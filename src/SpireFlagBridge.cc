@@ -53,13 +53,8 @@ static SpireBridgeEntries spire_bridge_load(const std::string& filename) {
 }
 
 // Writes the entries atomically: the data goes to a temporary file in the same directory, which is then renamed over
-// the destination. If there are no entries, the file is removed instead.
+// the destination.
 static void spire_bridge_save(const std::string& filename, uint32_t serial_number, const SpireBridgeEntries& entries) {
-  if (entries.empty()) {
-    std::filesystem::remove(filename);
-    return;
-  }
-
   phosg::JSON flags_json = phosg::JSON::list();
   for (const auto& [key, is_set] : entries) {
     flags_json.emplace_back(phosg::JSON::dict({
@@ -83,7 +78,7 @@ static void spire_bridge_save(const std::string& filename, uint32_t serial_numbe
 void spire_bridge_record_flag(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, Difficulty difficulty, uint16_t flag_num, bool is_set) {
   try {
-    if (!l->is_game() || (l->mode != GameMode::BATTLE) || !spire_bridge_flag_in_range(flag_num)) {
+    if (!l->is_game() || !spire_bridge_flag_in_range(flag_num)) {
       return;
     }
     if (static_cast<size_t>(difficulty) > 3) {
@@ -98,8 +93,9 @@ void spire_bridge_record_flag(
     auto entries = spire_bridge_load(filename);
     entries[std::make_pair(static_cast<uint8_t>(difficulty), flag_num)] = is_set;
     spire_bridge_save(filename, serial_number, entries);
-    c->log.info_f("Spire bridge: recorded {} quest flag {}:{:04X} for serial {:010} ({} stored)",
-        is_set ? "set" : "cleared", name_for_difficulty(difficulty), flag_num, serial_number, entries.size());
+    c->log.info_f("Spire bridge: recorded {} quest flag {}:{:04X} for serial {:010} in {} game ({} stored)",
+        is_set ? "set" : "cleared", name_for_difficulty(difficulty), flag_num, serial_number,
+        (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle", entries.size());
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire bridge: failed to record quest flag {:04X}: {}", flag_num, e.what());
@@ -108,7 +104,7 @@ void spire_bridge_record_flag(
 
 void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
-    if (!l->is_game() || (l->mode == GameMode::BATTLE)) {
+    if (!l->is_game()) {
       return;
     }
     uint32_t serial_number = spire_bridge_serial_for_client(c);
@@ -141,9 +137,10 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
       send_command(c, 0x6D, c->lobby_client_id, w.str());
     }
 
-    spire_bridge_save(filename, serial_number, SpireBridgeEntries());
-    c->log.info_f("Spire bridge: delivered {} quest flag(s) for serial {:010}; stored entries erased",
-        entries.size(), serial_number);
+    // The stored state is permanent: it is not erased after delivery, since the client does not save delivered flags
+    // to its memory card.
+    c->log.info_f("Spire bridge: delivered {} quest flag(s) for serial {:010} in {} game",
+        entries.size(), serial_number, (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle");
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire bridge: failed to deliver quest flags: {}", e.what());

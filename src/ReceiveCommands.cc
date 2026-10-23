@@ -5025,10 +5025,10 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
 
   send_server_time(c);
 
-  // Spire flag bridge: if this GC V3 client set bridged quest flags during an earlier Battle game, send them now. At
-  // this point the client has finished loading into the game (including any flag state synced from the leader), and
-  // no quest can have started yet, so the flags are in place before any quest script reads them. This is a no-op for
-  // other versions and for Battle games (see SpireFlagBridge.hh).
+  // Spire flag bridge: send this GC V3 client's stored bridged quest flags (set and clear) on every game join, Battle
+  // or not. At this point the client has finished loading into the game (including any flag state synced from the
+  // leader), and no quest can have started yet, so the flags are in place before any quest script reads them. This is
+  // a no-op for other versions (see SpireFlagBridge.hh).
   spire_bridge_deliver_flags(c, l);
 
   if (c->check_flag(Client::Flag::DEBUG_ENABLED)) {
