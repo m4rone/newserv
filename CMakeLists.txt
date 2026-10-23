@@ -127,6 +127,7 @@ set(SOURCES
     src/ShellCommands.cc
     src/ShopRandomSets.cc
     src/SignalWatcher.cc
+    src/SpireFlagBridge.cc
     src/StaticGameData.cc
     src/StaticTests.cc
     src/TeamIndex.cc

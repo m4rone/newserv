@@ -18,6 +18,7 @@
 #include "Map.hh"
 #include "PSOProtocol.hh"
 #include "SendCommands.hh"
+#include "SpireFlagBridge.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
 
@@ -3146,6 +3147,11 @@ static void on_set_quest_flag(std::shared_ptr<Client> c, SubcommandMessage& msg)
       p->quest_flags.clear(difficulty, flag_num);
     }
   }
+
+  // Spire flag bridge: remember flags in the bridged range that are written during a Battle game, so they can be
+  // re-sent when the client next joins a non-Battle game. This is a no-op for non-GC-V3 clients, for non-Battle games,
+  // and for flags outside the range (see SpireFlagBridge.hh).
+  spire_bridge_record_flag(c, l, difficulty, flag_num, should_set);
 
   forward_subcommand(c, msg);
 
