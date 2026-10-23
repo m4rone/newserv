@@ -3251,7 +3251,11 @@ static void on_sync_quest_register(std::shared_ptr<Client> c, SubcommandMessage&
   }
 
   bool should_forward = true;
-  if (l->quest->meta.enable_schtserv_commands) {
+  // Spire meta registers (quests 920-929, GC V3 only) are stored per serial and never forwarded; see SpireFlagBridge.hh
+  if (spire_bridge_handle_register(c, l, cmd.register_number, cmd.value.as_int)) {
+    should_forward = false;
+
+  } else if (l->quest && l->quest->meta.enable_schtserv_commands) {
     // We currently only implement one Schtserv server command here. There are likely many more which we don't support.
 
     if (cmd.register_number == 0xF0) {
