@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 
 #include "Client.hh"
@@ -22,8 +23,8 @@
 //   6x75 commands (set or clear), so quest scripts in that game read the server's state. Stored entries are never
 //   erased by delivery.
 // - Spire meta registers (v4): in the quests listed in the server config key SpireBridgeQuests (a JSON list of quest
-//   numbers; any game mode), 6x77 writes to registers 232-239 and 243-247 by a GC V3 client are merged into the same
-//   per-serial file (232/233 max, 234 min with 0 ignored, 235-239 and 245 OR, 243/244/246/247 last write wins) and
+//   numbers; any game mode), 6x77 writes to registers 232-239 and 243-247 by a GC V3 client are merged into a file per
+//   character (audit S-6: <serial>.<character id>.registers.json, like the flags and records) (232/233 max, 234 min with 0 ignored, 235-239 and 245 OR, 243/244/246/247 last write wins) and
 //   are not forwarded, so a co-op partner never takes them over. A write of 'SPIR' to register 248 is answered to that
 //   client only: one 6x77 per stored register (0 if none), then 248 = 'DONE'. Registers 240-242 are left alone (Sega's
 //   q101 and Schtserv commands use them). If SpireBridgeQuests is missing or empty, the register bridge takes nothing:
@@ -183,6 +184,10 @@ constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // a
 // transitions during the run. Also v29: the lives a client reported ('L' codes) are forgotten at every quest start,
 // so LastLives in the checkpoint file can only come from the current run.
 constexpr uint32_t SPIRE_FOLLOW_CITY_FLOOR = 0;
+// Audit S-12: a client that is still loading (Client::Flag::LOADING, or still on Client::floor's initial value 0x0F
+// because it has not reported a floor yet) is never warped. Ep1 has no game floor 0x0F; Ep2 does (Gol Dragon), so the
+// Ep2 rooms need another not-yet-loaded marker.
+constexpr uint32_t SPIRE_FOLLOW_UNLOADED_FLOOR = 0x0F;
 
 // Called at every quest start (on_quest_loaded) for each client of the game. Never throws.
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c);
@@ -190,7 +195,13 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c);
 // The two decisions above as plain functions, so 'newserv spire-follow-check' and 'spire-lives-check'
 // (tests/spire-follow-city.test.sh) measure them without a client. The lives store is keyed by the Client's address
 // and never dereferences it.
-bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor);
+// The action-stream part of the v19 room clear check, for the static tests: returns why a finished event's post-wave
+// actions still hold the room (a construct of an undefeated wave in the room, or a trigger of an unfinished event), or
+// "" if they do not.
+std::string spire_room_actions_hold(const void* action_stream, size_t action_stream_size, uint16_t room,
+    const std::function<bool(uint16_t wave)>& wave_undefeated,
+    const std::function<bool(uint32_t event_id)>& event_unfinished);
+bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading = false);
 void spire_checkpoint_lives_note(const Client* key, uint32_t lives);
 bool spire_checkpoint_lives_forget(const Client* key);
 uint32_t spire_checkpoint_lives_for(const Client* key); // 0 = no lives reported since the quest start

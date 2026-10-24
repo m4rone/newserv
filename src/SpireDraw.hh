@@ -63,6 +63,7 @@ struct SpireDrawInput {
   uint32_t state = 0; // r182: bits 8-15 rare bonus
   std::array<uint32_t, 4> picks = {}; // r183-r186: 3 bits per pool index, 10 per register
 };
+constexpr size_t SPIRE_DRAW_MAX_ENTRIES = 40; // 4 picks registers x 10 pool indexes
 constexpr size_t SPIRE_DRAW_NUM_INPUTS = 16;
 SpireDrawInput spire_draw_input_from_values(const std::vector<uint32_t>& values);
 

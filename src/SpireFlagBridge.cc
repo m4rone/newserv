@@ -92,9 +92,17 @@ static uint32_t spire_bridge_serial_for_client(std::shared_ptr<const Client> c) 
   return c->login->gc_license->serial_number;
 }
 
-static std::string spire_bridge_filename(uint32_t serial_number) {
+// Audit S-6: the meta registers belong to a character, like its flags (SpireMeta) and records, so a second character on
+// the same card never reads the first one's registers. The file before this, <serial>.json, is no longer read. Returns
+// "" if the client has no character data: the registers then read as 0 and a write is not stored.
+static std::string spire_bridge_filename(std::shared_ptr<Client> c, uint32_t serial_number) {
+  auto character = c->character_file(false, false);
+  if (!character) {
+    return "";
+  }
   // Same decimal format newserv uses when printing GC license serial numbers (see Account::str)
-  return std::format("{}/{:010}.json", SPIRE_BRIDGE_DIRECTORY, serial_number);
+  return std::format("{}/{:010}.{}.registers.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
+      spire_guard_character_id(character->disp));
 }
 
 static SpireBridgeState spire_bridge_load(const std::string& filename) {
@@ -628,7 +636,7 @@ bool spire_bridge_handle_register(
   // From here on the write belongs to the bridge: it is never forwarded, even if storing or answering fails, so a
   // co-op partner never takes over this client's meta registers.
   try {
-    std::string filename = spire_bridge_filename(serial_number);
+    std::string filename = spire_bridge_filename(c, serial_number);
 
     if (is_draw_data) {
       auto& values = spire_draw_inputs[c.get()];
@@ -737,6 +745,11 @@ bool spire_bridge_handle_register(
     const char* how = "";
     uint32_t new_value = spire_bridge_merge_register(register_number, old_value, value, &how);
     bool changed = (new_value != old_value);
+    if (changed && filename.empty()) {
+      c->log.warning_f("Spire bridge: register {} for serial {:010} in q{}: no character data; not stored",
+          register_number, serial_number, quest_number);
+      return true;
+    }
     if (changed) {
       state.registers[register_number] = new_value;
       spire_bridge_save(filename, serial_number, state);
@@ -1691,6 +1704,39 @@ static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor
 static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k);
 static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
 
+std::string spire_room_actions_hold(const void* action_stream, size_t action_stream_size, uint16_t room,
+    const std::function<bool(uint16_t wave)>& wave_undefeated,
+    const std::function<bool(uint32_t event_id)>& event_unfinished) {
+  phosg::StringReader r(action_stream, action_stream_size);
+  while (!r.eof()) {
+    uint8_t opcode = r.get_u8();
+    if ((opcode == 0x00) || (opcode == 0x0A) || (opcode == 0x0B)) {
+      if (opcode != 0x00) {
+        r.skip(2);
+      }
+    } else if (opcode == 0x08) {
+      r.skip(4);
+    } else if ((opcode == 0x09) || (opcode == 0x0D)) {
+      uint16_t c_room = r.get_u16l();
+      uint16_t c_wave = r.get_u16l();
+      if ((c_room == room) && wave_undefeated(c_wave)) {
+        return std::format("constructs wave {} of the room, not defeated", c_wave);
+      }
+      if (opcode == 0x0D) {
+        break;
+      }
+    } else if (opcode == 0x0C) {
+      uint32_t event_id = r.get_u32l();
+      if (event_unfinished(event_id)) {
+        return std::format("triggers event {}, not finished", event_id);
+      }
+    } else {
+      break; // 01 stop, or an opcode the 6x76 handler also stops at
+    }
+  }
+  return "";
+}
+
 // v19: room clear detection. The wave events of one room on one floor, read from the map the server keeps per game.
 // An event holds the room while it is started (0004 or 0002) and not finished (0008). A finished event holds it while
 // its post-wave actions point at work in the same room that is not done: a trigger_event (0C) of an unfinished event
@@ -1723,38 +1769,19 @@ static bool spire_bridge_room_is_clear(
       }
       continue;
     }
-    phosg::StringReader r(ev_ver.action_stream, ev_ver.action_stream_size);
-    while (!r.eof()) {
-      uint8_t opcode = r.get_u8();
-      if ((opcode == 0x00) || (opcode == 0x0A) || (opcode == 0x0B)) {
-        if (opcode != 0x00) {
-          r.skip(2);
+    auto wave_undefeated = [&](uint16_t c_wave) -> bool {
+      for (const auto& ene_st : ms->enemy_states_for_floor_room_wave(v, floor, room, c_wave)) {
+        if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8)) {
+          return true;
         }
-      } else if (opcode == 0x08) {
-        r.skip(4);
-      } else if ((opcode == 0x09) || (opcode == 0x0D)) {
-        uint16_t c_room = r.get_u16l();
-        uint16_t c_wave = r.get_u16l();
-        if (c_room == room) {
-          for (const auto& ene_st : ms->enemy_states_for_floor_room_wave(v, floor, c_room, c_wave)) {
-            if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8)) {
-              *why = std::format("W-{:03X} constructs wave {} of the room, not defeated", ev_st->w_id, c_wave);
-              return false;
-            }
-          }
-        }
-        if (opcode == 0x0D) {
-          break;
-        }
-      } else if (opcode == 0x0C) {
-        uint32_t event_id = r.get_u32l();
-        if (event_unfinished(event_id)) {
-          *why = std::format("W-{:03X} triggers event {}, not finished", ev_st->w_id, event_id);
-          return false;
-        }
-      } else {
-        break; // 01 stop, or an opcode the 6x76 handler also stops at
       }
+      return false;
+    };
+    std::string hold = spire_room_actions_hold(
+        ev_ver.action_stream, ev_ver.action_stream_size, room, wave_undefeated, event_unfinished);
+    if (!hold.empty()) {
+      *why = std::format("W-{:03X} {}", ev_st->w_id, hold);
+      return false;
     }
   }
   return !room_evs.empty();
@@ -2053,9 +2080,11 @@ static asio::awaitable<void> spire_replay_send(
   }
 }
 
-bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor) {
-  // never to the city (B-E01-41), never from the city (v29), never when already there
-  return (leader_floor != SPIRE_FOLLOW_CITY_FLOOR) && (partner_floor != SPIRE_FOLLOW_CITY_FLOOR) &&
+bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading) {
+  // never to the city (B-E01-41), never from the city (v29), never when already there, never a client that is still
+  // loading (audit S-12): a 6x94 mid-load leaves the partner between two floors
+  return !partner_loading && (partner_floor != SPIRE_FOLLOW_UNLOADED_FLOOR) &&
+      (leader_floor != SPIRE_FOLLOW_CITY_FLOOR) && (partner_floor != SPIRE_FOLLOW_CITY_FLOOR) &&
       (partner_floor != leader_floor);
 }
 
@@ -2071,7 +2100,13 @@ static asio::awaitable<void> spire_follow_leader_warp(
     if (!lc || (lc == leader) || (lc->floor == floor)) {
       continue;
     }
-    if (!spire_follow_should_warp(lc->floor, floor)) {
+    bool loading = lc->check_flag(Client::Flag::LOADING) || (lc->floor == SPIRE_FOLLOW_UNLOADED_FLOOR);
+    if (loading) {
+      l->log.info_f("Spire follow: client {} is still loading; not warped to the leader's floor {:02X} (its own floor load follows the leader again)",
+          lc->lobby_client_id, floor);
+      continue;
+    }
+    if (!spire_follow_should_warp(lc->floor, floor, false)) {
       // v29 (regie 2026-10-24): a partner still on Pioneer 2 takes the Ragol warp itself, as in a Sega quest; the
       // server only follows room transitions during the run
       l->log.info_f("Spire follow: client {} is in the city; not warped to the leader's floor {:02X} (takes the Ragol warp itself)",

@@ -1,8 +1,14 @@
+#include <phosg/Filesystem.hh>
 #include <phosg/UnitTest.hh>
+
+#include <filesystem>
+#include <format>
 
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
+#include "SpireDraw.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMeta.hh"
 
 void run_static_tests() {
   phosg::log_info_f("-- Quest opcode definitions");
@@ -140,6 +146,124 @@ void run_static_tests() {
     slow.arm();                       // the next lobby join arms it again
     expect_eq(E::NONE, slow.fired);
     expect(slow.on_lobby_loaded());
+  }
+
+  phosg::log_info_f("-- Spire follow: never a partner that is still loading (audit S-12)");
+  {
+    expect(spire_follow_should_warp(1, 2, false));
+    expect(!spire_follow_should_warp(1, 2, true));                        // LOADING set
+    expect(!spire_follow_should_warp(SPIRE_FOLLOW_UNLOADED_FLOOR, 2));    // no floor reported yet
+    expect(!spire_follow_should_warp(SPIRE_FOLLOW_CITY_FLOOR, 2));        // the city takes the Ragol warp itself
+    expect(!spire_follow_should_warp(1, SPIRE_FOLLOW_CITY_FLOOR));        // never to the city
+    expect(!spire_follow_should_warp(2, 2));                              // already there
+  }
+
+  phosg::log_info_f("-- Spire room clear: post-wave actions that hold the room (v19)");
+  {
+    auto none_undefeated = [](uint16_t) { return false; };
+    auto wave3_undefeated = [](uint16_t wave) { return wave == 3; };
+    auto none_unfinished = [](uint32_t) { return false; };
+    auto event7_unfinished = [](uint32_t ev) { return ev == 7; };
+    // 09 construct room 5 wave 3, then 01 stop
+    const uint8_t construct[] = {0x09, 0x05, 0x00, 0x03, 0x00, 0x01};
+    expect(spire_room_actions_hold(construct, sizeof(construct), 5, none_undefeated, none_unfinished).empty());
+    expect(!spire_room_actions_hold(construct, sizeof(construct), 5, wave3_undefeated, none_unfinished).empty());
+    expect(spire_room_actions_hold(construct, sizeof(construct), 6, wave3_undefeated, none_unfinished).empty()); // other room
+    // 0A (2 bytes), 08 (4 bytes), 0C trigger event 7
+    const uint8_t trigger[] = {0x0A, 0x11, 0x22, 0x08, 0, 0, 0, 0, 0x0C, 0x07, 0x00, 0x00, 0x00};
+    expect(spire_room_actions_hold(trigger, sizeof(trigger), 5, none_undefeated, none_unfinished).empty());
+    expect(!spire_room_actions_hold(trigger, sizeof(trigger), 5, none_undefeated, event7_unfinished).empty());
+    // 0D ends the stream: the trigger after it is not read
+    const uint8_t stop[] = {0x0D, 0x05, 0x00, 0x01, 0x00, 0x0C, 0x07, 0x00, 0x00, 0x00};
+    expect(spire_room_actions_hold(stop, sizeof(stop), 5, none_undefeated, event7_unfinished).empty());
+    // 01 stops too
+    const uint8_t stop01[] = {0x01, 0x0C, 0x07, 0x00, 0x00, 0x00};
+    expect(spire_room_actions_hold(stop01, sizeof(stop01), 5, none_undefeated, event7_unfinished).empty());
+  }
+
+  phosg::log_info_f("-- Spire draw: table limits and a fixed draw (v20, audit Q2-2)");
+  {
+    auto table_json = [](size_t num_entries, int zero_tag) {
+      std::string entries, members;
+      for (size_t z = 0; z < num_entries; z++) {
+        entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":{},\"rare\":false,\"own_curse\":false,\"glass_ok\":false}}",
+            z ? "," : "", (z == 0) ? "false" : "true");
+        members += std::format("{}{}", z ? "," : "", z);
+      }
+      std::string row = std::format("[{}]", members);
+      std::string zero = (zero_tag < 0) ? "" : std::format("{}", zero_tag);
+      // num_tags 1: 3 * 1 + 1 rows per band; the same archetype for HU, RA and FO
+      std::string archetype = std::format(
+          "{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{}]}},\"slot_c_zero_tags\":[{}]}}",
+          entries, row, row, row, row, zero);
+      return std::format("{{\"num_tags\":1,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,"
+                         "\"max_attempts\":8,\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,\"relic_bit_r14\":16,"
+                         "\"archetypes\":[{},{},{}]}}",
+          archetype, archetype, archetype);
+    };
+    auto filename = (std::filesystem::temp_directory_path() / std::format("newserv-static-spire-draw-{}.json", getpid())).string();
+    auto load = [&](const std::string& json) {
+      phosg::save_file(filename, json);
+      return SpireDrawTable::from_json_file(filename);
+    };
+    auto t = load(table_json(4, 0));
+    expect_eq(3u, t.archetypes.size());
+    expect_eq(SPIRE_DRAW_MAX_ENTRIES, load(table_json(SPIRE_DRAW_MAX_ENTRIES, -1)).archetypes.at(0).entries.size());
+    expect_raises(std::runtime_error, [&]() { load(table_json(SPIRE_DRAW_MAX_ENTRIES + 1, -1)); }); // picks cut off
+    expect_raises(std::runtime_error, [&]() { load(table_json(4, 1)); }); // zero tag >= num_tags
+    std::filesystem::remove(filename);
+
+    // rnd always 0: every slot picks the first member, then walks the table once the attempts run out
+    auto rnd0 = [](uint32_t) -> uint32_t { return 0; };
+    SpireDrawInput in;
+    uint32_t drawn = spire_draw(t, in, rnd0);
+    // board slot 2/3/4/5 at bits 0/6/12/18
+    expect_eq(1u, ((drawn >> 6) & 0x3F));   // slot 3: entry 1
+    expect_eq(2u, ((drawn >> 12) & 0x3F));  // slot 4: entry 1 is on the board, so entry 2
+    expect_eq(3u, ((drawn >> 18) & 0x3F));  // slot 5: entry 3
+    expect_eq(0u, (drawn & 0x3F));          // no fourth reward without R14
+    expect_eq(0u, (drawn >> 24));           // R12 is never offered at fewer than 2 lives
+    in.race = 2;                            // android: entry 1 is not android_ok
+    expect_eq(2u, ((spire_draw(t, in, rnd0) >> 6) & 0x3F));
+    in.race = 0;
+    in.picks[0] = 2;                        // entry 1 taken twice: at its cap
+    expect_eq(2u, ((spire_draw(t, in, rnd0) >> 6) & 0x3F));
+    in.picks[0] = 0;
+    in.relics = 16;                         // R14 More Eyes: slot 2 too
+    expect_eq(4u, (spire_draw(t, in, rnd0) & 0x3F));
+    in.archetype = 3;
+    expect_raises(std::runtime_error, [&]() { spire_draw(t, in, rnd0); });
+  }
+
+  phosg::log_info_f("-- Spire meta: the flags a finished run sets (v24)");
+  {
+    auto has = [](const std::vector<uint16_t>& v, uint16_t f) { return std::find(v.begin(), v.end(), f) != v.end(); };
+    auto lost = spire_meta_decode_finish(0);
+    expect(!lost.won && (lost.exams == 0) && !lost.deathless);
+    auto f = spire_meta_flags_for_finish(lost, 0, false);
+    expect_eq(1u, f.size());
+    expect_eq(SPIRE_META_FLAG_FIRST_RUN, f.at(0));
+
+    auto dragon = spire_meta_decode_finish(1 << SPIRE_META_FINISH_EXAMS_SHIFT);
+    expect_eq(1u, dragon.exams);
+    f = spire_meta_flags_for_finish(dragon, 0, false);
+    expect(has(f, SPIRE_META_FLAG_DRAGON) && has(f, SPIRE_META_FLAG_PACT_FIRST) && has(f, SPIRE_META_FLAG_PACT_FIRST + 1));
+    expect(!has(f, SPIRE_META_FLAG_DEROLLE) && !has(f, SPIRE_META_FLAG_PAY_WIN));
+
+    auto old_win = spire_meta_decode_finish(1 << 23); // a quest from before v24: the won bit alone means both exams
+    expect(old_win.won && (old_win.exams == 2));
+    expect_eq(2u, spire_meta_decode_finish(3 << SPIRE_META_FINISH_EXAMS_SHIFT).exams); // 3 is capped at 2
+
+    auto deathless = spire_meta_decode_finish((1 << 23) | SPIRE_META_FINISH_DEATHLESS | 600);
+    expect(deathless.deathless);
+    f = spire_meta_flags_for_finish(deathless, 0, true); // HUmar
+    expect(has(f, SPIRE_META_FLAG_DEATHLESS_WIN) && has(f, SPIRE_META_FLAG_PAY_DEATHLESS));
+    expect(has(f, SPIRE_META_FLAG_KIT2_FIRST) && has(f, SPIRE_META_FLAG_PAY_RECORD));
+    expect(has(spire_meta_flags_for_finish(deathless, 3, false), SPIRE_META_FLAG_KIT2_FIRST + 1)); // RAmar
+    expect(has(spire_meta_flags_for_finish(deathless, 6, false), SPIRE_META_FLAG_KIT2_FIRST + 2)); // FOmarl
+    expect(!has(spire_meta_flags_for_finish(deathless, 6, false), SPIRE_META_FLAG_PAY_RECORD));
+    expect_eq(std::string("Iron man"), std::string(spire_meta_flag_name(SPIRE_META_FLAG_PACT_FIRST)));
+    expect(spire_meta_flag_name(SPIRE_META_FLAG_PAY_WIN) == nullptr);
   }
 
   phosg::log_info_f("-- All static tests passed");
