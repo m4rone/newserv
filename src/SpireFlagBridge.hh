@@ -33,6 +33,8 @@
 //   set battle phase) to every client in the Battle game, 2 seconds apart. Off unless the key lists phases.
 // - Room clear (v16, lab probe): a write of 'ROOM' to register 248 sends the server text "Room clear!" (B0) to every
 //   client in the game, so the quest shows no window_msg of its own at the room clear.
+// - Short messages (v17): a write of a message code (SPIRE_BRIDGE_MSG_*) to register 248 sends the matching text (B0)
+//   to the writing client: wave n/m, life lost, time warning, partner wait, run over.
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -53,6 +55,16 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 // text message to every client in the game.
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
 constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear!";
+// v17: short run messages. A client writes kind << 24 | parameters to register 248 where it used to show a window_msg;
+// the bridge answers with the text (B0) to that client only (each client shows its own, as the window_msg did). Kinds:
+//   'W' wave n/m (n << 8 | m) · 'L' life lost (last << 8 | lives left) · 'T' time warning (minutes left)
+//   'P' partner wait (1: your partner is waiting, 0: waiting for your partner) · 'X' run over (rooms << 16 | seconds)
+// The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM').
+constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
+constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
+constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
+constexpr uint8_t SPIRE_BRIDGE_MSG_PARTNER = 'P';
+constexpr uint8_t SPIRE_BRIDGE_MSG_RUN_OVER = 'X';
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";

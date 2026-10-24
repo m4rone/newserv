@@ -336,6 +336,28 @@ static void spire_bridge_end_battle(
   asio::co_spawn(*s->io_context, spire_bridge_send_battle_phases(l, phases, prefix), asio::detached);
 }
 
+// v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the same words as the quest's window_msg (spire.json
+// texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code.
+static std::string spire_bridge_message_text(uint32_t value) {
+  uint8_t kind = value >> 24;
+  uint32_t a = (value >> 8) & 0xFF, b = value & 0xFF;
+  switch (kind) {
+    case SPIRE_BRIDGE_MSG_WAVE:
+      return std::format("Wave {}/{}", a, b);
+    case SPIRE_BRIDGE_MSG_LIFE:
+      return a ? std::format("$C1Life lost$C7 - {} left.\nNo more Scape Dolls:\nthe next death ends the run.", b)
+               : std::format("$C1Life lost$C7 - {} left.\nA new Scape Doll is yours.", b);
+    case SPIRE_BRIDGE_MSG_TIME:
+      return std::format("$C4{} minutes left.$C7\nThe timer ends the run.", value & 0xFFFF);
+    case SPIRE_BRIDGE_MSG_PARTNER:
+      return b ? "$C4Your partner is waiting.$C7\nOpen the quest board and\nmake your choice." : "Waiting for your partner...";
+    case SPIRE_BRIDGE_MSG_RUN_OVER:
+      return std::format("Run over after {} s.\nRooms cleared: {}.\nLeave the game now.", value & 0xFFFF, (value >> 16) & 0xFF);
+    default:
+      return "";
+  }
+}
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
@@ -375,6 +397,14 @@ bool spire_bridge_handle_register(
         }
         c->log.info_f("Spire bridge: ROOM for serial {:010} in q{}; sent \"{}\" to {} client(s)",
             serial_number, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, sent);
+        return true;
+      }
+      std::string msg = spire_bridge_message_text(value);
+      if (!msg.empty()) {
+        // v17: a short run message, to the writing client only
+        send_text_message(c, msg);
+        c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\"", value, serial_number,
+            quest_number, msg);
         return true;
       }
       if (value != SPIRE_BRIDGE_REQUEST_VALUE) {
