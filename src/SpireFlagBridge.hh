@@ -26,7 +26,8 @@
 //   are not forwarded, so a co-op partner never takes them over. A write of 'SPIR' to register 248 is answered to that
 //   client only: one 6x77 per stored register (0 if none), then 248 = 'DONE'. Registers 240-242 are left alone (Sega's
 //   q101 and Schtserv commands use them). If SpireBridgeQuests is missing or empty, the register bridge takes nothing:
-//   every register write is handled exactly as without the bridge. The flag part above has no quest limit.
+//   every register write is handled exactly as without the bridge. The flag part above records only in listed quests
+//   (v5) but delivers stored flags on every join, so E06 keeps reading its payout flag in normal games.
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
