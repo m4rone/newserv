@@ -1095,11 +1095,17 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 // verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
 // room for a slow Wii without letting a stuck login sit forever.
 static constexpr auto SPIRE_GUARD_ANSWER_TIMEOUT = std::chrono::seconds(15);
+// v28: a lobby restore asks this often before it leaves the restore to the next lobby join or login
+static constexpr size_t SPIRE_GUARD_LOBBY_ATTEMPTS = 3;
+static constexpr auto SPIRE_GUARD_LOBBY_RETRY_DELAY = std::chrono::seconds(5);
 
-// Drops the client if *done is still false when the timeout expires. Dropping cancels the pending promises
-// (Client::cancel_pending_promises), so the waiting restore throws and the caller never sends 97.
+// If *done is still false when the timeout expires, cancels the pending promises (Client::cancel_pending_promises),
+// so the waiting restore throws and the caller never sends 97. At login (drop) the client is also dropped: without a 97
+// the login cannot go on. In the lobby (v28) the connection stays: the lobby restore asks again, and the marker keeps
+// the restore pending for the next lobby join or login (measured 2026-10-24 15:56: a drop left Kamako in a dimmed
+// lobby that could not log in again).
 static asio::awaitable<void> spire_guard_watchdog(
-    std::weak_ptr<Client> weak_c, std::shared_ptr<bool> done, uint32_t serial_number, std::string what) {
+    std::weak_ptr<Client> weak_c, std::shared_ptr<bool> done, uint32_t serial_number, std::string what, bool drop) {
   co_await async_sleep(SPIRE_GUARD_ANSWER_TIMEOUT);
   if (*done) {
     co_return;
@@ -1108,9 +1114,14 @@ static asio::awaitable<void> spire_guard_watchdog(
   if (!c) {
     co_return;
   }
-  c->log.warning_f("Spire guard: no {} within {} s for serial {:010}; dropping the connection, no 97 (marker kept)",
-      what, SPIRE_GUARD_ANSWER_TIMEOUT.count(), serial_number);
-  c->channel->disconnect();
+  if (drop) {
+    c->log.warning_f("Spire guard: no {} within {} s for serial {:010}; dropping the connection, no 97 (marker kept)",
+        what, SPIRE_GUARD_ANSWER_TIMEOUT.count(), serial_number);
+    c->channel->disconnect();
+  } else {
+    c->log.warning_f("Spire guard: no {} within {} s for serial {:010}; connection kept (marker kept)",
+        what, SPIRE_GUARD_ANSWER_TIMEOUT.count(), serial_number);
+  }
   c->cancel_pending_promises();
 }
 
@@ -1118,8 +1129,9 @@ static asio::awaitable<void> spire_guard_watchdog(
 // wait throws.
 struct SpireGuardWatchdog {
   std::shared_ptr<bool> done = std::make_shared<bool>(false);
-  SpireGuardWatchdog(asio::any_io_executor executor, std::shared_ptr<Client> c, uint32_t serial_number, const char* what) {
-    asio::co_spawn(executor, spire_guard_watchdog(c, this->done, serial_number, what), asio::detached);
+  SpireGuardWatchdog(asio::any_io_executor executor, std::shared_ptr<Client> c, uint32_t serial_number, const char* what,
+      bool drop) {
+    asio::co_spawn(executor, spire_guard_watchdog(c, this->done, serial_number, what, drop), asio::detached);
   }
   SpireGuardWatchdog(const SpireGuardWatchdog&) = delete;
   SpireGuardWatchdog& operator=(const SpireGuardWatchdog&) = delete;
@@ -1182,6 +1194,7 @@ struct SpireGuardRestoreLock {
 // only if the restore was verified (RestorePending is then cleared). where is "login" or "lobby" (for the log).
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
+  bool drop = (std::string(where) != "lobby");
   c->log.info_f("Spire guard: restore pending for serial {:010} (q{}); restoring {} in the {}",
       serial_number, snapshot.quest_number, spire_guard_describe(snapshot), where);
   if (!snapshot.has_character) {
@@ -1204,7 +1217,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     // overlay changes (inventory and disp) are put back.
     GetPlayerInfoResult info;
     {
-      SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30)");
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30)", drop);
       info = co_await send_get_player_info(c, true);
     }
     if (!info.is_full_info || !info.character) {
@@ -1238,14 +1251,14 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     // Same function call as $loadchar
     {
       // v12 (critic K12): this can wait for the client too
-      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to the patch preparation");
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to the patch preparation", drop);
       co_await prepare_client_for_patches(c);
     }
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
     PSOGCCharacterFile::Character gc_char = *merged;
     {
-      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to SetExtendedPlayerInfo (B3)");
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to SetExtendedPlayerInfo (B3)", drop);
       co_await send_function_call(c, fn, {}, &gc_char, sizeof(gc_char));
     }
     c->log.info_f("Spire guard: sent {} for serial {:010} (was Lv{}); asking for a 61 to verify",
@@ -1255,7 +1268,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     // also puts it into the server's character data.
     GetPlayerInfoResult after;
     {
-      SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61");
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61", drop);
       after = co_await send_get_player_info(c, false);
     }
     if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "lobby"))) {
@@ -1390,10 +1403,37 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
     c->log.info_f("Spire guard: a restore is already running for serial {:010}; lobby restore skipped", serial_number);
     co_return;
   }
-  if (!co_await spire_guard_run_restore(c, serial_number, filename, snapshot, "lobby")) {
-    c->log.warning_f("Spire guard: lobby restore for serial {:010} not verified; dropping the connection (marker kept, the login restore follows)",
+  // v28: ask again instead of dropping; only while the client is still connected and in a lobby (in a game the
+  // join guard has refused it anyway, and the marker stays)
+  bool restored = false;
+  for (size_t attempt = 1; attempt <= SPIRE_GUARD_LOBBY_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      co_await async_sleep(SPIRE_GUARD_LOBBY_RETRY_DELAY);
+      auto l = c->lobby.lock();
+      if (!c->channel->connected() || !l || l->is_game()) {
+        break;
+      }
+      c->log.info_f("Spire guard: asking again for the lobby restore of serial {:010} (attempt {} of {})",
+          serial_number, attempt, SPIRE_GUARD_LOBBY_ATTEMPTS);
+      try {
+        snapshot = spire_guard_load(filename);
+      } catch (const std::exception& e) {
+        c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} before attempt {}: {}", serial_number, attempt, e.what());
+        break;
+      }
+      if (!snapshot.restore_pending) {
+        restored = true;
+        break;
+      }
+    }
+    if (co_await spire_guard_run_restore(c, serial_number, filename, snapshot, "lobby")) {
+      restored = true;
+      break;
+    }
+  }
+  if (!restored) {
+    c->log.warning_f("Spire guard: lobby restore for serial {:010} not verified; connection kept, marker kept, the restore follows at the next lobby join or login",
         serial_number);
-    c->channel->disconnect();
     co_return;
   }
 
