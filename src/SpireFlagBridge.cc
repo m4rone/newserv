@@ -114,10 +114,16 @@ static void spire_bridge_save(const std::string& filename, uint32_t serial_numbe
   std::filesystem::rename(temp_filename, filename);
 }
 
+static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint32_t quest_number);
+
 void spire_bridge_record_flag(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, Difficulty difficulty, uint16_t flag_num, bool is_set) {
   try {
     if (!l->is_game() || !spire_bridge_flag_in_range(flag_num)) {
+      return;
+    }
+    // Only flag writes made while a SpireBridgeQuests quest runs are stored (v5); delivery on join stays unconditional
+    if (!l->quest || !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
       return;
     }
     if (static_cast<size_t>(difficulty) > 3) {
