@@ -3344,8 +3344,13 @@ static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage&
       if (all_enemies_defeated) {
         l->log.info_f("All enemies defeated; setting events with room={:04X} wave_number={:04X} to finished state",
             room, wave_number);
-        // Spire (v19): the server sees the room clear itself, so the quest no longer has to poll for it
-        spire_bridge_check_room_clear(c, l, cmd.floor, room);
+        // Spire room clear (v19): only the first report of this wave counts; every later 6x76 finds it finished
+        bool wave_newly_finished = false;
+        for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), cmd.floor, room, wave_number)) {
+          if (!(ev_st->flags & 0x08)) {
+            wave_newly_finished = true;
+          }
+        }
         for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), cmd.floor, room, wave_number)) {
           ev_st->flags = (ev_st->flags | 0x18) & (~4);
           l->log.info_f("Set flags on W-{:03X} to {:04X}", ev_st->w_id, ev_st->flags);
@@ -3414,6 +3419,10 @@ static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage&
                 actions_r.go(actions_r.size());
             }
           }
+        }
+        // after the wave's events are finished, so the event rule sees them as done (spire-server-all)
+        if (wave_newly_finished) {
+          spire_bridge_check_room_clear(c, l, cmd.floor, room, wave_number);
         }
       }
     }

@@ -1398,22 +1398,98 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
 
-void spire_bridge_check_room_clear(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
+// v19: room clear detection. The wave events of one room on one floor, read from the map the server keeps per game.
+// An event holds the room while it is started (0004 or 0002) and not finished (0008). A finished event holds it while
+// its post-wave actions point at work in the same room that is not done: a trigger_event (0C) of an unfinished event
+// (covers the moment between the client's 6x76 and its 6x67 for the next wave), or a construct_enemies (09/0D) of a
+// wave whose enemies are not all defeated.
+static bool spire_bridge_room_is_clear(
+    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, std::string* why) {
+  auto& ms = l->map_state;
+  std::vector<std::shared_ptr<MapState::EventState>> room_evs;
+  for (const auto& ev_st : ms->event_states_for_floor(v, floor)) {
+    const auto* set_entry = ev_st->super_ev->version(v).set_entry;
+    if (set_entry && (set_entry->room == room)) {
+      room_evs.emplace_back(ev_st);
+    }
+  }
+  auto event_unfinished = [&](uint32_t event_id) -> bool {
+    for (const auto& ev_st : room_evs) {
+      if ((ev_st->super_ev->version(v).set_entry->event_id == event_id) && !(ev_st->flags & 0x08)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto& ev_st : room_evs) {
+    const auto& ev_ver = ev_st->super_ev->version(v);
+    if (!(ev_st->flags & 0x08)) {
+      if (ev_st->flags & 0x06) {
+        *why = std::format("W-{:03X} (event {}) is running", ev_st->w_id, ev_ver.set_entry->event_id.load());
+        return false;
+      }
+      continue;
+    }
+    phosg::StringReader r(ev_ver.action_stream, ev_ver.action_stream_size);
+    while (!r.eof()) {
+      uint8_t opcode = r.get_u8();
+      if ((opcode == 0x00) || (opcode == 0x0A) || (opcode == 0x0B)) {
+        if (opcode != 0x00) {
+          r.skip(2);
+        }
+      } else if (opcode == 0x08) {
+        r.skip(4);
+      } else if ((opcode == 0x09) || (opcode == 0x0D)) {
+        uint16_t c_room = r.get_u16l();
+        uint16_t c_wave = r.get_u16l();
+        if (c_room == room) {
+          for (const auto& ene_st : ms->enemy_states_for_floor_room_wave(v, floor, c_room, c_wave)) {
+            if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8)) {
+              *why = std::format("W-{:03X} constructs wave {} of the room, not defeated", ev_st->w_id, c_wave);
+              return false;
+            }
+          }
+        }
+        if (opcode == 0x0D) {
+          break;
+        }
+      } else if (opcode == 0x0C) {
+        uint32_t event_id = r.get_u32l();
+        if (event_unfinished(event_id)) {
+          *why = std::format("W-{:03X} triggers event {}, not finished", ev_st->w_id, event_id);
+          return false;
+        }
+      } else {
+        break; // 01 stop, or an opcode the 6x76 handler also stops at
+      }
+    }
+  }
+  return !room_evs.empty();
+}
+
+void spire_bridge_check_room_clear(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number) {
   try {
-    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest ||
+    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest || !l->map_state ||
         !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
       return;
     }
-
-    // Later waves of the room are already in the map state, not yet defeated, so this holds only after the last wave
-    for (const auto& ene_st : l->map_state->enemy_states) {
-      if (!ene_st || ene_st->super_ene->floor != floor || ene_st->super_ene->child_index) {
-        continue;
-      }
-      const auto* set_entry = ene_st->super_ene->version(c->version()).set_entry;
-      if (set_entry && (set_entry->room == room) && !(ene_st->set_flags & 8)) {
+    Version v = c->version();
+    // A wave with a boss sends nothing: the boss rooms (k4, k8) keep their own clear in the quest
+    for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
+      if (type_definition_for_enemy(ene_st->super_ene->type).is_boss()) {
+        l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} has a boss; no room clear", wave_number, room,
+            floor);
         return;
       }
+    }
+    // Event rule (spire-server-all): a wave that never started (the elite wave on the normal path) does not hold the
+    // room; a started or chained one does until it is finished
+    std::string why;
+    if (!spire_bridge_room_is_clear(l, v, floor, room, &why)) {
+      l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} done, room not clear: {}", wave_number, room,
+          floor, why.empty() ? "no wave events" : why);
+      return;
     }
 
     uint64_t key = (static_cast<uint64_t>(l->lobby_id) << 32) | (static_cast<uint32_t>(floor) << 16) | room;
@@ -1423,7 +1499,6 @@ void spire_bridge_check_room_clear(std::shared_ptr<Client> c, std::shared_ptr<Lo
     if (!spire_bridge_cleared_rooms.emplace(key).second) {
       return;
     }
-
     G_SyncQuestRegister_6x77 cmd;
     cmd.header = {0x77, 0x03, 0x0000};
     cmd.register_number = SPIRE_BRIDGE_ROOM_CLEARED_REGISTER;

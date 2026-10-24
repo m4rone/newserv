@@ -83,18 +83,19 @@ constexpr uint16_t SPIRE_BRIDGE_RECORD_FLAG = 0x03A2; // E06 payout: a new best 
 // to register 248 (warning below 80 minutes, so the code never equals 'SPIR'). The server then ticks once a second for that game (co_spawn + async_sleep, like the ENDB phases):
 // at limit - warning it sends the time warning text (B0) to every client, once; at the limit, or as soon as the game
 // has fewer clients than at the 'S', it sends "Time is up." / "The second player left." (B0) and a 6x77
-// register 230 = SPIRE_BRIDGE_TIMER_END << 24 | cause (1 time up, 2 player left) to every client, and stops. The quest's
-// t_timer reads r230 and goes into its end. A run-over code ('X', v17) from any client, a new 'S' or the end of the
-// game stops the timer. r230 is outside the stored ranges (HOOKS.md: r230-r248 free for the engine, r249 reserved).
+// register 252 = SPIRE_BRIDGE_TIMER_END << 24 | cause (1 time up, 2 player left) to every client, and stops. The quest's
+// t_timer reads r252 and goes into its end. A run-over code ('X', v17) from any client, a new 'S' or the end of the
+// game stops the timer. r252 is in the free range r251-r255 (regie), outside the stored ranges; r251 is room clear.
 constexpr uint8_t SPIRE_BRIDGE_TIMER_START = 'S';
 constexpr uint8_t SPIRE_BRIDGE_TIMER_END = 'E';
-constexpr uint8_t SPIRE_BRIDGE_TIMER_REGISTER = 230;
+constexpr uint8_t SPIRE_BRIDGE_TIMER_REGISTER = 252;
 constexpr uint32_t SPIRE_BRIDGE_TIMER_TIME_UP = 1;
 constexpr uint32_t SPIRE_BRIDGE_TIMER_PLAYER_LEFT = 2;
 constexpr auto SPIRE_BRIDGE_TIMER_TICK = std::chrono::seconds(1);
 
-// v19: room clear detected by the server. When every enemy of a room on a floor is defeated (all waves, from the 6x0A
-// set-flags path), the server sends SPIRE_BRIDGE_ROOM_CLEAR_TEXT and sets register SPIRE_BRIDGE_ROOM_CLEARED_REGISTER to
+// v19: room clear detected by the server. When a wave is finished and its room is clear by the event rule (see
+// spire_bridge_check_room_clear; a wave that never started, such as the elite wave on the normal path, does not hold
+// the room, and a boss wave sends nothing), the server sends SPIRE_BRIDGE_ROOM_CLEAR_TEXT and sets register SPIRE_BRIDGE_ROOM_CLEARED_REGISTER to
 // SPIRE_BRIDGE_ROOM_CLEARED_TAG | floor << 8 | room (6x77) on every client in the game, once per room and game. The quest
 // waits for that register instead of polling its own kill counters.
 constexpr uint8_t SPIRE_BRIDGE_ROOM_CLEARED_REGISTER = 251;
@@ -120,9 +121,13 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Called from the 6x0A set-flags path after a wave's enemies are all defeated (v19). Does nothing unless the client is
-// GC V3 and the lobby is a game running a quest listed in SpireBridgeQuests. Never throws.
-void spire_bridge_check_room_clear(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room);
+// Called from the 6x76 set-flags path once per wave, the first time all its enemies are defeated, after its events are
+// set to finished (v19, spire-server-all). Does nothing unless the client is GC V3 and the lobby is a game running a
+// quest listed in SpireBridgeQuests, or the wave has a boss. The room counts as clear when no wave event in it is started
+// but unfinished, and no finished event in it triggers an unfinished event of the room or constructs a wave of the room
+// that is not defeated. Once per (game, floor, room). Never throws.
+void spire_bridge_check_room_clear(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
 
 // Spire guard (v6-v15; GC V3 only).
 //
