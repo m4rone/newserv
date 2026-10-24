@@ -401,10 +401,23 @@ bool spire_bridge_handle_register(
       }
       std::string msg = spire_bridge_message_text(value);
       if (!msg.empty()) {
-        // v17: a short run message, to the writing client only
-        send_text_message(c, msg);
-        c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\"", value, serial_number,
-            quest_number, msg);
+        // v17: a short run message. Each client writes its own life, time, partner and run-over codes, so those go to
+        // the writer only; the wave code comes from the leader's room thread alone (the follower mirrors the room and
+        // shows no wave text), so it goes to every client in the game, like 'ROOM'
+        size_t sent = 0;
+        if ((value >> 24) == SPIRE_BRIDGE_MSG_WAVE) {
+          for (const auto& lc : l->clients) {
+            if (lc) {
+              send_text_message(lc, msg);
+              sent++;
+            }
+          }
+        } else {
+          send_text_message(c, msg);
+          sent = 1;
+        }
+        c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\" to {} client(s)", value,
+            serial_number, quest_number, msg, sent);
         return true;
       }
       if (value != SPIRE_BRIDGE_REQUEST_VALUE) {

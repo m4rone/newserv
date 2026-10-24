@@ -56,7 +56,7 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
 constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear!";
 // v17: short run messages. A client writes kind << 24 | parameters to register 248 where it used to show a window_msg;
-// the bridge answers with the text (B0) to that client only (each client shows its own, as the window_msg did). Kinds:
+// the bridge answers with the text (B0) to that client; the wave code (leader only) goes to every client. Kinds:
 //   'W' wave n/m (n << 8 | m) · 'L' life lost (last << 8 | lives left) · 'T' time warning (minutes left)
 //   'P' partner wait (1: your partner is waiting, 0: waiting for your partner) · 'X' run over (rooms << 16 | seconds)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM').
