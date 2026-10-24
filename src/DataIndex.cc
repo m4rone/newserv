@@ -750,6 +750,7 @@ void DataIndex::load_config_early() {
     }
   } catch (const std::out_of_range&) {
   }
+  this->spire_bba_tx_guard_patch = this->config_json->get_bool("SpireBBATxGuardPatch", true);
   this->spire_battle_end_phases.clear();
   try {
     for (const auto& item : this->config_json->at("SpireBattleEndPhases").as_list()) {

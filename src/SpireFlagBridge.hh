@@ -310,6 +310,11 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client =
 // not send 97 and must drop the login. Never throws.
 asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c);
 
+// Spire BBA TX guard (see SpireBBATxGuard.hh): at login, before the 97, send GC EU v1.0 clients the client function that
+// null-checks the BBA driver's TX-done callback. No-op for every other version, when SpireBBATxGuardPatch is false, or
+// when the client cannot run functions. Logs the client's answer (written / already present / no match).
+asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
+
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
 void spire_bridge_write_durable(const std::string& filename, const std::string& data);

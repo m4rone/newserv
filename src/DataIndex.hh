@@ -166,6 +166,9 @@ struct DataIndex {
   // phase 2) gets the server's room clear when it is defeated; empty = no boss clear on the server (k4/k8 unchanged)
   std::unordered_set<uint32_t> spire_boss_clear_quest_numbers;
   std::vector<uint8_t> spire_battle_end_phases;
+  // Spire BBA TX guard (SpireBBATxGuardPatch, default true): send the client patch of SpireBBATxGuard.hh to GC EU v1.0
+  // clients at login; false turns it off without a rebuild
+  bool spire_bba_tx_guard_patch = true;
   // v19 lab: SpireRunTimerLab {"LimitSeconds": n, "WarningSeconds": m} replaces the time limit and warning the quest
   // sends with 'S', so a lab round reaches the warning and "Time is up." in minutes. Missing (the pc): the quest's values.
   std::optional<std::pair<uint32_t, uint32_t>> spire_run_timer_lab;

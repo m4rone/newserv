@@ -417,6 +417,9 @@ static asio::awaitable<void> enable_save_if_needed(std::shared_ptr<Client> c) {
       // Spire guard (v6, v7): if a Spire run ended without a 98, put the real character back before the client saves;
       // this is a no-op for other clients (see SpireFlagBridge.hh). Without a verified restore there is no 97 at all:
       // a dropped login is better than a saved Lv1. 97 is always sent with flag 1, never 0.
+      // Spire BBA TX guard: give GC EU v1.0 clients the null check on the BBA TX-done callback before they start
+      // talking in earnest; a no-op for every other client (see SpireBBATxGuard.hh).
+      co_await spire_bba_tx_guard_if_needed(c);
       if (!co_await spire_guard_restore_if_needed(c)) {
         c->channel->disconnect();
         throw std::runtime_error("Spire guard: restore not verified; login dropped without 97");

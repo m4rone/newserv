@@ -16,6 +16,7 @@
 #include "AsyncUtils.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
+#include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
 #include "SpireMeta.hh"
 #include "ServerState.hh"
@@ -2142,3 +2143,47 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
   }
   throw std::runtime_error("Use: $spire status\n$spire continue");
 }
+
+asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c) {
+  auto s = c->require_server_state();
+  if (!s->data->spire_bba_tx_guard_patch) {
+    co_return;
+  }
+  if (!spire_bba_tx_guard_applies(c->specific_version)) {
+    c->log.info_f("Spire BBA TX guard: not sent; specific version {} is not {}",
+        str_for_specific_version(c->specific_version), str_for_specific_version(SPIRE_BBA_TX_GUARD_SPECIFIC_VERSION));
+    co_return;
+  }
+  if (!c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
+      !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE)) {
+    c->log.warning_f("Spire BBA TX guard: not sent; client cannot run functions (B2)");
+    co_return;
+  }
+  std::shared_ptr<const ClientFunctionIndex::Function> fn;
+  try {
+    fn = s->data->client_functions->get(SPIRE_BBA_TX_GUARD_FUNCTION_NAME, c->specific_version);
+  } catch (const std::out_of_range&) {
+    c->log.warning_f("Spire BBA TX guard: not sent; no client function {} for specific version {}",
+        SPIRE_BBA_TX_GUARD_FUNCTION_NAME, str_for_specific_version(c->specific_version));
+    co_return;
+  }
+  try {
+    auto executor = co_await asio::this_coro::executor;
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to the patch preparation (BBA TX guard)", true);
+      co_await prepare_client_for_patches(c);
+    }
+    C_ExecuteCodeResult_B3 result;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to SpireBBATxGuard (B3)", true);
+      result = co_await send_function_call(c, fn);
+    }
+    c->log.info_f("Spire BBA TX guard: client answered {} ({}) for the 8 words at {:08X}",
+        result.return_value.load(), spire_bba_tx_guard_describe(result.return_value), SPIRE_BBA_TX_GUARD_ADDRESS);
+  } catch (const std::exception& e) {
+    // The guard is a safety net for the client, never a reason to keep it out: log and let the login go on
+    c->log.warning_f("Spire BBA TX guard: failed to send the patch: {}", e.what());
+  }
+}
+

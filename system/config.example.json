@@ -996,6 +996,12 @@
     // original Sega servers.
     // "ClearUnreleasedItemList",
   ],
+  // Spire BBA TX guard (2026-10-24): send GC EU v1.0 (3OP0, GPOP8P) clients the client function SpireBBATxGuard at
+  // login. It gives the game's BBA driver the missing null check on its TX-done callback, so a second "transmit done"
+  // interrupt for one frame no longer jumps to address 0 (measured in four MEM1 dumps, see src/SpireBBATxGuard.hh).
+  // Other versions never get it, and the function writes nothing unless the code at 0x80429A78 is the original.
+  // false turns the sending off without a rebuild (the key missing means true).
+  "SpireBBATxGuardPatch": true,
   // Client functions listed here are automatically sent to all clients. If a client connects using a client version
   // that isn't compatible with some of these patches, the incompatible patches are skipped and the client is allowed
   // to connect. This option applies to all PSO versions, not only BB.
