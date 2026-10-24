@@ -1668,6 +1668,9 @@ static void on_change_floor_6x1F(std::shared_ptr<Client> c, SubcommandMessage& m
     }
   }
   forward_subcommand(c, msg);
+  if (auto l = c->lobby.lock()) {
+    spire_replay_after_floor_load(c, l);
+  }
 }
 
 static void on_change_floor_6x21(std::shared_ptr<Client> c, SubcommandMessage& msg) {
@@ -1676,6 +1679,9 @@ static void on_change_floor_6x21(std::shared_ptr<Client> c, SubcommandMessage& m
     c->floor = cmd.floor;
   }
   forward_subcommand(c, msg);
+  if (auto l = c->lobby.lock()) {
+    spire_replay_after_floor_load(c, l);
+  }
 }
 
 static void on_player_died(std::shared_ptr<Client> c, SubcommandMessage& msg) {
@@ -3250,6 +3256,7 @@ static void on_sync_quest_register(std::shared_ptr<Client> c, SubcommandMessage&
     }
   }
 
+  spire_replay_note_register(c, l, cmd.register_number, cmd.value.as_int);
   bool should_forward = true;
   // Spire meta registers (quests in SpireBridgeQuests, GC V3 only) are stored per serial and never forwarded; see SpireFlagBridge.hh
   if (spire_bridge_handle_register(c, l, cmd.register_number, cmd.value.as_int)) {

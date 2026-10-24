@@ -768,6 +768,32 @@ void DataIndex::load_config_early() {
   } catch (const std::out_of_range&) {
   }
 
+  this->spire_checkpoint_rooms.clear();
+  try {
+    for (const auto& item : this->config_json->get_list("SpireCheckpointRooms")) {
+      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
+      int64_t room = item->get_int("Room", -1);
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || (room < -1) || (room > 0xFFFF)) {
+        throw std::runtime_error("SpireCheckpointRooms: Floor 0-255, Room -1-65535, K 1-31");
+      }
+      this->spire_checkpoint_rooms[std::make_pair(static_cast<uint8_t>(floor), static_cast<int32_t>(room))] = k;
+    }
+    config_log.info_f("SpireCheckpointRooms: {} room(s)", this->spire_checkpoint_rooms.size());
+  } catch (const std::out_of_range&) {
+  }
+  this->spire_replay_registers.clear();
+  try {
+    for (const auto& item : this->config_json->get_list("SpireReplayRegisters")) {
+      int64_t reg = item->as_int();
+      if ((reg < 0) || (reg > 0xFF)) {
+        throw std::runtime_error("SpireReplayRegisters: registers 0-255");
+      }
+      this->spire_replay_registers.emplace(reg);
+    }
+    config_log.info_f("SpireReplayRegisters: {} register(s)", this->spire_replay_registers.size());
+  } catch (const std::out_of_range&) {
+  }
+
   auto parse_int_list = +[](const phosg::JSON& json) -> std::vector<uint32_t> {
     std::vector<uint32_t> ret;
     for (const auto& item : json.as_list()) {

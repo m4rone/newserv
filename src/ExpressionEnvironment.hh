@@ -15,6 +15,7 @@ struct ExpressionEnvironment {
   const QuestFlags* quest_flags;
   const PlayerRecordsChallengeBB* challenge_records;
   const TeamIndex::Team* team;
+  uint32_t spire_rooms = 0; // v22: rooms cleared by this character (bit k-1 = room k), SpireFlagBridge checkpoint
 
   int64_t evaluate(const ResourceDASM::Expression::Node& expr) const {
     return expr.evaluate(std::bind(&ExpressionEnvironment::env_lookup, this, std::placeholders::_1)).as_int();
@@ -25,6 +26,11 @@ struct ExpressionEnvironment {
       throw std::logic_error("Environment lookup name is empty");
     } else if (name == "P_SID") { // Player section ID
       return static_cast<int64_t>(this->section_id);
+    } else if (name == "SPIRE_MAX") { // Spire: highest room cleared by this character (0 = none)
+      return static_cast<int64_t>(this->spire_rooms ? (32 - __builtin_clz(this->spire_rooms)) : 0);
+    } else if (name.starts_with("SPIRE_K")) { // SPIRE_K<k>: Spire room k cleared by this character
+      size_t k = strtoull(name.c_str() + 7, nullptr, 10);
+      return static_cast<int64_t>((k >= 1) && (k <= 32) && ((this->spire_rooms >> (k - 1)) & 1));
     } else if (name.starts_with("F_")) { // Quest flag lookup
       if (!this->quest_flags) {
         throw std::runtime_error("Quest flags are not available");

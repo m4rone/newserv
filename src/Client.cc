@@ -16,6 +16,7 @@
 #include "Loggers.hh"
 #include "SendCommands.hh"
 #include "Server.hh"
+#include "SpireFlagBridge.hh"
 #include "Version.hh"
 
 const uint64_t CLIENT_CONFIG_MAGIC = 0x8399AC32;
@@ -387,6 +388,7 @@ bool Client::evaluate_quest_availability_expression(
       .quest_flags = &p->quest_flags,
       .challenge_records = &p->challenge_records,
       .team = this->team().get(),
+      .spire_rooms = spire_checkpoint_mask_for_client(this->shared_from_this()),
   };
   int64_t ret = env.evaluate(*expr);
   if (this->log.should_log(phosg::LogLevel::L_INFO)) {

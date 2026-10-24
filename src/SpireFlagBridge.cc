@@ -1452,6 +1452,8 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // v19: rooms already announced, per game (lobby id) as floor << 16 | room. A game's id is never reused while the server
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
+static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room);
+static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
 
 // v19: room clear detection. The wave events of one room on one floor, read from the map the server keeps per game.
 // An event holds the room while it is started (0004 or 0002) and not finished (0008). A finished event holds it while
@@ -1535,6 +1537,8 @@ void spire_bridge_check_room_clear(
       if (type_definition_for_enemy(ene_st->super_ene->type).is_boss()) {
         l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} has a boss; no room clear", wave_number, room,
             floor);
+        // v22: a boss wave done still counts as the room's clear for the checkpoint (no text, no r251)
+        spire_checkpoint_record_room(l, floor, room);
         return;
       }
     }
@@ -1570,7 +1574,196 @@ void spire_bridge_check_room_clear(
     l->log.info_f("Spire bridge: room {} on floor {:02X} cleared in q{}; sent \"{}\" and r{} = {:08X} to {} client(s)",
         room, floor, l->quest->meta.quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEARED_REGISTER,
         cmd.value.as_int.load(), sent);
+    spire_replay_note_room_cleared(l, floor, cmd.value.as_int);
+    spire_checkpoint_record_room(l, floor, room);
   } catch (const std::exception& e) {
     l->log.warning_f("Spire bridge: room clear check failed: {}", e.what());
+  }
+}
+
+// ---- v22: checkpoint per character and replay after a floor load (SpireFlagBridge.hh)
+
+struct SpireCheckpoint {
+  uint32_t rooms = 0; // bit k-1 = room k cleared in some run
+  uint32_t last_room = 0;
+  uint32_t last_quest = 0;
+};
+
+static std::string spire_checkpoint_filename(std::shared_ptr<const Client> c, uint32_t serial_number) {
+  auto character = c->character_file(false, false);
+  if (!character || !serial_number) {
+    return "";
+  }
+  return std::format("{}/{:010}.{}.checkpoint.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
+      spire_guard_character_id(character->disp));
+}
+
+static SpireCheckpoint spire_checkpoint_load(const std::string& filename) {
+  SpireCheckpoint ret;
+  if (std::filesystem::is_regular_file(filename)) {
+    auto json = phosg::JSON::parse(phosg::load_file(filename));
+    ret.rooms = json.get_int("Rooms");
+    ret.last_room = json.get_int("LastRoom");
+    ret.last_quest = json.get_int("LastQuest");
+  }
+  return ret;
+}
+
+static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
+  const auto& map = l->require_server_state()->data->spire_checkpoint_rooms;
+  auto it = map.find(std::make_pair(floor, static_cast<int32_t>(room)));
+  if (it == map.end()) {
+    it = map.find(std::make_pair(floor, -1));
+  }
+  if (it == map.end()) {
+    l->log.info_f("Spire checkpoint: room {} on floor {:02X} is not in SpireCheckpointRooms", room, floor);
+    return;
+  }
+  uint8_t k = it->second;
+  for (const auto& lc : l->clients) {
+    if (!lc || (lc->version() != Version::GC_V3)) {
+      continue;
+    }
+    try {
+      uint32_t serial_number = spire_bridge_serial_for_client(lc);
+      std::string filename = spire_checkpoint_filename(lc, serial_number);
+      if (filename.empty()) {
+        lc->log.info_f("Spire checkpoint: no character data; room {} not stored", k);
+        continue;
+      }
+      auto cp = spire_checkpoint_load(filename);
+      cp.rooms |= (1u << (k - 1));
+      cp.last_room = k;
+      cp.last_quest = l->quest->meta.quest_number;
+      auto json = phosg::JSON::dict({
+          {"SerialNumber", serial_number},
+          {"Rooms", cp.rooms},
+          {"LastRoom", cp.last_room},
+          {"LastQuest", cp.last_quest},
+      });
+      spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
+      lc->log.info_f("Spire checkpoint: room {} cleared in q{}; rooms {:08X} in {}", k, cp.last_quest, cp.rooms,
+          filename);
+    } catch (const std::exception& e) {
+      lc->log.warning_f("Spire checkpoint: failed to store room {}: {}", k, e.what());
+    }
+  }
+}
+
+uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c) {
+  try {
+    if (c->version() != Version::GC_V3) {
+      return 0;
+    }
+    std::string filename = spire_checkpoint_filename(c, spire_bridge_serial_for_client(c));
+    return filename.empty() ? 0 : spire_checkpoint_load(filename).rooms;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire checkpoint: failed to read: {}", e.what());
+    return 0;
+  }
+}
+
+// Per game: register -> client id -> latest value, and floor -> latest r251. The weak_ptr tells a reused Lobby
+// address from the game that wrote the state.
+struct SpireReplayState {
+  std::weak_ptr<const Lobby> game;
+  std::map<uint8_t, std::map<uint8_t, uint32_t>> registers;
+  std::map<uint8_t, uint32_t> room_cleared;
+};
+static std::unordered_map<const Lobby*, SpireReplayState> spire_replay_states;
+
+static SpireReplayState* spire_replay_state_for(std::shared_ptr<const Lobby> l, bool create) {
+  auto it = spire_replay_states.find(l.get());
+  if ((it != spire_replay_states.end()) && (it->second.game.lock() != l)) {
+    spire_replay_states.erase(it);
+    it = spire_replay_states.end();
+  }
+  if (it == spire_replay_states.end()) {
+    if (!create) {
+      return nullptr;
+    }
+    if (spire_replay_states.size() > 256) {
+      std::erase_if(spire_replay_states, [](const auto& e) { return e.second.game.expired(); });
+    }
+    it = spire_replay_states.emplace(l.get(), SpireReplayState{.game = l, .registers = {}, .room_cleared = {}}).first;
+  }
+  return &it->second;
+}
+
+static bool spire_replay_applies(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  return (c->version() == Version::GC_V3) && l->is_game() && l->quest &&
+      spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number);
+}
+
+void spire_replay_note_register(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value) {
+  try {
+    const auto& regs = c->require_server_state()->data->spire_replay_registers;
+    if (!regs.contains(register_number) || !spire_replay_applies(c, l)) {
+      return;
+    }
+    spire_replay_state_for(l, true)->registers[register_number][c->lobby_client_id] = value;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire replay: failed to note r{}: {}", register_number, e.what());
+  }
+}
+
+static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value) {
+  spire_replay_state_for(l, true)->room_cleared[floor] = value;
+}
+
+static asio::awaitable<void> spire_replay_send(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t floor, size_t attempt) {
+  co_await async_sleep(attempt ? SPIRE_REPLAY_SECOND_DELAY : SPIRE_REPLAY_DELAY);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l) || (c->floor != floor)) {
+    co_return; // left the game, or another floor load is under way (that one replays again)
+  }
+  auto* st = spire_replay_state_for(l, false);
+  if (!st) {
+    co_return;
+  }
+  size_t sent = 0;
+  auto send_reg = [&](uint8_t reg, uint32_t value) {
+    G_SyncQuestRegister_6x77 cmd;
+    cmd.header = {0x77, 0x03, 0x0000};
+    cmd.register_number = reg;
+    cmd.value.as_int = value;
+    send_command_t(c, 0x60, 0x00, cmd);
+    c->log.info_f("Spire replay: r{} = {:08X} after the load of floor {:02X}", reg, value, floor);
+    sent++;
+  };
+  for (const auto& [reg, by_client] : st->registers) {
+    // A register only one other client writes: its value. Written by this client itself: nothing (it has its own).
+    for (const auto& [client_id, value] : by_client) {
+      if (client_id != c->lobby_client_id) {
+        send_reg(reg, value);
+      }
+    }
+  }
+  auto rc = st->room_cleared.find(floor);
+  if (rc != st->room_cleared.end()) {
+    send_reg(SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, rc->second);
+  }
+  if (sent) {
+    l->log.info_f("Spire replay: {} register(s) to client {} after its load of floor {:02X} (send {})", sent,
+        c->lobby_client_id, floor, attempt + 1);
+  }
+  if (attempt == 0) {
+    // 6x1F can come before the load is done; the values are states, so a second send changes nothing that arrived
+    co_await spire_replay_send(weak_c, weak_l, floor, 1);
+  }
+}
+
+void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  try {
+    if (!spire_replay_applies(c, l) || !spire_replay_state_for(l, false)) {
+      return;
+    }
+    auto s = c->require_server_state();
+    asio::co_spawn(*s->io_context, spire_replay_send(c, l, c->floor, 0), asio::detached);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire replay: failed to schedule: {}", e.what());
   }
 }

@@ -143,6 +143,32 @@ bool spire_bridge_handle_register(
 void spire_bridge_check_room_clear(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
 
+// v22: room state on the server, for room transitions and checkpoints (spoor 9).
+// - Checkpoint per character: every room clear the server sees (the event rule above; a boss wave counts too, without a
+//   text) whose floor and room are in SpireCheckpointRooms is stored as room k in
+//   system/spire-bridge/<serial>.<character id>.checkpoint.json for every client in the game (each for its own
+//   character, like the records), as a bit mask of the rooms ever cleared plus the last room cleared and its quest. A
+//   quest's AvailableIf / EnabledIf reads it as SPIRE_K<k> (room k cleared, 0/1) and SPIRE_MAX (highest room cleared),
+//   the way Sega's challenge stages read CC_Ep1_<n>: a room quest unlocks once the room before it is cleared, and after
+//   a disconnect the next room's quest is where the run continues.
+// - Replay after a floor load: for the registers in SpireReplayRegisters the server keeps, per game, the latest value
+//   each client synced (6x77). When a client finishes a floor load (6x1F / 6x21, and 6F) it gets, after
+//   SPIRE_REPLAY_DELAY (and once more SPIRE_REPLAY_SECOND_DELAY later), the latest value of every such register written by another client, and the last room-cleared
+//   r251 of that floor. A 6x77 that reached it during its own load (respawn, go_floor) is so delivered again; a value
+//   it already had is unchanged by the replay. Nothing is sent if the client changed floor again in the meantime.
+constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
+constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
+
+// Called from the 6x77 handler for every quest register write in a game, after the bridge (forwarded or not). Never throws.
+void spire_replay_note_register(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value);
+
+// Called when a client has loaded a floor (6x1F, 6x21) or the game (6F). Never throws.
+void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);
+
+// The rooms this client's character has cleared (bit k-1 = room k), from its checkpoint file; 0 if none or unknown.
+uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
+
 // Spire guard (v6-v15; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
