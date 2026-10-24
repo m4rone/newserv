@@ -17,6 +17,7 @@
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireDraw.hh"
+#include "SpireMeta.hh"
 #include "ServerState.hh"
 
 // Stored entries, keyed by (difficulty, flag number). The value is true if the flag was set, false if it was cleared.
@@ -46,7 +47,7 @@ static bool spire_bridge_register_is_stored(uint8_t register_number) {
 
 // v12: writes data to filename so that a crash or power loss leaves either the old file or the new one, never a
 // partial or empty one: write a temp file, fsync it, rename it over the target, then fsync the directory.
-static void spire_bridge_write_durable(const std::string& filename, const std::string& data) {
+void spire_bridge_write_durable(const std::string& filename, const std::string& data) {
   std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
   std::string temp_filename = filename + ".tmp";
   int fd = ::open(temp_filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -173,13 +174,11 @@ void spire_bridge_record_flag(
       return;
     }
 
-    std::string filename = spire_bridge_filename(serial_number);
-    auto state = spire_bridge_load(filename);
-    state.flags[std::make_pair(static_cast<uint8_t>(difficulty), flag_num)] = is_set;
-    spire_bridge_save(filename, serial_number, state);
-    c->log.info_f("Spire bridge: recorded {} quest flag {}:{:04X} for serial {:010} in {} game ({} stored)",
-        is_set ? "set" : "cleared", name_for_difficulty(difficulty), flag_num, serial_number,
-        (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle", state.flags.size());
+    // v22: the flags belong to the character (SpireMeta), not to the card
+    if (!spire_meta_record_flag(c, serial_number, static_cast<uint8_t>(difficulty), flag_num, is_set)) {
+      c->log.info_f("Spire bridge: no character data for serial {:010}; quest flag {:04X} not recorded",
+          serial_number, flag_num);
+    }
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire bridge: failed to record quest flag {:04X}: {}", flag_num, e.what());
@@ -187,48 +186,16 @@ void spire_bridge_record_flag(
 }
 
 void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
-  try {
-    if (!l->is_game()) {
-      return;
-    }
-    uint32_t serial_number = spire_bridge_serial_for_client(c);
-    if (!serial_number) {
-      return;
-    }
-
-    std::string filename = spire_bridge_filename(serial_number);
-    const auto entries = spire_bridge_load(filename).flags;
-    if (entries.empty()) {
-      return;
-    }
-
-    // Same 6x75 format and delivery path as send_game_flag_state_t (SendCommands.cc). Action 0 sets the flag; 1 clears
-    // it.
-    phosg::StringWriter w;
-    for (const auto& [key, is_set] : entries) {
-      w.put(G_UpdateQuestFlag_V3_BB_6x75{
-          {{0x75, 0x03, 0x0000}, key.second, static_cast<uint16_t>(is_set ? 0 : 1)}, key.first, 0});
-      c->log.info_f("Spire bridge: sending {} quest flag {}:{:04X}",
-          is_set ? "set" : "clear", name_for_difficulty(static_cast<Difficulty>(key.first)), key.second);
-    }
-    if (c->game_join_command_queue) {
-      c->log.info_f("Client not ready to receive join commands; adding to queue");
-      auto& cmd = c->game_join_command_queue->emplace_back();
-      cmd.command = 0x006D;
-      cmd.flag = c->lobby_client_id;
-      cmd.data = std::move(w.str());
-    } else {
-      send_command(c, 0x6D, c->lobby_client_id, w.str());
-    }
-
-    // The stored state is permanent: it is not erased after delivery, since the client does not save delivered flags
-    // to its memory card.
-    c->log.info_f("Spire bridge: delivered {} quest flag(s) for serial {:010} in {} game",
-        entries.size(), serial_number, (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle");
-
-  } catch (const std::exception& e) {
-    c->log.warning_f("Spire bridge: failed to deliver quest flags: {}", e.what());
+  if (!l->is_game()) {
+    return;
   }
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  if (!serial_number) {
+    return;
+  }
+  // v22: the character's flags (SpireMeta). The stored state is permanent: the client does not save delivered flags to
+  // its memory card. Flags in a v5-v21 <serial>.json are no longer delivered: they belonged to the whole card.
+  spire_meta_deliver_flags(c, l, serial_number);
 }
 
 // Merges a newly written value into the stored one. Returns the new stored value and sets how to the name of the rule
@@ -501,7 +468,6 @@ static std::string spire_bridge_message_text(uint32_t value) {
 
 // v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
 // login), never the Battle overlay, so each character on a card has its own records (E04 AC-6).
-static std::string spire_guard_character_id(const PlayerDispDataV4& disp);
 
 struct SpireRecords {
   uint32_t best_score = 0;
@@ -603,12 +569,9 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   spire_records_save(filename, serial_number, rec);
   if (new_time) {
-    // the payout flag the quest set itself before v18; stored and delivered like any bridged flag write
-    std::string bridge_filename = spire_bridge_filename(serial_number);
-    auto state = spire_bridge_load(bridge_filename);
-    state.flags[std::make_pair(static_cast<uint8_t>(Difficulty::NORMAL), SPIRE_BRIDGE_RECORD_FLAG)] = true;
-    spire_bridge_save(bridge_filename, serial_number, state);
-    spire_bridge_deliver_flags(c, l);
+    // the payout flag the quest set itself before v18; v22: stored for the character (SpireMeta), on the game's
+    // difficulty (before v22 always Normal)
+    spire_meta_set_flag(c, l, serial_number, SPIRE_BRIDGE_RECORD_FLAG);
   }
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
                                : std::format("Best score: {}.", rec.best_score);
@@ -800,7 +763,7 @@ static bool spire_guard_same_character(const PlayerDispDataV4& a, const PlayerDi
       (a.visual.sh.char_class == b.visual.sh.char_class) && (a.visual.sh.section_id == b.visual.sh.section_id);
 }
 
-static std::string spire_guard_character_id(const PlayerDispDataV4& disp) {
+std::string spire_guard_character_id(const PlayerDispDataV4& disp) {
   // FNV-1a over the raw name bytes, class and section ID
   uint32_t hash = 0x811C9DC5;
   auto add = [&](const void* data, size_t size) {

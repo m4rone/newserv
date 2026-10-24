@@ -129,6 +129,7 @@ set(SOURCES
     src/SignalWatcher.cc
     src/SpireDraw.cc
     src/SpireFlagBridge.cc
+    src/SpireMeta.cc
     src/StaticGameData.cc
     src/StaticTests.cc
     src/TeamIndex.cc

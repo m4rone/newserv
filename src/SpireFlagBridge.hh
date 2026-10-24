@@ -218,3 +218,7 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client =
 // Called from enable_save_if_needed right before 97 is sent. Returns true if 97 may be sent; false if the caller must
 // not send 97 and must drop the login. Never throws.
 asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c);
+
+// Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
+std::string spire_guard_character_id(const PlayerDispDataV4& disp);
+void spire_bridge_write_durable(const std::string& filename, const std::string& data);
