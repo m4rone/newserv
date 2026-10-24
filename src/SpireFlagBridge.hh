@@ -178,6 +178,22 @@ constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // a
 // Pioneer 2, the server warps every other client of the game that is not on that floor there (6x94, the $warpall
 // form), after DelayMs and only if the leader is still on that floor. Never to floor 0: arriving on Pioneer 2 writes
 // the Lv1 overlay to the card (B-E01-41).
+// v29 (regie 2026-10-24, B-E01-52): a partner that still stands in the city (floor SPIRE_FOLLOW_CITY_FLOOR) is never
+// warped: it takes the Ragol warp itself, as in a Sega quest (route 1, q920/q929). The follow stays for the room
+// transitions during the run. Also v29: the lives a client reported ('L' codes) are forgotten at every quest start,
+// so LastLives in the checkpoint file can only come from the current run.
+constexpr uint32_t SPIRE_FOLLOW_CITY_FLOOR = 0;
+
+// Called at every quest start (on_quest_loaded) for each client of the game. Never throws.
+void spire_checkpoint_run_started(std::shared_ptr<const Client> c);
+
+// The two decisions above as plain functions, so 'newserv spire-follow-check' and 'spire-lives-check'
+// (tests/spire-follow-city.test.sh) measure them without a client. The lives store is keyed by the Client's address
+// and never dereferences it.
+bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor);
+void spire_checkpoint_lives_note(const Client* key, uint32_t lives);
+bool spire_checkpoint_lives_forget(const Client* key);
+uint32_t spire_checkpoint_lives_for(const Client* key); // 0 = no lives reported since the quest start
 
 // Called from the 6x77 handler for every quest register write in a game, after the bridge (forwarded or not). Never throws.
 void spire_replay_note_register(

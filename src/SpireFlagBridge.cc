@@ -466,8 +466,28 @@ static std::string spire_bridge_message_text(uint32_t value) {
   }
 }
 
-// v23: lives per client from its 'L' codes, for the checkpoint
+// v23: lives per client from its 'L' codes, for the checkpoint; v29: cleared at every quest start, so a second run on
+// the same connection (or a new Client at a reused address) never writes the previous run's lives into LastLives
 static std::unordered_map<const Client*, uint32_t> spire_checkpoint_lives;
+
+void spire_checkpoint_lives_note(const Client* key, uint32_t lives) {
+  spire_checkpoint_lives[key] = lives;
+}
+
+bool spire_checkpoint_lives_forget(const Client* key) {
+  return spire_checkpoint_lives.erase(key) > 0;
+}
+
+uint32_t spire_checkpoint_lives_for(const Client* key) {
+  auto it = spire_checkpoint_lives.find(key);
+  return (it == spire_checkpoint_lives.end()) ? 0 : it->second;
+}
+
+void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
+  if (spire_checkpoint_lives_forget(c.get())) {
+    c->log.info_f("Spire checkpoint: lives of the previous run forgotten at the quest start");
+  }
+}
 
 // v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
 // login), never the Battle overlay, so each character on a card has its own records (E04 AC-6).
@@ -640,7 +660,7 @@ bool spire_bridge_handle_register(
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_MSG_LIFE) {
-        spire_checkpoint_lives[c.get()] = value & 0xFF; // falls through to the life text below
+        spire_checkpoint_lives_note(c.get(), value & 0xFF); // falls through to the life text below
       }
       if (spire_records_handle(c, l, serial_number, quest_number, value)) {
         return true;
@@ -1738,8 +1758,7 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       cp.rooms |= (1u << (k - 1));
       cp.last_room = k;
       cp.last_quest = l->quest->meta.quest_number;
-      auto lives_it = spire_checkpoint_lives.find(lc.get());
-      cp.last_lives = (lives_it == spire_checkpoint_lives.end()) ? 0 : lives_it->second;
+      cp.last_lives = spire_checkpoint_lives_for(lc.get());
       auto json = phosg::JSON::dict({
           {"SerialNumber", serial_number},
           {"Rooms", cp.rooms},
@@ -1862,6 +1881,12 @@ static asio::awaitable<void> spire_replay_send(
   }
 }
 
+bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor) {
+  // never to the city (B-E01-41), never from the city (v29), never when already there
+  return (leader_floor != SPIRE_FOLLOW_CITY_FLOOR) && (partner_floor != SPIRE_FOLLOW_CITY_FLOOR) &&
+      (partner_floor != leader_floor);
+}
+
 static asio::awaitable<void> spire_follow_leader_warp(
     std::weak_ptr<Client> weak_leader, std::weak_ptr<Lobby> weak_l, uint32_t floor, uint32_t delay_ms) {
   co_await async_sleep(std::chrono::milliseconds(delay_ms));
@@ -1871,11 +1896,19 @@ static asio::awaitable<void> spire_follow_leader_warp(
     co_return; // the leader left the game or moved on; its next floor load warps again
   }
   for (const auto& lc : l->clients) {
-    if (lc && (lc != leader) && (lc->floor != floor)) {
-      l->log.info_f("Spire follow: client {} on floor {:02X} warped to the leader's floor {:02X}", lc->lobby_client_id,
-          lc->floor, floor);
-      send_warp(lc, floor, true);
+    if (!lc || (lc == leader) || (lc->floor == floor)) {
+      continue;
     }
+    if (!spire_follow_should_warp(lc->floor, floor)) {
+      // v29 (regie 2026-10-24): a partner still on Pioneer 2 takes the Ragol warp itself, as in a Sega quest; the
+      // server only follows room transitions during the run
+      l->log.info_f("Spire follow: client {} is in the city; not warped to the leader's floor {:02X} (takes the Ragol warp itself)",
+          lc->lobby_client_id, floor);
+      continue;
+    }
+    l->log.info_f("Spire follow: client {} on floor {:02X} warped to the leader's floor {:02X}", lc->lobby_client_id,
+        lc->floor, floor);
+    send_warp(lc, floor, true);
   }
 }
 

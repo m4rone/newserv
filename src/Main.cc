@@ -54,6 +54,7 @@
 #include "StaticTests.hh"
 #include "Text.hh"
 #include "TextIndex.hh"
+#include "SpireFlagBridge.hh"
 
 bool use_terminal_colors = false;
 
@@ -2727,6 +2728,46 @@ Action a_spire_blocked_check(
       bool blocked = di->is_spire_blocked(
           args.get<uint32_t>(1), args.get<std::string>(2), args.get<uint32_t>(3));
       phosg::fwrite_fmt(stdout, "{}\n", blocked ? "blocked" : "allowed");
+    });
+
+Action a_spire_follow_check(
+    "spire-follow-check", "\
+  spire-follow-check PARTNER_FLOOR LEADER_FLOOR\n\
+    Print \"warp\" or \"skip\": whether Spire follow the leader (v26/v29) warps a\n\
+    partner on PARTNER_FLOOR to the leader's LEADER_FLOOR. Never from or to the\n\
+    city (floor 0), never when already there.\n",
+    +[](phosg::Arguments& args) {
+      bool warp = spire_follow_should_warp(args.get<uint32_t>(1), args.get<uint32_t>(2));
+      phosg::fwrite_fmt(stdout, "{}\n", warp ? "warp" : "skip");
+    });
+
+Action a_spire_lives_check(
+    "spire-lives-check", "\
+  spire-lives-check\n\
+    Exercise the checkpoint lives store (v29): a client's lives are kept until\n\
+    its quest start forgets them, and another client's lives are untouched.\n\
+    Prints ok or FAIL and the step that failed.\n",
+    +[](phosg::Arguments&) {
+      const Client* a = reinterpret_cast<const Client*>(static_cast<uintptr_t>(0x1000));
+      const Client* b = reinterpret_cast<const Client*>(static_cast<uintptr_t>(0x2000));
+      auto expect = [](const char* step, bool ok) {
+        if (!ok) {
+          phosg::fwrite_fmt(stdout, "FAIL {}\n", step);
+          exit(1);
+        }
+      };
+      expect("1 unknown client has 0 lives", spire_checkpoint_lives_for(a) == 0);
+      spire_checkpoint_lives_note(a, 3);
+      spire_checkpoint_lives_note(b, 2);
+      expect("2 lives noted", (spire_checkpoint_lives_for(a) == 3) && (spire_checkpoint_lives_for(b) == 2));
+      spire_checkpoint_lives_note(a, 1);
+      expect("3 a later L code wins", spire_checkpoint_lives_for(a) == 1);
+      expect("4 quest start forgets a's lives", spire_checkpoint_lives_forget(a) && (spire_checkpoint_lives_for(a) == 0));
+      expect("5 b's lives untouched", spire_checkpoint_lives_for(b) == 2);
+      expect("6 forgetting again is a no-op", !spire_checkpoint_lives_forget(a));
+      spire_checkpoint_lives_note(a, 2);
+      expect("7 the new run's lives count again", spire_checkpoint_lives_for(a) == 2);
+      phosg::fwrite_fmt(stdout, "ok\n");
     });
 
 Action a_name_all_items(

@@ -2420,6 +2420,7 @@ static void on_quest_loaded(std::shared_ptr<Lobby> l) {
     }
 
     lc->delete_overlay();
+    spire_checkpoint_run_started(lc); // v29: forget the lives of a previous run (see SpireFlagBridge.hh)
 
     if ((l->quest->meta.challenge_template_index >= 0) && !is_v4(leader_c->version())) {
       // If the leader is BB, they will send an 02DF command that will create the overlays later; on other versions, we
