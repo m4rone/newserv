@@ -1393,3 +1393,53 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   }
   return false;
 }
+
+// v19: rooms already announced, per game (lobby id) as floor << 16 | room. A game's id is never reused while the server
+// runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
+static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
+
+void spire_bridge_check_room_clear(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
+  try {
+    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest ||
+        !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
+      return;
+    }
+
+    // Later waves of the room are already in the map state, not yet defeated, so this holds only after the last wave
+    for (const auto& ene_st : l->map_state->enemy_states) {
+      if (!ene_st || ene_st->super_ene->floor != floor || ene_st->super_ene->child_index) {
+        continue;
+      }
+      const auto* set_entry = ene_st->super_ene->version(c->version()).set_entry;
+      if (set_entry && (set_entry->room == room) && !(ene_st->set_flags & 8)) {
+        return;
+      }
+    }
+
+    uint64_t key = (static_cast<uint64_t>(l->lobby_id) << 32) | (static_cast<uint32_t>(floor) << 16) | room;
+    if (spire_bridge_cleared_rooms.size() > 4096) {
+      spire_bridge_cleared_rooms.clear();
+    }
+    if (!spire_bridge_cleared_rooms.emplace(key).second) {
+      return;
+    }
+
+    G_SyncQuestRegister_6x77 cmd;
+    cmd.header = {0x77, 0x03, 0x0000};
+    cmd.register_number = SPIRE_BRIDGE_ROOM_CLEARED_REGISTER;
+    cmd.value.as_int = SPIRE_BRIDGE_ROOM_CLEARED_TAG | (static_cast<uint32_t>(floor) << 8) | (room & 0xFF);
+    size_t sent = 0;
+    for (const auto& lc : l->clients) {
+      if (lc) {
+        send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+        send_command_t(lc, 0x60, 0x00, cmd);
+        sent++;
+      }
+    }
+    l->log.info_f("Spire bridge: room {} on floor {:02X} cleared in q{}; sent \"{}\" and r{} = {:08X} to {} client(s)",
+        room, floor, l->quest->meta.quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEARED_REGISTER,
+        cmd.value.as_int.load(), sent);
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: room clear check failed: {}", e.what());
+  }
+}
