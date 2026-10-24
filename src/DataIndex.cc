@@ -755,6 +755,17 @@ void DataIndex::load_config_early() {
   } catch (const std::out_of_range&) {
   }
 
+  this->spire_run_timer_lab.reset();
+  try {
+    const auto& t = this->config_json->at("SpireRunTimerLab");
+    int64_t limit = t.get_int("LimitSeconds"), warning = t.get_int("WarningSeconds");
+    if ((limit <= 0) || (limit > 0xFFFF) || (warning < 0) || (warning >= limit)) {
+      throw std::runtime_error("SpireRunTimerLab: LimitSeconds 1-65535, WarningSeconds 0 to below LimitSeconds");
+    }
+    this->spire_run_timer_lab = std::make_pair(static_cast<uint32_t>(limit), static_cast<uint32_t>(warning));
+  } catch (const std::out_of_range&) {
+  }
+
   auto parse_int_list = +[](const phosg::JSON& json) -> std::vector<uint32_t> {
     std::vector<uint32_t> ret;
     for (const auto& item : json.as_list()) {

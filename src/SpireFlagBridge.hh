@@ -92,6 +92,7 @@ constexpr uint8_t SPIRE_BRIDGE_TIMER_END = 'E';
 constexpr uint8_t SPIRE_BRIDGE_TIMER_REGISTER = 252;
 constexpr uint32_t SPIRE_BRIDGE_TIMER_TIME_UP = 1;
 constexpr uint32_t SPIRE_BRIDGE_TIMER_PLAYER_LEFT = 2;
+// Lab only: the server config key SpireRunTimerLab {"LimitSeconds", "WarningSeconds"} replaces the 'S' values (logged).
 constexpr auto SPIRE_BRIDGE_TIMER_TICK = std::chrono::seconds(1);
 
 // v19: room clear detected by the server. When a wave is finished and its room is clear by the event rule (see

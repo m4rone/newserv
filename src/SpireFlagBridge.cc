@@ -421,6 +421,13 @@ static void spire_run_timer_start(
   t.limit_s = value & 0xFFFF;
   t.warn_before_s = ((value >> 16) & 0xFF) * 60;
   t.clients_at_start = l->count_clients();
+  const auto& lab = c->require_server_state()->data->spire_run_timer_lab;
+  if (lab) { // lab config only: a short round instead of the quest's 60 min
+    c->log.info_f("Spire bridge: run timer lab override (SpireRunTimerLab): limit {} s -> {} s, warning {} s -> {} s",
+        t.limit_s, lab->first, t.warn_before_s, lab->second);
+    t.limit_s = lab->first;
+    t.warn_before_s = lab->second;
+  }
   spire_run_timers[l.get()] = t;
   c->log.info_f("Spire bridge: run timer for serial {:010} in q{}: limit {} s, warning {} s before, {} client(s)",
       serial_number, quest_number, t.limit_s, t.warn_before_s, t.clients_at_start);

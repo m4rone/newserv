@@ -163,6 +163,9 @@ struct DataIndex {
   // v15: quests the Spire guard protects; unset (the key is missing) means the guard uses spire_bridge_quest_numbers
   std::optional<std::unordered_set<uint32_t>> spire_guard_quest_numbers;
   std::vector<uint8_t> spire_battle_end_phases;
+  // v19 lab: SpireRunTimerLab {"LimitSeconds": n, "WarningSeconds": m} replaces the time limit and warning the quest
+  // sends with 'S', so a lab round reaches the warning and "Time is up." in minutes. Missing (the pc): the quest's values.
+  std::optional<std::pair<uint32_t, uint32_t>> spire_run_timer_lab;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};
