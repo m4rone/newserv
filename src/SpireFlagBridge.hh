@@ -142,6 +142,16 @@ bool spire_bridge_handle_register(
 void spire_bridge_check_room_clear(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
 
+// v25 (spire-bossclear): boss clear on the server for a boss without if_zone_clear. Sega's q160 polls vol_opt_is_dead
+// instead of if_zone_clear, so the Vol Opt room (k11) cannot use the quest's own zone clear. When a client sets
+// set_flags bit 8 (defeated, 6x76) on Vol Opt phase 2 (TBoss3VoloptP02, EnemyType VOL_OPT_2) in a game running a quest
+// listed in SpireBossClearQuests (and SpireBridgeQuests), the server sends the same as for a normal room clear:
+// SPIRE_BRIDGE_ROOM_CLEAR_TEXT and r251 = SPIRE_BRIDGE_ROOM_CLEARED_TAG | floor << 8 | room to every client, the replay
+// note and the checkpoint, once per (game, floor, room). Quests not in the list (q920, q940-q952 with the Dragon and De
+// Rol Le) keep their own boss clear; nothing changes there.
+void spire_bridge_check_boss_defeated(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type);
+
 // v23: room state on the server, for room transitions and checkpoints (spoor 9).
 // - Checkpoint per character: every room clear the server sees (the event rule above; a boss wave counts too, without a
 //   text) whose floor and room are in SpireCheckpointRooms is stored as room k in

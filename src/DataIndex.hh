@@ -162,6 +162,9 @@ struct DataIndex {
   std::unordered_set<uint32_t> spire_bridge_quest_numbers;
   // v15: quests the Spire guard protects; unset (the key is missing) means the guard uses spire_bridge_quest_numbers
   std::optional<std::unordered_set<uint32_t>> spire_guard_quest_numbers;
+  // v25 boss clear: quests (SpireBossClearQuests) in which a boss the quest cannot see clear with if_zone_clear (Vol Opt
+  // phase 2) gets the server's room clear when it is defeated; empty = no boss clear on the server (k4/k8 unchanged)
+  std::unordered_set<uint32_t> spire_boss_clear_quest_numbers;
   std::vector<uint8_t> spire_battle_end_phases;
   // v19 lab: SpireRunTimerLab {"LimitSeconds": n, "WarningSeconds": m} replaces the time limit and warning the quest
   // sends with 'S', so a lab round reaches the warning and "Time is up." in minutes. Missing (the pc): the quest's values.

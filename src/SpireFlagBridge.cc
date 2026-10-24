@@ -1585,6 +1585,54 @@ void spire_bridge_check_room_clear(
   }
 }
 
+// The boss types whose defeat is the room clear (v25): the last part of a boss Sega's quests never zone-clear.
+static bool spire_bridge_is_server_clear_boss(EnemyType type) {
+  return type == EnemyType::VOL_OPT_2;
+}
+
+void spire_bridge_check_boss_defeated(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type) {
+  try {
+    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest || !spire_bridge_is_server_clear_boss(type)) {
+      return;
+    }
+    uint32_t quest_number = l->quest->meta.quest_number;
+    const auto& data = c->require_server_state()->data;
+    if (!data->spire_boss_clear_quest_numbers.count(quest_number) || !spire_bridge_quest_is_bridged(c, quest_number)) {
+      l->log.info_f("Spire bridge: {} defeated in q{}, which is not in SpireBossClearQuests; no room clear",
+          phosg::name_for_enum(type), quest_number);
+      return;
+    }
+    uint64_t key = (static_cast<uint64_t>(l->lobby_id) << 32) | (static_cast<uint32_t>(floor) << 16) | room;
+    if (spire_bridge_cleared_rooms.size() > 4096) {
+      spire_bridge_cleared_rooms.clear();
+    }
+    if (!spire_bridge_cleared_rooms.emplace(key).second) {
+      l->log.info_f("Spire bridge: boss room {} on floor {:02X} already announced in this game", room, floor);
+      return;
+    }
+    G_SyncQuestRegister_6x77 cmd;
+    cmd.header = {0x77, 0x03, 0x0000};
+    cmd.register_number = SPIRE_BRIDGE_ROOM_CLEARED_REGISTER;
+    cmd.value.as_int = SPIRE_BRIDGE_ROOM_CLEARED_TAG | (static_cast<uint32_t>(floor) << 8) | (room & 0xFF);
+    size_t sent = 0;
+    for (const auto& lc : l->clients) {
+      if (lc) {
+        send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+        send_command_t(lc, 0x60, 0x00, cmd);
+        sent++;
+      }
+    }
+    l->log.info_f("Spire bridge: {} defeated (room {} on floor {:02X}) in q{}; sent \"{}\" and r{} = {:08X} to {} client(s)",
+        phosg::name_for_enum(type), room, floor, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT,
+        SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, cmd.value.as_int.load(), sent);
+    spire_replay_note_room_cleared(l, floor, cmd.value.as_int);
+    spire_checkpoint_record_room(l, floor, room);
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: boss clear check failed: {}", e.what());
+  }
+}
+
 // ---- v23: checkpoint per character and replay after a floor load (SpireFlagBridge.hh)
 
 struct SpireCheckpoint {

@@ -3328,6 +3328,10 @@ static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage&
       room = set_entry->room;
       wave_number = set_entry->wave_number;
       l->log.info_f("Client set set flags {:04X} on E-{:03X} (flags are now {:04X})", cmd.flags, ene_st->e_id, cmd.flags);
+      // Spire boss clear (v25): Vol Opt phase 2 defeated is its room's clear (only in SpireBossClearQuests)
+      if ((cmd.flags & 8) && type_definition_for_enemy(ene_st->super_ene->type).is_boss()) {
+        spire_bridge_check_boss_defeated(c, l, cmd.floor, set_entry->room, ene_st->super_ene->type);
+      }
     } catch (const std::out_of_range&) {
       l->log.warning_f("Flag update refers to missing enemy");
     }

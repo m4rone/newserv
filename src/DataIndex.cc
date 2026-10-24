@@ -743,6 +743,13 @@ void DataIndex::load_config_early() {
     this->spire_guard_quest_numbers = std::move(guard_quests);
   } catch (const std::out_of_range&) {
   }
+  this->spire_boss_clear_quest_numbers.clear();
+  try {
+    for (const auto& item : this->config_json->at("SpireBossClearQuests").as_list()) {
+      this->spire_boss_clear_quest_numbers.emplace(item->as_int());
+    }
+  } catch (const std::out_of_range&) {
+  }
   this->spire_battle_end_phases.clear();
   try {
     for (const auto& item : this->config_json->at("SpireBattleEndPhases").as_list()) {
