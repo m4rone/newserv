@@ -191,6 +191,12 @@ struct DataIndex {
   std::unordered_set<uint32_t> spire_blocked_quest_numbers;
   std::vector<std::pair<uint32_t, std::string>> spire_blocked_characters;
   bool is_spire_blocked(uint32_t gc_serial, const std::string& name, uint32_t quest_number) const;
+  // True if the character is listed in SpireBlockedCharacters, whatever the quest
+  bool is_spire_protected_character(uint32_t gc_serial, const std::string& name) const;
+  // The decision behind Client::is_spire_blocked. name is null if the client has no character to read it from (fail
+  // closed: every listed quest and every Challenge quest is blocked). A Challenge quest is blocked for a protected
+  // character whatever its number (audit S-3).
+  bool is_spire_blocked_quest(uint32_t gc_serial, const std::string* name, uint32_t quest_number, bool challenge) const;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};

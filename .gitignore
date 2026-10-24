@@ -57,3 +57,4 @@ system/players
 system/quests/includes
 system/quests/private
 .vscode
+.claude/review-loop/

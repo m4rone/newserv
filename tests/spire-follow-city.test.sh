@@ -6,7 +6,7 @@ set -e
 EXECUTABLE="$1"
 
 check() {
-  GOT=$($EXECUTABLE spire-follow-check "$1" "$2" 2>/dev/null)
+  GOT=$($EXECUTABLE spire-follow-check "$1" "$2" $4 2>/dev/null)
   if [ "$GOT" != "$3" ]; then
     echo "FAIL: partner on floor $1, leader on floor $2: expected $3, got $GOT"
     exit 1
@@ -23,6 +23,8 @@ check 11 12 warp
 check 1 1 skip     # already there
 check 1 0 skip     # never to the city (B-E01-41)
 check 0 0 skip
+check 1 2 skip loading  # audit S-12: a partner that is still loading is never warped
+check 15 14 warp   # Ep2: floor 0x0F (Gol Dragon) is a real floor, not "loading"
 
 GOT=$($EXECUTABLE spire-lives-check 2>/dev/null)
 [ "$GOT" = ok ] || { echo "FAIL: spire-lives-check: $GOT"; exit 1; }

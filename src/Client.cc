@@ -405,13 +405,13 @@ bool Client::is_spire_blocked(std::shared_ptr<const Quest> q) const {
   if (s->data->spire_blocked_characters.empty()) {
     return false;
   }
+  // Audit S-3: a Challenge quest's overlay replaces the character outside the Spire guard (which only covers Battle
+  // games), so a protected character never gets one
+  bool challenge = (q->meta.challenge_template_index >= 0);
   auto p = this->character_file(false);
-  if (!p) {
-    // No character to read the name from: fail closed, no blocked quest for this client
-    return s->data->spire_blocked_quest_numbers.count(q->meta.quest_number);
-  }
-  return s->data->is_spire_blocked(
-      this->login->gc_license->serial_number, p->disp.visual.name.decode(this->language()), q->meta.quest_number);
+  std::string name = p ? p->disp.visual.name.decode(this->language()) : "";
+  return s->data->is_spire_blocked_quest(
+      this->login->gc_license->serial_number, p ? &name : nullptr, q->meta.quest_number, challenge);
 }
 
 bool Client::can_see_quest(

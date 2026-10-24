@@ -2,6 +2,7 @@
 
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
+#include <format>
 #include <stdexcept>
 
 // Mirrors rewards.py (hook draw_rewards, draw_one, valid, unpack_tags, weights_syn/var) step by step, including the
@@ -57,6 +58,17 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
     }
     for (const auto& z : a_json->get_list("slot_c_zero_tags")) {
       a.slot_c_zero_tags.emplace_back(z->as_int());
+    }
+    // Audit Q2-2: the picks registers hold SPIRE_DRAW_MAX_ENTRIES pool indexes, so a larger pool would be cut off
+    // silently; refuse it here instead
+    if (a.entries.size() > SPIRE_DRAW_MAX_ENTRIES) {
+      throw std::runtime_error(std::format("archetype has {} entries; at most {} fit in the picks registers",
+          a.entries.size(), SPIRE_DRAW_MAX_ENTRIES));
+    }
+    for (uint8_t z : a.slot_c_zero_tags) {
+      if (z >= t.num_tags) {
+        throw std::runtime_error("slot_c_zero_tags entry out of range");
+      }
     }
     if (a.kbands.empty() || (a.kbands[0] != 1)) {
       throw std::runtime_error("archetype without k band 1");

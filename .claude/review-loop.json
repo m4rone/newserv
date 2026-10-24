@@ -1,0 +1,16 @@
+{
+  "goalsDir": "docs/review-loop/goals",
+  "reportDir": "docs/review-loop/reports",
+  "scratch": "/tmp/review-loop",
+  "verification": [
+    "`mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc) newserv` in de VOORGROND",
+    "`build/newserv run-static-tests`",
+    "`sh tests/spire-follow-city.test.sh build/newserv`"
+  ],
+  "rules": [
+    "De repo staat in /home/m4rck/code/worktrees/newserv/audit-slice-c (tak fix/audit-slice-c): werk uitsluitend daar, met absolute paden of cd in elk commando.",
+    "Niets op de pc of in het lab uitrollen of herstarten; de draaiende newserv op de laptop niet aanraken.",
+    "Processen nooit op naam stoppen.",
+    "Commentaar in het Engels."
+  ]
+}
