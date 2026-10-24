@@ -296,6 +296,9 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 // the connection is dropped and the marker stays, so the login restore remains the safety net. Never runs at the same
 // time as another restore for the same client. Never throws.
 asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c);
+// v33: called at every 99 (the client's answer to a B1, sent only once the lobby is loaded); starts a lobby restore
+// that waits for it. Cheap no-op for every other client.
+void spire_guard_lobby_loaded(std::shared_ptr<Client> c);
 
 // Called before a client joins or creates a game (v10). Returns false, after sending the client a short message, if a
 // restore is running for the client or RestorePending is set; the caller must then not let the client into a game.

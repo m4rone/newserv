@@ -3135,7 +3135,8 @@ static asio::awaitable<void> on_84(std::shared_ptr<Client> c, Channel::Message& 
     c->preferred_lobby_id = cmd.item_id;
     s->add_client_to_available_lobby(c, false);
     // Spire guard (v9): a Spire game end leaves a pending restore; run it now, in the lobby, instead of waiting for
-    // the next login. This is a no-op for other clients (see SpireFlagBridge.hh).
+    // the next login. This is a no-op for other clients (see SpireFlagBridge.hh). v33: it waits for the 99 that
+    // answers a B1 sent after the 67 (or 3 s), so the B2 never lands while the client is still loading the lobby.
     co_await spire_guard_restore_in_lobby(c);
 
   } else {
@@ -5142,6 +5143,8 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
 
 static asio::awaitable<void> on_99(std::shared_ptr<Client> c, Channel::Message& msg) {
   check_size_v(msg.data.size(), 0);
+  // Spire guard (v33): the client has loaded the lobby; a waiting lobby restore may start now
+  spire_guard_lobby_loaded(c);
 
   // This is an odd place to send 6xB4x52, but there's a reason for it. If the client receives 6xB4x52 while it's
   // loading the battlefield, it won't set the spectator count or top-bar text. But the client doesn't send anything

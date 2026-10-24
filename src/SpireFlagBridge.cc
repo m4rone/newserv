@@ -1510,6 +1510,59 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   co_return true;
 }
 
+void spire_guard_lobby_loaded(std::shared_ptr<Client> c) {
+  if (c->spire_lobby_gate.on_lobby_loaded() && c->spire_lobby_settle_promise && !c->spire_lobby_settle_promise->done()) {
+    c->spire_lobby_settle_promise->set_value();
+  }
+}
+
+static asio::awaitable<void> spire_guard_lobby_settle_timer(std::weak_ptr<Client> weak_c, std::shared_ptr<AsyncPromise<void>> promise) {
+  co_await async_sleep(std::chrono::milliseconds(SPIRE_GUARD_LOBBY_SETTLE_MS));
+  auto c = weak_c.lock();
+  if (!c || promise->done()) {
+    co_return;
+  }
+  if (c->spire_lobby_gate.on_timeout()) {
+    promise->set_value();
+  }
+}
+
+// v33: waits until the client has loaded the lobby: a B1 goes out now, the client answers it with a 99 only once the
+// lobby is loaded (see SpireLobbyGate.hh); fallback SPIRE_GUARD_LOBBY_SETTLE_MS. Returns false if the client
+// disconnected or left the lobby meanwhile (the marker stays; the restore follows at the next lobby join or login).
+// Measured 2026-10-24 15:56 (lab) and 18:39 (pc): a B2 in the same second as the 67 hung the lobby join.
+static asio::awaitable<bool> spire_guard_wait_for_lobby_settle(std::shared_ptr<Client> c, uint32_t serial_number) {
+  auto promise = std::make_shared<AsyncPromise<void>>();
+  c->spire_lobby_settle_promise = promise;
+  c->spire_lobby_gate.arm();
+  uint64_t start_usecs = phosg::now();
+  asio::co_spawn(co_await asio::this_coro::executor, spire_guard_lobby_settle_timer(c, promise), asio::detached);
+  try {
+    send_server_time(c);
+    co_await promise->get();
+  } catch (const std::exception& e) {
+    c->log.info_f("Spire guard: lobby restore for serial {:010} not started: {} while waiting for the 99 (marker kept)",
+        serial_number, e.what());
+    co_return false;
+  }
+  if (c->spire_lobby_settle_promise == promise) {
+    c->spire_lobby_settle_promise.reset();
+  }
+  uint64_t waited_ms = (phosg::now() - start_usecs) / 1000;
+  const char* why = (c->spire_lobby_gate.fired == SpireGuardLobbyGate::Event::LOBBY_LOADED)
+      ? "the 99 after the lobby join"
+      : "no 99 within the timeout";
+  auto l = c->lobby.lock();
+  if (!c->channel->connected() || !l || l->is_game()) {
+    c->log.info_f("Spire guard: lobby restore for serial {:010} not started: client {} after {} ms ({}); marker kept",
+        serial_number, !c->channel->connected() ? "disconnected" : "left the lobby", waited_ms, why);
+    co_return false;
+  }
+  c->log.info_f("Spire guard: lobby restore for serial {:010} starts {} ms after the lobby join ({})", serial_number,
+      waited_ms, why);
+  co_return true;
+}
+
 asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
@@ -1530,6 +1583,10 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
     co_return;
   }
   if (!snapshot.restore_pending) {
+    co_return;
+  }
+  // v33: not while the client is still loading the lobby
+  if (!co_await spire_guard_wait_for_lobby_settle(c, serial_number)) {
     co_return;
   }
 

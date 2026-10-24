@@ -118,5 +118,29 @@ void run_static_tests() {
     expect(!spire_guard_same_state(level.first, level.second, snapshot.first, snapshot.second));
   }
 
+  phosg::log_info_f("-- Spire guard: the lobby restore waits for the 99 after the 67 and the B1 (v33)");
+  {
+    using E = SpireGuardLobbyGate::Event;
+    SpireGuardLobbyGate gate;
+    expect(!gate.on_lobby_loaded());  // a 99 before the 67 went out does not count
+    expect(!gate.on_timeout());
+    gate.arm();                       // the 67 and the B1 went out
+    expect_eq(E::NONE, gate.fired);   // the restore does not start with the 67 itself (the v28 order)
+    expect(gate.on_lobby_loaded());   // the 99 starts the restore
+    expect_eq(E::LOBBY_LOADED, gate.fired);
+    expect(!gate.on_lobby_loaded());  // only once
+    expect(!gate.on_timeout());       // the timer that fires later starts nothing
+
+    SpireGuardLobbyGate slow;
+    slow.arm();
+    expect(slow.on_timeout());        // no 99 within the timeout: the restore starts anyway
+    expect_eq(E::TIMEOUT, slow.fired);
+    expect(!slow.on_lobby_loaded());  // a 99 that arrives later starts nothing
+
+    slow.arm();                       // the next lobby join arms it again
+    expect_eq(E::NONE, slow.fired);
+    expect(slow.on_lobby_loaded());
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }

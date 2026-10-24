@@ -1189,4 +1189,9 @@ void Client::cancel_pending_promises() {
     this->enable_save_promise->cancel();
   }
   this->enable_save_promise.reset();
+
+  if (this->spire_lobby_settle_promise && !this->spire_lobby_settle_promise->done()) {
+    this->spire_lobby_settle_promise->cancel();
+  }
+  this->spire_lobby_settle_promise.reset();
 }
