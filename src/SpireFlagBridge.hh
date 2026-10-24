@@ -68,7 +68,7 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Spire guard (v6-v10; GC V3 only).
+// Spire guard (v6-v11; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
 // character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
@@ -97,6 +97,11 @@ bool spire_bridge_handle_register(
 //   becomes AwaitingSave instead, and is cleared at the next login whose 61 already shows the snapshot's level and EXP,
 //   without a push; any other login pushes again. While a restore runs or RestorePending is set, game joins and game
 //   creation are refused with a short message, so a push never lands in a game.
+// - v11: snapshot and markers belong to the serial number plus the character (name, class and section ID from the 61;
+//   GC sends no character slot), in system/spire-bridge/<serial>.<character id>.snapshot.json, so switching
+//   characters on one card never restores one character onto another. The restore is refused (no push, marker kept)
+//   if the login 61 or the full character fetched before the push shows another character than the snapshot. A
+//   v6-v10 <serial>.snapshot.json is moved to the new name at the first use by the same character.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.

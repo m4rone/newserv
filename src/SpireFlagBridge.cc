@@ -391,7 +391,36 @@ struct SpireGuardSnapshot {
   PlayerDispDataV4 disp;
 };
 
-static std::string spire_guard_filename(uint32_t serial_number) {
+// v11: one memory card holds several characters, and GC sends no character slot (only the BB login has one). So a
+// snapshot belongs to a serial number plus a character: its name, class and section ID from the 61, which the battle
+// overlay keeps (the restore already takes visual from the client). Two characters on one card with the same name,
+// class and section ID count as one.
+static bool spire_guard_same_character(const PlayerDispDataV4& a, const PlayerDispDataV4& b) {
+  return !memcmp(&a.visual.name, &b.visual.name, sizeof(a.visual.name)) &&
+      (a.visual.sh.char_class == b.visual.sh.char_class) && (a.visual.sh.section_id == b.visual.sh.section_id);
+}
+
+static std::string spire_guard_character_id(const PlayerDispDataV4& disp) {
+  // FNV-1a over the raw name bytes, class and section ID
+  uint32_t hash = 0x811C9DC5;
+  auto add = [&](const void* data, size_t size) {
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+    for (size_t z = 0; z < size; z++) {
+      hash = (hash ^ bytes[z]) * 0x01000193;
+    }
+  };
+  add(&disp.visual.name, sizeof(disp.visual.name));
+  add(&disp.visual.sh.char_class, 1);
+  add(&disp.visual.sh.section_id, 1);
+  return std::format("{:08X}", hash);
+}
+
+static std::string spire_guard_filename(uint32_t serial_number, const PlayerDispDataV4& disp) {
+  return std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial_number, spire_guard_character_id(disp));
+}
+
+// The v6-v10 file, one per serial; only read to move it to its character's name (see spire_guard_filename_for)
+static std::string spire_guard_legacy_filename(uint32_t serial_number) {
   return std::format("{}/{:010}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial_number);
 }
 
@@ -486,6 +515,63 @@ static std::string spire_guard_describe(const SpireGuardSnapshot& snapshot) {
       snapshot.disp.stats.level + 1, snapshot.disp.stats.meseta.load());
 }
 
+// The snapshot file of the character the client started its current run with (set in spire_guard_begin_run), so the 98
+// and the lobby restore use the run's character even if the server's character data changed in between.
+struct SpireGuardRunFile {
+  std::weak_ptr<Client> client;
+  std::string filename;
+};
+static std::unordered_map<const Client*, SpireGuardRunFile> spire_guard_run_files;
+
+// Returns the snapshot file for this client's character: the file of its current run if there is one, else the file
+// for the character in the server's character data (the 61 at login or a 98 from a non-Spire game). Moves a v6-v10
+// file of the same character to the new name. Returns "" if the server has no character data for the client.
+static std::string spire_guard_filename_for(std::shared_ptr<Client> c, uint32_t serial_number) {
+  auto it = spire_guard_run_files.find(c.get());
+  if (it != spire_guard_run_files.end()) {
+    if (it->second.client.lock() == c) {
+      return it->second.filename;
+    }
+    spire_guard_run_files.erase(it);
+  }
+  // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
+  auto character = c->character_file(false, false);
+  if (!character) {
+    return "";
+  }
+  std::string filename = spire_guard_filename(serial_number, character->disp);
+  std::string legacy_filename = spire_guard_legacy_filename(serial_number);
+  if (!std::filesystem::is_regular_file(filename) && std::filesystem::is_regular_file(legacy_filename)) {
+    auto legacy = spire_guard_load(legacy_filename);
+    if (legacy.has_character && spire_guard_same_character(legacy.disp, character->disp)) {
+      std::filesystem::rename(legacy_filename, filename);
+      c->log.info_f("Spire guard: moved the snapshot of {} for serial {:010} to {}", spire_guard_describe(legacy),
+          serial_number, filename);
+    }
+  }
+  return filename;
+}
+
+// True if any snapshot file of this serial (v6-v10 file included) has a marker set. Used only when the server has no
+// character data for the client, so it cannot tell which character is on the card.
+static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
+  if (!std::filesystem::is_directory(SPIRE_BRIDGE_DIRECTORY)) {
+    return false;
+  }
+  std::string prefix = std::format("{:010}.", serial_number);
+  for (const auto& entry : std::filesystem::directory_iterator(SPIRE_BRIDGE_DIRECTORY)) {
+    std::string name = entry.path().filename().string();
+    if (!name.starts_with(prefix) || !name.ends_with(".snapshot.json")) {
+      continue;
+    }
+    auto snapshot = spire_guard_load(entry.path().string());
+    if (snapshot.run_in_progress || snapshot.restore_pending || snapshot.awaiting_save) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
     if (!l->is_game() || (l->mode != GameMode::BATTLE) || !l->quest) {
@@ -504,7 +590,15 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       return;
     }
 
-    std::string filename = spire_guard_filename(serial_number);
+    // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
+    auto character = c->character_file(false, false);
+    if (!character) {
+      c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); marker not set", serial_number, quest_number);
+      return;
+    }
+    spire_guard_run_files.erase(c.get());
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    spire_guard_run_files[c.get()] = SpireGuardRunFile{c, filename};
     auto snapshot = spire_guard_load(filename);
     if (snapshot.run_in_progress || snapshot.restore_pending) {
       c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
@@ -513,29 +607,23 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       return;
     }
 
-    // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
-    auto character = c->character_file(false, false);
     if (snapshot.awaiting_save) {
       // v10: the lobby restore was verified, so since then the server's character data is the real character: the
       // verifying 61, and after that only 61s and 98s from non-Spire games (a Spire game would have set a marker). A
       // fresh snapshot keeps any progress from normal games played in between. Only if that data shows a lower level
       // than the snapshot (impossible in normal play) is the old snapshot kept.
-      if (!character || (character->disp.stats.level < snapshot.disp.stats.level)) {
+      if (character->disp.stats.level < snapshot.disp.stats.level) {
         snapshot.awaiting_save = false;
         snapshot.run_in_progress = true;
         snapshot.quest_number = quest_number;
         spire_guard_save(filename, serial_number, snapshot);
         c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {}; marker set, kept snapshot {}",
-            serial_number, quest_number, character ? "shows a lower level" : "missing", spire_guard_describe(snapshot));
+            serial_number, quest_number, "shows a lower level", spire_guard_describe(snapshot));
         return;
       }
       snapshot.awaiting_save = false;
       c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; taking a fresh snapshot (was {})",
           serial_number, quest_number, spire_guard_describe(snapshot));
-    }
-    if (!character) {
-      c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); marker not set", serial_number, quest_number);
-      return;
     }
 
     snapshot.run_in_progress = true;
@@ -564,7 +652,10 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
     }
     uint32_t quest_number = (l && l->is_game() && l->quest) ? l->quest->meta.quest_number : 0;
 
-    std::string filename = spire_guard_filename(serial_number);
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    if (filename.empty()) {
+      return;
+    }
     auto snapshot = spire_guard_load(filename);
     if (snapshot.restore_pending) {
       c->log.info_f("Spire guard: 98 in q{} for serial {:010} leaves the pending restore of {} open",
@@ -705,6 +796,13 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
           serial_number);
       co_return false;
     }
+    if (!spire_guard_same_character(info.character->disp, snapshot.disp)) {
+      // v11: never put one character's snapshot on another character's slot
+      c->log.warning_f("Spire guard: the client's character ({}) is not the snapshot's ({}); nothing restored for serial {:010}, marker kept",
+          info.character->disp.visual.name.decode(info.character->inventory.language), spire_guard_describe(snapshot),
+          serial_number);
+      co_return false;
+    }
     auto merged = info.character;
     uint8_t level_before = merged->disp.stats.level;
     auto visual = merged->disp.visual;
@@ -751,8 +849,25 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   std::string filename;
   SpireGuardSnapshot snapshot;
   try {
-    filename = spire_guard_filename(serial_number);
+    filename = spire_guard_filename_for(c, serial_number);
+    if (filename.empty()) {
+      // No 61 yet, so the character on the card is unknown; only a serial without any open marker may save
+      if (spire_guard_serial_has_open_marker(serial_number)) {
+        c->log.warning_f("Spire guard: no login 61 for serial {:010} and a marker is open; no 97", serial_number);
+        co_return false;
+      }
+      co_return true;
+    }
     snapshot = spire_guard_load(filename);
+    if (snapshot.has_character) {
+      auto login_character = c->character_file(false, false);
+      if (!login_character || !spire_guard_same_character(login_character->disp, snapshot.disp)) {
+        // Cannot happen unless two characters share a file name (hash collision); restoring could cross slots
+        c->log.warning_f("Spire guard: login 61 for serial {:010} shows another character than the snapshot {} in {}; no restore, no 97",
+            serial_number, spire_guard_describe(snapshot), filename);
+        co_return false;
+      }
+    }
     if (!snapshot.run_in_progress && !snapshot.restore_pending && !snapshot.awaiting_save) {
       co_return true;
     }
@@ -816,7 +931,10 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
   std::string filename;
   SpireGuardSnapshot snapshot;
   try {
-    filename = spire_guard_filename(serial_number);
+    filename = spire_guard_filename_for(c, serial_number);
+    if (filename.empty()) {
+      co_return;
+    }
     snapshot = spire_guard_load(filename);
   } catch (const std::exception& e) {
     // The login restore stays the safety net; dropping here would not tell more than the next login does
@@ -862,7 +980,8 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c) {
   bool restoring = spire_guard_restoring_clients.count(c.get());
   bool pending = false;
   try {
-    pending = spire_guard_load(spire_guard_filename(serial_number)).restore_pending;
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    pending = filename.empty() ? spire_guard_serial_has_open_marker(serial_number) : spire_guard_load(filename).restore_pending;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
     pending = true;
