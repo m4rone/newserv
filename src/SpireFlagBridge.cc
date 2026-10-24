@@ -9,6 +9,7 @@
 #include <phosg/Strings.hh>
 #include <utility>
 
+#include "AsyncUtils.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "ServerState.hh"
@@ -314,11 +315,15 @@ bool spire_bridge_handle_register(
   return true;
 }
 
-// Spire guard (v6). The snapshot file sits next to the bridge file and is never touched by spire_bridge_save, so the
-// marker and the snapshot cannot be dropped by a flag or register write.
+// Spire guard (v6, v7). The snapshot file sits next to the bridge file and is never touched by spire_bridge_save, so
+// the markers and the snapshot cannot be dropped by a flag or register write.
 
 struct SpireGuardSnapshot {
+  // Set at quest load, cleared by a clean 98 from the run's own game
   bool run_in_progress = false;
+  // Set when a login finds run_in_progress still set (v7); cleared only when a 61 or 98 shows the snapshot's level
+  // and EXP. A 98 never clears it otherwise.
+  bool restore_pending = false;
   uint32_t quest_number = 0;
   uint64_t snapshot_time_usecs = 0;
   bool has_character = false;
@@ -373,6 +378,7 @@ static SpireGuardSnapshot spire_guard_load(const std::string& filename) {
   }
   auto json = phosg::JSON::parse(phosg::load_file(filename));
   ret.run_in_progress = json.get_bool("RunInProgress", false);
+  ret.restore_pending = json.get_bool("RestorePending", false);
   ret.quest_number = json.get_int("QuestNumber", 0);
   ret.snapshot_time_usecs = json.get_int("SnapshotTime", 0);
   if (json.contains("Inventory") && json.contains("Disp")) {
@@ -389,6 +395,7 @@ static void spire_guard_save(const std::string& filename, uint32_t serial_number
   auto json = phosg::JSON::dict({
       {"SerialNumber", serial_number},
       {"RunInProgress", snapshot.run_in_progress},
+      {"RestorePending", snapshot.restore_pending},
       {"QuestNumber", snapshot.quest_number},
       {"SnapshotTime", snapshot.snapshot_time_usecs},
   });
@@ -437,9 +444,10 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
 
     std::string filename = spire_guard_filename(serial_number);
     auto snapshot = spire_guard_load(filename);
-    if (snapshot.run_in_progress) {
-      c->log.info_f("Spire guard: run already in progress for serial {:010} (q{}); kept snapshot {} from q{}",
-          serial_number, quest_number, spire_guard_describe(snapshot), snapshot.quest_number);
+    if (snapshot.run_in_progress || snapshot.restore_pending) {
+      c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
+          snapshot.restore_pending ? "restore pending" : "run already in progress", serial_number, quest_number,
+          spire_guard_describe(snapshot), snapshot.quest_number);
       return;
     }
 
@@ -483,6 +491,12 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 
     std::string filename = spire_guard_filename(serial_number);
     auto snapshot = spire_guard_load(filename);
+    if (snapshot.restore_pending) {
+      // v7: an open restore is only ever closed by a verified 61 or 98 (spire_guard_check_restore)
+      c->log.info_f("Spire guard: 98 in q{} for serial {:010} leaves the pending restore of {} open",
+          quest_number, serial_number, spire_guard_describe(snapshot));
+      return;
+    }
     if (!snapshot.run_in_progress) {
       return;
     }
@@ -496,10 +510,77 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
   }
 }
 
-asio::awaitable<void> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
+// How long the guard waits for each client answer during a restore (30, the B3 of SetExtendedPlayerInfo, and the
+// verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
+// room for a slow Wii without letting a stuck login sit forever.
+static constexpr auto SPIRE_GUARD_ANSWER_TIMEOUT = std::chrono::seconds(15);
+
+// Drops the client if *done is still false when the timeout expires. Dropping cancels the pending promises
+// (Client::cancel_pending_promises), so the waiting restore throws and the caller never sends 97.
+static asio::awaitable<void> spire_guard_watchdog(
+    std::weak_ptr<Client> weak_c, std::shared_ptr<bool> done, uint32_t serial_number, std::string what) {
+  co_await async_sleep(SPIRE_GUARD_ANSWER_TIMEOUT);
+  if (*done) {
+    co_return;
+  }
+  auto c = weak_c.lock();
+  if (!c) {
+    co_return;
+  }
+  c->log.warning_f("Spire guard: no {} within {} s for serial {:010}; no 97, dropping the login (marker kept)",
+      what, SPIRE_GUARD_ANSWER_TIMEOUT.count(), serial_number);
+  c->channel->disconnect();
+  c->cancel_pending_promises();
+}
+
+// Arms the watchdog for one client answer; the answer counts as arrived when this goes out of scope, also when the
+// wait throws.
+struct SpireGuardWatchdog {
+  std::shared_ptr<bool> done = std::make_shared<bool>(false);
+  SpireGuardWatchdog(asio::any_io_executor executor, std::shared_ptr<Client> c, uint32_t serial_number, const char* what) {
+    asio::co_spawn(executor, spire_guard_watchdog(c, this->done, serial_number, what), asio::detached);
+  }
+  SpireGuardWatchdog(const SpireGuardWatchdog&) = delete;
+  SpireGuardWatchdog& operator=(const SpireGuardWatchdog&) = delete;
+  ~SpireGuardWatchdog() {
+    *this->done = true;
+  }
+};
+
+void spire_guard_check_restore(std::shared_ptr<Client> c, std::shared_ptr<const PSOBBCharacterFile> character, uint16_t command) {
+  try {
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    if (!serial_number || !character) {
+      return;
+    }
+    std::string filename = spire_guard_filename(serial_number);
+    auto snapshot = spire_guard_load(filename);
+    if (!snapshot.restore_pending || !snapshot.has_character) {
+      return;
+    }
+    uint32_t level = character->disp.stats.level;
+    uint32_t exp = character->disp.stats.exp;
+    uint32_t snapshot_level = snapshot.disp.stats.level;
+    uint32_t snapshot_exp = snapshot.disp.stats.exp;
+    if ((level != snapshot_level) || (exp != snapshot_exp)) {
+      c->log.info_f("Spire guard: restore not verified for serial {:010}: {:02X} shows Lv{} EXP {}, snapshot Lv{} EXP {}; marker kept",
+          serial_number, command, level + 1, exp, snapshot_level + 1, snapshot_exp);
+      return;
+    }
+    snapshot.restore_pending = false;
+    spire_guard_save(filename, serial_number, snapshot);
+    c->log.info_f("Spire guard: restore verified for serial {:010}: {:02X} shows Lv{} EXP {}; marker cleared",
+        serial_number, command, level + 1, exp);
+
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to check restore: {}", e.what());
+  }
+}
+
+asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
-    co_return;
+    co_return true;
   }
 
   std::string filename;
@@ -507,37 +588,50 @@ asio::awaitable<void> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   try {
     filename = spire_guard_filename(serial_number);
     snapshot = spire_guard_load(filename);
+    if (!snapshot.run_in_progress && !snapshot.restore_pending) {
+      co_return true;
+    }
+    if (snapshot.run_in_progress) {
+      // The run ended without a 98. From here on only a verified restore closes it (v7).
+      snapshot.run_in_progress = false;
+      snapshot.restore_pending = true;
+      spire_guard_save(filename, serial_number, snapshot);
+    }
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010}: {}", serial_number, e.what());
-    co_return;
-  }
-  if (!snapshot.run_in_progress) {
-    co_return;
+    // An unreadable snapshot file cannot tell whether a restore is open, so the login is not allowed to save
+    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010}: {}; no 97", serial_number, e.what());
+    co_return false;
   }
 
-  c->log.info_f("Spire guard: aborted run found for serial {:010} (q{}); holding 97 back to restore {}",
+  c->log.info_f("Spire guard: restore pending for serial {:010} (q{}); holding 97 back to restore {}",
       serial_number, snapshot.quest_number, spire_guard_describe(snapshot));
   if (!snapshot.has_character) {
-    c->log.warning_f("Spire guard: snapshot for serial {:010} has no character; nothing restored, marker kept",
+    c->log.warning_f("Spire guard: snapshot for serial {:010} has no character; nothing restored, no 97, marker kept",
         serial_number);
-    co_return;
+    co_return false;
   }
   if (!c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
       !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE)) {
-    c->log.warning_f("Spire guard: client cannot run functions (B2); nothing restored for serial {:010}, marker kept",
+    c->log.warning_f("Spire guard: client cannot run functions (B2); nothing restored for serial {:010}, no 97, marker kept",
         serial_number);
-    co_return;
+    co_return false;
   }
 
   try {
+    auto executor = co_await asio::this_coro::executor;
+
     // The 61 data the server has lacks the bank, quest flags and the rest of the save file, so the snapshot never
     // replaces the whole character: the client's current full character is fetched first and only the parts that the
     // overlay changes (inventory and disp) are put back.
-    auto info = co_await send_get_player_info(c, true);
+    GetPlayerInfoResult info;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30)");
+      info = co_await send_get_player_info(c, true);
+    }
     if (!info.is_full_info || !info.character) {
-      c->log.warning_f("Spire guard: client sent no full character (no 30); nothing restored for serial {:010}, marker kept",
+      c->log.warning_f("Spire guard: client sent no full character (no 30); nothing restored for serial {:010}, no 97, marker kept",
           serial_number);
-      co_return;
+      co_return false;
     }
     auto merged = info.character;
     uint8_t level_before = merged->disp.stats.level;
@@ -551,22 +645,30 @@ asio::awaitable<void> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
     PSOGCCharacterFile::Character gc_char = *merged;
-    co_await send_function_call(c, fn, {}, &gc_char, sizeof(gc_char));
-
-    // Keep the server's view of the character in line with what the client now has
-    auto character = c->character_file(false, false);
-    if (character) {
-      character->inventory = snapshot.inventory;
-      character->disp = snapshot.disp;
-      character->disp.visual = visual;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to SetExtendedPlayerInfo (B3)");
+      co_await send_function_call(c, fn, {}, &gc_char, sizeof(gc_char));
     }
-
-    snapshot.run_in_progress = false;
-    spire_guard_save(filename, serial_number, snapshot);
-    c->log.info_f("Spire guard: restored {} for serial {:010} (was Lv{}); marker cleared, 97 follows",
+    c->log.info_f("Spire guard: sent {} for serial {:010} (was Lv{}); asking for a 61 to verify",
         spire_guard_describe(snapshot), serial_number, level_before + 1);
 
+    // The 61 goes through on_61_98, which calls spire_guard_check_restore and updates the server's character data
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61");
+      co_await send_get_player_info(c, false);
+    }
+
+    auto after = spire_guard_load(filename);
+    if (after.restore_pending) {
+      c->log.warning_f("Spire guard: restore for serial {:010} not verified by the 61; no 97, dropping the login (marker kept)",
+          serial_number);
+      co_return false;
+    }
+    c->log.info_f("Spire guard: restored {} for serial {:010}; 97 follows", spire_guard_describe(snapshot), serial_number);
+    co_return true;
+
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire guard: failed to restore character for serial {:010}: {}; marker kept", serial_number, e.what());
+    c->log.warning_f("Spire guard: failed to restore character for serial {:010}: {}; no 97, marker kept", serial_number, e.what());
+    co_return false;
   }
 }

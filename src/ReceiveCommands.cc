@@ -413,9 +413,13 @@ static asio::awaitable<void> enable_save_if_needed(std::shared_ptr<Client> c) {
     c->clear_flag(Client::Flag::SHOULD_SEND_ENABLE_SAVE);
     // DC NTE and 11/2000 crash if they receive 97, so we do nothing on those versions
     if (!is_pre_v1(c->version())) {
-      // Spire guard (v6): if a Spire run ended without a 98, put the real character back before the client saves; this
-      // is a no-op for other clients (see SpireFlagBridge.hh). 97 is always sent with flag 1, never 0.
-      co_await spire_guard_restore_if_needed(c);
+      // Spire guard (v6, v7): if a Spire run ended without a 98, put the real character back before the client saves;
+      // this is a no-op for other clients (see SpireFlagBridge.hh). Without a verified restore there is no 97 at all:
+      // a dropped login is better than a saved Lv1. 97 is always sent with flag 1, never 0.
+      if (!co_await spire_guard_restore_if_needed(c)) {
+        c->channel->disconnect();
+        throw std::runtime_error("Spire guard: restore not verified; login dropped without 97");
+      }
       send_command(c, 0x97, 0x01);
       auto promise = std::make_shared<AsyncPromise<void>>();
       c->enable_save_promise = promise;
@@ -3559,6 +3563,8 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
   }
   player->inventory.decode_from_client(c->version());
   c->channel->language = player->inventory.language;
+  // Spire guard (v7): a 61 or 98 that shows the snapshot's level and EXP closes a pending restore
+  spire_guard_check_restore(c, player, msg.command);
   c->login->account->save();
 
   c->update_channel_name();
