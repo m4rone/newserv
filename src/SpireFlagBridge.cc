@@ -552,7 +552,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
 
   // 'F': the run's score ('K' before it) and time against the records
-  bool is_won = (value >> 23) & 1;
+  bool is_won = spire_meta_decode_finish(value).won;
   uint32_t seconds = value & 0xFFFF;
   auto it = spire_records_pending_score.find(c.get());
   uint32_t score = (it == spire_records_pending_score.end()) ? 0 : it->second;
@@ -571,16 +571,13 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     rec.best_time = seconds;
   }
   spire_records_save(filename, serial_number, rec);
-  if (new_time) {
-    // the payout flag the quest set itself before v18; v22: stored for the character (SpireMeta), on the game's
-    // difficulty (before v22 always Normal)
-    spire_meta_set_flag(c, l, serial_number, SPIRE_BRIDGE_RECORD_FLAG);
-  }
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
                                : std::format("Best score: {}.", rec.best_score);
   if (new_time) {
     text += std::format("\nNew best time: {} s!", seconds);
   }
+  // v24: unlocks and payout flags for the character (SpireMeta), on the game's difficulty
+  text += spire_meta_on_finish(c, l, serial_number, value, new_time);
   text += "\nRecords saved.";
   send_text_message(c, text);
   c->log.info_f("Spire records: run finished (score {}, {} s, {}) for serial {:010} in q{}; {}: best {} / {} s, {} run(s), {} won",

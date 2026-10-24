@@ -71,13 +71,12 @@ constexpr uint8_t SPIRE_BRIDGE_MSG_RUN_OVER = 'X';
 // v18: records per character, kept by the server (system/spire-bridge/<serial>.<character>.records.json) instead of
 // quest counters 12-14 on the card. Codes in register 248, from each client for its own character:
 //   'B' run started (runs + 1) · 'K' final score (low 24 bits; held until 'F') · 'F' run finished (bit 23 won, low 16
-//   bits the seconds): best score = max, and on a win won + 1 and best time = min (a new best time also sets payout flag
-//   SPIRE_BRIDGE_RECORD_FLAG) · 'Y' Records board. 'F' and 'Y' are answered with the record text (B0) to that client.
+//   bits the seconds): best score = max, and on a win won + 1 and best time = min; v24: bits 16-17 exams
+//   passed, bit 18 deathless team, and SpireMeta sets the unlock and payout flags · 'Y' Records board. 'F' and 'Y' are answered with the record text (B0) to that client.
 constexpr uint8_t SPIRE_BRIDGE_REC_BEGIN = 'B';
 constexpr uint8_t SPIRE_BRIDGE_REC_SCORE = 'K';
 constexpr uint8_t SPIRE_BRIDGE_REC_FINISH = 'F';
 constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
-constexpr uint16_t SPIRE_BRIDGE_RECORD_FLAG = 0x03A2; // E06 payout: a new best time (score.py FLAG_PAY_RECORD)
 
 // v19: the run timer on the server, instead of the quest's t_timer clock. The leader writes, at its run start,
 //   'S' << 24 | warning minutes before the end << 16 | time limit in seconds (r95, after Haste)
