@@ -97,7 +97,7 @@ constexpr auto SPIRE_BRIDGE_TIMER_TICK = std::chrono::seconds(1);
 // set-flags path), the server sends SPIRE_BRIDGE_ROOM_CLEAR_TEXT and sets register SPIRE_BRIDGE_ROOM_CLEARED_REGISTER to
 // SPIRE_BRIDGE_ROOM_CLEARED_TAG | floor << 8 | room (6x77) on every client in the game, once per room and game. The quest
 // waits for that register instead of polling its own kill counters.
-constexpr uint8_t SPIRE_BRIDGE_ROOM_CLEARED_REGISTER = 249;
+constexpr uint8_t SPIRE_BRIDGE_ROOM_CLEARED_REGISTER = 251;
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEARED_TAG = 0x434C0000; // 'CL'
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
