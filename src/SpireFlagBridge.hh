@@ -265,6 +265,17 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
 // snapshot means the connection is dropped (fail closed).
 void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
+// v30: a Battle game without a quest. A GC client that joins a Battle game without one is watched: if the game still
+// has no quest SPIRE_GUARD_NO_QUEST_SECONDS later (and nobody is picking one at the counter), the server tells it and
+// sends it back to the lobby (ExitAnywhere, as $exit does). Its join snapshot (v21) becomes a pending restore at the 98
+// and the lobby restore puts the real character back, so no item is lost. A client that cannot run functions only gets
+// the text and keeps the guard. spire_guard_no_quest_action is the decision, kept free of state for the static tests.
+constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
+constexpr uint32_t SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS = 30;
+enum class SpireNoQuestAction { NONE, WAIT, EXIT, TELL };
+SpireNoQuestAction spire_guard_no_quest_action(
+    bool client_in_game, bool battle_game, bool has_quest, bool quest_selection_in_progress, bool can_run_functions);
+
 // Called from the 98 handler before the client is removed from the game. Turns RunInProgress into RestorePending.
 // Never throws.
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);

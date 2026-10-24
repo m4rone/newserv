@@ -972,6 +972,7 @@ static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
 }
 
 static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_number);
+static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l);
 
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
@@ -1005,6 +1006,10 @@ void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lo
   }
   try {
     if (spire_guard_take_snapshot(c, 0)) {
+      if (!l->quest) {
+        auto ml = std::const_pointer_cast<Lobby>(l);
+        asio::co_spawn(*c->require_server_state()->io_context, spire_guard_watch_no_quest(c, ml), asio::detached);
+      }
       return;
     }
   } catch (const std::exception& e) {
@@ -1013,6 +1018,54 @@ void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lo
   // fail closed, like begin_run: no Battle game without a stored snapshot
   c->log.warning_f("Spire guard: no snapshot at the Battle game join; dropping the connection");
   c->channel->disconnect();
+}
+
+SpireNoQuestAction spire_guard_no_quest_action(
+    bool client_in_game, bool battle_game, bool has_quest, bool quest_selection_in_progress, bool can_run_functions) {
+  if (!client_in_game || !battle_game || has_quest) {
+    return SpireNoQuestAction::NONE;
+  }
+  if (quest_selection_in_progress) {
+    return SpireNoQuestAction::WAIT;
+  }
+  return can_run_functions ? SpireNoQuestAction::EXIT : SpireNoQuestAction::TELL;
+}
+
+static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l) {
+  co_await async_sleep(std::chrono::seconds(SPIRE_GUARD_NO_QUEST_SECONDS));
+  for (;;) {
+    auto c = weak_c.lock();
+    auto l = weak_l.lock();
+    if (!c || !l) {
+      co_return;
+    }
+    auto action = spire_guard_no_quest_action(
+        c->lobby.lock() == l, l->is_game() && (l->mode == GameMode::BATTLE), !!l->quest,
+        l->check_flag(Lobby::Flag::QUEST_SELECTION_IN_PROGRESS),
+        c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE));
+    if (action == SpireNoQuestAction::NONE) {
+      co_return;
+    }
+    if (action == SpireNoQuestAction::WAIT) {
+      co_await async_sleep(std::chrono::seconds(SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS));
+      continue;
+    }
+    c->log.warning_f("Spire guard: Battle game without a quest for {} s; {}", SPIRE_GUARD_NO_QUEST_SECONDS,
+        (action == SpireNoQuestAction::EXIT) ? "sending the client back to the lobby" : "client cannot run functions, told to leave");
+    send_text_message(c, "$C6Spire: no quest was\nloaded. Back to the\nlobby; your character\nis restored there.");
+    if (action == SpireNoQuestAction::EXIT) {
+      try {
+        auto s = c->require_server_state();
+        auto fn = s->data->client_functions->get("ExitAnywhere", c->specific_version);
+        co_await prepare_client_for_patches(c);
+        co_await send_function_call(c, fn);
+      } catch (const std::exception& e) {
+        // The guard stays: the join snapshot is a pending restore as soon as the client leaves the game
+        c->log.warning_f("Spire guard: failed to send the client back from the Battle game: {}", e.what());
+      }
+    }
+    co_return;
+  }
 }
 
 static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_number) {
