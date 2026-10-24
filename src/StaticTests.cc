@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <format>
 
+#include "DataIndex.hh"
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
 #include "SpireDraw.hh"
@@ -156,6 +157,29 @@ void run_static_tests() {
     expect(!spire_follow_should_warp(SPIRE_FOLLOW_CITY_FLOOR, 2));        // the city takes the Ragol warp itself
     expect(!spire_follow_should_warp(1, SPIRE_FOLLOW_CITY_FLOOR));        // never to the city
     expect(!spire_follow_should_warp(2, 2));                              // already there
+  }
+
+  phosg::log_info_f("-- Spire protected characters: any quest, also one not listed (audit S-3)");
+  {
+    DataIndex d;
+    d.spire_blocked_quest_numbers.emplace(929);
+    d.spire_blocked_characters.emplace_back(123, "Wakiru");
+    d.spire_blocked_characters.emplace_back(456, "");
+    expect(d.is_spire_protected_character(123, "\tEwakiru"));     // language marker and case ignored
+    expect(!d.is_spire_protected_character(123, "Other"));
+    expect(d.is_spire_protected_character(456, "Anyone"));       // empty name: every character on the card
+    expect(!d.is_spire_protected_character(789, "Wakiru"));
+    expect(d.is_spire_blocked(123, "Wakiru", 929));
+    expect(!d.is_spire_blocked(123, "Wakiru", 930));             // not a listed quest
+    expect(!d.is_spire_blocked(123, "Other", 929));
+  }
+
+  phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");
+  {
+    auto a = spire_bridge_registers_filename(42, "AAAA");
+    auto b = spire_bridge_registers_filename(42, "BBBB");
+    expect(a != b);
+    expect(a.ends_with("/0000000042.AAAA.registers.json"));
   }
 
   phosg::log_info_f("-- Spire room clear: post-wave actions that hold the room (v19)");

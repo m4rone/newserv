@@ -201,6 +201,8 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c);
 std::string spire_room_actions_hold(const void* action_stream, size_t action_stream_size, uint16_t room,
     const std::function<bool(uint16_t wave)>& wave_undefeated,
     const std::function<bool(uint32_t event_id)>& event_unfinished);
+// Audit S-6: the meta register file of one character (character id as in spire_guard_character_id)
+std::string spire_bridge_registers_filename(uint32_t serial_number, const std::string& character_id);
 bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading = false);
 void spire_checkpoint_lives_note(const Client* key, uint32_t lives);
 bool spire_checkpoint_lives_forget(const Client* key);

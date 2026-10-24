@@ -100,9 +100,12 @@ static std::string spire_bridge_filename(std::shared_ptr<Client> c, uint32_t ser
   if (!character) {
     return "";
   }
+  return spire_bridge_registers_filename(serial_number, spire_guard_character_id(character->disp));
+}
+
+std::string spire_bridge_registers_filename(uint32_t serial_number, const std::string& character_id) {
   // Same decimal format newserv uses when printing GC license serial numbers (see Account::str)
-  return std::format("{}/{:010}.{}.registers.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
-      spire_guard_character_id(character->disp));
+  return std::format("{}/{:010}.{}.registers.json", SPIRE_BRIDGE_DIRECTORY, serial_number, character_id);
 }
 
 static SpireBridgeState spire_bridge_load(const std::string& filename) {
@@ -491,7 +494,12 @@ uint32_t spire_checkpoint_lives_for(const Client* key) {
   return (it == spire_checkpoint_lives.end()) ? 0 : it->second;
 }
 
+// Audit S-12: partners skipped by spire_follow_leader_warp because they were still loading. Keyed by the Client's
+// address and never dereferenced; an entry is removed at that client's next loaded floor or quest start.
+static std::unordered_set<const Client*> spire_follow_pending;
+
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
+  spire_follow_pending.erase(c.get());
   if (spire_checkpoint_lives_forget(c.get())) {
     c->log.info_f("Spire checkpoint: lives of the previous run forgotten at the quest start");
   }
@@ -2100,13 +2108,16 @@ static asio::awaitable<void> spire_follow_leader_warp(
     if (!lc || (lc == leader) || (lc->floor == floor)) {
       continue;
     }
-    bool loading = lc->check_flag(Client::Flag::LOADING) || (lc->floor == SPIRE_FOLLOW_UNLOADED_FLOOR);
-    if (loading) {
-      l->log.info_f("Spire follow: client {} is still loading; not warped to the leader's floor {:02X} (its own floor load follows the leader again)",
+    bool loading = lc->check_flag(Client::Flag::LOADING);
+    if (!spire_follow_should_warp(lc->floor, floor, loading) &&
+        (loading || (lc->floor == SPIRE_FOLLOW_UNLOADED_FLOOR))) {
+      // Remembered, so the partner's own floor load (spire_follow_leader) warps it to the leader's floor afterwards
+      spire_follow_pending.insert(lc.get());
+      l->log.info_f("Spire follow: client {} is still loading; not warped to the leader's floor {:02X} (follows after its own floor load)",
           lc->lobby_client_id, floor);
       continue;
     }
-    if (!spire_follow_should_warp(lc->floor, floor, false)) {
+    if (!spire_follow_should_warp(lc->floor, floor, loading)) {
       // v29 (regie 2026-10-24): a partner still on Pioneer 2 takes the Ragol warp itself, as in a Sega quest; the
       // server only follows room transitions during the run
       l->log.info_f("Spire follow: client {} is in the city; not warped to the leader's floor {:02X} (takes the Ragol warp itself)",
@@ -2121,6 +2132,20 @@ static asio::awaitable<void> spire_follow_leader_warp(
 
 static void spire_follow_leader(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   const auto& follow = c->require_server_state()->data->spire_follow_leader;
+  if (follow && (c->lobby_client_id != follow->first) && spire_follow_pending.count(c.get())) {
+    // A partner skipped mid-load reports a floor: once it is loaded, follow the leader to its current floor, with the
+    // same checks. While it is still loading it stays pending.
+    if (c->check_flag(Client::Flag::LOADING) || (c->floor == SPIRE_FOLLOW_UNLOADED_FLOOR)) {
+      return;
+    }
+    spire_follow_pending.erase(c.get());
+    auto leader = (follow->first < l->clients.size()) ? l->clients[follow->first] : nullptr;
+    if (leader && spire_follow_should_warp(c->floor, leader->floor)) {
+      auto s = c->require_server_state();
+      asio::co_spawn(*s->io_context, spire_follow_leader_warp(leader, l, leader->floor, follow->second), asio::detached);
+    }
+    return;
+  }
   if (!follow || (c->lobby_client_id != follow->first) || (c->floor == 0)) {
     return;
   }
