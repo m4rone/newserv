@@ -275,6 +275,13 @@ constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
 // The login confirmation of a lobby restore requires this next to the snapshot's level and EXP.
 bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta);
+// v32: level, EXP, meseta and items equal. The two decisions below are kept free of state for the static tests: a run
+// start under AwaitingSave keeps the stored snapshot unless the character data equals it; the 61 after a restore push
+// verifies the restore only with the snapshot's items and meseta next to its level and EXP.
+bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
+    const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp);
+bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool lower_level, bool same_state);
+bool spire_guard_push_verified(bool same_stats, bool same_items);
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS = 30;
 enum class SpireNoQuestAction { NONE, WAIT, EXIT, TELL };
 SpireNoQuestAction spire_guard_no_quest_action(

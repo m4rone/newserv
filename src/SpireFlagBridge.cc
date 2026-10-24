@@ -995,6 +995,27 @@ bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, con
   std::sort(kb.begin(), kb.end());
   return ka == kb;
 }
+
+// v32: level, EXP, meseta and items equal (spire_guard_same_inventory)
+bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
+    const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp) {
+  return (disp.stats.level == snapshot_disp.stats.level) && (disp.stats.exp == snapshot_disp.stats.exp) &&
+      spire_guard_same_inventory(inventory, disp.stats.meseta, snapshot_inventory, snapshot_disp.stats.meseta);
+}
+
+// v32: at a run start under AwaitingSave the stored snapshot is kept when the character data shows a lower level
+// (v10) or differs from the snapshot in items, meseta, level or EXP; a fresh snapshot replaces it only when the data
+// equals it (then the fresh one is the same snapshot). A snapshot under an open marker is never overwritten with
+// other data (lab 2026-10-24 18:14: a fresh snapshot with the run's 7 items replaced the one with the real 20).
+bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool lower_level, bool same_state) {
+  return awaiting_save && (lower_level || !same_state);
+}
+
+// v32: the 61 after a push verifies the restore only if it shows the snapshot's level and EXP and its items and
+// meseta; a 61 with the same level and EXP but other items leaves the marker.
+bool spire_guard_push_verified(bool same_stats, bool same_items) {
+  return same_stats && same_items;
+}
 static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l);
 
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
@@ -1117,20 +1138,25 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
 
     if (snapshot.awaiting_save) {
       // v10: the lobby restore was verified, so since then the server's character data is the real character: the
-      // verifying 61, and after that only 61s and 98s from non-Spire games (a Spire game would have set a marker). A
-      // fresh snapshot keeps any progress from normal games played in between. Only if that data shows a lower level
-      // than the snapshot (impossible in normal play) is the old snapshot kept.
-      if (character->disp.stats.level < snapshot.disp.stats.level) {
+      // verifying 61, and after that only 61s and 98s from non-Spire games (a Spire game would have set a marker).
+      // v32: the stored snapshot is kept unless that data equals it in level, EXP, meseta and items; a fresh snapshot
+      // then changes nothing but the time. Progress from a normal game played in between is not taken over: the
+      // marker is open, and a snapshot under an open marker is never replaced by other data (lab 18:14).
+      bool lower_level = character->disp.stats.level < snapshot.disp.stats.level;
+      bool same_state = spire_guard_same_state(character->inventory, character->disp, snapshot.inventory, snapshot.disp);
+      if (spire_guard_run_start_keeps_snapshot(true, lower_level, same_state)) {
         snapshot.awaiting_save = false;
         snapshot.run_in_progress = true;
         snapshot.quest_number = quest_number;
         spire_guard_save(filename, serial_number, snapshot);
-        c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {}; marker set, kept snapshot {}",
-            serial_number, quest_number, "shows a lower level", spire_guard_describe(snapshot));
+        c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {} ({} items meseta {}, snapshot {} items meseta {}); marker set, kept snapshot {}",
+            serial_number, quest_number, lower_level ? "shows a lower level" : "differs from the snapshot",
+            character->inventory.num_items, character->disp.stats.meseta.load(), snapshot.inventory.num_items,
+            snapshot.disp.stats.meseta.load(), spire_guard_describe(snapshot));
         return true;
       }
       snapshot.awaiting_save = false;
-      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; taking a fresh snapshot (was {})",
+      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data equals the snapshot, taking a fresh snapshot (was {})",
           serial_number, quest_number, spire_guard_describe(snapshot));
     }
 
@@ -1236,8 +1262,8 @@ struct SpireGuardWatchdog {
   }
 };
 
-// Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot. The inventory
-// count is only logged. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
+// Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot, and (v32) the
+// items and meseta too. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
 // but becomes AwaitingSave: the card may still hold the overlay until the client saves.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
     SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool in_lobby) {
@@ -1251,11 +1277,16 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
   uint32_t snapshot_exp = snapshot.disp.stats.exp;
   size_t num_items = character->inventory.num_items;
   size_t snapshot_num_items = snapshot.inventory.num_items;
-  std::string items_str = std::format("inventory {} items, snapshot {} ({})",
+  std::string items_str = std::format("inventory {} items, snapshot {} ({} count)",
       num_items, snapshot_num_items, (num_items == snapshot_num_items) ? "equal" : "different");
-  if ((level != snapshot_level) || (exp != snapshot_exp)) {
-    c->log.warning_f("Spire guard: restore not verified for serial {:010}: 61 shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}; marker kept",
-        serial_number, level + 1, exp, snapshot_level + 1, snapshot_exp, items_str);
+  // v32: the items and meseta must equal the snapshot's too
+  bool same_stats = (level == snapshot_level) && (exp == snapshot_exp);
+  bool same_items = spire_guard_same_inventory(
+      character->inventory, character->disp.stats.meseta, snapshot.inventory, snapshot.disp.stats.meseta);
+  if (!spire_guard_push_verified(same_stats, same_items)) {
+    c->log.warning_f("Spire guard: restore not verified for serial {:010}: 61 shows Lv{} EXP {} meseta {}, snapshot Lv{} EXP {} meseta {}; {}; {}; marker kept",
+        serial_number, level + 1, exp, character->disp.stats.meseta.load(), snapshot_level + 1, snapshot_exp,
+        snapshot.disp.stats.meseta.load(), items_str, same_stats ? "the items or meseta differ" : "level or EXP differ");
     return false;
   }
   snapshot.restore_pending = false;

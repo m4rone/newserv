@@ -72,5 +72,51 @@ void run_static_tests() {
     expect(spire_guard_same_inventory(make(0, 0), 5, make(0, 0), 5));
   }
 
+  phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32)");
+  {
+    // arguments: awaiting_save, lower_level, same_state
+    expect(!spire_guard_run_start_keeps_snapshot(false, false, false)); // no open marker: fresh snapshot
+    expect(spire_guard_run_start_keeps_snapshot(true, true, false));    // lower level: keep (v10)
+    expect(!spire_guard_run_start_keeps_snapshot(true, false, true));   // same data: the fresh snapshot is the same
+    expect(spire_guard_run_start_keeps_snapshot(true, false, false));   // lab 18:14: same level, the run's 7 items: keep
+  }
+
+  phosg::log_info_f("-- Spire guard: the 61 after a push verifies only with the snapshot's items (v32)");
+  {
+    // arguments: same_stats (level and EXP), same_items (items and meseta)
+    expect(spire_guard_push_verified(true, true));
+    expect(!spire_guard_push_verified(false, true));
+    expect(!spire_guard_push_verified(false, false));
+    expect(!spire_guard_push_verified(true, false)); // same level and EXP, other items: not verified
+  }
+
+  phosg::log_info_f("-- Spire guard: same state means level, EXP, meseta and items (v32)");
+  {
+    auto make = [](size_t n, uint32_t level, uint32_t exp, uint32_t meseta) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      return ret;
+    };
+    auto snapshot = make(20, 51, 370758, 0);
+    auto same = make(20, 51, 370758, 0);
+    std::swap(same.first.items[0], same.first.items[19]);
+    expect(spire_guard_same_state(same.first, same.second, snapshot.first, snapshot.second));
+    auto run = make(7, 51, 370758, 0); // lab 18:11 BidX
+    expect(!spire_guard_same_state(run.first, run.second, snapshot.first, snapshot.second));
+    auto meseta = make(20, 51, 370758, 300);
+    expect(!spire_guard_same_state(meseta.first, meseta.second, snapshot.first, snapshot.second));
+    auto exp = make(20, 51, 370759, 0);
+    expect(!spire_guard_same_state(exp.first, exp.second, snapshot.first, snapshot.second));
+    auto level = make(20, 52, 370758, 0);
+    expect(!spire_guard_same_state(level.first, level.second, snapshot.first, snapshot.second));
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }
