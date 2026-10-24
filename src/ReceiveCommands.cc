@@ -413,6 +413,9 @@ static asio::awaitable<void> enable_save_if_needed(std::shared_ptr<Client> c) {
     c->clear_flag(Client::Flag::SHOULD_SEND_ENABLE_SAVE);
     // DC NTE and 11/2000 crash if they receive 97, so we do nothing on those versions
     if (!is_pre_v1(c->version())) {
+      // Spire guard (v6): if a Spire run ended without a 98, put the real character back before the client saves; this
+      // is a no-op for other clients (see SpireFlagBridge.hh). 97 is always sent with flag 1, never 0.
+      co_await spire_guard_restore_if_needed(c);
       send_command(c, 0x97, 0x01);
       auto promise = std::make_shared<AsyncPromise<void>>();
       c->enable_save_promise = promise;
@@ -2428,6 +2431,8 @@ static void on_quest_loaded(std::shared_ptr<Lobby> l) {
       if (is_v4(lc->version())) {
         lc->change_bank(lc->bb_character_index);
       }
+      // Spire guard (v6): store the real character before the overlay replaces it (see SpireFlagBridge.hh)
+      spire_guard_begin_run(lc, l);
       lc->create_battle_overlay(l->quest->meta.battle_rules, s->data->level_table(lc->version()));
       lc->log.info_f("Created battle overlay");
     }
@@ -3363,6 +3368,8 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
   // 98 should only be sent when leaving a game, and we should leave the client in no lobby (they will send an 84 soon
   // afterward to choose a lobby).
   if (msg.command == 0x98) {
+    // Spire guard (v6): a 98 from the run's own game is a clean end (see SpireFlagBridge.hh)
+    spire_guard_end_run(c, c->lobby.lock());
     // Clear all temporary state from the game
     c->delete_overlay();
     c->telepipe_lobby_id = 0;

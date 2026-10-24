@@ -60,3 +60,32 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 // means never), and the register is 232-239, 243-247 or 248. Never throws.
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
+
+// Spire guard (v6, GC V3 only).
+//
+// Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
+// character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
+// of the real character next to the bridge file, in system/spire-bridge/<serial>.snapshot.json:
+// - When a quest listed in SpireBridgeQuests is loaded in a Battle game with replace_char, RunInProgress is set and the
+//   real character (inventory and disp from the server's character data, which comes from the 61/98 the client sent
+//   before the game; never the overlay) is stored. If RunInProgress is already set, the stored snapshot is kept, so a
+//   second quest load can never replace the real character with the overlay.
+// - A 98 (leave game) sent from a game running a quest listed in SpireBridgeQuests clears RunInProgress. The snapshot
+//   stays until the next run replaces it.
+// - When save is enabled for a client whose RunInProgress is still set (the run ended without a 98), the 97 is held
+//   back: the client's full character is requested (GetExtendedPlayerInfo), its inventory and disp are replaced by the
+//   snapshot, the result is sent with SetExtendedPlayerInfo, and only then does the caller send 97 with flag 1, so the
+//   client saves the real character. RunInProgress is cleared after a successful restore; if the client cannot run
+//   functions or anything fails, nothing is sent, RunInProgress stays set and the normal 97 follows. 97 is never sent
+//   with flag 0 (that deletes the character's items and challenge records).
+
+// Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
+// GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
+// Never throws.
+void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// Called from the 98 handler before the client is removed from the game. Never throws.
+void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// Called from enable_save_if_needed right before 97 is sent. Never throws.
+asio::awaitable<void> spire_guard_restore_if_needed(std::shared_ptr<Client> c);

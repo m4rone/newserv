@@ -313,3 +313,260 @@ bool spire_bridge_handle_register(
   }
   return true;
 }
+
+// Spire guard (v6). The snapshot file sits next to the bridge file and is never touched by spire_bridge_save, so the
+// marker and the snapshot cannot be dropped by a flag or register write.
+
+struct SpireGuardSnapshot {
+  bool run_in_progress = false;
+  uint32_t quest_number = 0;
+  uint64_t snapshot_time_usecs = 0;
+  bool has_character = false;
+  PlayerInventory inventory;
+  PlayerDispDataV4 disp;
+};
+
+static std::string spire_guard_filename(uint32_t serial_number) {
+  return std::format("{}/{:010}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial_number);
+}
+
+static std::string spire_guard_hex_encode(const void* data, size_t size) {
+  static const char* digits = "0123456789ABCDEF";
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+  std::string ret;
+  ret.reserve(size * 2);
+  for (size_t z = 0; z < size; z++) {
+    ret.push_back(digits[bytes[z] >> 4]);
+    ret.push_back(digits[bytes[z] & 0x0F]);
+  }
+  return ret;
+}
+
+static uint8_t spire_guard_hex_digit(char ch) {
+  if ((ch >= '0') && (ch <= '9')) {
+    return ch - '0';
+  }
+  if ((ch >= 'A') && (ch <= 'F')) {
+    return ch - 'A' + 10;
+  }
+  if ((ch >= 'a') && (ch <= 'f')) {
+    return ch - 'a' + 10;
+  }
+  throw std::runtime_error("invalid hex digit in snapshot");
+}
+
+// Decodes a hex string into a structure of exactly the given size; throws if the length does not match.
+static void spire_guard_hex_decode(const std::string& hex, void* data, size_t size) {
+  if (hex.size() != size * 2) {
+    throw std::runtime_error(std::format("snapshot field has {} hex digits; expected {}", hex.size(), size * 2));
+  }
+  uint8_t* bytes = reinterpret_cast<uint8_t*>(data);
+  for (size_t z = 0; z < size; z++) {
+    bytes[z] = (spire_guard_hex_digit(hex[z * 2]) << 4) | spire_guard_hex_digit(hex[z * 2 + 1]);
+  }
+}
+
+static SpireGuardSnapshot spire_guard_load(const std::string& filename) {
+  SpireGuardSnapshot ret;
+  if (!std::filesystem::is_regular_file(filename)) {
+    return ret;
+  }
+  auto json = phosg::JSON::parse(phosg::load_file(filename));
+  ret.run_in_progress = json.get_bool("RunInProgress", false);
+  ret.quest_number = json.get_int("QuestNumber", 0);
+  ret.snapshot_time_usecs = json.get_int("SnapshotTime", 0);
+  if (json.contains("Inventory") && json.contains("Disp")) {
+    spire_guard_hex_decode(json.get_string("Inventory"), &ret.inventory, sizeof(ret.inventory));
+    spire_guard_hex_decode(json.get_string("Disp"), &ret.disp, sizeof(ret.disp));
+    ret.has_character = true;
+  }
+  return ret;
+}
+
+// Writes the snapshot file atomically, the same way as spire_bridge_save. Name, Level, Class and Meseta are only there
+// for people reading the file; loading uses the hex fields.
+static void spire_guard_save(const std::string& filename, uint32_t serial_number, const SpireGuardSnapshot& snapshot) {
+  auto json = phosg::JSON::dict({
+      {"SerialNumber", serial_number},
+      {"RunInProgress", snapshot.run_in_progress},
+      {"QuestNumber", snapshot.quest_number},
+      {"SnapshotTime", snapshot.snapshot_time_usecs},
+  });
+  if (snapshot.has_character) {
+    Language language = snapshot.inventory.language;
+    json.emplace("Name", snapshot.disp.visual.name.decode(language));
+    json.emplace("Level", snapshot.disp.stats.level + 1);
+    json.emplace("Class", snapshot.disp.visual.sh.char_class);
+    json.emplace("Meseta", snapshot.disp.stats.meseta.load());
+    json.emplace("Inventory", spire_guard_hex_encode(&snapshot.inventory, sizeof(snapshot.inventory)));
+    json.emplace("Disp", spire_guard_hex_encode(&snapshot.disp, sizeof(snapshot.disp)));
+  }
+  std::string data = json.serialize(phosg::JSON::SerializeOption::FORMAT);
+
+  std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
+  std::string temp_filename = filename + ".tmp";
+  phosg::save_file(temp_filename, data);
+  std::filesystem::rename(temp_filename, filename);
+}
+
+static std::string spire_guard_describe(const SpireGuardSnapshot& snapshot) {
+  if (!snapshot.has_character) {
+    return "no character";
+  }
+  return std::format("{} Lv{} meseta {}", snapshot.disp.visual.name.decode(snapshot.inventory.language),
+      snapshot.disp.stats.level + 1, snapshot.disp.stats.meseta.load());
+}
+
+void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    if (!l->is_game() || (l->mode != GameMode::BATTLE) || !l->quest) {
+      return;
+    }
+    const auto& rules = l->quest->meta.battle_rules;
+    if (!rules || !rules->replace_char) {
+      return;
+    }
+    uint32_t quest_number = l->quest->meta.quest_number;
+    if (!spire_bridge_quest_is_bridged(c, quest_number)) {
+      return;
+    }
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    if (!serial_number) {
+      return;
+    }
+
+    std::string filename = spire_guard_filename(serial_number);
+    auto snapshot = spire_guard_load(filename);
+    if (snapshot.run_in_progress) {
+      c->log.info_f("Spire guard: run already in progress for serial {:010} (q{}); kept snapshot {} from q{}",
+          serial_number, quest_number, spire_guard_describe(snapshot), snapshot.quest_number);
+      return;
+    }
+
+    // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
+    auto character = c->character_file(false, false);
+    if (!character) {
+      c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); marker not set", serial_number, quest_number);
+      return;
+    }
+
+    snapshot.run_in_progress = true;
+    snapshot.quest_number = quest_number;
+    snapshot.snapshot_time_usecs = phosg::now();
+    snapshot.has_character = true;
+    snapshot.inventory = character->inventory;
+    snapshot.disp = character->disp;
+    spire_guard_save(filename, serial_number, snapshot);
+    c->log.info_f("Spire guard: run started for serial {:010} in q{}; marker set, snapshot {}",
+        serial_number, quest_number, spire_guard_describe(snapshot));
+
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to start run: {}", e.what());
+  }
+}
+
+void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    // Only a 98 from the run's own game counts as a clean end; a 98 from any other game leaves the marker set, so an
+    // aborted run that was not yet restored is still restored at the next login.
+    if (!l || !l->is_game() || !l->quest) {
+      return;
+    }
+    uint32_t quest_number = l->quest->meta.quest_number;
+    if (!spire_bridge_quest_is_bridged(c, quest_number)) {
+      return;
+    }
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    if (!serial_number) {
+      return;
+    }
+
+    std::string filename = spire_guard_filename(serial_number);
+    auto snapshot = spire_guard_load(filename);
+    if (!snapshot.run_in_progress) {
+      return;
+    }
+    snapshot.run_in_progress = false;
+    spire_guard_save(filename, serial_number, snapshot);
+    c->log.info_f("Spire guard: run ended cleanly for serial {:010} (98 in q{}); marker cleared, snapshot {} kept",
+        serial_number, quest_number, spire_guard_describe(snapshot));
+
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to end run: {}", e.what());
+  }
+}
+
+asio::awaitable<void> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  if (!serial_number) {
+    co_return;
+  }
+
+  std::string filename;
+  SpireGuardSnapshot snapshot;
+  try {
+    filename = spire_guard_filename(serial_number);
+    snapshot = spire_guard_load(filename);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010}: {}", serial_number, e.what());
+    co_return;
+  }
+  if (!snapshot.run_in_progress) {
+    co_return;
+  }
+
+  c->log.info_f("Spire guard: aborted run found for serial {:010} (q{}); holding 97 back to restore {}",
+      serial_number, snapshot.quest_number, spire_guard_describe(snapshot));
+  if (!snapshot.has_character) {
+    c->log.warning_f("Spire guard: snapshot for serial {:010} has no character; nothing restored, marker kept",
+        serial_number);
+    co_return;
+  }
+  if (!c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
+      !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE)) {
+    c->log.warning_f("Spire guard: client cannot run functions (B2); nothing restored for serial {:010}, marker kept",
+        serial_number);
+    co_return;
+  }
+
+  try {
+    // The 61 data the server has lacks the bank, quest flags and the rest of the save file, so the snapshot never
+    // replaces the whole character: the client's current full character is fetched first and only the parts that the
+    // overlay changes (inventory and disp) are put back.
+    auto info = co_await send_get_player_info(c, true);
+    if (!info.is_full_info || !info.character) {
+      c->log.warning_f("Spire guard: client sent no full character (no 30); nothing restored for serial {:010}, marker kept",
+          serial_number);
+      co_return;
+    }
+    auto merged = info.character;
+    uint8_t level_before = merged->disp.stats.level;
+    auto visual = merged->disp.visual;
+    merged->inventory = snapshot.inventory;
+    merged->disp = snapshot.disp;
+    merged->disp.visual = visual;
+
+    // Same function call as $loadchar
+    co_await prepare_client_for_patches(c);
+    auto s = c->require_server_state();
+    auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
+    PSOGCCharacterFile::Character gc_char = *merged;
+    co_await send_function_call(c, fn, {}, &gc_char, sizeof(gc_char));
+
+    // Keep the server's view of the character in line with what the client now has
+    auto character = c->character_file(false, false);
+    if (character) {
+      character->inventory = snapshot.inventory;
+      character->disp = snapshot.disp;
+      character->disp.visual = visual;
+    }
+
+    snapshot.run_in_progress = false;
+    spire_guard_save(filename, serial_number, snapshot);
+    c->log.info_f("Spire guard: restored {} for serial {:010} (was Lv{}); marker cleared, 97 follows",
+        spire_guard_describe(snapshot), serial_number, level_before + 1);
+
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to restore character for serial {:010}: {}; marker kept", serial_number, e.what());
+  }
+}
