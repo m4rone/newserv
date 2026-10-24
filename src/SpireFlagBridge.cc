@@ -174,7 +174,7 @@ void spire_bridge_record_flag(
       return;
     }
 
-    // v22: the flags belong to the character (SpireMeta), not to the card
+    // v23: the flags belong to the character (SpireMeta), not to the card
     if (!spire_meta_record_flag(c, serial_number, static_cast<uint8_t>(difficulty), flag_num, is_set)) {
       c->log.info_f("Spire bridge: no character data for serial {:010}; quest flag {:04X} not recorded",
           serial_number, flag_num);
@@ -193,7 +193,7 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
   if (!serial_number) {
     return;
   }
-  // v22: the character's flags (SpireMeta). The stored state is permanent: the client does not save delivered flags to
+  // v23: the character's flags (SpireMeta). The stored state is permanent: the client does not save delivered flags to
   // its memory card. Flags in a v5-v21 <serial>.json are no longer delivered: they belonged to the whole card.
   spire_meta_deliver_flags(c, l, serial_number);
 }
@@ -466,7 +466,7 @@ static std::string spire_bridge_message_text(uint32_t value) {
   }
 }
 
-// v22: lives per client from its 'L' codes, for the checkpoint
+// v23: lives per client from its 'L' codes, for the checkpoint
 static std::unordered_map<const Client*, uint32_t> spire_checkpoint_lives;
 
 // v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
@@ -1544,7 +1544,7 @@ void spire_bridge_check_room_clear(
       if (type_definition_for_enemy(ene_st->super_ene->type).is_boss()) {
         l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} has a boss; no room clear", wave_number, room,
             floor);
-        // v22: a boss wave done still counts as the room's clear for the checkpoint (no text, no r251)
+        // v23: a boss wave done still counts as the room's clear for the checkpoint (no text, no r251)
         spire_checkpoint_record_room(l, floor, room);
         return;
       }
@@ -1588,7 +1588,7 @@ void spire_bridge_check_room_clear(
   }
 }
 
-// ---- v22: checkpoint per character and replay after a floor load (SpireFlagBridge.hh)
+// ---- v23: checkpoint per character and replay after a floor load (SpireFlagBridge.hh)
 
 struct SpireCheckpoint {
   uint32_t rooms = 0; // bit k-1 = room k cleared in some run

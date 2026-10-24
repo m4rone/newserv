@@ -15,7 +15,7 @@ struct ExpressionEnvironment {
   const QuestFlags* quest_flags;
   const PlayerRecordsChallengeBB* challenge_records;
   const TeamIndex::Team* team;
-  uint32_t spire_rooms = 0; // v22: rooms cleared by this character (bit k-1 = room k), SpireFlagBridge checkpoint
+  uint32_t spire_rooms = 0; // v23: rooms cleared by this character (bit k-1 = room k), SpireFlagBridge checkpoint
 
   int64_t evaluate(const ResourceDASM::Expression::Node& expr) const {
     return expr.evaluate(std::bind(&ExpressionEnvironment::env_lookup, this, std::placeholders::_1)).as_int();

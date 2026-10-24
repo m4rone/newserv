@@ -143,7 +143,7 @@ bool spire_bridge_handle_register(
 void spire_bridge_check_room_clear(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
 
-// v22: room state on the server, for room transitions and checkpoints (spoor 9).
+// v23: room state on the server, for room transitions and checkpoints (spoor 9).
 // - Checkpoint per character: every room clear the server sees (the event rule above; a boss wave counts too, without a
 //   text) whose floor and room are in SpireCheckpointRooms is stored as room k in
 //   system/spire-bridge/<serial>.<character id>.checkpoint.json for every client in the game (each for its own
