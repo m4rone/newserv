@@ -61,7 +61,7 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Spire guard (v6-v9; GC V3 only).
+// Spire guard (v6-v10; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
 // character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
@@ -85,6 +85,11 @@ bool spire_bridge_handle_register(
 // - v9: the same restore also runs as soon as a client with RestorePending leaves a game and is back in a lobby (84),
 //   so the real character is back without a new login. A failure there drops the connection; the login restore stays
 //   the safety net.
+// - v10: a verified lobby restore does not clear the marker: the real character is then only in the client's memory
+//   until the client saves, so a Wii switched off right after it would still have the overlay on the card. The marker
+//   becomes AwaitingSave instead, and is cleared at the next login whose 61 already shows the snapshot's level and EXP,
+//   without a push; any other login pushes again. While a restore runs or RestorePending is set, game joins and game
+//   creation are refused with a short message, so a push never lands in a game.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -100,6 +105,11 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 // the connection is dropped and the marker stays, so the login restore remains the safety net. Never runs at the same
 // time as another restore for the same client. Never throws.
 asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c);
+
+// Called before a client joins or creates a game (v10). Returns false, after sending the client a short message, if a
+// restore is running for the client or RestorePending is set; the caller must then not let the client into a game.
+// Never throws.
+bool spire_guard_game_join_allowed(std::shared_ptr<Client> c);
 
 // Called from enable_save_if_needed right before 97 is sent. Returns true if 97 may be sent; false if the caller must
 // not send 97 and must drop the login. Never throws.

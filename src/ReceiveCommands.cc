@@ -2747,6 +2747,10 @@ static void on_10_game_menu(std::shared_ptr<Client> c, uint32_t item_id, const s
     send_lobby_message_box(c, "$C7You cannot join this\ngame because it no\nlonger exists.");
     return;
   }
+  // Spire guard (v10): no game while a character restore runs or is not verified (see SpireFlagBridge.hh)
+  if (game->is_game() && !spire_guard_game_join_allowed(c)) {
+    return;
+  }
   switch (game->join_error_for_client(c, &password)) {
     case Lobby::JoinError::ALLOWED:
       if (!s->change_client_lobby(c, game)) {
@@ -4816,6 +4820,10 @@ static asio::awaitable<void> on_C1_PC(std::shared_ptr<Client> c, Channel::Messag
 
 static asio::awaitable<void> on_0C_C1_E7_EC(std::shared_ptr<Client> c, Channel::Message& msg) {
   auto s = c->require_server_state();
+  // Spire guard (v10): no game while a character restore runs or is not verified (see SpireFlagBridge.hh)
+  if (!spire_guard_game_join_allowed(c)) {
+    co_return;
+  }
 
   std::shared_ptr<Lobby> game;
   if (is_pre_v1(c->version())) {

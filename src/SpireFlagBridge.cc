@@ -1,6 +1,7 @@
 #include "SpireFlagBridge.hh"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <map>
@@ -324,6 +325,10 @@ struct SpireGuardSnapshot {
   bool run_in_progress = false;
   // Cleared only when the 61 requested right after the restore push shows the snapshot's level and EXP (v8)
   bool restore_pending = false;
+  // v10: set instead of clearing restore_pending when the lobby restore is verified. The real character is then only in
+  // the client's memory until the client saves it, so the card may still hold the overlay. Cleared at the next login
+  // whose 61 already shows the snapshot's level and EXP (no push); any other login turns it back into restore_pending.
+  bool awaiting_save = false;
   uint32_t quest_number = 0;
   uint64_t snapshot_time_usecs = 0;
   bool has_character = false;
@@ -379,6 +384,7 @@ static SpireGuardSnapshot spire_guard_load(const std::string& filename) {
   auto json = phosg::JSON::parse(phosg::load_file(filename));
   ret.run_in_progress = json.get_bool("RunInProgress", false);
   ret.restore_pending = json.get_bool("RestorePending", false);
+  ret.awaiting_save = json.get_bool("AwaitingSave", false);
   ret.quest_number = json.get_int("QuestNumber", 0);
   ret.snapshot_time_usecs = json.get_int("SnapshotTime", 0);
   if (json.contains("Inventory") && json.contains("Disp")) {
@@ -396,6 +402,7 @@ static void spire_guard_save(const std::string& filename, uint32_t serial_number
       {"SerialNumber", serial_number},
       {"RunInProgress", snapshot.run_in_progress},
       {"RestorePending", snapshot.restore_pending},
+      {"AwaitingSave", snapshot.awaiting_save},
       {"QuestNumber", snapshot.quest_number},
       {"SnapshotTime", snapshot.snapshot_time_usecs},
   });
@@ -448,6 +455,17 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
           snapshot.restore_pending ? "restore pending" : "run already in progress", serial_number, quest_number,
           spire_guard_describe(snapshot), snapshot.quest_number);
+      return;
+    }
+    if (snapshot.awaiting_save) {
+      // v10: the lobby restore put the real character back and the 61 after it matched the snapshot, so the snapshot
+      // still is the real character; keep it and track this run as a new one
+      snapshot.awaiting_save = false;
+      snapshot.run_in_progress = true;
+      snapshot.quest_number = quest_number;
+      spire_guard_save(filename, serial_number, snapshot);
+      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; marker set, kept snapshot {}",
+          serial_number, quest_number, spire_guard_describe(snapshot));
       return;
     }
 
@@ -543,9 +561,10 @@ struct SpireGuardWatchdog {
 };
 
 // Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot. The inventory
-// count is only logged. Clears RestorePending and returns true if verified.
+// count is only logged. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
+// but becomes AwaitingSave: the card may still hold the overlay until the client saves.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
-    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character) {
+    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool in_lobby) {
   if (!character) {
     c->log.warning_f("Spire guard: restore not verified for serial {:010}: no character in the 61; marker kept", serial_number);
     return false;
@@ -564,9 +583,11 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
     return false;
   }
   snapshot.restore_pending = false;
+  snapshot.awaiting_save = in_lobby;
   spire_guard_save(filename, serial_number, snapshot);
-  c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; marker cleared",
-      serial_number, level + 1, exp, items_str);
+  c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}",
+      serial_number, level + 1, exp, items_str,
+      in_lobby ? "marker kept until a login 61 shows the same" : "marker cleared");
   return true;
 }
 
@@ -648,7 +669,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
       SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61");
       after = co_await send_get_player_info(c, false);
     }
-    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character)) {
+    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "lobby"))) {
       co_return false;
     }
     co_return true;
@@ -670,13 +691,36 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   try {
     filename = spire_guard_filename(serial_number);
     snapshot = spire_guard_load(filename);
-    if (!snapshot.run_in_progress && !snapshot.restore_pending) {
+    if (!snapshot.run_in_progress && !snapshot.restore_pending && !snapshot.awaiting_save) {
       co_return true;
+    }
+    if (snapshot.awaiting_save && !snapshot.run_in_progress && !snapshot.restore_pending) {
+      // v10: after a verified lobby restore, the client may have saved the real character since. If the 61 of this
+      // login already shows it, the card holds it: clear the marker without a push. Otherwise push again.
+      snapshot.awaiting_save = false;
+      auto character = c->character_file(false, false);
+      if (character && (character->disp.stats.level == snapshot.disp.stats.level) &&
+          (character->disp.stats.exp == snapshot.disp.stats.exp)) {
+        spire_guard_save(filename, serial_number, snapshot);
+        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {} like the snapshot; lobby restore confirmed, marker cleared, no push",
+            serial_number, character->disp.stats.level + 1, character->disp.stats.exp.load());
+        co_return true;
+      }
+      if (character) {
+        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; the client did not save the lobby restore, pushing again",
+            serial_number, character->disp.stats.level + 1, character->disp.stats.exp.load(),
+            snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load());
+      } else {
+        c->log.info_f("Spire guard: no login 61 for serial {:010}; cannot confirm the lobby restore, pushing again", serial_number);
+      }
+      snapshot.restore_pending = true;
+      spire_guard_save(filename, serial_number, snapshot);
     }
     if (snapshot.run_in_progress) {
       // The run ended without a 98. From here on only a verified restore closes it (v7).
       snapshot.run_in_progress = false;
       snapshot.restore_pending = true;
+      snapshot.awaiting_save = false;
       spire_guard_save(filename, serial_number, snapshot);
     }
   } catch (const std::exception& e) {
@@ -744,6 +788,28 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to refresh the lobby after the restore: {}", e.what());
   }
-  c->log.info_f("Spire guard: restored {} for serial {:010} in the lobby; marker cleared", spire_guard_describe(snapshot),
-      serial_number);
+  c->log.info_f("Spire guard: restored {} for serial {:010} in the lobby; marker stays until the next login confirms it",
+      spire_guard_describe(snapshot), serial_number);
+}
+
+bool spire_guard_game_join_allowed(std::shared_ptr<Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  if (!serial_number) {
+    return true;
+  }
+  bool restoring = spire_guard_restoring_clients.count(c.get());
+  bool pending = false;
+  try {
+    pending = spire_guard_load(spire_guard_filename(serial_number)).restore_pending;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
+    pending = true;
+  }
+  if (!restoring && !pending) {
+    return true;
+  }
+  c->log.info_f("Spire guard: game join refused for serial {:010}: {}", serial_number,
+      restoring ? "a restore is running" : "the restore is not verified");
+  send_lobby_message_box(c, "$C7Your character is\nstill being restored.\nTry again in a\nmoment.");
+  return false;
 }
