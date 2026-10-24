@@ -3372,7 +3372,8 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
   // 98 should only be sent when leaving a game, and we should leave the client in no lobby (they will send an 84 soon
   // afterward to choose a lobby).
   if (msg.command == 0x98) {
-    // Spire guard (v6): a 98 from the run's own game is a clean end (see SpireFlagBridge.hh)
+    // Spire guard (v8): a 98 is never proof of a clean end; it turns a running Spire run into a pending restore (see
+    // SpireFlagBridge.hh)
     spire_guard_end_run(c, c->lobby.lock());
     // Clear all temporary state from the game
     c->delete_overlay();
@@ -3563,8 +3564,6 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
   }
   player->inventory.decode_from_client(c->version());
   c->channel->language = player->inventory.language;
-  // Spire guard (v7): a 61 or 98 that shows the snapshot's level and EXP closes a pending restore
-  spire_guard_check_restore(c, player, msg.command);
   c->login->account->save();
 
   c->update_channel_name();

@@ -61,38 +61,36 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Spire guard (v6, v7; GC V3 only).
+// Spire guard (v6-v8; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
 // character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
 // of the real character next to the bridge file, in system/spire-bridge/<serial>.snapshot.json, with two markers:
-// RunInProgress (a run is running) and RestorePending (a run ended without a 98 and the restore is not verified yet).
+// RunInProgress (a run is running) and RestorePending (the run's game has ended, by a 98 or not, and the restore is not
+// verified yet). Measured on the Wii (v8): even a normal end of a run saves the overlay character to the card, so every
+// Spire game end needs a verified restore.
 // - When a quest listed in SpireBridgeQuests is loaded in a Battle game with replace_char, RunInProgress is set and the
-//   real character (inventory and disp from the server's character data, which comes from the 61/98 the client sent
-//   before the game; never the overlay) is stored. If either marker is already set, the stored snapshot is kept, so a
-//   second quest load can never replace the real character with the overlay.
-// - A 98 sent from a game running a quest listed in SpireBridgeQuests clears RunInProgress, but never RestorePending.
-//   The snapshot stays until the next run replaces it.
-// - When save is enabled for a client with RunInProgress still set, it becomes RestorePending and the 97 is held back:
-//   the client's full character is requested (GetExtendedPlayerInfo), its inventory and disp are replaced by the
-//   snapshot, the result is sent with SetExtendedPlayerInfo, and a 61 is requested. Only a 61 or 98 that shows the
-//   snapshot's level and EXP clears RestorePending; only then does the caller send 97 with flag 1. If the client
-//   cannot run functions, does not answer within 15 seconds, or the 61 does not match, no 97 is sent, the login is
-//   dropped and both files stay, so the next login tries again. 97 is never sent with flag 0 (that deletes the
-//   character's items and challenge records). To give up on a pending restore, delete the snapshot file.
+//   real character (inventory and disp from the server's character data, which comes from the 61 at login or a 98 from
+//   a non-Spire game; never the overlay) is stored. If either marker is already set, the stored snapshot is kept, so a
+//   61 or 98 from or after a Spire game can never become the snapshot.
+// - A 98 with RunInProgress set turns it into RestorePending; a 98 never clears either marker. The snapshot stays until
+//   the next run replaces it.
+// - When save is enabled for a client with either marker set, it becomes RestorePending and the 97 is held back: the
+//   client's full character is requested (GetExtendedPlayerInfo), its inventory and disp are replaced by the snapshot,
+//   the result is sent with SetExtendedPlayerInfo, and a 61 is requested. Only that 61, showing the snapshot's level
+//   and EXP, clears RestorePending (the inventory count is logged); only then does the caller send 97 with flag 1. If
+//   the client cannot run functions, does not answer within 15 seconds, or the 61 does not match, no 97 is sent, the
+//   login is dropped and both files stay, so the next login tries again. 97 is never sent with flag 0 (that deletes
+//   the character's items and challenge records). To give up on a pending restore, delete the snapshot file.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
 // Never throws.
 void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
-// Called from the 98 handler before the client is removed from the game. Never throws.
+// Called from the 98 handler before the client is removed from the game. Turns RunInProgress into RestorePending.
+// Never throws.
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
-
-// Called from the 61/98 handler with the character data the client just sent. Clears RestorePending if the level and
-// EXP match the snapshot. Never throws.
-void spire_guard_check_restore(
-    std::shared_ptr<Client> c, std::shared_ptr<const PSOBBCharacterFile> character, uint16_t command);
 
 // Called from enable_save_if_needed right before 97 is sent. Returns true if 97 may be sent; false if the caller must
 // not send 97 and must drop the login. Never throws.
