@@ -635,6 +635,10 @@ Lobby::JoinError Lobby::join_error_for_client(std::shared_ptr<Client> c, const s
         (this->check_flag(Flag::IS_CLIENT_CUSTOMIZATION) != c->check_flag(Client::Flag::IS_CLIENT_CUSTOMIZATION))) {
       return JoinError::VERSION_CONFLICT;
     }
+    // v27: before FREE_JOIN_GAMES, so no account flag lets a blocked character into a Spire quest
+    if (this->quest && c->is_spire_blocked(this->quest)) {
+      return JoinError::SPIRE_BLOCKED;
+    }
     if (!c->login->account->check_flag(Account::Flag::FREE_JOIN_GAMES)) {
       if (password && !this->password.empty() && (*password != this->password)) {
         return JoinError::INCORRECT_PASSWORD;
@@ -765,6 +769,15 @@ std::unordered_map<uint32_t, std::shared_ptr<Client>> Lobby::clients_by_account_
   return ret;
 }
 
+std::shared_ptr<Client> Lobby::spire_blocked_client(std::shared_ptr<const Quest> q) const {
+  for (const auto& lc : this->clients) {
+    if (lc && lc->is_spire_blocked(q)) {
+      return lc;
+    }
+  }
+  return nullptr;
+}
+
 QuestIndex::IncludeCondition Lobby::quest_include_condition() const {
   size_t num_players = this->count_clients();
   bool v1_present = this->any_v1_clients_present();
@@ -872,6 +885,8 @@ const char* phosg::name_for_enum<Lobby::JoinError>(Lobby::JoinError value) {
       return "LEVEL_TOO_HIGH";
     case Lobby::JoinError::NO_ACCESS_TO_QUEST:
       return "NO_ACCESS_TO_QUEST";
+    case Lobby::JoinError::SPIRE_BLOCKED:
+      return "SPIRE_BLOCKED";
     default:
       throw std::runtime_error("invalid drop mode");
   }

@@ -2455,6 +2455,11 @@ void set_lobby_quest(std::shared_ptr<Lobby> l, std::shared_ptr<const Quest> q, b
   if (l->quest) {
     throw std::runtime_error("lobby already has an assigned quest");
   }
+  // v27: the last gate, whatever path loads the quest
+  if (auto bc = l->spire_blocked_client(q)) {
+    send_lobby_message_box(bc, "$C7Spire: alleen met\neen testkarakter.");
+    throw std::runtime_error(std::format("q{} is blocked for a character in this game (SpireBlockedCharacters)", q->meta.quest_number));
+  }
 
   // Only allow loading battle/challenge quests if the game mode is correct
   if ((q->meta.challenge_template_index >= 0) != (l->mode == GameMode::CHALLENGE)) {
@@ -2807,6 +2812,9 @@ static void on_10_game_menu(std::shared_ptr<Client> c, uint32_t item_id, const s
       send_lobby_message_box(c, std::format("$C7You must be level\n{} or below to\njoin this game.", static_cast<size_t>(game->max_level + 1)));
       break;
     }
+    case Lobby::JoinError::SPIRE_BLOCKED:
+      send_lobby_message_box(c, "$C7Spire: alleen met\neen testkarakter.");
+      break;
     case Lobby::JoinError::NO_ACCESS_TO_QUEST:
       send_lobby_message_box(c, "$C7You don't have access\nto the quest in progress\nin this game, or there\nis no space for another\nplayer in the quest.");
       break;
@@ -2840,7 +2848,9 @@ static void on_10_quest_categories(std::shared_ptr<Client> c, uint32_t item_id) 
       include_condition = l->quest_include_condition();
     }
 
-    const auto& quests = s->data->quest_index->filter(episode, version_flags, item_id, include_condition);
+    auto quests = s->data->quest_index->filter(episode, version_flags, item_id, include_condition);
+    // v27: also without quest requirements (include_condition null), a blocked character never sees a Spire quest
+    std::erase_if(quests, [&](const auto& it) { return l ? !!l->spire_blocked_client(it.second) : c->is_spire_blocked(it.second); });
     send_quest_menu(c, quests, !l);
   }
 }
@@ -2863,6 +2873,10 @@ static void on_10_quest_menu(std::shared_ptr<Client> c, uint32_t item_id) {
 
   // If the client is not in a lobby, send it as a download quest; otherwise, they must be in a game to load a quest.
   auto l = c->lobby.lock();
+  if (l ? !!l->spire_blocked_client(q) : c->is_spire_blocked(q)) {
+    send_lobby_message_box(c, "$C7Spire: alleen met\neen testkarakter.");
+    return;
+  }
   if (l && !l->is_game()) {
     send_lobby_message_box(c, "$C7Quests cannot be\nloaded in lobbies.");
     return;

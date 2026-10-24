@@ -2207,6 +2207,9 @@ ChatCommandDefinition cc_quest(
       }
 
       auto l = a.c->require_lobby();
+      if (l->spire_blocked_client(q)) {
+        throw precondition_failed("$C6Spire: alleen met\neen testkarakter.");
+      }
       if (a.check_permissions && !a.c->check_flag(Client::Flag::DEBUG_ENABLED)) {
         if (l->count_clients() > 1) {
           throw precondition_failed("$C6This command can only\nbe used with no\nother players present");

@@ -251,6 +251,7 @@ struct Lobby : public std::enable_shared_from_this<Lobby> {
     LEVEL_TOO_LOW,
     LEVEL_TOO_HIGH,
     NO_ACCESS_TO_QUEST,
+    SPIRE_BLOCKED,
   };
   JoinError join_error_for_client(std::shared_ptr<Client> c, const std::string* password) const;
 
@@ -272,6 +273,8 @@ struct Lobby : public std::enable_shared_from_this<Lobby> {
   void assign_inventory_and_bank_item_ids(std::shared_ptr<Client> c, bool consume_ids);
 
   QuestIndex::IncludeCondition quest_include_condition() const;
+  // v27: a client in this lobby that SpireBlockedCharacters keeps out of quest q, or null
+  std::shared_ptr<Client> spire_blocked_client(std::shared_ptr<const Quest> q) const;
 
   std::unordered_map<uint32_t, std::shared_ptr<Client>> clients_by_account_id() const;
 

@@ -181,6 +181,13 @@ struct DataIndex {
   // v26 follow the leader: SpireFollowLeader {"LeaderClient": n, "DelayMs": m}. When that client of a Spire game loads
   // a floor other than Pioneer 2, every other client not on it is warped there (6x94) after DelayMs; missing = off.
   std::optional<std::pair<uint8_t, uint32_t>> spire_follow_leader;
+  // v27 blocked characters: SpireBlockedCharacters {"Quests": [n, ...], "Characters": [{"Serial": s, "Name": n}, ...]}.
+  // A GC client with that serial and character name (Name empty: every character of that serial) never sees, loads or
+  // joins one of those quests. A serial belongs to the console, not the character, so a real character is blocked by
+  // serial plus name and the test characters on the same console still play (regie 2026-10-24, Wakiru).
+  std::unordered_set<uint32_t> spire_blocked_quest_numbers;
+  std::vector<std::pair<uint32_t, std::string>> spire_blocked_characters;
+  bool is_spire_blocked(uint32_t gc_serial, const std::string& name, uint32_t quest_number) const;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};

@@ -811,6 +811,27 @@ void DataIndex::load_config_early() {
     config_log.info_f("SpireFollowLeader: client {} leads, others follow after {} ms", leader, delay);
   } catch (const std::out_of_range&) {
   }
+  this->spire_blocked_quest_numbers.clear();
+  this->spire_blocked_characters.clear();
+  try {
+    const auto& b = this->config_json->at("SpireBlockedCharacters");
+    for (const auto& item : b.get_list("Quests")) {
+      this->spire_blocked_quest_numbers.emplace(item->as_int());
+    }
+    for (const auto& item : b.get_list("Characters")) {
+      int64_t serial = item->get_int("Serial", -1);
+      if ((serial < 0) || (serial > 0xFFFFFFFF)) {
+        throw std::runtime_error("SpireBlockedCharacters: Characters need a GC Serial 0-4294967295");
+      }
+      this->spire_blocked_characters.emplace_back(static_cast<uint32_t>(serial), item->get_string("Name", ""));
+    }
+    if (this->spire_blocked_quest_numbers.empty() || this->spire_blocked_characters.empty()) {
+      throw std::runtime_error("SpireBlockedCharacters: Quests and Characters may not be empty");
+    }
+    config_log.info_f("SpireBlockedCharacters: {} character(s) blocked from {} quest(s)",
+        this->spire_blocked_characters.size(), this->spire_blocked_quest_numbers.size());
+  } catch (const std::out_of_range&) {
+  }
   this->spire_replay_registers.clear();
   try {
     for (const auto& item : this->config_json->get_list("SpireReplayRegisters")) {
@@ -2145,4 +2166,25 @@ void DataIndex::load_all() {
   this->load_quest_opcode_defs();
   this->load_quest_index();
   this->generate_bb_stream_file();
+}
+
+bool DataIndex::is_spire_blocked(uint32_t gc_serial, const std::string& name, uint32_t quest_number) const {
+  if (!this->spire_blocked_quest_numbers.count(quest_number)) {
+    return false;
+  }
+  // The client's name can carry a language marker (\tE, \tJ); names compare without it and without case
+  auto plain = [](const std::string& n) -> std::string {
+    std::string ret = (n.size() >= 2 && n[0] == '\t') ? n.substr(2) : n;
+    for (auto& ch : ret) {
+      ch = tolower(ch);
+    }
+    return ret;
+  };
+  std::string client_name = plain(name);
+  for (const auto& [serial, blocked_name] : this->spire_blocked_characters) {
+    if ((serial == gc_serial) && (blocked_name.empty() || (plain(blocked_name) == client_name))) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -397,6 +397,23 @@ bool Client::evaluate_quest_availability_expression(
   return ret;
 }
 
+bool Client::is_spire_blocked(std::shared_ptr<const Quest> q) const {
+  if (!q || !this->login || !this->login->gc_license) {
+    return false;
+  }
+  auto s = this->require_server_state();
+  if (s->data->spire_blocked_characters.empty()) {
+    return false;
+  }
+  auto p = this->character_file(false);
+  if (!p) {
+    // No character to read the name from: fail closed, no blocked quest for this client
+    return s->data->spire_blocked_quest_numbers.count(q->meta.quest_number);
+  }
+  return s->data->is_spire_blocked(
+      this->login->gc_license->serial_number, p->disp.visual.name.decode(this->language()), q->meta.quest_number);
+}
+
 bool Client::can_see_quest(
     std::shared_ptr<const Quest> q,
     std::shared_ptr<const Lobby> game,
@@ -404,6 +421,9 @@ bool Client::can_see_quest(
     Difficulty difficulty,
     size_t num_players,
     bool v1_present) const {
+  if (this->is_spire_blocked(q)) {
+    return false;
+  }
   if (!q->has_version_any_language(this->version())) {
     return false;
   }

@@ -2716,6 +2716,19 @@ Action a_describe_item(
       phosg::log_info_f("Purchase price: {}; sale price: {}", purchase_price, sale_price);
     });
 
+Action a_spire_blocked_check(
+    "spire-blocked-check", "\
+  spire-blocked-check SERIAL NAME QUEST\n\
+    Print \"blocked\" or \"allowed\": whether SpireBlockedCharacters in the config\n\
+    keeps the GC character NAME on console SERIAL out of quest number QUEST.\n",
+    +[](phosg::Arguments& args) {
+      auto di = std::make_shared<DataIndex>(get_config_filename(args));
+      di->load_config_early();
+      bool blocked = di->is_spire_blocked(
+          args.get<uint32_t>(1), args.get<std::string>(2), args.get<uint32_t>(3));
+      phosg::fwrite_fmt(stdout, "{}\n", blocked ? "blocked" : "allowed");
+    });
+
 Action a_name_all_items(
     "name-all-items", nullptr, +[](phosg::Arguments& args) {
       auto di = std::make_shared<DataIndex>(get_config_filename(args));
