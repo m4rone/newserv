@@ -2187,7 +2187,7 @@ ChatCommandDefinition cc_spire(
     {"$spire"},
     +[](const Args& a) -> asio::awaitable<void> {
       try {
-        send_text_message(a.c, spire_start_command(a.c, a.text));
+        send_text_message(a.c, spire_checkpoint_command(a.c, a.text));
       } catch (const std::exception& e) {
         throw precondition_failed("$C6{}", e.what());
       }

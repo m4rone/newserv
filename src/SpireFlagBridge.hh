@@ -156,14 +156,9 @@ void spire_bridge_check_room_clear(
 //   SPIRE_REPLAY_DELAY (and once more SPIRE_REPLAY_SECOND_DELAY later), the latest value of every such register written by another client, and the last room-cleared
 //   r251 of that floor. A 6x77 that reached it during its own load (respawn, go_floor) is so delivered again; a value
 //   it already had is unchanged by the replay. Nothing is sent if the client changed floor again in the meantime.
-// - Start on a room ('$spire start <k>' or '$spire continue' in the lobby or a game, before the run starts): the
-//   server keeps a pending start for that client. At its Start the quest writes 'C' << 24 to register 248; the server
-//   answers like SPIR (6x77 r248) with SPIRE_START_ANSWER << 24 | k << 8 | lives, k 0 = the normal start at room 1,
-//   lives 0 = the quest's own count. '$spire continue' takes the room after the last one cleared and the lives the
-//   character had at that clear (from its 'L' codes; 0 if none were seen). The kit follows from the class, which the
-//   quest reads itself. The answer clears the pending start. No other register is used (r251-r255 are taken).
-constexpr uint8_t SPIRE_START_REQUEST = 'C';
-constexpr uint8_t SPIRE_START_ANSWER = 'K';
+// - '$spire status' shows the rooms this character cleared; '$spire continue' names the room to continue at (the one
+//   after the last room cleared) and the lives it had at that clear (from its 'L' codes), so after a disconnect the
+//   player picks that room's quest, which its AvailableIf has unlocked. The kit follows from the class.
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
 constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
 
@@ -174,9 +169,9 @@ void spire_replay_note_register(
 // Called when a client has loaded a floor (6x1F, 6x21) or the game (6F). Never throws.
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);
 
-// '$spire start <k>' / '$spire continue' / '$spire status': sets the pending start (or shows the checkpoint) and
-// returns the text for the player. Throws std::runtime_error with a short message on bad input.
-std::string spire_start_command(std::shared_ptr<Client> c, const std::string& args);
+// '$spire status' / '$spire continue': returns the text for the player. Throws std::runtime_error with a short message
+// on bad input.
+std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::string& args);
 
 // The rooms this client's character has cleared (bit k-1 = room k), from its checkpoint file; 0 if none or unknown.
 uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
