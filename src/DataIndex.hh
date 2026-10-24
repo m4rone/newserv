@@ -157,6 +157,9 @@ struct DataIndex {
   uint64_t persistent_game_idle_timeout_usecs = 0;
   std::unordered_map<uint32_t, int64_t> enable_send_function_call_quest_numbers;
   bool enable_v3_v4_protected_subcommands = false;
+  // Quest numbers in which the Spire register bridge applies (SpireBridgeQuests); empty = the bridge never takes a
+  // register write (see SpireFlagBridge.hh)
+  std::unordered_set<uint32_t> spire_bridge_quest_numbers;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};

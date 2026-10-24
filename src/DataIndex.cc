@@ -727,6 +727,13 @@ void DataIndex::load_config_early() {
   } catch (const std::out_of_range&) {
   }
   this->enable_v3_v4_protected_subcommands = this->config_json->get_bool("EnableV3V4ProtectedSubcommands", false);
+  this->spire_bridge_quest_numbers.clear();
+  try {
+    for (const auto& item : this->config_json->at("SpireBridgeQuests").as_list()) {
+      this->spire_bridge_quest_numbers.emplace(item->as_int());
+    }
+  } catch (const std::out_of_range&) {
+  }
 
   auto parse_int_list = +[](const phosg::JSON& json) -> std::vector<uint32_t> {
     std::vector<uint32_t> ret;

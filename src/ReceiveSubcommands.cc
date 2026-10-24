@@ -3251,7 +3251,7 @@ static void on_sync_quest_register(std::shared_ptr<Client> c, SubcommandMessage&
   }
 
   bool should_forward = true;
-  // Spire meta registers (quests 920-929, GC V3 only) are stored per serial and never forwarded; see SpireFlagBridge.hh
+  // Spire meta registers (quests in SpireBridgeQuests, GC V3 only) are stored per serial and never forwarded; see SpireFlagBridge.hh
   if (spire_bridge_handle_register(c, l, cmd.register_number, cmd.value.as_int)) {
     should_forward = false;
 

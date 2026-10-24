@@ -11,6 +11,7 @@
 
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
+#include "ServerState.hh"
 
 // Stored entries, keyed by (difficulty, flag number). The value is true if the flag was set, false if it was cleared.
 // The last write for a given key wins.
@@ -217,13 +218,22 @@ static uint32_t spire_bridge_merge_register(
   }
 }
 
+// Only quests listed in SpireBridgeQuests are bridged; a missing or empty list means no quest is.
+static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint32_t quest_number) {
+  try {
+    return c->require_server_state()->data->spire_bridge_quest_numbers.count(quest_number) != 0;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
     return false;
   }
   uint32_t quest_number = l->quest->meta.quest_number;
-  if ((quest_number < SPIRE_BRIDGE_FIRST_QUEST) || (quest_number > SPIRE_BRIDGE_LAST_QUEST)) {
+  if (!spire_bridge_quest_is_bridged(c, quest_number)) {
     return false;
   }
   bool is_request = (register_number == SPIRE_BRIDGE_REQUEST_REGISTER);
