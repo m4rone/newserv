@@ -763,6 +763,8 @@ void DataIndex::load_config_early() {
       throw std::runtime_error("SpireRunTimerLab: LimitSeconds 1-65535, WarningSeconds 0 to below LimitSeconds");
     }
     this->spire_run_timer_lab = std::make_pair(static_cast<uint32_t>(limit), static_cast<uint32_t>(warning));
+    config_log.info_f("SpireRunTimerLab: LimitSeconds {}, WarningSeconds {} (lab override of the quest's run timer)",
+        limit, warning);
   } catch (const std::out_of_range&) {
   }
 
