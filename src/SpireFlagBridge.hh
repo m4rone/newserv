@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <chrono>
 #include <memory>
 
 #include "Client.hh"
@@ -28,6 +29,8 @@
 //   q101 and Schtserv commands use them). If SpireBridgeQuests is missing or empty, the register bridge takes nothing:
 //   every register write is handled exactly as without the bridge. The flag part above records only in listed quests
 //   (v5) but delivers stored flags on every join, so E06 keeps reading its payout flag in normal games.
+// - Battle end (v10b): a write of 'ENDB' to register 248 sends the phases in SpireBattleEndPhases as 6x7D (what = 0,
+//   set battle phase) to every client in the Battle game, 2 seconds apart. Off unless the key lists phases.
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -40,6 +43,10 @@ constexpr uint8_t SPIRE_BRIDGE_LAST_REGISTER = 247;
 constexpr uint8_t SPIRE_BRIDGE_REQUEST_REGISTER = 248;
 constexpr uint32_t SPIRE_BRIDGE_REQUEST_VALUE = 0x53504952; // 'SPIR'
 constexpr uint32_t SPIRE_BRIDGE_DONE_VALUE = 0x444F4E45; // 'DONE'
+// v10b: written to register 248 by the quest at the end of a run; see spire_bridge_end_battle. The phases come from the
+// server config key SpireBattleEndPhases (a JSON list of 6x7D phase numbers, e.g. [3, 4]; missing or empty: off).
+constexpr uint32_t SPIRE_BRIDGE_BATTLE_END_VALUE = 0x454E4442; // 'ENDB'
+constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";

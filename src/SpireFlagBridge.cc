@@ -236,6 +236,57 @@ static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint3
   }
 }
 
+// Sends one 6x7D (what = 0: set battle phase) to every client in the game. Same delivery path as the 6x77 answers.
+static void spire_bridge_send_battle_phase(std::shared_ptr<const Lobby> l, uint8_t phase) {
+  G_SetBattleModeData_6x7D cmd;
+  cmd.header.subcommand = 0x7D;
+  cmd.header.size = sizeof(cmd) / 4;
+  cmd.header.unused = 0;
+  cmd.what = 0;
+  cmd.phase = phase;
+  for (const auto& lc : l->clients) {
+    if (lc) {
+      send_command_t(lc, 0x60, 0x00, cmd);
+    }
+  }
+}
+
+static asio::awaitable<void> spire_bridge_send_battle_phases(
+    std::weak_ptr<const Lobby> weak_l, std::vector<uint8_t> phases, std::string log_prefix) {
+  for (size_t z = 0; z < phases.size(); z++) {
+    if (z > 0) {
+      co_await async_sleep(SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL);
+    }
+    auto l = weak_l.lock();
+    if (!l || !l->is_game()) {
+      // The game is gone (everyone left), so there is no battle left to end
+      co_return;
+    }
+    spire_bridge_send_battle_phase(l, phases[z]);
+    l->log.info_f("{}: sent 6x7D phase {} to {} client(s)", log_prefix, phases[z], l->count_clients());
+  }
+}
+
+// v10b: the quest writes 'ENDB' to register 248 at its end. If SpireBattleEndPhases lists phases (default: none), the
+// server sends them as 6x7D to the whole game, SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL apart, so the clients' battle leaves
+// phase 2 the way a Sega battle does when its time limit runs out. Without the key the write is only logged.
+static void spire_bridge_end_battle(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number, uint32_t quest_number) {
+  const auto& phases = c->require_server_state()->data->spire_battle_end_phases;
+  if (phases.empty()) {
+    c->log.info_f("Spire bridge: ENDB for serial {:010} in q{}; SpireBattleEndPhases is empty, no 6x7D sent",
+        serial_number, quest_number);
+    return;
+  }
+  if (l->mode != GameMode::BATTLE) {
+    c->log.info_f("Spire bridge: ENDB for serial {:010} in q{} outside a Battle game; no 6x7D sent", serial_number, quest_number);
+    return;
+  }
+  std::string prefix = std::format("Spire bridge: ENDB for serial {:010} in q{}", serial_number, quest_number);
+  auto s = c->require_server_state();
+  asio::co_spawn(*s->io_context, spire_bridge_send_battle_phases(l, phases, prefix), asio::detached);
+}
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
@@ -260,6 +311,10 @@ bool spire_bridge_handle_register(
     std::string filename = spire_bridge_filename(serial_number);
 
     if (is_request) {
+      if (value == SPIRE_BRIDGE_BATTLE_END_VALUE) {
+        spire_bridge_end_battle(c, l, serial_number, quest_number);
+        return true;
+      }
       if (value != SPIRE_BRIDGE_REQUEST_VALUE) {
         c->log.info_f("Spire bridge: ignored register {} value {:08X} for serial {:010} in q{}",
             register_number, value, serial_number, quest_number);
@@ -457,20 +512,27 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
           spire_guard_describe(snapshot), snapshot.quest_number);
       return;
     }
-    if (snapshot.awaiting_save) {
-      // v10: the lobby restore put the real character back and the 61 after it matched the snapshot, so the snapshot
-      // still is the real character; keep it and track this run as a new one
-      snapshot.awaiting_save = false;
-      snapshot.run_in_progress = true;
-      snapshot.quest_number = quest_number;
-      spire_guard_save(filename, serial_number, snapshot);
-      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; marker set, kept snapshot {}",
-          serial_number, quest_number, spire_guard_describe(snapshot));
-      return;
-    }
 
     // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
     auto character = c->character_file(false, false);
+    if (snapshot.awaiting_save) {
+      // v10: the lobby restore was verified, so since then the server's character data is the real character: the
+      // verifying 61, and after that only 61s and 98s from non-Spire games (a Spire game would have set a marker). A
+      // fresh snapshot keeps any progress from normal games played in between. Only if that data shows a lower level
+      // than the snapshot (impossible in normal play) is the old snapshot kept.
+      if (!character || (character->disp.stats.level < snapshot.disp.stats.level)) {
+        snapshot.awaiting_save = false;
+        snapshot.run_in_progress = true;
+        snapshot.quest_number = quest_number;
+        spire_guard_save(filename, serial_number, snapshot);
+        c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {}; marker set, kept snapshot {}",
+            serial_number, quest_number, character ? "shows a lower level" : "missing", spire_guard_describe(snapshot));
+        return;
+      }
+      snapshot.awaiting_save = false;
+      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; taking a fresh snapshot (was {})",
+          serial_number, quest_number, spire_guard_describe(snapshot));
+    }
     if (!character) {
       c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); marker not set", serial_number, quest_number);
       return;

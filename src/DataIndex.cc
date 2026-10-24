@@ -734,6 +734,17 @@ void DataIndex::load_config_early() {
     }
   } catch (const std::out_of_range&) {
   }
+  this->spire_battle_end_phases.clear();
+  try {
+    for (const auto& item : this->config_json->at("SpireBattleEndPhases").as_list()) {
+      int64_t phase = item->as_int();
+      if ((phase < 0) || (phase > 6)) {
+        throw std::runtime_error(std::format("SpireBattleEndPhases contains {}; 6x7D phases are 0-6", phase));
+      }
+      this->spire_battle_end_phases.emplace_back(phase);
+    }
+  } catch (const std::out_of_range&) {
+  }
 
   auto parse_int_list = +[](const phosg::JSON& json) -> std::vector<uint32_t> {
     std::vector<uint32_t> ret;
