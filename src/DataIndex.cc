@@ -781,6 +781,18 @@ void DataIndex::load_config_early() {
     config_log.info_f("SpireCheckpointRooms: {} room(s)", this->spire_checkpoint_rooms.size());
   } catch (const std::out_of_range&) {
   }
+  this->spire_checkpoint_arrivals.clear();
+  try {
+    for (const auto& item : this->config_json->get_list("SpireCheckpointArrivals")) {
+      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31)) {
+        throw std::runtime_error("SpireCheckpointArrivals: Floor 0-255, K 1-31");
+      }
+      this->spire_checkpoint_arrivals[floor] = k;
+    }
+    config_log.info_f("SpireCheckpointArrivals: {} floor(s)", this->spire_checkpoint_arrivals.size());
+  } catch (const std::out_of_range&) {
+  }
   this->spire_replay_registers.clear();
   try {
     for (const auto& item : this->config_json->get_list("SpireReplayRegisters")) {

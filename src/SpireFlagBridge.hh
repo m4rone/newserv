@@ -150,7 +150,9 @@ void spire_bridge_check_room_clear(
 //   character, like the records), as a bit mask of the rooms ever cleared plus the last room cleared and its quest. A
 //   quest's AvailableIf / EnabledIf reads it as SPIRE_K<k> (room k cleared, 0/1) and SPIRE_MAX (highest room cleared),
 //   the way Sega's challenge stages read CC_Ep1_<n>: a room quest unlocks once the room before it is cleared, and after
-//   a disconnect the next room's quest is where the run continues.
+//   a disconnect the next room's quest is where the run continues. SpireCheckpointArrivals adds a room on the arrival
+//   of a client on a floor (6x1F / 6x21 / 6F): a rest room has no fight to see, so the next room's floor is its
+//   checkpoint.
 // - Replay after a floor load: for the registers in SpireReplayRegisters the server keeps, per game, the latest value
 //   each client synced (6x77). When a client finishes a floor load (6x1F / 6x21, and 6F) it gets, after
 //   SPIRE_REPLAY_DELAY (and once more SPIRE_REPLAY_SECOND_DELAY later), the latest value of every such register written by another client, and the last room-cleared

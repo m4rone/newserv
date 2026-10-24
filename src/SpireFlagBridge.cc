@@ -1459,6 +1459,7 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
 static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room);
+static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k);
 static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
 
 // v19: room clear detection. The wave events of one room on one floor, read from the map the server keeps per game.
@@ -1628,7 +1629,11 @@ static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor
     return;
   }
   uint8_t k = it->second;
-  for (const auto& lc : l->clients) {
+  spire_checkpoint_store(l, l->clients, k);
+}
+
+static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k) {
+  for (const auto& lc : clients) {
     if (!lc || (lc->version() != Version::GC_V3)) {
       continue;
     }
@@ -1640,6 +1645,11 @@ static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor
         continue;
       }
       auto cp = spire_checkpoint_load(filename);
+      // A room already stored (a respawn reloads its floor, an arrival repeats) never moves the last room back
+      bool known = (cp.rooms >> (k - 1)) & 1;
+      if (known && (k < cp.last_room)) {
+        continue;
+      }
       cp.rooms |= (1u << (k - 1));
       cp.last_room = k;
       cp.last_quest = l->quest->meta.quest_number;
@@ -1769,7 +1779,16 @@ static asio::awaitable<void> spire_replay_send(
 
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   try {
-    if (!spire_replay_applies(c, l) || !spire_replay_state_for(l, false)) {
+    if (!spire_replay_applies(c, l)) {
+      return;
+    }
+    const auto& arrivals = c->require_server_state()->data->spire_checkpoint_arrivals;
+    auto arr = arrivals.find(c->floor);
+    if (arr != arrivals.end()) {
+      std::array<std::shared_ptr<Client>, 1> just_c{c}; // each arriving client for its own character
+      spire_checkpoint_store(l, just_c, arr->second);
+    }
+    if (!spire_replay_state_for(l, false)) {
       return;
     }
     auto s = c->require_server_state();
