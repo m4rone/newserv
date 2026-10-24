@@ -271,6 +271,20 @@ static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint3
   }
 }
 
+// v15: the guard has its own list (SpireGuardQuests), so a probe quest can be protected without its flags and
+// registers being stored under the player's serial. Without the key the guard follows SpireBridgeQuests, as before.
+static bool spire_guard_quest_is_guarded(std::shared_ptr<const Client> c, uint32_t quest_number) {
+  try {
+    const auto& data = c->require_server_state()->data;
+    if (data->spire_guard_quest_numbers) {
+      return data->spire_guard_quest_numbers->count(quest_number) != 0;
+    }
+    return data->spire_bridge_quest_numbers.count(quest_number) != 0;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 // Sends one 6x7D (what = 0: set battle phase) to every client in the game. Same delivery path as the 6x77 answers.
 static void spire_bridge_send_battle_phase(std::shared_ptr<const Lobby> l, uint8_t phase) {
   G_SetBattleModeData_6x7D cmd;
@@ -637,9 +651,9 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       return true;
     }
     uint32_t quest_number = l->quest->meta.quest_number;
-    if (!spire_bridge_quest_is_bridged(c, quest_number)) {
+    if (!spire_guard_quest_is_guarded(c, quest_number)) {
       // v12 (critic K5): a replace_char quest outside the list runs without the guard; say so
-      c->log.warning_f("Spire guard: q{} is a replace_char Battle quest but not in SpireBridgeQuests; no guard for this run",
+      c->log.warning_f("Spire guard: q{} is a replace_char Battle quest but not in SpireGuardQuests (or SpireBridgeQuests if that key is missing); no guard for this run",
           quest_number);
       return true;
     }

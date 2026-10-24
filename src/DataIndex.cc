@@ -734,6 +734,15 @@ void DataIndex::load_config_early() {
     }
   } catch (const std::out_of_range&) {
   }
+  this->spire_guard_quest_numbers.reset();
+  try {
+    std::unordered_set<uint32_t> guard_quests;
+    for (const auto& item : this->config_json->at("SpireGuardQuests").as_list()) {
+      guard_quests.emplace(item->as_int());
+    }
+    this->spire_guard_quest_numbers = std::move(guard_quests);
+  } catch (const std::out_of_range&) {
+  }
   this->spire_battle_end_phases.clear();
   try {
     for (const auto& item : this->config_json->at("SpireBattleEndPhases").as_list()) {

@@ -68,7 +68,7 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Spire guard (v6-v14; GC V3 only).
+// Spire guard (v6-v15; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
 // character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
@@ -109,6 +109,9 @@ bool spire_bridge_handle_register(
 // - v13: a game join refused in a lobby while RestorePending is set and no restore runs starts the lobby restore.
 // - v14: a login 61 with the snapshot's level and EXP always confirms the lobby restore (no push), and no overlay
 //   fingerprint is kept when the client already had the real character in memory at the lobby restore.
+// - v15: the guard protects the quests in the config key SpireGuardQuests; if that key is missing, the quests in
+//   SpireBridgeQuests. So a probe quest with replace_char can be guarded without the bridge storing its flags and
+//   registers under the player's serial.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.

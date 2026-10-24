@@ -160,6 +160,8 @@ struct DataIndex {
   // Quest numbers in which the Spire register bridge applies (SpireBridgeQuests); empty = the bridge never takes a
   // register write (see SpireFlagBridge.hh)
   std::unordered_set<uint32_t> spire_bridge_quest_numbers;
+  // v15: quests the Spire guard protects; unset (the key is missing) means the guard uses spire_bridge_quest_numbers
+  std::optional<std::unordered_set<uint32_t>> spire_guard_quest_numbers;
   std::vector<uint8_t> spire_battle_end_phases;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
