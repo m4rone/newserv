@@ -24,7 +24,7 @@ check 1 1 skip     # already there
 check 1 0 skip     # never to the city (B-E01-41)
 check 0 0 skip
 check 1 2 skip loading  # audit S-12: a partner that is still loading is never warped
-check 15 2 skip    # floor 0x0F: no floor reported yet
+check 15 14 warp   # Ep2: floor 0x0F (Gol Dragon) is a real floor, not "loading"
 
 GOT=$($EXECUTABLE spire-lives-check 2>/dev/null)
 [ "$GOT" = ok ] || { echo "FAIL: spire-lives-check: $GOT"; exit 1; }

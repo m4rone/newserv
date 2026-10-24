@@ -184,10 +184,8 @@ constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // a
 // transitions during the run. Also v29: the lives a client reported ('L' codes) are forgotten at every quest start,
 // so LastLives in the checkpoint file can only come from the current run.
 constexpr uint32_t SPIRE_FOLLOW_CITY_FLOOR = 0;
-// Audit S-12: a client that is still loading (Client::Flag::LOADING, or still on Client::floor's initial value 0x0F
-// because it has not reported a floor yet) is never warped. Ep1 has no game floor 0x0F; Ep2 does (Gol Dragon), so the
-// Ep2 rooms need another not-yet-loaded marker.
-constexpr uint32_t SPIRE_FOLLOW_UNLOADED_FLOOR = 0x0F;
+// Audit S-12: a client that is still loading (Client::Flag::LOADING) is never warped. Only the flag counts, not a floor
+// number: Client::floor starts at 0x0F, but 0x0F is a real floor in Ep2 (Gol Dragon).
 
 // Called at every quest start (on_quest_loaded) for each client of the game. Never throws.
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c);

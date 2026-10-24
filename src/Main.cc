@@ -2736,7 +2736,7 @@ Action a_spire_follow_check(
     Print \"warp\" or \"skip\": whether Spire follow the leader (v26/v29) warps a\n\
     partner on PARTNER_FLOOR to the leader's LEADER_FLOOR. Never from or to the\n\
     city (floor 0), never when already there, never a partner that is still\n\
-    loading (the word loading, or partner floor 0x0F).\n",
+    loading (the word loading).\n",
     +[](phosg::Arguments& args) {
       bool warp = spire_follow_should_warp(
           args.get<uint32_t>(1), args.get<uint32_t>(2), args.get<std::string>(3, false) == "loading");

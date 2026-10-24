@@ -153,12 +153,13 @@ void run_static_tests() {
   {
     expect(spire_follow_should_warp(1, 2, false));
     expect(!spire_follow_should_warp(1, 2, true));                        // LOADING set
-    expect(!spire_follow_should_warp(SPIRE_FOLLOW_UNLOADED_FLOOR, 2));    // no floor reported yet
+    expect(spire_follow_should_warp(0x0F, 0x0E));                         // Ep2: Gol Dragon is a real floor
+    expect(spire_follow_should_warp(0x0E, 0x0F));
     expect(!spire_follow_should_warp(SPIRE_FOLLOW_CITY_FLOOR, 2));        // the city takes the Ragol warp itself
     expect(!spire_follow_should_warp(1, SPIRE_FOLLOW_CITY_FLOOR));        // never to the city
     expect(!spire_follow_should_warp(2, 2));                              // already there
     expect(spire_follow_partner_pending(1, 2, true));                     // remembered, follows after its load
-    expect(spire_follow_partner_pending(SPIRE_FOLLOW_UNLOADED_FLOOR, 2, false));
+    expect(!spire_follow_partner_pending(0x0F, 0x0E, false));              // Ep2 floor 0x0F, loaded: warped now
     expect(!spire_follow_partner_pending(1, 2, false));                   // warped now
     expect(!spire_follow_partner_pending(SPIRE_FOLLOW_CITY_FLOOR, 2, false)); // city: takes the Ragol warp itself
   }

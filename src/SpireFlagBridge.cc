@@ -2090,15 +2090,13 @@ static asio::awaitable<void> spire_replay_send(
 }
 
 bool spire_follow_partner_pending(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading) {
-  return !spire_follow_should_warp(partner_floor, leader_floor, partner_loading) &&
-      (partner_loading || (partner_floor == SPIRE_FOLLOW_UNLOADED_FLOOR));
+  return partner_loading && spire_follow_should_warp(partner_floor, leader_floor, false);
 }
 
 bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading) {
   // never to the city (B-E01-41), never from the city (v29), never when already there, never a client that is still
   // loading (audit S-12): a 6x94 mid-load leaves the partner between two floors
-  return !partner_loading && (partner_floor != SPIRE_FOLLOW_UNLOADED_FLOOR) &&
-      (leader_floor != SPIRE_FOLLOW_CITY_FLOOR) && (partner_floor != SPIRE_FOLLOW_CITY_FLOOR) &&
+  return !partner_loading && (leader_floor != SPIRE_FOLLOW_CITY_FLOOR) && (partner_floor != SPIRE_FOLLOW_CITY_FLOOR) &&
       (partner_floor != leader_floor);
 }
 
@@ -2140,7 +2138,7 @@ static void spire_follow_leader(std::shared_ptr<Client> c, std::shared_ptr<Lobby
   if (follow && (c->lobby_client_id != follow->first) && spire_follow_pending.count(c.get())) {
     // A partner skipped mid-load reports a floor: once it is loaded, follow the leader to its current floor, with the
     // same checks. While it is still loading it stays pending.
-    if (c->check_flag(Client::Flag::LOADING) || (c->floor == SPIRE_FOLLOW_UNLOADED_FLOOR)) {
+    if (c->check_flag(Client::Flag::LOADING)) {
       return;
     }
     spire_follow_pending.erase(c.get());
