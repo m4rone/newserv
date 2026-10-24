@@ -972,6 +972,29 @@ static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
 }
 
 static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_number);
+
+// v31: the same items (data1 and data2; the item ID differs per login) in any order, and the same meseta. Lab
+// 2026-10-24 18:11: BidX logged in with the snapshot's level and EXP but the run's 7 items instead of its 20 (Dolphin
+// stopped in the lobby before a save); level and EXP alone confirmed the lobby restore and the 20 items were lost.
+bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta) {
+  if ((a.num_items != b.num_items) || (a_meseta != b_meseta) || (a.num_items > a.items.size())) {
+    return false;
+  }
+  auto key = [](const ItemData& d) {
+    std::array<uint8_t, 16> ret;
+    memcpy(ret.data(), d.data1.data(), 12);
+    memcpy(ret.data() + 12, d.data2.data(), 4);
+    return ret;
+  };
+  std::vector<std::array<uint8_t, 16>> ka, kb;
+  for (size_t z = 0; z < a.num_items; z++) {
+    ka.emplace_back(key(a.items[z].data));
+    kb.emplace_back(key(b.items[z].data));
+  }
+  std::sort(ka.begin(), ka.end());
+  std::sort(kb.begin(), kb.end());
+  return ka == kb;
+}
 static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l);
 
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
@@ -1400,9 +1423,14 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
             (character->disp.stats.meseta == snapshot.overlay_meseta) &&
             (character->inventory.num_items == snapshot.overlay_num_items);
         bool lost_exp = exp < snapshot.disp.stats.exp;
-        // v14: a 61 with the snapshot's level and EXP is the real character, also if an (older) fingerprint matches it
-        bool same = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
-        if (same || (!shows_overlay && !lost_exp)) {
+        // v14: a 61 with the snapshot's level and EXP is the real character, also if an (older) fingerprint matches it.
+        // v31: only with the snapshot's items and meseta too; a run character with the same level and EXP (no overlay
+        // fingerprint is kept then, v14) otherwise passes for the real one.
+        bool same_stats = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
+        bool same_items = spire_guard_same_inventory(
+            character->inventory, character->disp.stats.meseta, snapshot.inventory, snapshot.disp.stats.meseta);
+        bool same = same_stats && same_items;
+        if (same || (!same_stats && !shows_overlay && !lost_exp)) {
           snapshot.has_overlay = false;
           spire_guard_save(filename, serial_number, snapshot);
           c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, marker cleared, no push",
@@ -1410,9 +1438,12 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
               same ? "lobby restore confirmed" : "progress since the lobby restore");
           co_return true;
         }
-        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, pushing again",
-            serial_number, level + 1, exp, snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(),
-            shows_overlay ? "the card still holds the overlay" : "less EXP than the snapshot");
+        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {} with {} items meseta {}, snapshot Lv{} EXP {} with {} items meseta {}; {}, pushing again",
+            serial_number, level + 1, exp, character->inventory.num_items, character->disp.stats.meseta.load(),
+            snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(), snapshot.inventory.num_items,
+            snapshot.disp.stats.meseta.load(),
+            same_stats ? "the items differ from the snapshot (the card still holds the run)"
+                       : (shows_overlay ? "the card still holds the overlay" : "less EXP than the snapshot"));
       } else {
         c->log.info_f("Spire guard: no login 61 for serial {:010}; cannot confirm the lobby restore, pushing again", serial_number);
       }

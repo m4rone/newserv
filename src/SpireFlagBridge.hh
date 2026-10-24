@@ -271,6 +271,10 @@ void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lo
 // and the lobby restore puts the real character back, so no item is lost. A client that cannot run functions only gets
 // the text and keeps the guard. spire_guard_no_quest_action is the decision, kept free of state for the static tests.
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
+
+// v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
+// The login confirmation of a lobby restore requires this next to the snapshot's level and EXP.
+bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta);
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS = 30;
 enum class SpireNoQuestAction { NONE, WAIT, EXIT, TELL };
 SpireNoQuestAction spire_guard_no_quest_action(
