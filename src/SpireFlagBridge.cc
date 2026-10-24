@@ -10,6 +10,8 @@
 #include <phosg/JSON.hh>
 #include <phosg/Strings.hh>
 #include <utility>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "AsyncUtils.hh"
 #include "CommandFormats.hh"
@@ -39,6 +41,42 @@ static bool spire_bridge_flag_in_range(uint16_t flag_num) {
 static bool spire_bridge_register_is_stored(uint8_t register_number) {
   return ((register_number >= SPIRE_BRIDGE_FIRST_REGISTER) && (register_number <= 239)) ||
       ((register_number >= 243) && (register_number <= SPIRE_BRIDGE_LAST_REGISTER));
+}
+
+// v12: writes data to filename so that a crash or power loss leaves either the old file or the new one, never a
+// partial or empty one: write a temp file, fsync it, rename it over the target, then fsync the directory.
+static void spire_bridge_write_durable(const std::string& filename, const std::string& data) {
+  std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
+  std::string temp_filename = filename + ".tmp";
+  int fd = ::open(temp_filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    throw std::runtime_error(std::format("cannot open {}: errno {}", temp_filename, errno));
+  }
+  size_t offset = 0;
+  while (offset < data.size()) {
+    ssize_t written = ::write(fd, data.data() + offset, data.size() - offset);
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      int error = errno;
+      ::close(fd);
+      throw std::runtime_error(std::format("cannot write {}: errno {}", temp_filename, error));
+    }
+    offset += written;
+  }
+  if (::fsync(fd) != 0) {
+    int error = errno;
+    ::close(fd);
+    throw std::runtime_error(std::format("cannot fsync {}: errno {}", temp_filename, error));
+  }
+  ::close(fd);
+  std::filesystem::rename(temp_filename, filename);
+  int dir_fd = ::open(SPIRE_BRIDGE_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    ::fsync(dir_fd);
+    ::close(dir_fd);
+  }
 }
 
 // Returns the GC license serial number for the client, or 0 if the bridge does not apply to this client.
@@ -111,10 +149,7 @@ static void spire_bridge_save(const std::string& filename, uint32_t serial_numbe
   });
   std::string data = json.serialize(phosg::JSON::SerializeOption::FORMAT | phosg::JSON::SerializeOption::HEX_INTEGERS);
 
-  std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
-  std::string temp_filename = filename + ".tmp";
-  phosg::save_file(temp_filename, data);
-  std::filesystem::rename(temp_filename, filename);
+  spire_bridge_write_durable(filename, data);
 }
 
 static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint32_t quest_number);
@@ -384,6 +419,13 @@ struct SpireGuardSnapshot {
   // the client's memory until the client saves it, so the card may still hold the overlay. Cleared at the next login
   // whose 61 already shows the snapshot's level and EXP (no push); any other login turns it back into restore_pending.
   bool awaiting_save = false;
+  // v12: what the client had in memory right before the lobby restore (from its 30): the overlay. Set together with
+  // awaiting_save. Only a login 61 that still shows exactly this gets a push; any other unequal 61 is real progress.
+  bool has_overlay = false;
+  uint32_t overlay_level = 0;
+  uint32_t overlay_exp = 0;
+  uint32_t overlay_meseta = 0;
+  uint32_t overlay_num_items = 0;
   uint32_t quest_number = 0;
   uint64_t snapshot_time_usecs = 0;
   bool has_character = false;
@@ -469,6 +511,14 @@ static SpireGuardSnapshot spire_guard_load(const std::string& filename) {
   ret.run_in_progress = json.get_bool("RunInProgress", false);
   ret.restore_pending = json.get_bool("RestorePending", false);
   ret.awaiting_save = json.get_bool("AwaitingSave", false);
+  if (json.contains("Overlay")) {
+    const auto& overlay = json.at("Overlay");
+    ret.has_overlay = true;
+    ret.overlay_level = overlay.get_int("Level");
+    ret.overlay_exp = overlay.get_int("EXP");
+    ret.overlay_meseta = overlay.get_int("Meseta");
+    ret.overlay_num_items = overlay.get_int("NumItems");
+  }
   ret.quest_number = json.get_int("QuestNumber", 0);
   ret.snapshot_time_usecs = json.get_int("SnapshotTime", 0);
   if (json.contains("Inventory") && json.contains("Disp")) {
@@ -490,6 +540,14 @@ static void spire_guard_save(const std::string& filename, uint32_t serial_number
       {"QuestNumber", snapshot.quest_number},
       {"SnapshotTime", snapshot.snapshot_time_usecs},
   });
+  if (snapshot.has_overlay) {
+    json.emplace("Overlay", phosg::JSON::dict({
+        {"Level", snapshot.overlay_level},
+        {"EXP", snapshot.overlay_exp},
+        {"Meseta", snapshot.overlay_meseta},
+        {"NumItems", snapshot.overlay_num_items},
+    }));
+  }
   if (snapshot.has_character) {
     Language language = snapshot.inventory.language;
     json.emplace("Name", snapshot.disp.visual.name.decode(language));
@@ -501,10 +559,7 @@ static void spire_guard_save(const std::string& filename, uint32_t serial_number
   }
   std::string data = json.serialize(phosg::JSON::SerializeOption::FORMAT);
 
-  std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
-  std::string temp_filename = filename + ".tmp";
-  phosg::save_file(temp_filename, data);
-  std::filesystem::rename(temp_filename, filename);
+  spire_bridge_write_durable(filename, data);
 }
 
 static std::string spire_guard_describe(const SpireGuardSnapshot& snapshot) {
@@ -572,29 +627,32 @@ static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
   return false;
 }
 
-void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
     if (!l->is_game() || (l->mode != GameMode::BATTLE) || !l->quest) {
-      return;
+      return true;
     }
     const auto& rules = l->quest->meta.battle_rules;
     if (!rules || !rules->replace_char) {
-      return;
+      return true;
     }
     uint32_t quest_number = l->quest->meta.quest_number;
     if (!spire_bridge_quest_is_bridged(c, quest_number)) {
-      return;
+      // v12 (critic K5): a replace_char quest outside the list runs without the guard; say so
+      c->log.warning_f("Spire guard: q{} is a replace_char Battle quest but not in SpireBridgeQuests; no guard for this run",
+          quest_number);
+      return true;
     }
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     if (!serial_number) {
-      return;
+      return true;
     }
 
     // allow_load=false: on GC, loading would create an empty character; allow_overlay=false: never the overlay
     auto character = c->character_file(false, false);
     if (!character) {
-      c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); marker not set", serial_number, quest_number);
-      return;
+      c->log.warning_f("Spire guard: no character data for serial {:010} (q{}); no snapshot, no overlay", serial_number, quest_number);
+      return false;
     }
     spire_guard_run_files.erase(c.get());
     std::string filename = spire_guard_filename_for(c, serial_number);
@@ -604,7 +662,7 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
           snapshot.restore_pending ? "restore pending" : "run already in progress", serial_number, quest_number,
           spire_guard_describe(snapshot), snapshot.quest_number);
-      return;
+      return true;
     }
 
     if (snapshot.awaiting_save) {
@@ -619,7 +677,7 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
         spire_guard_save(filename, serial_number, snapshot);
         c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {}; marker set, kept snapshot {}",
             serial_number, quest_number, "shows a lower level", spire_guard_describe(snapshot));
-        return;
+        return true;
       }
       snapshot.awaiting_save = false;
       c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; taking a fresh snapshot (was {})",
@@ -637,8 +695,11 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
         serial_number, quest_number, spire_guard_describe(snapshot));
 
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire guard: failed to start run: {}", e.what());
+    // v12 (critic K2): fail closed; a run without a stored snapshot must not get the overlay
+    c->log.warning_f("Spire guard: failed to start run: {}; no overlay", e.what());
+    return false;
   }
+  return true;
 }
 
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
@@ -737,6 +798,7 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
   }
   snapshot.restore_pending = false;
   snapshot.awaiting_save = in_lobby;
+  snapshot.has_overlay = in_lobby && snapshot.has_overlay;
   spire_guard_save(filename, serial_number, snapshot);
   c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}",
       serial_number, level + 1, exp, items_str,
@@ -803,6 +865,12 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
           serial_number);
       co_return false;
     }
+    // v12: the overlay as the client has it now; kept with AwaitingSave if this is a lobby restore
+    snapshot.has_overlay = true;
+    snapshot.overlay_level = info.character->disp.stats.level;
+    snapshot.overlay_exp = info.character->disp.stats.exp;
+    snapshot.overlay_meseta = info.character->disp.stats.meseta;
+    snapshot.overlay_num_items = info.character->inventory.num_items;
     auto merged = info.character;
     uint8_t level_before = merged->disp.stats.level;
     auto visual = merged->disp.visual;
@@ -811,7 +879,11 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     merged->disp.visual = visual;
 
     // Same function call as $loadchar
-    co_await prepare_client_for_patches(c);
+    {
+      // v12 (critic K12): this can wait for the client too
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to the patch preparation");
+      co_await prepare_client_for_patches(c);
+    }
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
     PSOGCCharacterFile::Character gc_char = *merged;
@@ -872,21 +944,31 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
       co_return true;
     }
     if (snapshot.awaiting_save && !snapshot.run_in_progress && !snapshot.restore_pending) {
-      // v10: after a verified lobby restore, the client may have saved the real character since. If the 61 of this
-      // login already shows it, the card holds it: clear the marker without a push. Otherwise push again.
+      // v10: after a verified lobby restore, the client may have saved the real character since. v12 (critic K1): the
+      // client may also have played a normal game since and saved real progress, which a push would undo. EXP never
+      // goes down in normal play, so only a 61 with less EXP than the snapshot, or one that still shows exactly the
+      // overlay the lobby restore replaced, means the card holds the overlay. Any other 61 clears the marker.
       snapshot.awaiting_save = false;
       auto character = c->character_file(false, false);
-      if (character && (character->disp.stats.level == snapshot.disp.stats.level) &&
-          (character->disp.stats.exp == snapshot.disp.stats.exp)) {
-        spire_guard_save(filename, serial_number, snapshot);
-        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {} like the snapshot; lobby restore confirmed, marker cleared, no push",
-            serial_number, character->disp.stats.level + 1, character->disp.stats.exp.load());
-        co_return true;
-      }
       if (character) {
-        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; the client did not save the lobby restore, pushing again",
-            serial_number, character->disp.stats.level + 1, character->disp.stats.exp.load(),
-            snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load());
+        uint32_t level = character->disp.stats.level;
+        uint32_t exp = character->disp.stats.exp;
+        bool shows_overlay = snapshot.has_overlay && (level == snapshot.overlay_level) && (exp == snapshot.overlay_exp) &&
+            (character->disp.stats.meseta == snapshot.overlay_meseta) &&
+            (character->inventory.num_items == snapshot.overlay_num_items);
+        bool lost_exp = exp < snapshot.disp.stats.exp;
+        if (!shows_overlay && !lost_exp) {
+          snapshot.has_overlay = false;
+          spire_guard_save(filename, serial_number, snapshot);
+          bool same = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
+          c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, marker cleared, no push",
+              serial_number, level + 1, exp, snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(),
+              same ? "lobby restore confirmed" : "progress since the lobby restore");
+          co_return true;
+        }
+        c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, pushing again",
+            serial_number, level + 1, exp, snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(),
+            shows_overlay ? "the card still holds the overlay" : "less EXP than the snapshot");
       } else {
         c->log.info_f("Spire guard: no login 61 for serial {:010}; cannot confirm the lobby restore, pushing again", serial_number);
       }
@@ -972,7 +1054,7 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
       spire_guard_describe(snapshot), serial_number);
 }
 
-bool spire_guard_game_join_allowed(std::shared_ptr<Client> c) {
+bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
     return true;
@@ -981,7 +1063,13 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c) {
   bool pending = false;
   try {
     std::string filename = spire_guard_filename_for(c, serial_number);
-    pending = filename.empty() ? spire_guard_serial_has_open_marker(serial_number) : spire_guard_load(filename).restore_pending;
+    if (filename.empty()) {
+      pending = spire_guard_serial_has_open_marker(serial_number);
+    } else {
+      // v12 (critic K7): a run that never got its 98 counts too
+      auto snapshot = spire_guard_load(filename);
+      pending = snapshot.restore_pending || snapshot.run_in_progress;
+    }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
     pending = true;
@@ -991,6 +1079,8 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c) {
   }
   c->log.info_f("Spire guard: game join refused for serial {:010}: {}", serial_number,
       restoring ? "a restore is running" : "the restore is not verified");
-  send_lobby_message_box(c, "$C7Your character is\nstill being restored.\nTry again in a\nmoment.");
+  if (tell_client) {
+    send_lobby_message_box(c, "$C7Your character is\nstill being restored.\nTry again in a\nmoment.");
+  }
   return false;
 }

@@ -323,7 +323,8 @@ asio::awaitable<void> start_login_server_procedure(std::shared_ptr<Client> c) {
   }
 
   if (c->preferred_lobby_id >= 0) {
-    s->add_client_to_available_lobby(c, true);
+    // Spire guard (v12): no game straight from the login while a restore is open (see SpireFlagBridge.hh)
+    s->add_client_to_available_lobby(c, spire_guard_game_join_allowed(c, false));
     if (c->require_lobby()->is_game()) {
       c->set_flag(Client::Flag::LOADING);
       c->log.info_f("LOADING flag set");
@@ -2436,7 +2437,11 @@ static void on_quest_loaded(std::shared_ptr<Lobby> l) {
         lc->change_bank(lc->bb_character_index);
       }
       // Spire guard (v6): store the real character before the overlay replaces it (see SpireFlagBridge.hh)
-      spire_guard_begin_run(lc, l);
+      if (!spire_guard_begin_run(lc, l)) {
+        // v12: no snapshot stored, so no overlay that the client could save over the real character
+        lc->channel->disconnect();
+        continue;
+      }
       lc->create_battle_overlay(l->quest->meta.battle_rules, s->data->level_table(lc->version()));
       lc->log.info_f("Created battle overlay");
     }
