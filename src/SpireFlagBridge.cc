@@ -1822,11 +1822,38 @@ static asio::awaitable<void> spire_replay_send(
   }
 }
 
+static asio::awaitable<void> spire_follow_leader_warp(
+    std::weak_ptr<Client> weak_leader, std::weak_ptr<Lobby> weak_l, uint32_t floor, uint32_t delay_ms) {
+  co_await async_sleep(std::chrono::milliseconds(delay_ms));
+  auto leader = weak_leader.lock();
+  auto l = weak_l.lock();
+  if (!leader || !l || (leader->lobby.lock() != l) || (leader->floor != floor)) {
+    co_return; // the leader left the game or moved on; its next floor load warps again
+  }
+  for (const auto& lc : l->clients) {
+    if (lc && (lc != leader) && (lc->floor != floor)) {
+      l->log.info_f("Spire follow: client {} on floor {:02X} warped to the leader's floor {:02X}", lc->lobby_client_id,
+          lc->floor, floor);
+      send_warp(lc, floor, true);
+    }
+  }
+}
+
+static void spire_follow_leader(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  const auto& follow = c->require_server_state()->data->spire_follow_leader;
+  if (!follow || (c->lobby_client_id != follow->first) || (c->floor == 0)) {
+    return;
+  }
+  auto s = c->require_server_state();
+  asio::co_spawn(*s->io_context, spire_follow_leader_warp(c, l, c->floor, follow->second), asio::detached);
+}
+
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   try {
     if (!spire_replay_applies(c, l)) {
       return;
     }
+    spire_follow_leader(c, l);
     const auto& arrivals = c->require_server_state()->data->spire_checkpoint_arrivals;
     auto arr = arrivals.find(c->floor);
     if (arr != arrivals.end()) {

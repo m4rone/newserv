@@ -800,6 +800,17 @@ void DataIndex::load_config_early() {
     config_log.info_f("SpireCheckpointArrivals: {} floor(s)", this->spire_checkpoint_arrivals.size());
   } catch (const std::out_of_range&) {
   }
+  this->spire_follow_leader.reset();
+  try {
+    const auto& f = this->config_json->at("SpireFollowLeader");
+    int64_t leader = f.get_int("LeaderClient", 0), delay = f.get_int("DelayMs", 2000);
+    if ((leader < 0) || (leader > 11) || (delay < 0) || (delay > 60000)) {
+      throw std::runtime_error("SpireFollowLeader: LeaderClient 0-11, DelayMs 0-60000");
+    }
+    this->spire_follow_leader = std::make_pair(static_cast<uint8_t>(leader), static_cast<uint32_t>(delay));
+    config_log.info_f("SpireFollowLeader: client {} leads, others follow after {} ms", leader, delay);
+  } catch (const std::out_of_range&) {
+  }
   this->spire_replay_registers.clear();
   try {
     for (const auto& item : this->config_json->get_list("SpireReplayRegisters")) {

@@ -173,6 +173,12 @@ void spire_bridge_check_boss_defeated(
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
 constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
 
+// v26 follow the leader (SpireFollowLeader, regie 2026-10-24 Marck's choice A): a room starts as soon as the leader is
+// in it, the partner never waits for the other. When the leader client loads a floor (6x1F / 6x21 / 6F) other than
+// Pioneer 2, the server warps every other client of the game that is not on that floor there (6x94, the $warpall
+// form), after DelayMs and only if the leader is still on that floor. Never to floor 0: arriving on Pioneer 2 writes
+// the Lv1 overlay to the card (B-E01-41).
+
 // Called from the 6x77 handler for every quest register write in a game, after the bridge (forwarded or not). Never throws.
 void spire_replay_note_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value);

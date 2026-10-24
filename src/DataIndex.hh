@@ -178,6 +178,9 @@ struct DataIndex {
   // v23 replay: SpireReplayRegisters [n, ...], the quest registers whose latest 6x77 value the server keeps per game and
   // sends again to a client after its own floor load (a packet that arrives during a load can be lost); empty means off.
   std::set<uint8_t> spire_replay_registers;
+  // v26 follow the leader: SpireFollowLeader {"LeaderClient": n, "DelayMs": m}. When that client of a Spire game loads
+  // a floor other than Pioneer 2, every other client not on it is warped there (6x94) after DelayMs; missing = off.
+  std::optional<std::pair<uint8_t, uint32_t>> spire_follow_leader;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};
