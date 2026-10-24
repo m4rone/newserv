@@ -37,6 +37,7 @@
 //   to the writing client: wave n/m, life lost, time warning, partner wait, run over.
 // - Records (v18): best score, best time, runs and wins per character on the server (SPIRE_BRIDGE_REC_*).
 // - Run timer (v19): the time limit, its warning and "player left" on the server (SPIRE_BRIDGE_TIMER_*).
+// - Reward draw (v20): the pause A draw on the server (SPIRE_BRIDGE_DRAW_*, SpireDraw.hh).
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -100,6 +101,17 @@ constexpr auto SPIRE_BRIDGE_TIMER_TICK = std::chrono::seconds(1);
 // waits for that register instead of polling its own kill counters.
 constexpr uint8_t SPIRE_BRIDGE_ROOM_CLEARED_REGISTER = 251;
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEARED_TAG = 0x434C0000; // 'CL'
+
+// v20: the reward draw on the server. The quest writes its SPIRE_DRAW_NUM_INPUTS input registers, in order, to
+// register SPIRE_BRIDGE_DRAW_DATA_REGISTER (each a 6x77; the bridge takes them and keeps them per client, never forwards
+// them), then 'Q' << 24 | count to register 248. The server loads the draw table system/spire-draw/q<quest>.json (written
+// by the quest build), draws, and answers that client like SPIR: 6x77 r181 = the drawn menu, then r248 = 'DONE'. With a
+// missing table or a wrong count only the log says why and no answer is sent: the quest's own draw takes over after
+// its wait. The data register is in the free range r251-r255 (regie); r251 room clear, r252 run end.
+constexpr uint8_t SPIRE_BRIDGE_DRAW_REQUEST = 'Q';
+constexpr uint8_t SPIRE_BRIDGE_DRAW_DATA_REGISTER = 253;
+constexpr uint8_t SPIRE_BRIDGE_DRAW_RESULT_REGISTER = 181;
+constexpr const char* SPIRE_BRIDGE_DRAW_DIRECTORY = "system/spire-draw";
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";

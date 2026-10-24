@@ -16,6 +16,7 @@
 #include "AsyncUtils.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
+#include "SpireDraw.hh"
 #include "ServerState.hh"
 
 // Stored entries, keyed by (difficulty, flag number). The value is true if the flag was set, false if it was cleared.
@@ -427,6 +428,47 @@ static void spire_run_timer_start(
   asio::co_spawn(*s->io_context, spire_run_timer_tick(l, l.get(), t.generation), asio::detached);
 }
 
+// v20: the draw inputs a client sent to SPIRE_BRIDGE_DRAW_DATA_REGISTER since its last request.
+static std::unordered_map<const Client*, std::vector<uint32_t>> spire_draw_inputs;
+
+static void spire_draw_answer(std::shared_ptr<Client> c, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
+  spire_draw_inputs.erase(c.get());
+  if (values.size() != (value & 0xFFFF)) {
+    c->log.warning_f("Spire bridge: draw for serial {:010} in q{}: {} inputs announced, {} received; no answer",
+        serial_number, quest_number, value & 0xFFFF, values.size());
+    return;
+  }
+  std::string filename = std::format("{}/q{}.json", SPIRE_BRIDGE_DRAW_DIRECTORY, quest_number);
+  SpireDrawTable table;
+  try {
+    table = SpireDrawTable::from_json_file(filename);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire bridge: draw for serial {:010} in q{}: table {}: {}; no answer", serial_number,
+        quest_number, filename, e.what());
+    return;
+  }
+  auto in = spire_draw_input_from_values(values);
+  uint32_t drawn = spire_draw(table, in, [](uint32_t n) -> uint32_t {
+    return n ? (phosg::random_object<uint32_t>() % n) : 0;
+  });
+
+  G_SyncQuestRegister_6x77 cmd;
+  cmd.header.subcommand = 0x77;
+  cmd.header.size = sizeof(cmd) / 4;
+  cmd.header.unused = 0;
+  cmd.register_number = SPIRE_BRIDGE_DRAW_RESULT_REGISTER;
+  cmd.value.as_int = drawn;
+  send_command_t(c, 0x60, 0x00, cmd);
+  cmd.register_number = SPIRE_BRIDGE_REQUEST_REGISTER;
+  cmd.value.as_int = SPIRE_BRIDGE_DONE_VALUE;
+  send_command_t(c, 0x60, 0x00, cmd);
+  c->log.info_f("Spire bridge: draw for serial {:010} in q{} (arch {} k {} path {} choice {} relics {:08X}): r{}={:08X}, "
+      "r{}=DONE", serial_number, quest_number, in.archetype, in.k, in.path, in.choice, in.relics,
+      SPIRE_BRIDGE_DRAW_RESULT_REGISTER, drawn, SPIRE_BRIDGE_REQUEST_REGISTER);
+}
+
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the same words as the quest's window_msg (spire.json
 // texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code.
 static std::string spire_bridge_message_text(uint32_t value) {
@@ -583,7 +625,8 @@ bool spire_bridge_handle_register(
     return false;
   }
   bool is_request = (register_number == SPIRE_BRIDGE_REQUEST_REGISTER);
-  if (!is_request && ((register_number >= 0x100) || !spire_bridge_register_is_stored(register_number))) {
+  bool is_draw_data = (register_number == SPIRE_BRIDGE_DRAW_DATA_REGISTER);
+  if (!is_request && !is_draw_data && ((register_number >= 0x100) || !spire_bridge_register_is_stored(register_number))) {
     return false;
   }
   uint32_t serial_number = spire_bridge_serial_for_client(c);
@@ -596,7 +639,18 @@ bool spire_bridge_handle_register(
   try {
     std::string filename = spire_bridge_filename(serial_number);
 
+    if (is_draw_data) {
+      auto& values = spire_draw_inputs[c.get()];
+      if (values.size() < 64) { // a quest sends SPIRE_DRAW_NUM_INPUTS per request; more is a lost request
+        values.emplace_back(value);
+      }
+      return true;
+    }
     if (is_request) {
+      if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
+        spire_draw_answer(c, serial_number, quest_number, value);
+        return true;
+      }
       if (value == SPIRE_BRIDGE_BATTLE_END_VALUE) {
         spire_bridge_end_battle(c, l, serial_number, quest_number);
         return true;
