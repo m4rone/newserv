@@ -54,6 +54,13 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
 constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear!";
 
+// v19: room clear detected by the server. When every enemy of a room on a floor is defeated (all waves, from the 6x0A
+// set-flags path), the server sends SPIRE_BRIDGE_ROOM_CLEAR_TEXT and sets register SPIRE_BRIDGE_ROOM_CLEARED_REGISTER to
+// SPIRE_BRIDGE_ROOM_CLEARED_TAG | floor << 8 | room (6x77) on every client in the game, once per room and game. The quest
+// waits for that register instead of polling its own kill counters.
+constexpr uint8_t SPIRE_BRIDGE_ROOM_CLEARED_REGISTER = 249;
+constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEARED_TAG = 0x434C0000; // 'CL'
+
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
 
@@ -73,6 +80,10 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 // means never), and the register is 232-239, 243-247 or 248. Never throws.
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
+
+// Called from the 6x0A set-flags path after a wave's enemies are all defeated (v19). Does nothing unless the client is
+// GC V3 and the lobby is a game running a quest listed in SpireBridgeQuests. Never throws.
+void spire_bridge_check_room_clear(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room);
 
 // Spire guard (v6-v15; GC V3 only).
 //
