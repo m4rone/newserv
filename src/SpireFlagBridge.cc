@@ -393,7 +393,8 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     cmd.header.size = sizeof(cmd) / 4;
     cmd.header.unused = 0;
     cmd.register_number = SPIRE_BRIDGE_TIMER_REGISTER;
-    cmd.value.as_int = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) | cause;
+    // v21: the server's seconds in the low 16 bits; the quest takes them as its run time (lab: quest 213 s, server 240 s)
+    cmd.value.as_int = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) | (cause << 16) | std::min<uint32_t>(elapsed, 0xFFFF);
     const char* text = (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "Time is up.\nThe run ends here."
                                                              : "The second player left.\nThe run ends here.";
     for (const auto& lc : l->clients) {
@@ -984,6 +985,8 @@ static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
   return false;
 }
 
+static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_number);
+
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
     if (!l->is_game() || (l->mode != GameMode::BATTLE) || !l->quest) {
@@ -1000,6 +1003,34 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
           quest_number);
       return true;
     }
+    return spire_guard_take_snapshot(c, quest_number);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to start run: {}; no overlay", e.what());
+    return false;
+  }
+}
+
+// v21: every Battle game is guarded, also one without a quest (lab 10:26: Kamako 23 -> 8 items, BidX 20 -> 7 in a
+// Battle game without quest). The join takes the snapshot (quest 0); the guarded quest that may follow in the same game
+// keeps it (run already in progress), and the 98 at the end turns it into a pending restore, as for a run.
+void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  if (!l || !l->is_game() || (l->mode != GameMode::BATTLE)) {
+    return;
+  }
+  try {
+    if (spire_guard_take_snapshot(c, 0)) {
+      return;
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to guard the Battle game join: {}", e.what());
+  }
+  // fail closed, like begin_run: no Battle game without a stored snapshot
+  c->log.warning_f("Spire guard: no snapshot at the Battle game join; dropping the connection");
+  c->channel->disconnect();
+}
+
+static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_number) {
+  try {
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     if (!serial_number) {
       return true;
@@ -1558,6 +1589,7 @@ void spire_bridge_check_room_clear(
       spire_bridge_cleared_rooms.clear();
     }
     if (!spire_bridge_cleared_rooms.emplace(key).second) {
+      l->log.info_f("Spire bridge: room {} on floor {:02X} already announced in this game; no second text", room, floor);
       return;
     }
     G_SyncQuestRegister_6x77 cmd;

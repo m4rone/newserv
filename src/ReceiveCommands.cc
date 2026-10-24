@@ -5058,6 +5058,8 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
   // leader), and no quest can have started yet, so the flags are in place before any quest script reads them. This is
   // a no-op for other versions (see SpireFlagBridge.hh).
   spire_bridge_deliver_flags(c, l);
+  // Spire guard (v21): every Battle game is guarded, also one without a quest (see SpireFlagBridge.hh)
+  spire_guard_battle_join(c, l);
 
   if (c->check_flag(Client::Flag::DEBUG_ENABLED)) {
     std::string variations_str;

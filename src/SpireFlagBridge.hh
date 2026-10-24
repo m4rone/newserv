@@ -84,7 +84,8 @@ constexpr uint16_t SPIRE_BRIDGE_RECORD_FLAG = 0x03A2; // E06 payout: a new best 
 // to register 248 (warning below 80 minutes, so the code never equals 'SPIR'). The server then ticks once a second for that game (co_spawn + async_sleep, like the ENDB phases):
 // at limit - warning it sends the time warning text (B0) to every client, once; at the limit, or as soon as the game
 // has fewer clients than at the 'S', it sends "Time is up." / "The second player left." (B0) and a 6x77
-// register 252 = SPIRE_BRIDGE_TIMER_END << 24 | cause (1 time up, 2 player left) to every client, and stops. The quest's
+// register 252 = SPIRE_BRIDGE_TIMER_END << 24 | cause << 16 | elapsed seconds (cause 1 time up, 2 player left; v21) to
+// every client, and stops. The quest takes those seconds as its run time. The quest's
 // t_timer reads r252 and goes into its end. A run-over code ('X', v17) from any client, a new 'S' or the end of the
 // game stops the timer. r252 is in the free range r251-r255 (regie), outside the stored ranges; r251 is room clear.
 constexpr uint8_t SPIRE_BRIDGE_TIMER_START = 'S';
@@ -193,6 +194,10 @@ void spire_bridge_check_room_clear(
 // Returns false (v12) if the client must not get the battle overlay: the guard applies but could not store the
 // snapshot. The caller then drops the client instead of creating the overlay.
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// v21: at every Battle game join (also without a quest) the guard stores the real character, like a run start; no
+// snapshot means the connection is dropped (fail closed).
+void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
 // Called from the 98 handler before the client is removed from the game. Turns RunInProgress into RestorePending.
 // Never throws.
