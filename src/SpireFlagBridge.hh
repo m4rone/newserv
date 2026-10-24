@@ -36,6 +36,7 @@
 // - Short messages (v17): a write of a message code (SPIRE_BRIDGE_MSG_*) to register 248 sends the matching text (B0)
 //   to the writing client: wave n/m, life lost, time warning, partner wait, run over.
 // - Records (v18): best score, best time, runs and wins per character on the server (SPIRE_BRIDGE_REC_*).
+// - Run timer (v19): the time limit, its warning and "player left" on the server (SPIRE_BRIDGE_TIMER_*).
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -76,6 +77,21 @@ constexpr uint8_t SPIRE_BRIDGE_REC_SCORE = 'K';
 constexpr uint8_t SPIRE_BRIDGE_REC_FINISH = 'F';
 constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
 constexpr uint16_t SPIRE_BRIDGE_RECORD_FLAG = 0x03A2; // E06 payout: a new best time (score.py FLAG_PAY_RECORD)
+
+// v19: the run timer on the server, instead of the quest's t_timer clock. The leader writes, at its run start,
+//   'S' << 24 | warning minutes before the end << 16 | time limit in seconds (r95, after Haste)
+// to register 248 (warning below 80 minutes, so the code never equals 'SPIR'). The server then ticks once a second for that game (co_spawn + async_sleep, like the ENDB phases):
+// at limit - warning it sends the time warning text (B0) to every client, once; at the limit, or as soon as the game
+// has fewer clients than at the 'S', it sends "Time is up." / "The second player left." (B0) and a 6x77
+// register 230 = SPIRE_BRIDGE_TIMER_END << 24 | cause (1 time up, 2 player left) to every client, and stops. The quest's
+// t_timer reads r230 and goes into its end. A run-over code ('X', v17) from any client, a new 'S' or the end of the
+// game stops the timer. r230 is outside the stored ranges (HOOKS.md: r230-r248 free for the engine, r249 reserved).
+constexpr uint8_t SPIRE_BRIDGE_TIMER_START = 'S';
+constexpr uint8_t SPIRE_BRIDGE_TIMER_END = 'E';
+constexpr uint8_t SPIRE_BRIDGE_TIMER_REGISTER = 230;
+constexpr uint32_t SPIRE_BRIDGE_TIMER_TIME_UP = 1;
+constexpr uint32_t SPIRE_BRIDGE_TIMER_PLAYER_LEFT = 2;
+constexpr auto SPIRE_BRIDGE_TIMER_TICK = std::chrono::seconds(1);
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";

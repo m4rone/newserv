@@ -336,6 +336,97 @@ static void spire_bridge_end_battle(
   asio::co_spawn(*s->io_context, spire_bridge_send_battle_phases(l, phases, prefix), asio::detached);
 }
 
+// v19: one run timer per game. The generation tells a coroutine that its timer was replaced or stopped; the key is
+// the lobby's address, and a coroutine whose lobby is gone (weak_ptr) removes nothing but its own generation.
+struct SpireRunTimer {
+  uint64_t generation = 0;
+  std::chrono::steady_clock::time_point start;
+  uint32_t limit_s = 0;
+  uint32_t warn_before_s = 0;
+  size_t clients_at_start = 0;
+  bool warned = false;
+};
+static std::unordered_map<const Lobby*, SpireRunTimer> spire_run_timers;
+static uint64_t spire_run_timer_next_generation = 1;
+
+static void spire_run_timer_stop(const Lobby* l) {
+  spire_run_timers.erase(l);
+}
+
+static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, const Lobby* key, uint64_t generation) {
+  for (;;) {
+    co_await async_sleep(SPIRE_BRIDGE_TIMER_TICK);
+    auto it = spire_run_timers.find(key);
+    if ((it == spire_run_timers.end()) || (it->second.generation != generation)) {
+      co_return; // stopped, or replaced by a newer 'S'
+    }
+    auto l = weak_l.lock();
+    if (!l || !l->is_game()) {
+      spire_run_timers.erase(it);
+      co_return;
+    }
+    auto& t = it->second;
+    uint32_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t.start).count();
+    size_t clients = l->count_clients();
+    uint32_t cause = 0;
+    if (clients < t.clients_at_start) {
+      cause = SPIRE_BRIDGE_TIMER_PLAYER_LEFT;
+    } else if (elapsed >= t.limit_s) {
+      cause = SPIRE_BRIDGE_TIMER_TIME_UP;
+    } else if (!t.warned && (elapsed + t.warn_before_s >= t.limit_s)) {
+      t.warned = true;
+      uint32_t minutes = (t.limit_s - elapsed + 59) / 60;
+      std::string msg = std::format("$C4{} minutes left.$C7\nThe timer ends the run.", minutes);
+      for (const auto& lc : l->clients) {
+        if (lc) {
+          send_text_message(lc, msg);
+        }
+      }
+      l->log.info_f("Spire bridge: run timer warning at {} s ({} minutes left) to {} client(s)", elapsed, minutes, clients);
+      continue;
+    } else {
+      continue;
+    }
+    G_SyncQuestRegister_6x77 cmd;
+    cmd.header.subcommand = 0x77;
+    cmd.header.size = sizeof(cmd) / 4;
+    cmd.header.unused = 0;
+    cmd.register_number = SPIRE_BRIDGE_TIMER_REGISTER;
+    cmd.value.as_int = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) | cause;
+    const char* text = (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "Time is up.\nThe run ends here."
+                                                             : "The second player left.\nThe run ends here.";
+    for (const auto& lc : l->clients) {
+      if (lc) {
+        send_text_message(lc, text);
+        send_command_t(lc, 0x60, 0x00, cmd);
+      }
+    }
+    l->log.info_f("Spire bridge: run timer end ({}) at {} s with {} of {} client(s); sent r{}={:08X}",
+        (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "time up" : "player left", elapsed, clients, t.clients_at_start,
+        SPIRE_BRIDGE_TIMER_REGISTER, cmd.value.as_int.load());
+    spire_run_timers.erase(it);
+    co_return;
+  }
+}
+
+// v19: 'S' from the leader at its run start (see SPIRE_BRIDGE_TIMER_START).
+static void spire_run_timer_start(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> cl, uint32_t serial_number, uint32_t quest_number,
+    uint32_t value) {
+  auto l = std::const_pointer_cast<Lobby>(cl);
+  SpireRunTimer t;
+  t.generation = spire_run_timer_next_generation++;
+  t.start = std::chrono::steady_clock::now();
+  t.limit_s = value & 0xFFFF;
+  t.warn_before_s = ((value >> 16) & 0xFF) * 60;
+  t.clients_at_start = l->count_clients();
+  spire_run_timers[l.get()] = t;
+  c->log.info_f("Spire bridge: run timer for serial {:010} in q{}: limit {} s, warning {} s before, {} client(s)",
+      serial_number, quest_number, t.limit_s, t.warn_before_s, t.clients_at_start);
+  auto s = c->require_server_state();
+  asio::co_spawn(*s->io_context, spire_run_timer_tick(l, l.get(), t.generation), asio::detached);
+}
+
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the same words as the quest's window_msg (spire.json
 // texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code.
 static std::string spire_bridge_message_text(uint32_t value) {
@@ -525,6 +616,14 @@ bool spire_bridge_handle_register(
       }
       if (spire_records_handle(c, l, serial_number, quest_number, value)) {
         return true;
+      }
+      // 'SPIR' starts with 'S' too; the timer code never equals it (its warning byte is below 'P' = 80 minutes)
+      if (((value >> 24) == SPIRE_BRIDGE_TIMER_START) && (value != SPIRE_BRIDGE_REQUEST_VALUE)) {
+        spire_run_timer_start(c, l, serial_number, quest_number, value);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_MSG_RUN_OVER) {
+        spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
       }
       std::string msg = spire_bridge_message_text(value);
       if (!msg.empty()) {
