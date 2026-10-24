@@ -1061,6 +1061,7 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   }
   bool restoring = spire_guard_restoring_clients.count(c.get());
   bool pending = false;
+  bool can_restore_now = false;
   try {
     std::string filename = spire_guard_filename_for(c, serial_number);
     if (filename.empty()) {
@@ -1069,6 +1070,7 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
       // v12 (critic K7): a run that never got its 98 counts too
       auto snapshot = spire_guard_load(filename);
       pending = snapshot.restore_pending || snapshot.run_in_progress;
+      can_restore_now = snapshot.restore_pending;
     }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
@@ -1079,6 +1081,13 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   }
   c->log.info_f("Spire guard: game join refused for serial {:010}: {}", serial_number,
       restoring ? "a restore is running" : "the restore is not verified");
+  // v13 (critic K10): if no restore runs but one is pending and the client is in a lobby (the lobby restore did not
+  // run, e.g. after $exit), start it now, so "try again" can succeed
+  auto l = c->lobby.lock();
+  if (tell_client && !restoring && can_restore_now && l && !l->is_game()) {
+    c->log.info_f("Spire guard: starting the pending restore for serial {:010} after a refused game join", serial_number);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_guard_restore_in_lobby(c), asio::detached);
+  }
   if (tell_client) {
     send_lobby_message_box(c, "$C7Your character is\nstill being restored.\nTry again in a\nmoment.");
   }
