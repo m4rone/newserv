@@ -865,8 +865,11 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
           serial_number);
       co_return false;
     }
-    // v12: the overlay as the client has it now; kept with AwaitingSave if this is a lobby restore
-    snapshot.has_overlay = true;
+    // v12: the overlay as the client has it now; kept with AwaitingSave if this is a lobby restore. v14: if the client
+    // already shows the snapshot's level and EXP, it has the real character in memory and there is no overlay to
+    // recognize later (measured: BidX Lv52, 2026-10-24 03:52); then no fingerprint is kept.
+    snapshot.has_overlay = (info.character->disp.stats.level != snapshot.disp.stats.level) ||
+        (info.character->disp.stats.exp != snapshot.disp.stats.exp);
     snapshot.overlay_level = info.character->disp.stats.level;
     snapshot.overlay_exp = info.character->disp.stats.exp;
     snapshot.overlay_meseta = info.character->disp.stats.meseta;
@@ -957,10 +960,11 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
             (character->disp.stats.meseta == snapshot.overlay_meseta) &&
             (character->inventory.num_items == snapshot.overlay_num_items);
         bool lost_exp = exp < snapshot.disp.stats.exp;
-        if (!shows_overlay && !lost_exp) {
+        // v14: a 61 with the snapshot's level and EXP is the real character, also if an (older) fingerprint matches it
+        bool same = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
+        if (same || (!shows_overlay && !lost_exp)) {
           snapshot.has_overlay = false;
           spire_guard_save(filename, serial_number, snapshot);
-          bool same = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
           c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, marker cleared, no push",
               serial_number, level + 1, exp, snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(),
               same ? "lobby restore confirmed" : "progress since the lobby restore");
