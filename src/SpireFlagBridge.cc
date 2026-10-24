@@ -466,6 +466,11 @@ static std::string spire_bridge_message_text(uint32_t value) {
   }
 }
 
+// v22: lives per client from its 'L' codes (for the checkpoint) and the pending start per client ('$spire start')
+static std::unordered_map<const Client*, uint32_t> spire_checkpoint_lives;
+static std::unordered_map<const Client*, uint32_t> spire_start_pending; // k << 8 | lives
+static void spire_start_answer(std::shared_ptr<Client> c, uint32_t quest_number);
+
 // v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
 // login), never the Battle overlay, so each character on a card has its own records (E04 AC-6).
 
@@ -638,6 +643,13 @@ bool spire_bridge_handle_register(
         c->log.info_f("Spire bridge: ROOM for serial {:010} in q{}; sent \"{}\" to {} client(s)",
             serial_number, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, sent);
         return true;
+      }
+      if ((value >> 24) == SPIRE_START_REQUEST) {
+        spire_start_answer(c, quest_number);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_MSG_LIFE) {
+        spire_checkpoint_lives[c.get()] = value & 0xFF; // falls through to the life text below
       }
       if (spire_records_handle(c, l, serial_number, quest_number, value)) {
         return true;
@@ -1587,6 +1599,7 @@ struct SpireCheckpoint {
   uint32_t rooms = 0; // bit k-1 = room k cleared in some run
   uint32_t last_room = 0;
   uint32_t last_quest = 0;
+  uint32_t last_lives = 0; // lives at the last clear; 0 = not known
 };
 
 static std::string spire_checkpoint_filename(std::shared_ptr<const Client> c, uint32_t serial_number) {
@@ -1605,6 +1618,7 @@ static SpireCheckpoint spire_checkpoint_load(const std::string& filename) {
     ret.rooms = json.get_int("Rooms");
     ret.last_room = json.get_int("LastRoom");
     ret.last_quest = json.get_int("LastQuest");
+    ret.last_lives = json.get_int("LastLives", 0);
   }
   return ret;
 }
@@ -1635,11 +1649,14 @@ static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor
       cp.rooms |= (1u << (k - 1));
       cp.last_room = k;
       cp.last_quest = l->quest->meta.quest_number;
+      auto lives_it = spire_checkpoint_lives.find(lc.get());
+      cp.last_lives = (lives_it == spire_checkpoint_lives.end()) ? 0 : lives_it->second;
       auto json = phosg::JSON::dict({
           {"SerialNumber", serial_number},
           {"Rooms", cp.rooms},
           {"LastRoom", cp.last_room},
           {"LastQuest", cp.last_quest},
+          {"LastLives", cp.last_lives},
       });
       spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
       lc->log.info_f("Spire checkpoint: room {} cleared in q{}; rooms {:08X} in {}", k, cp.last_quest, cp.rooms,
@@ -1766,4 +1783,65 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
   } catch (const std::exception& e) {
     c->log.warning_f("Spire replay: failed to schedule: {}", e.what());
   }
+}
+
+static void spire_start_answer(std::shared_ptr<Client> c, uint32_t quest_number) {
+  uint32_t pending = 0;
+  auto it = spire_start_pending.find(c.get());
+  if (it != spire_start_pending.end()) {
+    pending = it->second;
+    spire_start_pending.erase(it);
+  }
+  spire_checkpoint_lives.erase(c.get()); // a new run: lives come from its own 'L' codes again
+  G_SyncQuestRegister_6x77 cmd;
+  cmd.header = {0x77, 0x03, 0x0000};
+  cmd.register_number = SPIRE_BRIDGE_REQUEST_REGISTER;
+  cmd.value.as_int = (static_cast<uint32_t>(SPIRE_START_ANSWER) << 24) | (pending & 0xFFFF);
+  send_command_t(c, 0x60, 0x00, cmd);
+  c->log.info_f("Spire start: q{} starts at room {} with lives {} (r{} = {:08X})", quest_number,
+      (pending >> 8) & 0xFF, pending & 0xFF, SPIRE_BRIDGE_REQUEST_REGISTER, cmd.value.as_int.load());
+}
+
+std::string spire_start_command(std::shared_ptr<Client> c, const std::string& args) {
+  auto tokens = phosg::split(args, ' ');
+  std::erase_if(tokens, [](const std::string& t) { return t.empty(); });
+  std::string filename = spire_checkpoint_filename(c, spire_bridge_serial_for_client(c));
+  if (filename.empty()) {
+    throw std::runtime_error("No character data");
+  }
+  auto cp = spire_checkpoint_load(filename);
+  if (tokens.empty() || (tokens[0] == "status")) {
+    std::string rooms;
+    for (size_t k = 1; k <= 31; k++) {
+      if ((cp.rooms >> (k - 1)) & 1) {
+        rooms += (rooms.empty() ? "" : " ") + std::to_string(k);
+      }
+    }
+    return cp.rooms ? std::format("Rooms cleared: {}\nLast: room {}", rooms, cp.last_room)
+                    : std::string("No rooms cleared yet");
+  }
+  uint32_t k, lives = 0;
+  if (tokens[0] == "continue") {
+    if (!cp.last_room) {
+      throw std::runtime_error("No checkpoint yet");
+    }
+    k = cp.last_room + 1;
+    lives = cp.last_lives;
+  } else if ((tokens[0] == "start") && (tokens.size() == 2)) {
+    k = std::stoul(tokens[1]);
+  } else {
+    throw std::runtime_error("Use: $spire start <room>\n$spire continue\n$spire status");
+  }
+  const auto& rooms = c->require_server_state()->data->spire_checkpoint_rooms;
+  uint32_t max_k = 0;
+  for (const auto& [key, rk] : rooms) {
+    max_k = std::max<uint32_t>(max_k, rk);
+  }
+  if ((k < 1) || (k > max_k)) {
+    throw std::runtime_error(max_k ? std::format("Room 1-{}", max_k) : std::string("No Spire rooms configured"));
+  }
+  spire_start_pending[c.get()] = (k << 8) | (lives & 0xFF);
+  c->log.info_f("Spire start: pending room {} with lives {} ({})", k, lives, tokens[0]);
+  return lives ? std::format("Next run starts at room {}\nwith {} lives", k, lives)
+               : std::format("Next run starts at room {}", k);
 }

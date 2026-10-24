@@ -19,6 +19,7 @@
 #include "ReceiveCommands.hh"
 #include "Revision.hh"
 #include "SendCommands.hh"
+#include "SpireFlagBridge.hh"
 #include "Server.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
@@ -2179,6 +2180,17 @@ ChatCommandDefinition cc_qsyncall(
     {"$qsyncall"},
     +[](const Args& a) -> asio::awaitable<void> {
       command_qsync_qsyncall(a, true);
+      co_return;
+    });
+
+ChatCommandDefinition cc_spire(
+    {"$spire"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      try {
+        send_text_message(a.c, spire_start_command(a.c, a.text));
+      } catch (const std::exception& e) {
+        throw precondition_failed("$C6{}", e.what());
+      }
       co_return;
     });
 
