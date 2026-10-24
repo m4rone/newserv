@@ -61,7 +61,7 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
 
-// Spire guard (v6-v8; GC V3 only).
+// Spire guard (v6-v9; GC V3 only).
 //
 // Quit Game (or a disconnect, crash or power loss) in the middle of a replace_char Battle quest leaves the overlay
 // character (Lv1) on the memory card, and the client logs in with it next time. The guard keeps a per-serial snapshot
@@ -82,6 +82,9 @@ bool spire_bridge_handle_register(
 //   the client cannot run functions, does not answer within 15 seconds, or the 61 does not match, no 97 is sent, the
 //   login is dropped and both files stay, so the next login tries again. 97 is never sent with flag 0 (that deletes
 //   the character's items and challenge records). To give up on a pending restore, delete the snapshot file.
+// - v9: the same restore also runs as soon as a client with RestorePending leaves a game and is back in a lobby (84),
+//   so the real character is back without a new login. A failure there drops the connection; the login restore stays
+//   the safety net.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -91,6 +94,12 @@ void spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
 // Called from the 98 handler before the client is removed from the game. Turns RunInProgress into RestorePending.
 // Never throws.
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// Called from on_84 right after a client that just left a game was added to a lobby (v9). If RestorePending is set,
+// runs the same restore as the login path, at once, in the lobby. On success RestorePending is cleared; on any failure
+// the connection is dropped and the marker stays, so the login restore remains the safety net. Never runs at the same
+// time as another restore for the same client. Never throws.
+asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c);
 
 // Called from enable_save_if_needed right before 97 is sent. Returns true if 97 may be sent; false if the caller must
 // not send 97 and must drop the login. Never throws.

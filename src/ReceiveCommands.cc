@@ -3110,6 +3110,9 @@ static asio::awaitable<void> on_84(std::shared_ptr<Client> c, Channel::Message& 
     // back to another lobby if it's full.
     c->preferred_lobby_id = cmd.item_id;
     s->add_client_to_available_lobby(c, false);
+    // Spire guard (v9): a Spire game end leaves a pending restore; run it now, in the lobby, instead of waiting for
+    // the next login. This is a no-op for other clients (see SpireFlagBridge.hh).
+    co_await spire_guard_restore_in_lobby(c);
 
   } else {
     // If the client already is in a lobby, then they're using the lobby teleporter; add them to the lobby they
