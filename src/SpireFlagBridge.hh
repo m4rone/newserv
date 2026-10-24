@@ -35,6 +35,7 @@
 //   client in the game, so the quest shows no window_msg of its own at the room clear.
 // - Short messages (v17): a write of a message code (SPIRE_BRIDGE_MSG_*) to register 248 sends the matching text (B0)
 //   to the writing client: wave n/m, life lost, time warning, partner wait, run over.
+// - Records (v18): best score, best time, runs and wins per character on the server (SPIRE_BRIDGE_REC_*).
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -65,6 +66,16 @@ constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
 constexpr uint8_t SPIRE_BRIDGE_MSG_PARTNER = 'P';
 constexpr uint8_t SPIRE_BRIDGE_MSG_RUN_OVER = 'X';
+// v18: records per character, kept by the server (system/spire-bridge/<serial>.<character>.records.json) instead of
+// quest counters 12-14 on the card. Codes in register 248, from each client for its own character:
+//   'B' run started (runs + 1) · 'K' final score (low 24 bits; held until 'F') · 'F' run finished (bit 23 won, low 16
+//   bits the seconds): best score = max, and on a win won + 1 and best time = min (a new best time also sets payout flag
+//   SPIRE_BRIDGE_RECORD_FLAG) · 'Y' Records board. 'F' and 'Y' are answered with the record text (B0) to that client.
+constexpr uint8_t SPIRE_BRIDGE_REC_BEGIN = 'B';
+constexpr uint8_t SPIRE_BRIDGE_REC_SCORE = 'K';
+constexpr uint8_t SPIRE_BRIDGE_REC_FINISH = 'F';
+constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
+constexpr uint16_t SPIRE_BRIDGE_RECORD_FLAG = 0x03A2; // E06 payout: a new best time (score.py FLAG_PAY_RECORD)
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";

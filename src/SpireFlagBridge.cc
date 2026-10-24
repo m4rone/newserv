@@ -358,6 +358,130 @@ static std::string spire_bridge_message_text(uint32_t value) {
   }
 }
 
+// v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
+// login), never the Battle overlay, so each character on a card has its own records (E04 AC-6).
+static std::string spire_guard_character_id(const PlayerDispDataV4& disp);
+
+struct SpireRecords {
+  uint32_t best_score = 0;
+  uint32_t best_time = 0; // seconds; 0 = no won run yet
+  uint32_t runs = 0;
+  uint32_t won = 0;
+};
+// The score of the run ('K'), per client until its 'F'
+static std::unordered_map<const Client*, uint32_t> spire_records_pending_score;
+
+static std::string spire_records_filename(std::shared_ptr<Client> c, uint32_t serial_number) {
+  auto character = c->character_file(false, false);
+  if (!character) {
+    return "";
+  }
+  return std::format("{}/{:010}.{}.records.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
+      spire_guard_character_id(character->disp));
+}
+
+static SpireRecords spire_records_load(const std::string& filename) {
+  SpireRecords ret;
+  if (std::filesystem::is_regular_file(filename)) {
+    auto json = phosg::JSON::parse(phosg::load_file(filename));
+    ret.best_score = json.get_int("BestScore");
+    ret.best_time = json.get_int("BestTime");
+    ret.runs = json.get_int("Runs");
+    ret.won = json.get_int("Won");
+  }
+  return ret;
+}
+
+static void spire_records_save(const std::string& filename, uint32_t serial_number, const SpireRecords& rec) {
+  auto json = phosg::JSON::dict({
+      {"SerialNumber", serial_number},
+      {"BestScore", rec.best_score},
+      {"BestTime", rec.best_time},
+      {"Runs", rec.runs},
+      {"Won", rec.won},
+  });
+  spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
+}
+
+static std::string spire_records_board_text(const SpireRecords& rec) {
+  std::string time = rec.best_time
+      ? std::format("{} min {} s", rec.best_time / 60, rec.best_time % 60)
+      : std::string("none yet");
+  return std::format("Best score: {}\nBest time: {}\nRuns: {}  Won: {}", rec.best_score, time, rec.runs, rec.won);
+}
+
+// Handles a record code; returns false if the value is none. Throws if the file cannot be written (the caller logs).
+static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t kind = value >> 24;
+  if ((kind != SPIRE_BRIDGE_REC_BEGIN) && (kind != SPIRE_BRIDGE_REC_SCORE) && (kind != SPIRE_BRIDGE_REC_FINISH) &&
+      (kind != SPIRE_BRIDGE_REC_BOARD)) {
+    return false;
+  }
+  if (kind == SPIRE_BRIDGE_REC_SCORE) {
+    spire_records_pending_score[c.get()] = value & 0xFFFFFF;
+    c->log.info_f("Spire records: score {} for serial {:010} in q{}", value & 0xFFFFFF, serial_number, quest_number);
+    return true;
+  }
+  std::string filename = spire_records_filename(c, serial_number);
+  if (filename.empty()) {
+    c->log.info_f("Spire records: no character data for serial {:010}; code {:08X} ignored", serial_number, value);
+    return true;
+  }
+  auto rec = spire_records_load(filename);
+  if (kind == SPIRE_BRIDGE_REC_BEGIN) {
+    rec.runs++;
+    spire_records_save(filename, serial_number, rec);
+    c->log.info_f("Spire records: run started, {} run(s) in {}", rec.runs, filename);
+    return true;
+  }
+  if (kind == SPIRE_BRIDGE_REC_BOARD) {
+    send_text_message(c, spire_records_board_text(rec));
+    c->log.info_f("Spire records: board for {}", filename);
+    return true;
+  }
+
+  // 'F': the run's score ('K' before it) and time against the records
+  bool is_won = (value >> 23) & 1;
+  uint32_t seconds = value & 0xFFFF;
+  auto it = spire_records_pending_score.find(c.get());
+  uint32_t score = (it == spire_records_pending_score.end()) ? 0 : it->second;
+  if (it != spire_records_pending_score.end()) {
+    spire_records_pending_score.erase(it);
+  }
+  bool new_score = score > rec.best_score;
+  bool new_time = is_won && (!rec.best_time || (seconds < rec.best_time));
+  if (new_score) {
+    rec.best_score = score;
+  }
+  if (is_won) {
+    rec.won++;
+  }
+  if (new_time) {
+    rec.best_time = seconds;
+  }
+  spire_records_save(filename, serial_number, rec);
+  if (new_time) {
+    // the payout flag the quest set itself before v18; stored and delivered like any bridged flag write
+    std::string bridge_filename = spire_bridge_filename(serial_number);
+    auto state = spire_bridge_load(bridge_filename);
+    state.flags[std::make_pair(static_cast<uint8_t>(Difficulty::NORMAL), SPIRE_BRIDGE_RECORD_FLAG)] = true;
+    spire_bridge_save(bridge_filename, serial_number, state);
+    spire_bridge_deliver_flags(c, l);
+  }
+  std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
+                               : std::format("Best score: {}.", rec.best_score);
+  if (new_time) {
+    text += std::format("\nNew best time: {} s!", seconds);
+  }
+  text += "\nRecords saved.";
+  send_text_message(c, text);
+  c->log.info_f("Spire records: run finished (score {}, {} s, {}) for serial {:010} in q{}; {}: best {} / {} s, {} run(s), {} won",
+      score, seconds, is_won ? "won" : "not won", serial_number, quest_number, filename, rec.best_score,
+      rec.best_time, rec.runs, rec.won);
+  return true;
+}
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
@@ -397,6 +521,9 @@ bool spire_bridge_handle_register(
         }
         c->log.info_f("Spire bridge: ROOM for serial {:010} in q{}; sent \"{}\" to {} client(s)",
             serial_number, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, sent);
+        return true;
+      }
+      if (spire_records_handle(c, l, serial_number, quest_number, value)) {
         return true;
       }
       std::string msg = spire_bridge_message_text(value);
