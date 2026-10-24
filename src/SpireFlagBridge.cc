@@ -364,6 +364,19 @@ bool spire_bridge_handle_register(
         spire_bridge_end_battle(c, l, serial_number, quest_number);
         return true;
       }
+      if (value == SPIRE_BRIDGE_ROOM_CLEAR_VALUE) {
+        // v16: the room clear text comes from the server (B0), not from a window_msg in the quest
+        size_t sent = 0;
+        for (const auto& lc : l->clients) {
+          if (lc) {
+            send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+            sent++;
+          }
+        }
+        c->log.info_f("Spire bridge: ROOM for serial {:010} in q{}; sent \"{}\" to {} client(s)",
+            serial_number, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, sent);
+        return true;
+      }
       if (value != SPIRE_BRIDGE_REQUEST_VALUE) {
         c->log.info_f("Spire bridge: ignored register {} value {:08X} for serial {:010} in q{}",
             register_number, value, serial_number, quest_number);

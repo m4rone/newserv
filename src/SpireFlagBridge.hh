@@ -31,6 +31,8 @@
 //   (v5) but delivers stored flags on every join, so E06 keeps reading its payout flag in normal games.
 // - Battle end (v10b): a write of 'ENDB' to register 248 sends the phases in SpireBattleEndPhases as 6x7D (what = 0,
 //   set battle phase) to every client in the Battle game, 2 seconds apart. Off unless the key lists phases.
+// - Room clear (v16, lab probe): a write of 'ROOM' to register 248 sends the server text "Room clear!" (B0) to every
+//   client in the game, so the quest shows no window_msg of its own at the room clear.
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -47,6 +49,10 @@ constexpr uint32_t SPIRE_BRIDGE_DONE_VALUE = 0x444F4E45; // 'DONE'
 // server config key SpireBattleEndPhases (a JSON list of 6x7D phase numbers, e.g. [3, 4]; missing or empty: off).
 constexpr uint32_t SPIRE_BRIDGE_BATTLE_END_VALUE = 0x454E4442; // 'ENDB'
 constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
+// v16: written to register 248 by the quest's leader at a room clear; answered with SPIRE_BRIDGE_ROOM_CLEAR_TEXT as a
+// text message to every client in the game.
+constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
+constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear!";
 
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
