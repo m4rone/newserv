@@ -157,6 +157,10 @@ void run_static_tests() {
     expect(!spire_follow_should_warp(SPIRE_FOLLOW_CITY_FLOOR, 2));        // the city takes the Ragol warp itself
     expect(!spire_follow_should_warp(1, SPIRE_FOLLOW_CITY_FLOOR));        // never to the city
     expect(!spire_follow_should_warp(2, 2));                              // already there
+    expect(spire_follow_partner_pending(1, 2, true));                     // remembered, follows after its load
+    expect(spire_follow_partner_pending(SPIRE_FOLLOW_UNLOADED_FLOOR, 2, false));
+    expect(!spire_follow_partner_pending(1, 2, false));                   // warped now
+    expect(!spire_follow_partner_pending(SPIRE_FOLLOW_CITY_FLOOR, 2, false)); // city: takes the Ragol warp itself
   }
 
   phosg::log_info_f("-- Spire protected characters: any quest, also one not listed (audit S-3)");
@@ -172,6 +176,16 @@ void run_static_tests() {
     expect(d.is_spire_blocked(123, "Wakiru", 929));
     expect(!d.is_spire_blocked(123, "Wakiru", 930));             // not a listed quest
     expect(!d.is_spire_blocked(123, "Other", 929));
+    std::string wakiru = "Wakiru", other = "Other";
+    expect(d.is_spire_blocked_quest(123, &wakiru, 930, true));   // Challenge: blocked whatever the number
+    expect(!d.is_spire_blocked_quest(123, &other, 930, true));
+    expect(!d.is_spire_blocked_quest(123, &wakiru, 930, false));
+    expect(d.is_spire_blocked_quest(123, &wakiru, 929, false));
+    expect(d.is_spire_blocked_quest(123, nullptr, 930, true));   // no character: fail closed
+    expect(d.is_spire_blocked_quest(123, nullptr, 929, false));
+    expect(!d.is_spire_blocked_quest(123, nullptr, 930, false));
+    DataIndex empty;
+    expect(!empty.is_spire_blocked_quest(123, nullptr, 929, true)); // no protected characters: nothing blocked
   }
 
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");
@@ -180,6 +194,14 @@ void run_static_tests() {
     auto b = spire_bridge_registers_filename(42, "BBBB");
     expect(a != b);
     expect(a.ends_with("/0000000042.AAAA.registers.json"));
+    PlayerDispDataV4 da, db;
+    da.visual.name.encode("Alpha", Language::ENGLISH);
+    db.visual.name.encode("Beta", Language::ENGLISH);
+    auto fa = spire_bridge_registers_filename_for(42, &da);
+    expect(fa.ends_with(".registers.json"));
+    expect(fa != spire_bridge_registers_filename_for(42, &db));   // a second character never reads the first's file
+    expect(fa == spire_bridge_registers_filename(42, spire_guard_character_id(da)));
+    expect(spire_bridge_registers_filename_for(42, nullptr).empty()); // no character data: not stored
   }
 
   phosg::log_info_f("-- Spire room clear: post-wave actions that hold the room (v19)");

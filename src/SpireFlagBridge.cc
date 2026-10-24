@@ -97,10 +97,11 @@ static uint32_t spire_bridge_serial_for_client(std::shared_ptr<const Client> c) 
 // "" if the client has no character data: the registers then read as 0 and a write is not stored.
 static std::string spire_bridge_filename(std::shared_ptr<Client> c, uint32_t serial_number) {
   auto character = c->character_file(false, false);
-  if (!character) {
-    return "";
-  }
-  return spire_bridge_registers_filename(serial_number, spire_guard_character_id(character->disp));
+  return spire_bridge_registers_filename_for(serial_number, character ? &character->disp : nullptr);
+}
+
+std::string spire_bridge_registers_filename_for(uint32_t serial_number, const PlayerDispDataV4* disp) {
+  return disp ? spire_bridge_registers_filename(serial_number, spire_guard_character_id(*disp)) : "";
 }
 
 std::string spire_bridge_registers_filename(uint32_t serial_number, const std::string& character_id) {
@@ -2088,6 +2089,11 @@ static asio::awaitable<void> spire_replay_send(
   }
 }
 
+bool spire_follow_partner_pending(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading) {
+  return !spire_follow_should_warp(partner_floor, leader_floor, partner_loading) &&
+      (partner_loading || (partner_floor == SPIRE_FOLLOW_UNLOADED_FLOOR));
+}
+
 bool spire_follow_should_warp(uint32_t partner_floor, uint32_t leader_floor, bool partner_loading) {
   // never to the city (B-E01-41), never from the city (v29), never when already there, never a client that is still
   // loading (audit S-12): a 6x94 mid-load leaves the partner between two floors
@@ -2109,8 +2115,7 @@ static asio::awaitable<void> spire_follow_leader_warp(
       continue;
     }
     bool loading = lc->check_flag(Client::Flag::LOADING);
-    if (!spire_follow_should_warp(lc->floor, floor, loading) &&
-        (loading || (lc->floor == SPIRE_FOLLOW_UNLOADED_FLOOR))) {
+    if (spire_follow_partner_pending(lc->floor, floor, loading)) {
       // Remembered, so the partner's own floor load (spire_follow_leader) warps it to the leader's floor afterwards
       spire_follow_pending.insert(lc.get());
       l->log.info_f("Spire follow: client {} is still loading; not warped to the leader's floor {:02X} (follows after its own floor load)",

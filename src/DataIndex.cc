@@ -2172,6 +2172,18 @@ bool DataIndex::is_spire_blocked(uint32_t gc_serial, const std::string& name, ui
   return this->spire_blocked_quest_numbers.count(quest_number) && this->is_spire_protected_character(gc_serial, name);
 }
 
+bool DataIndex::is_spire_blocked_quest(
+    uint32_t gc_serial, const std::string* name, uint32_t quest_number, bool challenge) const {
+  if (this->spire_blocked_characters.empty()) {
+    return false;
+  }
+  if (!name) {
+    return challenge || this->spire_blocked_quest_numbers.count(quest_number);
+  }
+  return challenge ? this->is_spire_protected_character(gc_serial, *name)
+                   : this->is_spire_blocked(gc_serial, *name, quest_number);
+}
+
 bool DataIndex::is_spire_protected_character(uint32_t gc_serial, const std::string& name) const {
   // The client's name can carry a language marker (\tE, \tJ); names compare without it and without case
   auto plain = [](const std::string& n) -> std::string {
