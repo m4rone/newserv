@@ -11,6 +11,13 @@
 
 uint8_t translate_subcommand_number(Version to_version, Version from_version, uint8_t subcommand);
 
+// The enemy or object an entity id (0x1000+ enemy, 0x4000+ object) names in the server's map view, for forwarding a
+// subcommand to clients of other versions. An id past the last enemy or object (a client whose map holds more entities
+// than the server's, e.g. a Spire wave) leaves both null and returns the lookup error: the caller then forwards the
+// command unchanged instead of throwing, which disconnected the sender (Spire sweep 2026-10-25).
+std::string entity_states_for_forwarding(std::shared_ptr<MapState> map_state, Version version, uint16_t entity_id,
+    std::shared_ptr<const MapState::EnemyState>& ene_st, std::shared_ptr<const MapState::ObjectState>& obj_st);
+
 asio::awaitable<void> on_subcommand_multi(std::shared_ptr<Client> c, Channel::Message& msg);
 
 void send_item_notification_if_needed(std::shared_ptr<Client> c, const ItemData& item, bool is_from_rare_table);
