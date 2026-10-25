@@ -2415,6 +2415,7 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
   }
 }
 
+// v35: one line each, so the answer is no window when the command is typed during a run
 std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::string& args) {
   std::string arg = args;
   phosg::strip_whitespace(arg);
@@ -2430,17 +2431,17 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
         rooms += (rooms.empty() ? "" : " ") + std::to_string(k);
       }
     }
-    return cp.rooms ? std::format("Rooms cleared: {}\nLast: room {}", rooms, cp.last_room)
+    return cp.rooms ? std::format("Rooms cleared: {} - last: room {}", rooms, cp.last_room)
                     : std::string("No rooms cleared yet");
   }
   if (arg == "continue") {
     if (!cp.last_room) {
-      return "No checkpoint yet:\nstart at room 1";
+      return "No checkpoint yet: start at room 1";
     }
-    return cp.last_lives ? std::format("Continue at room {}\n(you had {} lives)", cp.last_room + 1, cp.last_lives)
+    return cp.last_lives ? std::format("Continue at room {} (you had {} lives)", cp.last_room + 1, cp.last_lives)
                          : std::format("Continue at room {}", cp.last_room + 1);
   }
-  throw std::runtime_error("Use: $spire status\n$spire continue");
+  throw std::runtime_error("Use: $spire status or $spire continue");
 }
 
 asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c) {
