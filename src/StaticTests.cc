@@ -2195,6 +2195,18 @@ void run_static_tests() {
     expect_eq(3u, items.size()); // no mag, no empty slot
     expect_eq(0x00, items[0].data1[0]);
     expect_eq(0x8A, items[0].data1[4]); // the special stays: the quest creates the item with its full data1
+    expect_eq(0x05, items[0].data1[3]); // and the grind (B-E01-188: equip_item would make a plain one from data1[0-2])
+    {
+      // an equipped run weapon comes back as the same item (grind, special), unequipped: the equipped flag is the
+      // inventory's, not the item's, and there is no route that equips an existing item (B-E01-188)
+      PlayerInventory equipped = overlay;
+      equipped.items[1].flags = 0x00000008;
+      equipped.items[1].state = 2;
+      int32_t g = 0;
+      auto again = spire_savestate_items(equipped, 0, &g);
+      expect_eq(3u, again.size());
+      expect(!memcmp(&again[0], &items[0], sizeof(ItemData)));
+    }
     expect_eq(1, glass);
     expect_eq(0x04, items[2].data1[5]); // the stack count stays
     for (const auto& item : items) {
