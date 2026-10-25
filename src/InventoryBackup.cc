@@ -174,6 +174,17 @@ ssize_t inventory_backup_pick_previous(const std::vector<std::string>& sorted_na
   return -1;
 }
 
+ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_names,
+    const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename) {
+  for (ssize_t z = static_cast<ssize_t>(sorted_names.size()) - 1; z >= 0; z--) {
+    if ((sorted_names[z] != current_basename) && (static_cast<size_t>(z) < flags.size()) &&
+        flags[z].imported && !flags[z].restored) {
+      return z;
+    }
+  }
+  return inventory_backup_pick_previous(sorted_names, current_basename);
+}
+
 void inventory_removals_add(InventoryRemovals& removals, const ItemData& item) {
   if (item.data1[0] == 0x04) {
     removals.meseta += item.data2d;
@@ -460,17 +471,27 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
   std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
   auto names = inventory_backup_list(dir);
   std::string current = std::filesystem::path(c->inventory_backup_current).filename().string();
-  ssize_t index = inventory_backup_pick_previous(names, current);
+  // Read every backup (at most INVENTORY_BACKUP_KEEP) for its Imported and Restored marks; an unreadable file has
+  // neither, so it can only be picked as the newest one, and is then refused as missing
+  std::vector<std::unique_ptr<InventoryBackup>> loaded;
+  std::vector<InventoryBackupPickFlags> flags;
+  for (const auto& backup_name : names) {
+    std::unique_ptr<InventoryBackup> b;
+    try {
+      b = std::make_unique<InventoryBackup>(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(dir + "/" + backup_name))));
+    } catch (const std::exception& e) {
+      c->log.warning_f("Restore: cannot read {}/{}: {}", dir, backup_name, e.what());
+    }
+    flags.emplace_back(InventoryBackupPickFlags{b && !b->imported_from.empty(), b && b->restored});
+    loaded.emplace_back(std::move(b));
+  }
+  ssize_t index = inventory_backup_pick_restore(names, flags, current);
 
   std::unique_ptr<InventoryBackup> backup;
   std::string path;
   if (index >= 0) {
     path = dir + "/" + names[index];
-    try {
-      backup = std::make_unique<InventoryBackup>(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path))));
-    } catch (const std::exception& e) {
-      c->log.warning_f("Restore: cannot read {}: {}", path, e.what());
-    }
+    backup = std::move(loaded[index]);
   }
 
   auto refusal = inventory_restore_refusal(in_game, spire_game, protected_character, serial, character_id, backup.get());

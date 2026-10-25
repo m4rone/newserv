@@ -1328,6 +1328,28 @@ void run_static_tests() {
     expect_eq(1, inventory_backup_pick_previous(names, "20261025-150000-000000.json"));
     expect_eq(2, inventory_backup_pick_previous(names, ""));
     expect_eq(-1, inventory_backup_pick_previous({"20261025-150000-000000.json"}, "20261025-150000-000000.json"));
+
+    phosg::log_info_f("-- Inventory backup: $restore picks an unrestored import over later join backups (regie pso-regie-10)");
+    using F = InventoryBackupPickFlags;
+    std::vector<std::string> pick_names = {"20261025-120000-000000.json", "20261025-130000-000000.json",
+        "20261025-140000-000000.json", "20261025-150000-000000.json", "20261025-160000-000000.json"};
+    const std::string current_game = "20261025-160000-000000.json";
+    // Import (index 1), then two later join backups and the current game: the import wins
+    expect_eq(1, inventory_backup_pick_restore(pick_names, {F{}, F{true, false}, F{}, F{}, F{}}, current_game));
+    // The import is restored: the normal rule again (newest that is not the current game)
+    expect_eq(3, inventory_backup_pick_restore(pick_names, {F{}, F{true, true}, F{}, F{}, F{}}, current_game));
+    // Two unrestored imports: the newest import
+    expect_eq(2, inventory_backup_pick_restore(pick_names, {F{true, false}, F{}, F{true, false}, F{}, F{}}, current_game));
+    // A newer import already restored: the newest unrestored import before it, not the later join backup
+    expect_eq(2, inventory_backup_pick_restore(pick_names, {F{true, false}, F{}, F{true, false}, F{true, true}, F{}}, current_game));
+    // The current game's own file is never picked, also not when it is an unrestored import
+    expect_eq(1, inventory_backup_pick_restore(pick_names, {F{}, F{true, false}, F{}, F{}, F{true, false}}, current_game));
+    expect_eq(3, inventory_backup_pick_restore(pick_names, {F{}, F{}, F{}, F{}, F{true, false}}, current_game));
+    expect_eq(-1, inventory_backup_pick_restore({current_game}, {F{true, false}}, current_game));
+    // No import: the old behaviour
+    expect_eq(3, inventory_backup_pick_restore(pick_names, {F{}, F{}, F{}, F{}, F{}}, current_game));
+    expect_eq(4, inventory_backup_pick_restore(pick_names, {F{}, F{}, F{}, F{}, F{}}, ""));
+    expect_eq(-1, inventory_backup_pick_restore({}, {}, current_game));
   }
 
   phosg::log_info_f("-- All static tests passed");

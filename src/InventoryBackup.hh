@@ -26,8 +26,10 @@ class Lobby;
 // LeftNormally; a disconnect while still in the game writes Exit, the server's own view of the inventory at that moment
 // (it already applied every drop, trade, sale and use the server saw). The server never restores on its own.
 //
-// $restore (and "$restore check", which only lists): compares the newest backup of the typing player's own character
-// made before the current game with his current inventory and drops what is missing at his feet, visible only to him.
+// $restore (and "$restore check", which only lists): compares a backup of the typing player's own character made
+// before the current game with his current inventory and drops what is missing at his feet, visible only to him. The
+// backup is the newest imported one not yet restored, else the newest one before the current game
+// (inventory_backup_pick_restore).
 // The rule (B-E10 decision log): only a backup whose game ended without a 98 (Exit present, or a backup imported from a
 // guard snapshot) is restorable; a game that ended normally saved the card, so there is nothing Sega took. Refused
 // outside a game, in a Spire run, for a backup from a Spire run (the guard restores those), and a second time for the
@@ -70,6 +72,15 @@ void inventory_backup_write_file(const std::string& path, const InventoryBackup&
 std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep);
 // The index of the newest name that is not current_basename, or -1
 ssize_t inventory_backup_pick_previous(const std::vector<std::string>& sorted_names, const std::string& current_basename);
+struct InventoryBackupPickFlags {
+  bool imported = false; // ImportedFrom set
+  bool restored = false; // Restored mark set
+};
+// The backup $restore (and $restore check) uses, from names sorted oldest first and flags[z] for sorted_names[z]
+// (regie pso-regie-10): the newest imported backup that is not yet restored always wins over join backups, also over
+// later ones; otherwise the newest name that is not current_basename. Never current_basename; -1 if nothing is left
+ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_names,
+    const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename);
 
 // What left the inventory in ways the server saw, since the current game began
 struct InventoryRemovals {
