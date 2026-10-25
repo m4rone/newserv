@@ -41,6 +41,11 @@
 // - Reward draw (v20): the pause A draw on the server (SPIRE_BRIDGE_DRAW_*, SpireDraw.hh).
 // - No window in a run (v35): every bridge text during a run is one B0 line (spire_ticker_line), the form of "Waiting
 //   for your partner..."; the records text of a run end waits for the lobby (spire_deliver_lobby_texts).
+// - Run over to the lobby (v35, regie): the first 'X' in a game marks the run over (no room clear or checkpoint after
+//   it), sends the run-over text to every client and sends each client back to the lobby the way $exit leaves a quest
+//   (6x73): the writer SPIRE_RUN_OVER_LOBBY_DELAY after its own 'X', a partner after its own 'X' too or at the latest
+//   SPIRE_RUN_OVER_PARTNER_DELAY after the first. Never to Pioneer 2 (B-E01-41); the 98 and the lobby join run the
+//   guard's restore as for a Quit.
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -337,6 +342,13 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
 std::string spire_ticker_line(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
+// v35: the lobby return after 'X' (see above). spire_run_over_exit_action is the decision, free of state for the static
+// tests: nothing if the client left the game or was already sent; 6x73 while a quest runs; ExitAnywhere without a
+// quest if the client runs functions; else only the log (the client leaves itself).
+constexpr auto SPIRE_RUN_OVER_LOBBY_DELAY = std::chrono::seconds(6);
+constexpr auto SPIRE_RUN_OVER_PARTNER_DELAY = std::chrono::seconds(20);
+enum class SpireRunOverExit { NONE, EXIT_QUEST, EXIT_ANYWHERE, TELL };
+SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progress, bool can_run_functions, bool already_sent);
 // v35: called from on_84 once a client that left a game is in a lobby (after the guard's lobby restore). Texts the
 // bridge held during the run (the records at the run end) go out SPIRE_LOBBY_TEXT_DELAY later, if the client is still
 // in a lobby then. Never throws.

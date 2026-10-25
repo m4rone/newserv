@@ -433,6 +433,99 @@ static const SpireRunEnd* spire_run_end_for(std::shared_ptr<const Lobby> l) {
   return (it == spire_run_ends.end()) ? nullptr : &it->second;
 }
 
+// v35 (regie): after the run is over every client of the game goes back to the lobby, the way $exit leaves a quest
+// (6x73: the client fades out and leaves the game, as Quit does), never to Pioneer 2, whose arrival writes the
+// Lv1 overlay to the card (B-E01-41). The 98 of that exit makes the guard's restore pending and the lobby join runs it.
+SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progress, bool can_run_functions, bool already_sent) {
+  if (!same_game || already_sent) {
+    return SpireRunOverExit::NONE;
+  }
+  if (quest_in_progress) {
+    return SpireRunOverExit::EXIT_QUEST;
+  }
+  return can_run_functions ? SpireRunOverExit::EXIT_ANYWHERE : SpireRunOverExit::TELL;
+}
+
+static asio::awaitable<void> spire_run_over_exit(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l, std::chrono::seconds delay) {
+  co_await async_sleep(delay);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l) {
+    co_return;
+  }
+  auto it = spire_run_ends.find(l->lobby_id);
+  if (it == spire_run_ends.end()) {
+    l->log.info_f("Spire bridge: client {} not sent back: a new run started in this game", c->lobby_client_id);
+    co_return;
+  }
+  bool already_sent = it->second.exit_sent.count(c->lobby_client_id);
+  auto action = spire_run_over_exit_action((c->lobby.lock() == l) && l->is_game(),
+      l->check_flag(Lobby::Flag::QUEST_IN_PROGRESS) || l->check_flag(Lobby::Flag::JOINABLE_QUEST_IN_PROGRESS),
+      c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE),
+      already_sent);
+  switch (action) {
+    case SpireRunOverExit::NONE:
+      co_return;
+    case SpireRunOverExit::EXIT_QUEST: {
+      it->second.exit_sent.emplace(c->lobby_client_id);
+      G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
+      c->channel->send(0x60, 0x00, cmd);
+      l->log.info_f("Spire bridge: run over; client {} sent back to the lobby (6x73, {} s after the run-over code)",
+          c->lobby_client_id, delay.count());
+      co_return;
+    }
+    case SpireRunOverExit::EXIT_ANYWHERE:
+      it->second.exit_sent.emplace(c->lobby_client_id);
+      try {
+        auto s = c->require_server_state();
+        auto fn = s->data->client_functions->get("ExitAnywhere", c->specific_version);
+        co_await prepare_client_for_patches(c);
+        co_await send_function_call(c, fn);
+        l->log.info_f("Spire bridge: run over; client {} sent back to the lobby (ExitAnywhere, no quest loaded)",
+            c->lobby_client_id);
+      } catch (const std::exception& e) {
+        l->log.warning_f("Spire bridge: run over; failed to send client {} back to the lobby: {}", c->lobby_client_id,
+            e.what());
+      }
+      co_return;
+    case SpireRunOverExit::TELL:
+      l->log.warning_f("Spire bridge: run over; client {} cannot run functions and no quest is loaded: it leaves itself",
+          c->lobby_client_id);
+      co_return;
+  }
+}
+
+static void spire_run_timer_stop(const Lobby* l);
+
+// 'X' (run over) from a client: the first one in the game tells every client and sends the partners back after
+// SPIRE_RUN_OVER_PARTNER_DELAY at the latest; each writer goes back SPIRE_RUN_OVER_LOBBY_DELAY after its own 'X'.
+static void spire_run_over(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> cl, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  auto l = std::const_pointer_cast<Lobby>(cl);
+  spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
+  auto& end = spire_run_mark_ended(l, "run over");
+  std::string msg = spire_bridge_message_text(value);
+  auto s = c->require_server_state();
+  size_t told = 0;
+  if (!end.over_announced) {
+    end.over_announced = true;
+    for (const auto& lc : l->clients) {
+      if (!lc) {
+        continue;
+      }
+      spire_send_ticker(lc, msg);
+      told++;
+      if (lc != c) {
+        asio::co_spawn(*s->io_context, spire_run_over_exit(lc, l, SPIRE_RUN_OVER_PARTNER_DELAY), asio::detached);
+      }
+    }
+  }
+  asio::co_spawn(*s->io_context, spire_run_over_exit(c, l, SPIRE_RUN_OVER_LOBBY_DELAY), asio::detached);
+  c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\" to {} client(s); back to the lobby in {} s",
+      value, serial_number, quest_number, msg, told, SPIRE_RUN_OVER_LOBBY_DELAY.count());
+}
+
 // v19: one run timer per game. The generation tells a coroutine that its timer was replaced or stopped; the key is
 // the lobby's address, and a coroutine whose lobby is gone (weak_ptr) removes nothing but its own generation.
 struct SpireRunTimer {
@@ -816,8 +909,8 @@ bool spire_bridge_handle_register(
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_MSG_RUN_OVER) {
-        spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
-        spire_run_mark_ended(l, "run over");
+        spire_run_over(c, l, serial_number, quest_number, value);
+        return true;
       }
       std::string msg = spire_bridge_message_text(value);
       if (!msg.empty()) {

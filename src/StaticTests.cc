@@ -245,6 +245,18 @@ void run_static_tests() {
     expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
   }
 
+  phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");
+  {
+    using X = SpireRunOverExit;
+    // arguments: same_game, quest_in_progress, can_run_functions, already_sent
+    expect_eq(X::EXIT_QUEST, spire_run_over_exit_action(true, true, false, false));    // 6x73, as $exit in a quest
+    expect_eq(X::EXIT_QUEST, spire_run_over_exit_action(true, true, true, false));
+    expect_eq(X::NONE, spire_run_over_exit_action(true, true, true, true));            // its own 'X' after the fallback
+    expect_eq(X::NONE, spire_run_over_exit_action(false, true, true, false));          // already left the game
+    expect_eq(X::EXIT_ANYWHERE, spire_run_over_exit_action(true, false, true, false)); // no quest loaded any more
+    expect_eq(X::TELL, spire_run_over_exit_action(true, false, false, false));
+  }
+
   phosg::log_info_f("-- Spire protected characters: any quest, also one not listed (audit S-3)");
   {
     DataIndex d;
