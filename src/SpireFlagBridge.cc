@@ -710,6 +710,21 @@ std::string spire_bridge_message_text(uint32_t value) {
       return b ? "You are down - you get up when the room is clear." : "You are back on your feet.";
     case SPIRE_BRIDGE_MSG_HINT:
       return "Close the board and take a step.";
+    case SPIRE_BRIDGE_MSG_PROMPT:
+      switch (a) {
+        case 1:
+          return "Take your reward: Quest Board, slot Reward.";
+        case 2:
+          return "Take a step: your reward pages open.";
+        case 6:
+          return "The way is open. Walk to a warp.";
+        case 7:
+          return "Partner has not taken a reward. The way is open.";
+        case 8:
+          return "Partner is in the shop. The warp waits for him.";
+        default:
+          return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
+      }
     case SPIRE_BRIDGE_MSG_APPROACH:
       switch (a) {
         case 1:
@@ -945,6 +960,9 @@ bool spire_bridge_handle_register(
         return true;
       }
       std::string msg = spire_bridge_message_text(value);
+      if (msg.empty() && ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT)) {
+        return true; // v37: a retired wait point (3-5): no text, no log line
+      }
       if (!msg.empty()) {
         // v17: a short run message. Each client writes its own life, time, partner and run-over codes, so those go to
         // the writer only; the wave code comes from the leader's room thread alone (the follower mirrors the room and

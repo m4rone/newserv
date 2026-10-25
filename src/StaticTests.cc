@@ -236,7 +236,7 @@ void run_static_tests() {
     expect_eq(std::string("a b"), spire_ticker_line("a \nb\n"));
     expect_eq(std::string("Waiting for your partner..."), spire_ticker_line("Waiting for your partner..."));
     for (uint32_t value : {0x57000102u, 0x4C000002u, 0x4C000101u, 0x5400000Fu, 0x50000000u, 0x50000001u, 0x580000A3u,
-             0x47000000u, 0x47000001u, 0x55000000u, 0x55000001u, 0x48000000u, 0x41000002u, 0x41000105u, 0x41000207u}) {
+             0x43000102u, 0x43000202u, 0x43000602u, 0x43000702u, 0x43000802u, 0x47000000u, 0x47000001u, 0x55000000u, 0x55000001u, 0x48000000u, 0x41000002u, 0x41000105u, 0x41000207u}) {
       std::string text = spire_bridge_message_text(value);
       expect(!text.empty());
       expect(text.find('\n') == std::string::npos);
@@ -251,6 +251,16 @@ void run_static_tests() {
     expect_eq(std::string("You are back on your feet."), spire_bridge_message_text(0x55000000));
     expect_eq(std::string("Close the board and take a step."), spire_bridge_message_text(0x48000000));
     expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002));
+    // v37: 'C' point << 8 | room (quest 802ebe9); 3-5 retired
+    expect_eq(std::string("Take your reward: Quest Board, slot Reward."), spire_bridge_message_text(0x43000102));
+    expect_eq(std::string("Take a step: your reward pages open."), spire_bridge_message_text(0x43000202));
+    expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000602));
+    expect_eq(std::string("Partner has not taken a reward. The way is open."), spire_bridge_message_text(0x43000702));
+    expect_eq(std::string("Partner is in the shop. The warp waits for him."), spire_bridge_message_text(0x43000802));
+    for (uint32_t value : {0x43000302u, 0x43000402u, 0x43000502u}) {
+      expect(spire_bridge_message_text(value).empty());
+    }
+    expect_eq(std::string("Room clear! Take a step for your reward."), std::string(SPIRE_BRIDGE_ROOM_CLEAR_TEXT));
     expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105));
     expect_eq(std::string("Room 7 - Rest"), spire_bridge_message_text(0x41000207));
     expect_eq(std::string("Last life: fall again and you stay down until the clear."), spire_bridge_message_text(0x4C000100));

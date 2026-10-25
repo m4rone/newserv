@@ -65,7 +65,7 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 // v16: written to register 248 by the quest's leader at a room clear; answered with SPIRE_BRIDGE_ROOM_CLEAR_TEXT as a
 // text message to every client in the game.
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
-constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear - open the Quest Board";
+constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear! Take a step for your reward.";
 // v36: the server's room clear (r251) sends its text this long after the r251, so the board text the quest shows on
 // the r251 does not push the line aside (pc 2026-10-25 09:06:48: B0 sent with r251, nothing seen)
 constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(1000);
@@ -75,7 +75,8 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   'P' partner wait (1: your partner is waiting, 0: waiting for your partner) · 'X' run over (rooms << 16 | seconds)
 //   v36 (quest spike/stadstart b29f310), each to the writer only: 'G' pause B (0: Continue, 1: Ready) · 'U' down
 //   (1: down, 0: back on its feet) · 'H' hint: close the board and take a step · 'A' pipe approach (type << 8 | room
-//   number; type 0 normal, 1 elite, 2 rest)
+//   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
+//   (point << 8 | room number; points 1, 2, 6, 7, 8; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q') and the lab probe ('N').
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
@@ -87,6 +88,7 @@ constexpr uint8_t SPIRE_BRIDGE_MSG_PAUSE_B = 'G';
 constexpr uint8_t SPIRE_BRIDGE_MSG_DOWN = 'U';
 constexpr uint8_t SPIRE_BRIDGE_MSG_HINT = 'H';
 constexpr uint8_t SPIRE_BRIDGE_MSG_APPROACH = 'A';
+constexpr uint8_t SPIRE_BRIDGE_MSG_PROMPT = 'C';
 // v18: records per character, kept by the server (system/spire-bridge/<serial>.<character>.records.json) instead of
 // quest counters 12-14 on the card. Codes in register 248, from each client for its own character:
 //   'B' run started (runs + 1) · 'K' final score (low 24 bits; held until 'F') · 'F' run finished (bit 23 won, low 16
