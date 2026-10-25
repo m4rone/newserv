@@ -751,6 +751,84 @@ void run_static_tests() {
     expect(!DataIndex::spire_cheat_refused("$lv", d.is_spire_protected_character(3117539659, "BidX")));
   }
 
+  phosg::log_info_f("-- $kitlobby: level table stats and EXP, material counters and caps, gates (regie 2026-10-25)");
+  {
+    using MatType = PSOBBCharacterFile::MaterialType;
+    auto level_table = std::make_shared<JSONLevelTable>(
+        phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    // A Lv1 FOnewearl (class 8) as Nyra: level 200, EXP and stats summed from the table, plus 2 per material
+    PSOBBCharacterFile ch;
+    ch.disp.visual.sh.char_class = 8;
+    level_table->reset_to_base(ch.disp.stats, 8);
+    spire_kit_lobby_apply(ch, level_table, 200);
+    const auto& base = level_table->base_stats_for_class(8);
+    uint32_t atp = base.atp, dfp = base.dfp, mst = base.mst, hp = base.hp;
+    for (uint32_t lv = 1; lv < 200; lv++) {
+      const auto& delta = level_table->stats_delta_for_level(8, lv);
+      atp += delta.atp;
+      dfp += delta.dfp;
+      mst += delta.mst;
+      hp += delta.hp;
+    }
+    expect_eq(199, ch.disp.stats.level);
+    expect_eq(level_table->stats_delta_for_level(8, 199).exp, ch.disp.stats.exp);
+    expect(ch.disp.stats.exp > 0);
+    expect_eq(atp + 72 * 2, ch.disp.stats.char_stats.atp);
+    expect_eq(dfp + 33 * 2, ch.disp.stats.char_stats.dfp);
+    expect_eq(mst, ch.disp.stats.char_stats.mst);
+    expect_eq(hp, ch.disp.stats.char_stats.hp); // HP from materials is in hp_from_materials, not here
+    expect_eq(base.lck + 45 * 2, ch.disp.stats.char_stats.lck);
+    expect_eq(72, ch.get_material_usage(MatType::POWER));
+    expect_eq(33, ch.get_material_usage(MatType::DEF));
+    expect_eq(45, ch.get_material_usage(MatType::LUCK));
+    expect_eq(125, ch.get_material_usage(MatType::HP));
+    expect_eq(250, ch.inventory.hp_from_materials);
+    expect_eq(72, ch.inventory.items[8 + static_cast<uint8_t>(MatType::POWER)].extension_data2);
+    expect_eq(0, ch.get_material_usage(MatType::MIND));
+    expect_eq(0, ch.get_material_usage(MatType::EVADE));
+    // Twice gives the same: counters are never added twice
+    spire_kit_lobby_apply(ch, level_table, 200);
+    expect_eq(72, ch.get_material_usage(MatType::POWER));
+    expect_eq(atp + 72 * 2, ch.disp.stats.char_stats.atp);
+    // Level 50 on request; out-of-range levels clamp
+    PSOBBCharacterFile low;
+    low.disp.visual.sh.char_class = 8;
+    spire_kit_lobby_apply(low, level_table, 50);
+    expect_eq(49, low.disp.stats.level);
+    expect_eq(level_table->stats_delta_for_level(8, 49).exp, low.disp.stats.exp);
+    spire_kit_lobby_apply(low, level_table, 999);
+    expect_eq(199, low.disp.stats.level);
+    // An android (HUcast, class 2) with 100 Evade already: the shared cap 150 leaves 50 (Power 50, Def 0, Luck 0)
+    PSOBBCharacterFile cast;
+    cast.disp.visual.sh.char_class = 2;
+    cast.set_material_usage(MatType::EVADE, 100);
+    spire_kit_lobby_apply(cast, level_table, 200);
+    expect_eq(50, cast.get_material_usage(MatType::POWER));
+    expect_eq(0, cast.get_material_usage(MatType::DEF));
+    expect_eq(0, cast.get_material_usage(MatType::LUCK));
+    expect_eq(100, cast.get_material_usage(MatType::EVADE));
+    expect_eq(125, cast.get_material_usage(MatType::HP));
+    // A non-android with 200 Mind: the cap 250 leaves 50
+    PSOBBCharacterFile mind;
+    mind.disp.visual.sh.char_class = 8;
+    mind.set_material_usage(MatType::MIND, 200);
+    mind.set_material_usage(MatType::POWER, 80); // higher than 72: kept
+    spire_kit_lobby_apply(mind, level_table, 200);
+    expect_eq(80, mind.get_material_usage(MatType::POWER));
+    expect_eq(0, mind.get_material_usage(MatType::DEF)); // 200 + 80 is over the cap already
+    // Gates: Wakiru refused, BidX allowed, never in a Spire run or a game, never while a restore is pending
+    DataIndex d;
+    d.spire_blocked_characters.emplace_back(3117539659, "Wakiru");
+    expect_eq(std::string("$C6Niet op dit personage."), std::string(spire_kit_lobby_refused(
+        d.is_spire_protected_character(3117539659, "Wakiru"), false, false, false)));
+    expect(spire_kit_lobby_refused(d.is_spire_protected_character(3117539659, "BidX"), false, false, false) == nullptr);
+    expect(DataIndex::spire_cheat_refused("$kitlobby", d.is_spire_protected_character(3117539659, "Wakiru")));
+    expect(!DataIndex::spire_cheat_refused("$kitlobby", d.is_spire_protected_character(3117539659, "BidX")));
+    expect_eq(std::string("$C6Niet in een Spire-run."), std::string(spire_kit_lobby_refused(false, true, true, false)));
+    expect_eq(std::string("$C6Alleen in de lobby."), std::string(spire_kit_lobby_refused(false, true, false, false)));
+    expect_eq(std::string("$C6Wacht: herstel loopt"), std::string(spire_kit_lobby_refused(false, false, false, true)));
+  }
+
   phosg::log_info_f("-- Spire guard: a marker only for a guarded quest, never for a protected character (regie pso-regie-9)");
   {
     using G = SpireGuardStart;

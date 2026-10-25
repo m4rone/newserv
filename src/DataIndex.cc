@@ -2223,6 +2223,7 @@ bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protec
       "$edit", // stats, level, exp, materials, name, section ID, class
       "$item", // creates an item (alias $i)
       "$kit", // regie pso-regie-10: drops a start set of items
+      "$kitlobby", // regie 2026-10-25: pushes level, stats and material counters
       "$loadchar", // replaces the character with a server backup
       "$lv", // regie pso-regie-10: alias for $edit level
       "$matcount", // regie B-REGIE-9-4 (it only reads the material counts)

@@ -1862,6 +1862,130 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
   }
 }
 
+const char* spire_kit_lobby_refused(bool protected_character, bool is_game, bool spire_run, bool restore_pending) {
+  if (protected_character) {
+    return "$C6Niet op dit personage.";
+  }
+  if (spire_run) {
+    return "$C6Niet in een Spire-run.";
+  }
+  if (is_game) {
+    return "$C6Alleen in de lobby.";
+  }
+  if (restore_pending) {
+    return "$C6Wacht: herstel loopt";
+  }
+  return nullptr;
+}
+
+void spire_kit_lobby_apply(PSOBBCharacterFile& ch, std::shared_ptr<const LevelTable> level_table, uint32_t level) {
+  using MatType = PSOBBCharacterFile::MaterialType;
+  level = std::clamp<uint32_t>(level, 1, 200);
+  // Never lower a counter; add up to the target within the shared cap (Power, Mind, Evade, Def, Luck)
+  size_t cap = char_class_is_android(ch.disp.visual.sh.char_class) ? SPIRE_KIT_LOBBY_MATERIAL_CAP_ANDROID
+                                                                   : SPIRE_KIT_LOBBY_MATERIAL_CAP;
+  size_t used = 0;
+  for (auto which : {MatType::POWER, MatType::MIND, MatType::EVADE, MatType::DEF, MatType::LUCK}) {
+    used += ch.get_material_usage(which);
+  }
+  for (const auto& [which, target] : std::initializer_list<std::pair<MatType, uint8_t>>{
+           {MatType::POWER, SPIRE_KIT_LOBBY_POWER}, {MatType::DEF, SPIRE_KIT_LOBBY_DEF}, {MatType::LUCK, SPIRE_KIT_LOBBY_LUCK}}) {
+    size_t current = ch.get_material_usage(which);
+    size_t add = (target > current) ? std::min<size_t>(target - current, (cap > used) ? (cap - used) : 0) : 0;
+    ch.set_material_usage(which, current + add);
+    used += add;
+  }
+  if (ch.get_material_usage(MatType::HP) < SPIRE_KIT_LOBBY_HP) {
+    ch.set_material_usage(MatType::HP, SPIRE_KIT_LOBBY_HP);
+  }
+  // The level table's stats and EXP for the class at that level, plus 2 per used material (as $edit level on BB)
+  ch.disp.stats.level = level - 1;
+  ch.recompute_stats(level_table, true);
+}
+
+asio::awaitable<std::string> spire_kit_lobby_push(std::shared_ptr<Client> c, uint32_t level) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  if (!serial_number) {
+    co_return "$C6Alleen voor GC.";
+  }
+  if (!c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
+      !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE)) {
+    co_return "$C6Kan niet: geen\nfunctie-aanroep.";
+  }
+  // Never while the guard restores this client or holds a marker for this character
+  SpireGuardRestoreLock lock(c.get());
+  bool pending = !lock.locked;
+  if (!pending) {
+    try {
+      std::string filename = spire_guard_filename_for(c, serial_number);
+      if (filename.empty()) {
+        pending = spire_guard_serial_has_open_marker(c, serial_number);
+      } else if (std::filesystem::is_regular_file(filename)) {
+        auto snapshot = spire_guard_load(filename);
+        pending = spire_guard_marker_open(
+            c->is_spire_protected(), snapshot.run_in_progress, snapshot.restore_pending, snapshot.awaiting_save);
+      }
+    } catch (const std::exception& e) {
+      c->log.warning_f("Kit lobby: cannot read the guard marker for serial {:010}: {}", serial_number, e.what());
+      pending = true;
+    }
+  }
+  const char* refused = spire_kit_lobby_refused(c->is_spire_protected(), false, false, pending);
+  if (refused) {
+    co_return refused;
+  }
+
+  try {
+    auto executor = co_await asio::this_coro::executor;
+    // The guard's restore push (spire_guard_run_restore): full character (30), change it, SetExtendedPlayerInfo, 61
+    GetPlayerInfoResult info;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30) for $kitlobby", false);
+      info = co_await send_get_player_info(c, true);
+    }
+    if (!info.is_full_info || !info.character) {
+      co_return "$C6Kan niet: geen\nvolledig personage.";
+    }
+    auto ch = info.character;
+    std::string name = ch->disp.visual.name.decode(ch->inventory.language);
+    uint32_t level_before = ch->disp.stats.level + 1;
+    auto s = c->require_server_state();
+    spire_kit_lobby_apply(*ch, s->data->level_table(c->version()), level);
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to the patch preparation for $kitlobby", false);
+      co_await prepare_client_for_patches(c);
+    }
+    auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
+    PSOGCCharacterFile::Character gc_char = *ch;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "answer to SetExtendedPlayerInfo (B3) for $kitlobby", false);
+      co_await send_function_call(c, fn, {}, &gc_char, sizeof(gc_char));
+    }
+    c->log.info_f("Kit lobby: {} pushed to Lv{} EXP {} (was Lv{}) for serial {:010}; {}; asking for a 61 to verify",
+        name, ch->disp.stats.level + 1, ch->disp.stats.exp.load(), level_before, serial_number,
+        spire_guard_materials_str(ch->inventory));
+    GetPlayerInfoResult after;
+    {
+      SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61 for $kitlobby", false);
+      after = co_await send_get_player_info(c, false);
+    }
+    if (!after.character || (after.character->disp.stats.level != ch->disp.stats.level) ||
+        (after.character->disp.stats.exp != ch->disp.stats.exp) ||
+        !spire_guard_same_materials(after.character->inventory, ch->inventory)) {
+      c->log.warning_f("Kit lobby: {} not verified for serial {:010}: 61 shows {}", name, serial_number,
+          after.character ? std::format("Lv{} EXP {}; {}", after.character->disp.stats.level + 1,
+                                after.character->disp.stats.exp.load(), spire_guard_materials_str(after.character->inventory))
+                          : std::string("no character"));
+      co_return "$C6Niet bevestigd:\nlevel of materialen\nanders na de push.";
+    }
+    c->log.info_f("Kit lobby: {} pushed to Lv{}", name, ch->disp.stats.level + 1);
+    co_return std::format("$C7{} is nu Lv{}.", name, ch->disp.stats.level + 1);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Kit lobby: push failed for serial {:010}: {}", serial_number, e.what());
+    co_return "$C6Push mislukt.";
+  }
+}
+
 asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {

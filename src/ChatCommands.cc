@@ -1331,6 +1331,33 @@ ChatCommandDefinition cc_kit(
       co_return;
     });
 
+// Regie 2026-10-25: "$kitlobby [n]" brings the player's own GC character to level n (default 200) with the level
+// table's stats and the $kit materials in its counters, pushed with the guard's restore push and verified with a 61
+// (spire_kit_lobby_push). Only in the lobby, never for a protected character, never while a guard restore is pending.
+ChatCommandDefinition cc_kitlobby(
+    {"$kitlobby"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      a.check_is_proxy(false);
+      uint32_t level = SPIRE_KIT_LOBBY_DEFAULT_LEVEL;
+      if (!a.text.empty()) {
+        if ((a.text.size() > 3) || (a.text.find_first_not_of("0123456789") != std::string::npos) ||
+            (std::stoul(a.text) < 1) || (std::stoul(a.text) > 200)) {
+          throw precondition_failed("$C6Gebruik: $kitlobby\nof $kitlobby <1-200>");
+        }
+        level = std::stoul(a.text);
+      }
+      auto s = a.c->require_server_state();
+      auto l = a.c->require_lobby();
+      bool spire_quest = spire_game_is_spire(a.c, l) ||
+          (l->quest && s->data->spire_meta_quest_numbers.count(l->quest->meta.quest_number));
+      const char* refused = spire_kit_lobby_refused(a.c->is_spire_protected(), l->is_game(), spire_quest, false);
+      if (refused) {
+        throw precondition_failed("{}", refused);
+      }
+      a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
+      send_text_message(a.c, co_await spire_kit_lobby_push(a.c, level));
+    });
+
 // Regie pso-regie-10: "$restore" drops what Sega took from the player's own character after a game that did not end
 // cleanly; "$restore check" only lists it (see InventoryBackup.hh). Allowed for protected characters (Wakiru).
 ChatCommandDefinition cc_restore(
