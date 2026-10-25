@@ -1354,7 +1354,9 @@ ChatCommandDefinition cc_kitlobby(
       if (refused) {
         throw precondition_failed("{}", refused);
       }
-      a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
+      if (SPIRE_KIT_LOBBY_NEEDS_CHEAT_MODE) {
+        a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
+      }
       send_text_message(a.c, co_await spire_kit_lobby_push(a.c, level));
     });
 

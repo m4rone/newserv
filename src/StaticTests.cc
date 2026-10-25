@@ -828,6 +828,10 @@ void run_static_tests() {
     expect_eq(std::string("$C6Niet in een Spire-run."), std::string(spire_kit_lobby_refused(false, true, true, false)));
     expect_eq(std::string("$C6Alleen in de lobby."), std::string(spire_kit_lobby_refused(false, true, false, false)));
     expect_eq(std::string("$C6Wacht: herstel loopt"), std::string(spire_kit_lobby_refused(false, false, false, true)));
+    // Lobby without cheat mode: allowed for BidX (cheat mode is never on in a lobby), Wakiru still refused
+    expect(!SPIRE_KIT_LOBBY_NEEDS_CHEAT_MODE);
+    expect(spire_kit_lobby_refused(d.is_spire_protected_character(3117539659, "BidX"), false, false, false) == nullptr);
+    expect(spire_kit_lobby_refused(d.is_spire_protected_character(3117539659, "Wakiru"), false, false, false) != nullptr);
   }
 
   phosg::log_info_f("-- Spire guard: a marker only for a guarded quest, never for a protected character (regie pso-regie-9)");

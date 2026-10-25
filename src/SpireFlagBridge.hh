@@ -458,6 +458,9 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c);
 // (never lower than they are, within the shared cap: 150 for an android, 250 otherwise; HP at most 125). The character
 // is pushed to the client with the guard's restore push (full character 30, SetExtendedPlayerInfo, verifying 61).
 constexpr uint32_t SPIRE_KIT_LOBBY_DEFAULT_LEVEL = 200;
+// $kitlobby works only in the lobby, where cheat mode is never on (CheatModeBehavior OnByDefault applies to games),
+// so it is gated on spire_kit_lobby_refused and the guard marker alone, never on cheat mode (regie pso-regie-10)
+constexpr bool SPIRE_KIT_LOBBY_NEEDS_CHEAT_MODE = false;
 constexpr uint8_t SPIRE_KIT_LOBBY_POWER = 72;
 constexpr uint8_t SPIRE_KIT_LOBBY_DEF = 33;
 constexpr uint8_t SPIRE_KIT_LOBBY_LUCK = 45;
