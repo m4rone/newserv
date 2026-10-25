@@ -213,9 +213,15 @@ void spire_bridge_check_dark_falz_flag(
 //   after the last room cleared) and the lives it had at that clear (from its 'L' codes), so after a disconnect the
 //   player picks that room's quest, which its AvailableIf has unlocked. The kit follows from the class.
 // The room index k a clear of this room on this floor stores (SpireCheckpointRooms; Room -1 is any room of the floor, the
-// boss floors 11 Dragon, 12 De Rol Le, 13 Vol Opt and 14 Dark Falz), or 0 if the room is not listed. Free of state for the tests.
+// Ep1 boss floors 11 Dragon, 12 De Rol Le, 13 Vol Opt and 14 Dark Falz; Ep2 floor 14 Barba Ray), or 0 if the room is not listed. Free of state for the tests.
 uint8_t spire_checkpoint_room_k(
     const std::map<std::pair<uint8_t, int32_t>, uint8_t>& rooms, uint8_t floor, uint16_t room);
+// The same for a game of this episode: the rooms of SpireCheckpointRooms with that Episode (missing: 1), 0 if none.
+uint8_t spire_checkpoint_room_k(const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>& rooms_by_episode,
+    Episode episode, uint8_t floor, uint16_t room);
+// The room index k an arrival on this floor in a game of this episode stores (SpireCheckpointArrivals), or 0.
+uint8_t spire_checkpoint_arrival_k(
+    const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor);
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
 constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
 

@@ -1035,6 +1035,61 @@ void run_static_tests() {
     expect(!spire_drops_is_boss_drop(EnemyType::VOL_OPT_1));
   }
 
+  phosg::log_info_f("-- Spire rooms k16-k18: Episode 2 VR Temple and Barba Ray checkpoints per episode and drop (plan-ep2-temple section 7)");
+  {
+    // SpireCheckpointRooms with an Episode field: entries without it are Episode 1, so the Ep1 rooms stay as they were
+    std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>> rooms = {
+        {1, {{{1, 7}, 2}, {{1, 10}, 2}, {{1, 11}, 1}, {{2, 2}, 3}, {{3, 50}, 5}, {{4, 14}, 6}, {{5, 50}, 7},
+                {{6, 50}, 9}, {{7, 60}, 10}, {{8, 60}, 12}, {{9, 31}, 13}, {{10, 40}, 14}, {{11, -1}, 4},
+                {{12, -1}, 8}, {{13, -1}, 11}, {{14, -1}, 15}}},
+        {2, {{{1, 70}, 16}, {{2, 50}, 17}, {{14, -1}, 18}}}};
+    expect_eq(15, spire_checkpoint_room_k(rooms, Episode::EP1, 14, 0)); // Dark Falz stays k15
+    expect_eq(15, spire_checkpoint_room_k(rooms, Episode::EP1, 14, 7));
+    expect_eq(18, spire_checkpoint_room_k(rooms, Episode::EP2, 14, 0)); // Barba Ray: any room of Ep2 floor 14
+    expect_eq(18, spire_checkpoint_room_k(rooms, Episode::EP2, 14, 1));
+    expect_eq(16, spire_checkpoint_room_k(rooms, Episode::EP2, 1, 70)); // VR Temple Alpha
+    expect_eq(17, spire_checkpoint_room_k(rooms, Episode::EP2, 2, 50)); // VR Temple Beta
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::EP2, 1, 7));   // Ep1 Forest 1 room 7 is not an Ep2 room
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::EP2, 2, 2));
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::EP2, 13, 0));  // Vol Opt's floor number in Ep2: nothing
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::EP1, 1, 70));  // the Temple room numbers in Ep1: nothing
+    expect_eq(2, spire_checkpoint_room_k(rooms, Episode::EP1, 1, 7));   // Ep1 unchanged
+    expect_eq(12, spire_checkpoint_room_k(rooms, Episode::EP1, 8, 60));
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::EP4, 14, 0));  // no Ep4 rooms
+    expect_eq(0, spire_checkpoint_room_k(rooms, Episode::NONE, 14, 0));
+    // SpireCheckpointArrivals: Ep1 floor 14 is k14 (the rest room before Dark Falz), Ep2 floor 14 is k17
+    std::map<uint8_t, std::map<uint8_t, uint8_t>> arrivals = {{1, {{14, 14}}}, {2, {{14, 17}}}};
+    expect_eq(14, spire_checkpoint_arrival_k(arrivals, Episode::EP1, 14));
+    expect_eq(17, spire_checkpoint_arrival_k(arrivals, Episode::EP2, 14));
+    expect_eq(0, spire_checkpoint_arrival_k(arrivals, Episode::EP2, 13));
+    expect_eq(0, spire_checkpoint_arrival_k(arrivals, Episode::EP4, 14));
+
+    // The config as build.sh writes it: entries without Episode are Episode 1, with "Episode": 2 a separate table
+    {
+      DataIndex d;
+      d.config_json = std::make_shared<phosg::JSON>(phosg::JSON::parse(R"({
+        "SpireCheckpointRooms": [{"Floor": 14, "Room": -1, "K": 15}, {"Floor": 1, "Room": 7, "K": 2},
+            {"Episode": 2, "Floor": 1, "Room": 70, "K": 16}, {"Episode": 2, "Floor": 2, "Room": 50, "K": 17},
+            {"Episode": 2, "Floor": 14, "K": 18}],
+        "SpireCheckpointArrivals": [{"Floor": 14, "K": 14}, {"Episode": 2, "Floor": 14, "K": 17}]})"));
+      d.load_spire_checkpoint_config();
+      expect_eq(15, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP1, 14, 3));
+      expect_eq(18, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 14, 3));
+      expect_eq(2, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP1, 1, 7));
+      expect_eq(0, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 1, 7));
+      expect_eq(16, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 1, 70));
+      expect_eq(17, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 2, 50));
+      expect_eq(14, spire_checkpoint_arrival_k(d.spire_checkpoint_arrivals, Episode::EP1, 14));
+      expect_eq(17, spire_checkpoint_arrival_k(d.spire_checkpoint_arrivals, Episode::EP2, 14));
+    }
+
+    // Boss drop: Barba Ray yes; its joints (Sega's boss flag) and the Pig Rays no
+    expect(spire_drops_is_boss_drop(EnemyType::BARBA_RAY));
+    expect(type_definition_for_enemy(EnemyType::BARBA_RAY_JOINT).is_boss()); // Sega's flag: a boss part
+    expect(!spire_drops_is_boss_drop(EnemyType::BARBA_RAY_JOINT));
+    expect(!spire_drops_is_boss_drop(EnemyType::PIG_RAY));
+  }
+
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");
   {
     auto a = spire_bridge_registers_filename(42, "AAAA");

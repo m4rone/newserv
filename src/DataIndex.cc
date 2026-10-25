@@ -783,31 +783,7 @@ void DataIndex::load_config_early() {
   } catch (const std::out_of_range&) {
   }
 
-  this->spire_checkpoint_rooms.clear();
-  try {
-    for (const auto& item : this->config_json->get_list("SpireCheckpointRooms")) {
-      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
-      int64_t room = item->get_int("Room", -1);
-      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || (room < -1) || (room > 0xFFFF)) {
-        throw std::runtime_error("SpireCheckpointRooms: Floor 0-255, Room -1-65535, K 1-31");
-      }
-      this->spire_checkpoint_rooms[std::make_pair(static_cast<uint8_t>(floor), static_cast<int32_t>(room))] = k;
-    }
-    config_log.info_f("SpireCheckpointRooms: {} room(s)", this->spire_checkpoint_rooms.size());
-  } catch (const std::out_of_range&) {
-  }
-  this->spire_checkpoint_arrivals.clear();
-  try {
-    for (const auto& item : this->config_json->get_list("SpireCheckpointArrivals")) {
-      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
-      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31)) {
-        throw std::runtime_error("SpireCheckpointArrivals: Floor 0-255, K 1-31");
-      }
-      this->spire_checkpoint_arrivals[floor] = k;
-    }
-    config_log.info_f("SpireCheckpointArrivals: {} floor(s)", this->spire_checkpoint_arrivals.size());
-  } catch (const std::out_of_range&) {
-  }
+  this->load_spire_checkpoint_config();
   this->spire_follow_leader.reset();
   try {
     const auto& f = this->config_json->at("SpireFollowLeader");
@@ -1317,6 +1293,43 @@ void DataIndex::load_config_early() {
     this->cheat_flags = CheatFlags(this->config_json->at("CheatingBehaviors"));
   } catch (const std::out_of_range&) {
     this->cheat_flags = CheatFlags();
+  }
+}
+
+// SpireCheckpointRooms and SpireCheckpointArrivals from config_json (part of load_config_early; separate for the tests)
+void DataIndex::load_spire_checkpoint_config() {
+  this->spire_checkpoint_rooms.clear();
+  try {
+    size_t count = 0;
+    for (const auto& item : this->config_json->get_list("SpireCheckpointRooms")) {
+      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
+      int64_t room = item->get_int("Room", -1), episode = item->get_int("Episode", 1);
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || (room < -1) || (room > 0xFFFF) ||
+          ((episode != 1) && (episode != 2) && (episode != 4))) {
+        throw std::runtime_error("SpireCheckpointRooms: Episode 1, 2 or 4, Floor 0-255, Room -1-65535, K 1-31");
+      }
+      auto& rooms = this->spire_checkpoint_rooms[static_cast<uint8_t>(episode)];
+      auto key = std::make_pair(static_cast<uint8_t>(floor), static_cast<int32_t>(room));
+      count += rooms.count(key) ? 0 : 1;
+      rooms[key] = k;
+    }
+    config_log.info_f("SpireCheckpointRooms: {} room(s)", count);
+  } catch (const std::out_of_range&) {
+  }
+  this->spire_checkpoint_arrivals.clear();
+  try {
+    size_t count = 0;
+    for (const auto& item : this->config_json->get_list("SpireCheckpointArrivals")) {
+      int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0), episode = item->get_int("Episode", 1);
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || ((episode != 1) && (episode != 2) && (episode != 4))) {
+        throw std::runtime_error("SpireCheckpointArrivals: Episode 1, 2 or 4, Floor 0-255, K 1-31");
+      }
+      auto& arrivals = this->spire_checkpoint_arrivals[static_cast<uint8_t>(episode)];
+      count += arrivals.count(floor) ? 0 : 1;
+      arrivals[floor] = k;
+    }
+    config_log.info_f("SpireCheckpointArrivals: {} floor(s)", count);
+  } catch (const std::out_of_range&) {
   }
 }
 

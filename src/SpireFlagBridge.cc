@@ -2793,10 +2793,27 @@ uint8_t spire_checkpoint_room_k(
   return (it == rooms.end()) ? 0 : it->second;
 }
 
+uint8_t spire_checkpoint_room_k(const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>& rooms_by_episode,
+    Episode episode, uint8_t floor, uint16_t room) {
+  auto it = rooms_by_episode.find(static_cast<uint8_t>(episode));
+  return (it == rooms_by_episode.end()) ? 0 : spire_checkpoint_room_k(it->second, floor, room);
+}
+
+uint8_t spire_checkpoint_arrival_k(
+    const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor) {
+  auto ep_it = arrivals_by_episode.find(static_cast<uint8_t>(episode));
+  if (ep_it == arrivals_by_episode.end()) {
+    return 0;
+  }
+  auto it = ep_it->second.find(floor);
+  return (it == ep_it->second.end()) ? 0 : it->second;
+}
+
 static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
-  uint8_t k = spire_checkpoint_room_k(l->require_server_state()->data->spire_checkpoint_rooms, floor, room);
+  uint8_t k = spire_checkpoint_room_k(l->require_server_state()->data->spire_checkpoint_rooms, l->episode, floor, room);
   if (!k) {
-    l->log.info_f("Spire checkpoint: room {} on floor {:02X} is not in SpireCheckpointRooms", room, floor);
+    l->log.info_f("Spire checkpoint: room {} on floor {:02X} (episode {}) is not in SpireCheckpointRooms", room, floor,
+        static_cast<int>(l->episode));
     return;
   }
   spire_checkpoint_store(l, l->clients, k);
@@ -3019,15 +3036,15 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
       return;
     }
     spire_follow_leader(c, l);
-    const auto& arrivals = c->require_server_state()->data->spire_checkpoint_arrivals;
-    auto arr = arrivals.find(c->floor);
-    if (arr != arrivals.end()) {
+    uint8_t arrival_k = spire_checkpoint_arrival_k(
+        c->require_server_state()->data->spire_checkpoint_arrivals, l->episode, c->floor);
+    if (arrival_k) {
       if (auto end = spire_run_end_for(l)) {
         c->log.info_f("Spire checkpoint: arrival on floor {:02X} after the run ended ({}); room {} not stored", c->floor,
-            end->why, arr->second);
+            end->why, arrival_k);
       } else {
         std::array<std::shared_ptr<Client>, 1> just_c{c}; // each arriving client for its own character
-        spire_checkpoint_store(l, just_c, arr->second);
+        spire_checkpoint_store(l, just_c, arrival_k);
       }
     }
     if (!spire_replay_state_for(l, false)) {

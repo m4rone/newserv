@@ -177,12 +177,17 @@ struct DataIndex {
   // v19 lab: SpireRunTimerLab {"LimitSeconds": n, "WarningSeconds": m} replaces the time limit and warning the quest
   // sends with 'S', so a lab round reaches the warning and "Time is up." in minutes. Missing (the pc): the quest's values.
   std::optional<std::pair<uint32_t, uint32_t>> spire_run_timer_lab;
-  // v23 checkpoint: SpireCheckpointRooms [{"Floor": f, "Room": r, "K": k}, ...] maps a cleared room (Room missing or -1:
-  // any room of the floor, used for the boss floors) to the run's room index k 1-31; empty means no checkpoints.
-  std::map<std::pair<uint8_t, int32_t>, uint8_t> spire_checkpoint_rooms;
-  // v23: SpireCheckpointArrivals [{"Floor": f, "K": k}, ...]: a client arriving on floor f has done room k (a rest
-  // room has no fight the server can see, so the floor of the room after it is its checkpoint).
-  std::map<uint8_t, uint8_t> spire_checkpoint_arrivals;
+  // v23 checkpoint: SpireCheckpointRooms [{"Episode": e, "Floor": f, "Room": r, "K": k}, ...] maps a cleared room (Room
+  // missing or -1: any room of the floor, used for the boss floors) to the run's room index k 1-31; empty means no
+  // checkpoints. Episode (1, 2 or 4; missing: 1) is compared to the game's episode, since a floor number is another
+  // area in each episode (Ep2 floor 14 is Barba Ray, Ep1 floor 14 Dark Falz). Keyed by episode, then (floor, room).
+  std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>> spire_checkpoint_rooms;
+  // v23: SpireCheckpointArrivals [{"Episode": e, "Floor": f, "K": k}, ...]: a client arriving on floor f of a game of
+  // episode e (missing: 1) has done room k (a rest room has no fight the server can see, so the floor of the room after
+  // it is its checkpoint). Keyed by episode, then floor.
+  std::map<uint8_t, std::map<uint8_t, uint8_t>> spire_checkpoint_arrivals;
+  // Parses the two keys above from config_json (called by load_config_early).
+  void load_spire_checkpoint_config();
   // v23 replay: SpireReplayRegisters [n, ...], the quest registers whose latest 6x77 value the server keeps per game and
   // sends again to a client after its own floor load (a packet that arrives during a load can be lost); empty means off.
   std::set<uint8_t> spire_replay_registers;
