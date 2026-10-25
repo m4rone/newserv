@@ -6,6 +6,7 @@
 #include <phosg/JSON.hh>
 #include <string>
 
+#include "EnemyType.hh"
 #include "ItemData.hh"
 #include "ItemParameterTable.hh"
 #include "LevelTable.hh"
@@ -71,6 +72,12 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
 // was kept as it is.
 const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParameterTable& pmt, ItemData& item,
     const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random);
+
+// Item 28 applies to the drop of this enemy: a boss (EnemyType BOSS flag), except the Vol Opt parts before its end.
+// Vol Opt's monitors, pillars, amp, core and phase 1 carry the BOSS flag too, but only VOL_OPT_2 falling ends the fight
+// (k11, plan-mines-volopt-2026-10-25 section 5), so only VOL_OPT_2 gives each player his boss weapon. Dragon, De Rol Le
+// and every other boss are unchanged.
+bool spire_drops_is_boss_drop(EnemyType type);
 
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
 // counter. Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a

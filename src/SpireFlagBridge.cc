@@ -2738,17 +2738,21 @@ static SpireCheckpoint spire_checkpoint_load(const std::string& filename) {
   return ret;
 }
 
-static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
-  const auto& map = l->require_server_state()->data->spire_checkpoint_rooms;
-  auto it = map.find(std::make_pair(floor, static_cast<int32_t>(room)));
-  if (it == map.end()) {
-    it = map.find(std::make_pair(floor, -1));
+uint8_t spire_checkpoint_room_k(
+    const std::map<std::pair<uint8_t, int32_t>, uint8_t>& rooms, uint8_t floor, uint16_t room) {
+  auto it = rooms.find(std::make_pair(floor, static_cast<int32_t>(room)));
+  if (it == rooms.end()) {
+    it = rooms.find(std::make_pair(floor, -1));
   }
-  if (it == map.end()) {
+  return (it == rooms.end()) ? 0 : it->second;
+}
+
+static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
+  uint8_t k = spire_checkpoint_room_k(l->require_server_state()->data->spire_checkpoint_rooms, floor, room);
+  if (!k) {
     l->log.info_f("Spire checkpoint: room {} on floor {:02X} is not in SpireCheckpointRooms", room, floor);
     return;
   }
-  uint8_t k = it->second;
   spire_checkpoint_store(l, l->clients, k);
 }
 

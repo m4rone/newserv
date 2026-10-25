@@ -880,6 +880,38 @@ void run_static_tests() {
     expect_eq(0u, empty.spire_availability_rooms(3117539659, 0));             // key missing: off
   }
 
+  phosg::log_info_f("-- Spire rooms k9-k11: Mines 1, Mines 2 and Vol Opt checkpoints and unlocks (plan-mines-volopt section 5)");
+  {
+    // SpireCheckpointRooms as pso-roguelike quests/spire/build.sh writes it (build-pc/newserv-config.json)
+    std::map<std::pair<uint8_t, int32_t>, uint8_t> rooms = {{{1, 7}, 2}, {{1, 10}, 2}, {{1, 11}, 1}, {{2, 2}, 3},
+        {{3, 50}, 5}, {{4, 14}, 6}, {{5, 50}, 7}, {{6, 50}, 9}, {{7, 60}, 10}, {{11, -1}, 4}, {{12, -1}, 8},
+        {{13, -1}, 11}};
+    expect_eq(9, spire_checkpoint_room_k(rooms, 6, 50));  // Mines 1
+    expect_eq(10, spire_checkpoint_room_k(rooms, 7, 60)); // Mines 2
+    expect_eq(11, spire_checkpoint_room_k(rooms, 13, 0)); // Vol Opt: any room of floor 13
+    expect_eq(11, spire_checkpoint_room_k(rooms, 13, 3));
+    expect_eq(8, spire_checkpoint_room_k(rooms, 12, 0));  // De Rol Le unchanged
+    expect_eq(4, spire_checkpoint_room_k(rooms, 11, 0));  // Dragon unchanged
+    expect_eq(0, spire_checkpoint_room_k(rooms, 6, 49));  // another Mines 1 room: no checkpoint
+    expect_eq(0, spire_checkpoint_room_k(rooms, 7, 50));
+    expect_eq(0, spire_checkpoint_room_k(rooms, 8, 0));   // Ruins 1: not in the run yet
+    DataIndex d;
+    auto available = [&](const char* expr_str, uint32_t checkpoint_rooms) -> bool {
+      auto expr = ResourceDASM::Expression::Node::parse(expr_str);
+      ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+          .difficulty = Difficulty::NORMAL, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+          .spire_rooms = d.spire_availability_rooms(3117539666, checkpoint_rooms)};
+      return env.evaluate(*expr) != 0;
+    };
+    uint32_t to_k8 = 0xFF, to_k9 = 0x1FF, to_k10 = 0x3FF, to_k11 = 0x7FF;
+    expect(available("SPIRE_K8", to_k8) && !available("SPIRE_K9", to_k8)); // q954 (Mines 2) still locked after De Rol Le
+    expect(available("SPIRE_K9", to_k9) && !available("SPIRE_K10", to_k9)); // q954 open, q955 (Vol Opt) still locked
+    expect(available("SPIRE_K10", to_k10) && !available("SPIRE_K11", to_k10)); // q955 open
+    expect(available("SPIRE_K11", to_k11));
+    expect(available("SPIRE_MAX == 11", to_k11) && available("SPIRE_MAX == 10", to_k10) && available("SPIRE_MAX == 9", to_k9));
+    expect(available("SPIRE_K10", 1u << 9) && !available("SPIRE_K9", 1u << 9)); // only room 10 stored: bit 9
+  }
+
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");
   {
     auto a = spire_bridge_registers_filename(42, "AAAA");
@@ -1385,6 +1417,27 @@ void run_static_tests() {
       it = ItemData();
       expect(spire_drops_filter_item(no_boss_rule, *pmt, it, lv1(0, 5), true, pity, 0) == nullptr);
       expect(it.empty());
+    }
+    // Item 28 on Vol Opt (k11): only phase 2 is the boss drop, not its monitors, pillars, amp, core or phase 1
+    {
+      expect(spire_drops_is_boss_drop(EnemyType::VOL_OPT_2));
+      for (auto part : {EnemyType::VOL_OPT_1, EnemyType::VOL_OPT_AMP, EnemyType::VOL_OPT_CORE,
+               EnemyType::VOL_OPT_MONITOR, EnemyType::VOL_OPT_PILLAR}) {
+        expect(type_definition_for_enemy(part).is_boss()); // Sega's flag: a boss part
+        expect(!spire_drops_is_boss_drop(part));
+        uint32_t pity = 0;
+        ItemData it = monomate; // a pillar's monomate stays a monomate, no weapon per player
+        expect(spire_drops_filter_item(cfg, *pmt, it, lv1(0, 5), spire_drops_is_boss_drop(part), pity, 0) == nullptr);
+        expect(same(it, monomate));
+      }
+      uint32_t pity = 0;
+      ItemData it = monomate;
+      spire_drops_filter_item(cfg, *pmt, it, lv1(0, 5), spire_drops_is_boss_drop(EnemyType::VOL_OPT_2), pity, 0);
+      expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, it, lv1(0, 0)));
+      // Dragon and De Rol Le unchanged: a boss drop; a normal enemy is not
+      expect(spire_drops_is_boss_drop(EnemyType::DRAGON));
+      expect(spire_drops_is_boss_drop(EnemyType::DE_ROL_LE));
+      expect(!spire_drops_is_boss_drop(EnemyType::BOOMA));
     }
   }
 

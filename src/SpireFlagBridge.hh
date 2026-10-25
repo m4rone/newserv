@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 
 #include "Client.hh"
@@ -200,6 +201,10 @@ void spire_bridge_check_boss_defeated(
 // - '$spire status' shows the rooms this character cleared; '$spire continue' names the room to continue at (the one
 //   after the last room cleared) and the lives it had at that clear (from its 'L' codes), so after a disconnect the
 //   player picks that room's quest, which its AvailableIf has unlocked. The kit follows from the class.
+// The room index k a clear of this room on this floor stores (SpireCheckpointRooms; Room -1 is any room of the floor, the
+// boss floors 11 Dragon, 12 De Rol Le and 13 Vol Opt), or 0 if the room is not listed. Free of state for the tests.
+uint8_t spire_checkpoint_room_k(
+    const std::map<std::pair<uint8_t, int32_t>, uint8_t>& rooms, uint8_t floor, uint16_t room);
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
 constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
 

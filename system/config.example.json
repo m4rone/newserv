@@ -1002,6 +1002,14 @@
   // Other versions never get it, and the function writes nothing unless the code at 0x80429A78 is the original.
   // false turns the sending off without a rebuild (the key missing means true).
   "SpireBBATxGuardPatch": true,
+  // Spire run (pso-roguelike quests/spire/build.sh writes the full set into the pc config; shown here for rooms k9-k11).
+  // SpireBossClearQuests: quests in which Vol Opt phase 2 falling is the room clear (Vol Opt has no if_zone_clear):
+  // the run q929 and every room quest that plays on into Vol Opt (q953 Mines 1, q954 Mines 2, q955 Vol Opt).
+  // SpireCheckpointRooms: a cleared room stored as room K (SPIRE_K<K> for a room quest's AvailableIf); Room -1 is any
+  // room of the floor (the boss floors). Floor 6 room 50 is k9 (unlocks q954), floor 7 room 60 is k10 (unlocks q955),
+  // floor 13 is k11 (Vol Opt).
+  // "SpireBossClearQuests": [929, 953, 954, 955],
+  // "SpireCheckpointRooms": [{"Floor": 6, "Room": 50, "K": 9}, {"Floor": 7, "Room": 60, "K": 10}, {"Floor": 13, "Room": -1, "K": 11}],
   // Client functions listed here are automatically sent to all clients. If a client connects using a client version
   // that isn't compatible with some of these patches, the incompatible patches are skipped and the client is allowed
   // to connect. This option applies to all PSO versions, not only BB.

@@ -200,6 +200,19 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
   return nullptr;
 }
 
+bool spire_drops_is_boss_drop(EnemyType type) {
+  switch (type) {
+    case EnemyType::VOL_OPT_1:
+    case EnemyType::VOL_OPT_AMP:
+    case EnemyType::VOL_OPT_CORE:
+    case EnemyType::VOL_OPT_MONITOR:
+    case EnemyType::VOL_OPT_PILLAR:
+      return false;
+    default:
+      return type_definition_for_enemy(type).is_boss();
+  }
+}
+
 static std::unordered_map<const Client*, uint32_t> spire_drops_pity;
 
 static const SpireDropsConfig* spire_drops_config_for(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
