@@ -2138,8 +2138,9 @@ std::string spire_room_actions_hold(const void* action_stream, size_t action_str
 // its post-wave actions point at work in the same room that is not done: a trigger_event (0C) of an unfinished event
 // (covers the moment between the client's 6x76 and its 6x67 for the next wave), or a construct_enemies (09/0D) of a
 // wave whose enemies are not all defeated.
-static bool spire_bridge_room_is_clear(
-    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, std::string* why) {
+// treat_finished (v42): W-ids of events the dead-event net counts as finished (flag 0008 not yet set).
+static bool spire_bridge_room_is_clear(std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room,
+    std::string* why, const std::unordered_set<size_t>* treat_finished = nullptr) {
   auto& ms = l->map_state;
   std::vector<std::shared_ptr<MapState::EventState>> room_evs;
   for (const auto& ev_st : ms->event_states_for_floor(v, floor)) {
@@ -2148,9 +2149,12 @@ static bool spire_bridge_room_is_clear(
       room_evs.emplace_back(ev_st);
     }
   }
+  auto finished = [&](const MapState::EventState& ev_st) -> bool {
+    return (ev_st.flags & 0x08) || (treat_finished && treat_finished->count(ev_st.w_id));
+  };
   auto event_unfinished = [&](uint32_t event_id) -> bool {
     for (const auto& ev_st : room_evs) {
-      if ((ev_st->super_ev->version(v).set_entry->event_id == event_id) && !(ev_st->flags & 0x08)) {
+      if ((ev_st->super_ev->version(v).set_entry->event_id == event_id) && !finished(*ev_st)) {
         return true;
       }
     }
@@ -2158,7 +2162,7 @@ static bool spire_bridge_room_is_clear(
   };
   for (const auto& ev_st : room_evs) {
     const auto& ev_ver = ev_st->super_ev->version(v);
-    if (!(ev_st->flags & 0x08)) {
+    if (!finished(*ev_st)) {
       if (ev_st->flags & 0x06) {
         *why = std::format("W-{:03X} (event {}) is running", ev_st->w_id, ev_ver.set_entry->event_id.load());
         return false;
@@ -2182,6 +2186,9 @@ static bool spire_bridge_room_is_clear(
   }
   return !room_evs.empty();
 }
+
+static void spire_dead_event_watch(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
 
 void spire_bridge_check_room_clear(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number) {
@@ -2212,6 +2219,7 @@ void spire_bridge_check_room_clear(
     if (!spire_bridge_room_is_clear(l, v, floor, room, &why)) {
       l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} done, room not clear: {}", wave_number, room,
           floor, why.empty() ? "no wave events" : why);
+      spire_dead_event_watch(c, l, floor, room, wave_number);
       return;
     }
 
@@ -2347,6 +2355,129 @@ void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lo
         spire_unhit_wave_wait(c, l, floor, room, wave_number, generation, recheck), asio::detached);
   } catch (const std::exception& e) {
     l->log.warning_f("Spire bridge: unhit enemy watch failed: {}", e.what());
+  }
+}
+
+// v42: safety net for a started wave event without a living enemy (SpireFlagBridge.hh)
+bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies) {
+  for (const auto& e : enemies) {
+    if (!e.defeated && (e.ever_hit || e.is_boss)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The W-ids of the room's started, unfinished wave events whose enemies are all defeated or never hit
+static std::unordered_set<size_t> spire_dead_room_events(
+    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room) {
+  std::unordered_set<size_t> ret;
+  for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
+    const auto* set_entry = ev_st->super_ev->version(v).set_entry;
+    if (!set_entry || (set_entry->room != room) || (ev_st->flags & 0x08) || !(ev_st->flags & 0x06)) {
+      continue;
+    }
+    if (spire_event_without_living_enemy(spire_wave_enemies(l, v, floor, room, set_entry->wave_number))) {
+      ret.emplace(ev_st->w_id);
+    }
+  }
+  return ret;
+}
+
+// Per (game, floor, room): the generation of the running watch; one watch per room
+static std::map<std::tuple<uint32_t, uint8_t, uint16_t>, uint64_t> spire_dead_event_waits;
+static uint64_t spire_dead_event_next_generation = 1;
+
+static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l,
+    uint8_t floor, uint16_t room, uint16_t wave_number, uint64_t generation, std::unordered_set<size_t> seen) {
+  for (;;) {
+    co_await async_sleep(SPIRE_UNHIT_ENEMY_SECONDS);
+    auto l = weak_l.lock();
+    if (!l || !l->is_game() || !l->map_state) {
+      co_return;
+    }
+    auto key = std::make_tuple(l->lobby_id, floor, room);
+    auto it = spire_dead_event_waits.find(key);
+    if ((it == spire_dead_event_waits.end()) || (it->second != generation)) {
+      co_return;
+    }
+    auto c = weak_c.lock();
+    if (!c || (c->lobby.lock() != l)) {
+      c = nullptr;
+      for (const auto& lc : l->clients) {
+        if (lc && (lc->version() == Version::GC_V3)) {
+          c = lc;
+          break;
+        }
+      }
+    }
+    if (!c || spire_run_end_for(l)) {
+      spire_dead_event_waits.erase(it);
+      co_return;
+    }
+    Version v = c->version();
+    std::string why;
+    if (spire_bridge_room_is_clear(l, v, floor, room, &why)) {
+      spire_dead_event_waits.erase(it); // the room cleared by itself: the wave check announced it
+      co_return;
+    }
+    // Only events without a living enemy at the previous look and still now: at least SPIRE_UNHIT_ENEMY_SECONDS long
+    auto now = spire_dead_room_events(l, v, floor, room);
+    std::unordered_set<size_t> both;
+    for (size_t w_id : now) {
+      if (seen.count(w_id)) {
+        both.emplace(w_id);
+      }
+    }
+    if (!both.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &both)) {
+      spire_dead_event_waits.erase(it);
+      for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
+        if (!both.count(ev_st->w_id)) {
+          continue;
+        }
+        const auto* set_entry = ev_st->super_ev->version(v).set_entry;
+        for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, set_entry->wave_number)) {
+          if (!ene_st->super_ene->child_index) {
+            ene_st->set_flags |= 8;
+          }
+        }
+        ev_st->flags |= 0x18; // all enemies killed, post-wave actions run (server's map state only)
+        l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} running without a living enemy; counted as finished",
+            set_entry->event_id.load(), room, floor);
+      }
+      spire_bridge_check_room_clear(c, l, floor, room, wave_number);
+      co_return;
+    }
+    if (now.empty()) {
+      spire_dead_event_waits.erase(it); // every started event has a living enemy again: the next wave check looks anew
+      co_return;
+    }
+    seen = std::move(now);
+  }
+}
+
+static void spire_dead_event_watch(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number) {
+  try {
+    auto seen = spire_dead_room_events(l, c->version(), floor, room);
+    if (seen.empty()) {
+      return;
+    }
+    auto key = std::make_tuple(l->lobby_id, floor, room);
+    if (spire_dead_event_waits.count(key)) {
+      return; // this room's watch runs already
+    }
+    if (spire_dead_event_waits.size() > 4096) {
+      spire_dead_event_waits.clear();
+    }
+    uint64_t generation = spire_dead_event_next_generation++;
+    spire_dead_event_waits[key] = generation;
+    l->log.info_f("Spire bridge: room {} on floor {:02X} has {} started event(s) without a living enemy; counted as finished after {} s unless one is hit",
+        room, floor, seen.size(), SPIRE_UNHIT_ENEMY_SECONDS.count());
+    asio::co_spawn(*c->require_server_state()->io_context,
+        spire_dead_event_wait(c, l, floor, room, wave_number, generation, std::move(seen)), asio::detached);
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: dead event watch failed: {}", e.what());
   }
 }
 

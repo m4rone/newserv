@@ -448,6 +448,16 @@ struct SpireWaveEnemy {
 // The decision, free of state for the static tests: at least one enemy defeated, at least one not, and every one not
 // defeated never hit and no boss.
 bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
+// v42 (regie, pc 2026-10-25 12:32: q921 room 7 = k2 elite, "wave 3 done, room not clear: W-009 (event 117) is
+// running"; its only enemy, the elite Hildebear E-04D, never showed: no hit, no kill, no flag from either client while
+// the event had started at 12:29:48). Second net, for a started wave event without a living enemy: when the room
+// check finds the room not clear and some started, unfinished event of the room has no enemy that is alive and was hit
+// (every one defeated or never hit, no boss; an event without enemies counts too), the server looks again every
+// SPIRE_UNHIT_ENEMY_SECONDS. An event without a living enemy at two looks in a row that is all that still holds the
+// room counts as finished (flag 0018 on the event, flag 8 on its enemies; the server's map state only), logs "event n
+// of room r on floor ff running without a living enemy; counted as finished", and the room check runs again. One
+// watch per room; it stops at the room clear, at the run end, or when every started event has a living enemy again.
+bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,

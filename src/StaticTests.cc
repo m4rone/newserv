@@ -484,6 +484,19 @@ void run_static_tests() {
     expect(!spire_wave_held_only_by_unhit({}));
   }
 
+  phosg::log_info_f("-- Spire bridge: a started event without a living enemy holds no room forever (v42)");
+  {
+    using E = SpireWaveEnemy;
+    E dead{.defeated = true}, unhit{}, hit{.ever_hit = true}, boss{.is_boss = true}, dead_boss{true, true, true};
+    expect(spire_event_without_living_enemy({unhit}));                  // pc 12:32: E-04D, the elite Hildebear, never showed
+    expect(spire_event_without_living_enemy({dead, dead}));             // all defeated, the 6x76 never came
+    expect(spire_event_without_living_enemy({dead, unhit}));
+    expect(spire_event_without_living_enemy({}));                       // an event without enemies
+    expect(spire_event_without_living_enemy({dead_boss}));
+    expect(!spire_event_without_living_enemy({unhit, hit}));            // a hit enemy is alive and reachable: wait
+    expect(!spire_event_without_living_enemy({boss}));                  // never a living boss
+  }
+
   phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");
   {
     using X = SpireRunOverExit;
