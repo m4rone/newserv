@@ -226,6 +226,16 @@ void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const
   spire_meta_deliver_flags(c, l, serial_number);
 }
 
+bool spire_bridge_flag_is_shared(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, uint16_t flag_num) {
+  try {
+    bool meta_game = l && spire_meta_delivery_applies(l->is_game(), !!l->quest, spire_game_is_spire(c, l),
+                              l->quest && spire_meta_quest_is_listed(c, l->quest->meta.quest_number));
+    return spire_meta_flag_is_shared(meta_game, flag_num);
+  } catch (const std::exception&) {
+    return true;
+  }
+}
+
 // Merges a newly written value into the stored one. Returns the new stored value and sets how to the name of the rule
 // that was applied (for the log).
 static uint32_t spire_bridge_merge_register(

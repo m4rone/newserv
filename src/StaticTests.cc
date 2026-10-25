@@ -730,6 +730,97 @@ void run_static_tests() {
     expect(spire_bridge_registers_filename_for(42, nullptr).empty()); // no character data: not stored
   }
 
+  phosg::log_info_f("-- Spire meta flags: id distinct per character on one card, overlay is the real character (audit S-6)");
+  {
+    PlayerDispDataV4 a, b, a_class, a_section;
+    a.visual.name.encode("Alpha", Language::ENGLISH);
+    a.visual.sh.char_class = 0;
+    a.visual.sh.section_id = 3;
+    b = a;
+    b.visual.name.encode("Beta", Language::ENGLISH);
+    a_class = a;
+    a_class.visual.sh.char_class = 1;
+    a_section = a;
+    a_section.visual.sh.section_id = 4;
+    expect(spire_guard_character_id(a) != spire_guard_character_id(b));         // another name
+    expect(spire_guard_character_id(a) != spire_guard_character_id(a_class));   // same name, another class
+    expect(spire_guard_character_id(a) != spire_guard_character_id(a_section)); // same name, another section ID
+    // What create_battle_overlay changes (level, EXP, stats, ESP, meseta) never moves the id: a run's overlay records
+    // to the real character's file
+    PlayerDispDataV4 overlay = a;
+    overlay.stats.level = 98;
+    overlay.stats.exp = 123456;
+    overlay.stats.esp = 40;
+    overlay.stats.meseta = 300;
+    overlay.stats.char_stats.atp = 1;
+    expect_eq(spire_guard_character_id(a), spire_guard_character_id(overlay));
+    expect_eq(spire_meta_filename_for(42, &a), spire_meta_filename_for(42, &overlay));
+    auto fa = spire_meta_filename_for(42, &a);
+    auto fb = spire_meta_filename_for(42, &b);
+    expect(fa != fb);
+    expect(fa.ends_with(std::format("/0000000042.{}.meta.json", spire_guard_character_id(a))));
+    expect(spire_meta_filename_for(42, nullptr).empty()); // no character data: nothing read or stored
+  }
+
+  phosg::log_info_f("-- Spire meta flags: A's unlocks and q925 payout never reach B on the same card (audit S-6)");
+  {
+    PlayerDispDataV4 a, b;
+    a.visual.name.encode("Alpha", Language::ENGLISH);
+    b.visual.name.encode("Beta", Language::ENGLISH);
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-meta-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto local = [&](const std::string& filename) {
+      return (dir / std::filesystem::path(filename).filename()).string();
+    };
+    // A won a run: Haste unlocked and the payout open, on Normal
+    std::string flags_json = "{\"SerialNumber\":42,\"Flags\":[{\"Difficulty\":0,\"Flag\":900,\"Set\":true},"
+                             "{\"Difficulty\":0,\"Flag\":928,\"Set\":true},{\"Difficulty\":0,\"Flag\":929,\"Set\":true}]}";
+    phosg::save_file(local(spire_meta_filename_for(42, &a)), flags_json);
+    // The v5-v21 per-card file holds the same flags; it is nobody's meta file and is never read
+    std::string legacy = std::format("{}/{:010}.json", SPIRE_BRIDGE_DIRECTORY, 42);
+    phosg::save_file(local(legacy), flags_json);
+    expect(spire_meta_filename_for(42, &a) != legacy);
+    expect(spire_meta_filename_for(42, &b) != legacy);
+    expect(spire_bridge_registers_filename_for(42, &b) != legacy);
+
+    auto stored_a = spire_meta_load(local(spire_meta_filename_for(42, &a)));
+    auto stored_b = spire_meta_load(local(spire_meta_filename_for(42, &b)));
+    expect_eq(3u, stored_a.size());
+    expect(stored_b.empty()); // B has no file of its own: the legacy file next to it is not taken
+    auto value_of = [](const std::vector<SpireMetaDelivery>& v, uint16_t flag) -> int {
+      int ret = -1;
+      for (const auto& e : v) {
+        if ((e.difficulty == 0) && (e.flag == flag)) {
+          expect_eq(-1, ret); // one entry per flag
+          ret = e.set ? 1 : 0;
+        }
+      }
+      return ret;
+    };
+    auto to_a = spire_meta_delivery_entries(stored_a, 0);
+    auto to_b = spire_meta_delivery_entries(stored_b, 0);
+    expect_eq(1, value_of(to_a, 0x0384));                    // A's own unlock
+    expect_eq(1, value_of(to_a, SPIRE_META_FLAG_PAY_WIN));   // A's payout
+    expect_eq(1, value_of(to_a, SPIRE_META_FLAG_PAY_DEATHLESS));
+    expect_eq(0, value_of(to_a, SPIRE_META_FLAG_PAY_RECORD));
+    expect_eq(0, value_of(to_b, 0x0384));                    // not B's unlock: cleared, even after A's join sync
+    expect_eq(0, value_of(to_b, SPIRE_META_FLAG_PAY_WIN));   // A's payout is not visible to B in q925
+    expect_eq(0, value_of(to_b, SPIRE_META_FLAG_PAY_DEATHLESS));
+    expect_eq(-1, value_of(to_b, 0x03A8));                   // q925's S-rank received stays the client's own
+    expect_eq(-1, value_of(to_b, 0x03A9));
+    expect_eq(static_cast<size_t>(SPIRE_META_SERVER_LAST_FLAG - SPIRE_BRIDGE_FIRST_FLAG + 1), to_b.size());
+    expect_eq(to_b.size(), to_a.size());
+    // A live write in a Spire or q925 game stays with its writer: not forwarded to B, not in the game's flag state
+    expect(!spire_meta_flag_is_shared(true, SPIRE_META_FLAG_FIRST_RUN));
+    expect(!spire_meta_flag_is_shared(true, SPIRE_META_FLAG_PAY_WIN));
+    expect(!spire_meta_flag_is_shared(true, 0x03A8));
+    expect(!spire_meta_flag_is_shared(true, SPIRE_BRIDGE_LAST_FLAG));
+    expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_FIRST_FLAG - 1)); // a quest's own flags: shared as before
+    expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_LAST_FLAG + 1));
+    expect(spire_meta_flag_is_shared(false, SPIRE_META_FLAG_PAY_WIN));    // a normal game: unchanged
+    std::filesystem::remove_all(dir);
+  }
+
   phosg::log_info_f("-- Spire room clear: post-wave actions that hold the room (v19)");
   {
     auto none_undefeated = [](uint16_t) { return false; };

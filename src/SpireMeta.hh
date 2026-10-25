@@ -1,6 +1,9 @@
 #pragma once
 
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 #include <stdint.h>
 
 #include "Client.hh"
@@ -30,6 +33,33 @@ constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
 
 constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits
 constexpr uint32_t SPIRE_META_FINISH_DEATHLESS = 1 << 18;
+
+// Keyed by (difficulty, flag number); true = set, false = cleared. Same meaning as the bridge's flag entries.
+using SpireMetaFlags = std::map<std::pair<uint8_t, uint16_t>, bool>;
+
+// Audit S-6: the flags the server owns, 0x380 to the last payout flag (unlocks, relics seen, payout). 0x3A3-0x3AF
+// (q925's 0x3A8 S-rank received, 0x3A9 ever paid) are set by the client in a normal game and stay on its card.
+constexpr uint16_t SPIRE_META_SERVER_LAST_FLAG = SPIRE_META_FLAG_PAY_RECORD;
+
+// The meta file of one character: system/spire-bridge/<serial>.<character id>.meta.json ("" without character data).
+// The v5-v21 file <serial>.json (one per card) is never read, merged or moved: it cannot tell which character wrote a
+// flag, so it would hand the first character's unlocks to every character on the card.
+std::string spire_meta_filename_for(uint32_t serial_number, const PlayerDispDataV4* disp);
+SpireMetaFlags spire_meta_load(const std::string& filename); // empty if the file does not exist
+
+// What a delivery sends: every stored entry, plus a clear of each server-owned flag (0x380-0x3A2) the character has no
+// entry for on the game's difficulty. Pure, for the offline test.
+struct SpireMetaDelivery {
+  uint8_t difficulty = 0;
+  uint16_t flag = 0;
+  bool set = false;
+};
+std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFlags& stored, uint8_t difficulty);
+
+// Audit S-6: in a game where the meta flags apply (spire_meta_delivery_applies), a quest flag write in 0x380-0x3AF
+// belongs to the writer: it is not forwarded to the other clients and not kept in the game's flag state (which a
+// joining client receives). Elsewhere every flag is shared as before. Pure, for the offline test.
+bool spire_meta_flag_is_shared(bool meta_game, uint16_t flag_num);
 
 // Called from spire_bridge_record_flag for a bridged quest flag write in range. Stores it for the writing character.
 // Returns false if the client has no character data (the caller then does nothing). Throws on a file error.

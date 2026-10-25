@@ -3171,14 +3171,18 @@ static void on_set_quest_flag(std::shared_ptr<Client> c, SubcommandMessage& msg)
     return;
   }
   bool should_set = (action == 0);
+  // Audit S-6: a Spire meta flag in a Spire or payout game stays with its writer (see spire_bridge_flag_is_shared)
+  bool shared = spire_bridge_flag_is_shared(c, l, flag_num);
 
-  if (l->quest_flags_known) {
-    l->quest_flags_known->set(difficulty, flag_num);
-  }
-  if (should_set) {
-    l->quest_flag_values->set(difficulty, flag_num);
-  } else {
-    l->quest_flag_values->clear(difficulty, flag_num);
+  if (shared) {
+    if (l->quest_flags_known) {
+      l->quest_flags_known->set(difficulty, flag_num);
+    }
+    if (should_set) {
+      l->quest_flag_values->set(difficulty, flag_num);
+    } else {
+      l->quest_flag_values->clear(difficulty, flag_num);
+    }
   }
 
   if (c->version() == Version::BB_V4) {
@@ -3199,7 +3203,12 @@ static void on_set_quest_flag(std::shared_ptr<Client> c, SubcommandMessage& msg)
   // SpireFlagBridge.hh).
   spire_bridge_record_flag(c, l, difficulty, flag_num, should_set);
 
-  forward_subcommand(c, msg);
+  if (shared) {
+    forward_subcommand(c, msg);
+  } else {
+    c->log.info_f("Spire meta: quest flag {}:{:04X} kept for its writer (not forwarded)",
+        name_for_difficulty(difficulty), flag_num);
+  }
 
   if (l->drop_mode != ServerDropMode::DISABLED) {
     EnemyType boss_enemy_type = EnemyType::NONE;

@@ -11,19 +11,41 @@
 #include "SpireFlagBridge.hh"
 #include "StaticGameData.hh"
 
-// Keyed by (difficulty, flag number); true = set, false = cleared. Same meaning as the bridge's flag entries.
-using SpireMetaFlags = std::map<std::pair<uint8_t, uint16_t>, bool>;
 
+// Always the real character (allow_overlay false): a Battle overlay keeps name, class and section ID, so its id is the
+// real character's anyway, but the file is never chosen from the overlay's data.
 static std::string spire_meta_filename(std::shared_ptr<Client> c, uint32_t serial_number) {
   auto character = c->character_file(false, false);
-  if (!character) {
-    return "";
-  }
-  return std::format("{}/{:010}.{}.meta.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
-      spire_guard_character_id(character->disp));
+  return spire_meta_filename_for(serial_number, character ? &character->disp : nullptr);
 }
 
-static SpireMetaFlags spire_meta_load(const std::string& filename) {
+std::string spire_meta_filename_for(uint32_t serial_number, const PlayerDispDataV4* disp) {
+  if (!disp) {
+    return "";
+  }
+  return std::format("{}/{:010}.{}.meta.json", SPIRE_BRIDGE_DIRECTORY, serial_number, spire_guard_character_id(*disp));
+}
+
+std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFlags& stored, uint8_t difficulty) {
+  std::vector<SpireMetaDelivery> ret;
+  for (const auto& [key, is_set] : stored) {
+    ret.emplace_back(SpireMetaDelivery{key.first, key.second, is_set});
+  }
+  // Audit S-6: what the server owns but this character never wrote is cleared on the game's difficulty, so a flag the
+  // leader's join sync or an earlier character put into the client's game is not taken over
+  for (uint16_t flag_num = SPIRE_BRIDGE_FIRST_FLAG; flag_num <= SPIRE_META_SERVER_LAST_FLAG; flag_num++) {
+    if (!stored.count(std::make_pair(difficulty, flag_num))) {
+      ret.emplace_back(SpireMetaDelivery{difficulty, flag_num, false});
+    }
+  }
+  return ret;
+}
+
+bool spire_meta_flag_is_shared(bool meta_game, uint16_t flag_num) {
+  return !meta_game || (flag_num < SPIRE_BRIDGE_FIRST_FLAG) || (flag_num > SPIRE_BRIDGE_LAST_FLAG);
+}
+
+SpireMetaFlags spire_meta_load(const std::string& filename) {
   SpireMetaFlags ret;
   if (!std::filesystem::is_regular_file(filename)) {
     return ret;
@@ -71,14 +93,12 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
       return;
     }
     auto flags = spire_meta_load(filename);
-    if (flags.empty()) {
-      return;
-    }
+    auto entries = spire_meta_delivery_entries(flags, static_cast<uint8_t>(l->difficulty));
     // Same 6x75 form and 6D path as the bridge's delivery (send_game_flag_state_t); action 0 sets, 1 clears
     phosg::StringWriter w;
-    for (const auto& [key, is_set] : flags) {
+    for (const auto& e : entries) {
       w.put(G_UpdateQuestFlag_V3_BB_6x75{
-          {{0x75, 0x03, 0x0000}, key.second, static_cast<uint16_t>(is_set ? 0 : 1)}, key.first, 0});
+          {{0x75, 0x03, 0x0000}, e.flag, static_cast<uint16_t>(e.set ? 0 : 1)}, e.difficulty, 0});
     }
     if (c->game_join_command_queue) {
       auto& cmd = c->game_join_command_queue->emplace_back();
@@ -88,7 +108,8 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
     } else {
       send_command(c, 0x6D, c->lobby_client_id, w.str());
     }
-    c->log.info_f("Spire meta: delivered {} quest flag(s) from {} in {} game", flags.size(), filename,
+    c->log.info_f("Spire meta: delivered {} quest flag(s) from {} ({} stored) in {} game", entries.size(), filename,
+        flags.size(),
         (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle");
   } catch (const std::exception& e) {
     c->log.warning_f("Spire meta: failed to deliver quest flags: {}", e.what());

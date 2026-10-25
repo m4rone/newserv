@@ -17,8 +17,9 @@
 // sets the flag in the running game, but the GC client does not save it to the memory card as character state. So the
 // server is the only source of truth for the bridged range:
 // - Every quest flag write in the bridged range by a GC V3 client, in any game (Battle or not) that runs a quest listed
-//   in SpireBridgeQuests (v5; a missing or empty list records nothing), is recorded per GC license serial number in
-//   system/spire-bridge/<serial>.json. Both set and clear are recorded; the last write wins.
+//   in SpireBridgeQuests (v5; a missing or empty list records nothing), is recorded per character (SpireMeta, v22; audit S-6) in
+//   system/spire-bridge/<serial>.<character id>.meta.json; the v5-v21 per-card file <serial>.json is never read. In such
+//   a game the write is not forwarded to the other clients. Both set and clear are recorded; the last write wins.
 // - The stored flags are sent to the same client as 6x75 commands (set or clear) only in a game that runs a Spire quest
 //   (spire_game_is_spire: SpireBridgeQuests or SpireGuardQuests; regie pso-regie-9) or a quest listed in
 //   SpireMetaQuests (the E06 payout q925, which also has its clears of 0x3A0-0x3A2 recorded): when such a quest loads
@@ -150,6 +151,11 @@ void spire_bridge_record_flag(
 // Called when a client has finished loading into a game (6F). Does nothing unless the client is GC V3, the lobby is a
 // game, and there are stored entries for the client's GC license serial. Never throws.
 void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// Audit S-6: false for a quest flag write in 0x380-0x3AF in a game where the meta flags apply (a Spire quest or a
+// SpireMetaQuests quest): the 6x75 handler then neither forwards it nor keeps it in the game's flag state, so a partner
+// never takes over the writer's unlocks or payout. True otherwise (and on any error). Never throws.
+bool spire_bridge_flag_is_shared(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, uint16_t flag_num);
 
 // Called from the 6x77 handler for every valid quest register write. Returns true if the bridge took the write (the
 // caller must then not forward it), false if the caller should handle it as before. Takes nothing unless the client
