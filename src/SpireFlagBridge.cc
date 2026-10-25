@@ -1978,7 +1978,8 @@ asio::awaitable<std::string> spire_kit_lobby_push(std::shared_ptr<Client> c, uin
                           : std::string("no character"));
       co_return "$C6Niet bevestigd:\nlevel of materialen\nanders na de push.";
     }
-    c->log.info_f("Kit lobby: {} pushed to Lv{}", name, ch->disp.stats.level + 1);
+    c->log.info_f("Kit lobby: {} verified by the 61: Lv{} EXP {}; {}", name, after.character->disp.stats.level + 1,
+        after.character->disp.stats.exp.load(), spire_guard_materials_str(after.character->inventory));
     co_return std::format("$C7{} is nu Lv{}.", name, ch->disp.stats.level + 1);
   } catch (const std::exception& e) {
     c->log.warning_f("Kit lobby: push failed for serial {:010}: {}", serial_number, e.what());
