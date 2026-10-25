@@ -9,6 +9,8 @@
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
 #include "InventoryBackup.hh"
+#include "Map.hh"
+#include "PSOEncryption.hh"
 #include "Text.hh"
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
@@ -2103,6 +2105,73 @@ void run_static_tests() {
     expect(protected_command_allowed_v3_v4(true, false, true, true));
     expect(!protected_command_allowed_v3_v4(false, true, false, true)); // no function calls: nothing to send
     expect(!protected_command_allowed_v3_v4(true, true, true, false));
+  }
+
+  phosg::log_info_f("-- Boss lookup on a Spire Run F1 floor order: Dragon index and floor/type match (2026-10-25)");
+  {
+    // q921 as deployed on 2026-10-25 had two Pan Arms in Caves 2 (floor 04), each 3 server entries; the client
+    // builds no Pan Arms there, so its Dragon index was 4 lower than the server's and 6x12 hit the wrong enemy
+    using ESE = MapFile::EnemySetEntry;
+    auto make_set = [](uint16_t base_type, uint8_t floor) {
+      ESE e;
+      e.base_type = base_type;
+      e.floor = floor;
+      e.room = 1;
+      e.wave_number = 1;
+      return e;
+    };
+    auto dat = std::make_shared<std::string>();
+    auto add_section = [&](uint8_t floor, const std::vector<ESE>& sets) {
+      MapFile::SectionHeader h;
+      h.le_type = static_cast<uint32_t>(MapFile::SectionHeader::Type::ENEMY_SETS);
+      h.data_size = sets.size() * sizeof(ESE);
+      h.section_size = sizeof(h) + h.data_size;
+      h.floor = floor;
+      dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+      dat->append(reinterpret_cast<const char*>(sets.data()), h.data_size);
+    };
+    add_section(0x04, {make_set(0x0065, 0x04), make_set(0x0065, 0x04), make_set(0x0060, 0x04)}); // Pan Arms x2, Grass
+    add_section(0x0B, {make_set(0x00C0, 0x0B)}); // Dragon
+    add_section(0x0C, {make_set(0x00C1, 0x0C)}); // De Rol Le (+10 body, +9 mines)
+    add_section(0x0E, {make_set(0x00C8, 0x0E)}); // Dark Falz (root DF3, darvants, DF3/DF2/DF1 aliases)
+    add_section(0x11, {make_set(0x0044, 0x11)}); // an enemy on the last floor
+    MapFile::SectionHeader end_h;
+    end_h.le_type = 0;
+    end_h.section_size = 0;
+    end_h.floor = 0;
+    end_h.data_size = 0;
+    dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+
+    std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+    map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+    auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+    auto rand_crypt = std::make_shared<MT19937Generator>(0);
+    auto map_state = std::make_shared<MapState>(
+        0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, rand_crypt, supermap);
+
+    // Server view: Pan Arms 3 + 3, Grass 1, so the Dragon is index 7 (on the client, which builds no Pan Arms in
+    // Caves 2, it was index 3: the 6x12 of 2026-10-25 21:00 came in with that index)
+    expect_eq(EnemyType::DRAGON, map_state->enemy_state_for_index(Version::GC_V3, 7)->super_ene->type);
+    expect_eq(EnemyType::PAN_ARMS, map_state->enemy_state_for_index(Version::GC_V3, 3)->super_ene->type);
+
+    auto lookup = [&](uint8_t floor, EnemyType type) {
+      return map_state->enemy_state_for_floor_type(Version::GC_V3, floor, type);
+    };
+    auto dragon = lookup(0x0B, EnemyType::DRAGON);
+    expect_eq(EnemyType::DRAGON, dragon->super_ene->type);
+    expect_eq(7, map_state->index_for_enemy_state(Version::GC_V3, dragon));
+    // floor and type must both match: no De Rol Le on the Dragon floor (was: the floor's first enemy, the Dragon)
+    expect_raises(std::out_of_range, [&]() { lookup(0x0B, EnemyType::DE_ROL_LE); });
+    expect_eq(EnemyType::DE_ROL_LE, lookup(0x0C, EnemyType::DE_ROL_LE)->super_ene->type);
+    expect_eq(EnemyType::DE_ROL_LE_MINE, lookup(0x0C, EnemyType::DE_ROL_LE_MINE)->super_ene->type);
+    // Dark Falz phases: DF2 is an alias of the root DF3, so the final boss drop still resolves to the root
+    auto df2 = lookup(0x0E, EnemyType::DARK_FALZ_2);
+    expect_eq(EnemyType::DARK_FALZ_2, df2->super_ene->type);
+    expect(df2->alias_target_ene_st != nullptr);
+    expect_eq(EnemyType::DARK_FALZ_3, df2->alias_target_ene_st->super_ene->type);
+    expect_eq(EnemyType::DARK_FALZ_3, lookup(0x0E, EnemyType::DARK_FALZ_3)->super_ene->type);
+    // last floor: the search runs to the end of the enemy list (was: stopped at index 0x12)
+    expect_eq(EnemyType::BOOMA, lookup(0x11, EnemyType::BOOMA)->super_ene->type);
   }
 
   phosg::log_info_f("-- All static tests passed");
