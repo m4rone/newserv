@@ -235,7 +235,8 @@ void run_static_tests() {
     expect_eq(std::string("New best score: 5237! Records saved."), spire_ticker_line("New best score: 5237!\nRecords saved."));
     expect_eq(std::string("a b"), spire_ticker_line("a \nb\n"));
     expect_eq(std::string("Waiting for your partner..."), spire_ticker_line("Waiting for your partner..."));
-    for (uint32_t value : {0x57000102u, 0x4C000002u, 0x4C000101u, 0x5400000Fu, 0x50000000u, 0x50000001u, 0x580000A3u}) {
+    for (uint32_t value : {0x57000102u, 0x4C000002u, 0x4C000101u, 0x5400000Fu, 0x50000000u, 0x50000001u, 0x580000A3u,
+             0x47000000u, 0x47000001u, 0x55000000u, 0x55000001u, 0x48000000u, 0x41000002u, 0x41000105u, 0x41000207u}) {
       std::string text = spire_bridge_message_text(value);
       expect(!text.empty());
       expect(text.find('\n') == std::string::npos);
@@ -243,6 +244,17 @@ void run_static_tests() {
     expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000));
     expect_eq(std::string("Run over - back to the lobby. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3));
     expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
+    // v36: the quest's codes from spike/stadstart b29f310 (kind << 24 | a << 8 | b)
+    expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Continue = leave room."), spire_bridge_message_text(0x47000000));
+    expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Ready = leave room."), spire_bridge_message_text(0x47000001));
+    expect_eq(std::string("You are down - you get up when the room is clear."), spire_bridge_message_text(0x55000001));
+    expect_eq(std::string("You are back on your feet."), spire_bridge_message_text(0x55000000));
+    expect_eq(std::string("Close the board and take a step."), spire_bridge_message_text(0x48000000));
+    expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002));
+    expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105));
+    expect_eq(std::string("Room 7 - Rest"), spire_bridge_message_text(0x41000207));
+    expect_eq(std::string("$C1Life lost$C7 - 0 left. No more Scape Dolls: fall now and you stay down until the room is clear."),
+        spire_bridge_message_text(0x4C000100));
   }
 
   phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");

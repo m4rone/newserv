@@ -343,6 +343,22 @@ static void spire_send_ticker(std::shared_ptr<Client> c, const std::string& text
   send_text_message(c, spire_ticker_line(text));
 }
 
+// v36: the same, after delay, if the client is still in that game
+static asio::awaitable<void> spire_send_ticker_later_co(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, std::string text, std::chrono::milliseconds delay) {
+  co_await async_sleep(delay);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (c && l && (c->lobby.lock() == l)) {
+    spire_send_ticker(c, text);
+  }
+}
+
+static void spire_send_ticker_later(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, const std::string& text, std::chrono::milliseconds delay) {
+  asio::co_spawn(*c->require_server_state()->io_context, spire_send_ticker_later_co(c, l, text, delay), asio::detached);
+}
+
 // Texts held for the lobby, per client. The weak_ptr tells a reused Client address from the client that earned them.
 struct SpireLobbyTexts {
   std::weak_ptr<Client> client;
@@ -679,7 +695,7 @@ std::string spire_bridge_message_text(uint32_t value) {
     case SPIRE_BRIDGE_MSG_WAVE:
       return std::format("Wave {}/{}", a, b);
     case SPIRE_BRIDGE_MSG_LIFE:
-      return a ? std::format("$C1Life lost$C7 - {} left. No more Scape Dolls: the next death ends the run.", b)
+      return a ? std::format("$C1Life lost$C7 - {} left. No more Scape Dolls: fall now and you stay down until the room is clear.", b)
                : std::format("$C1Life lost$C7 - {} left. A new Scape Doll is yours.", b);
     case SPIRE_BRIDGE_MSG_TIME:
       return std::format("$C4{} minutes left$C7 - the timer ends the run.", value & 0xFFFF);
@@ -687,6 +703,22 @@ std::string spire_bridge_message_text(uint32_t value) {
       return b ? "$C4Your partner is waiting.$C7 Open the quest board and make your choice." : "Waiting for your partner...";
     case SPIRE_BRIDGE_MSG_RUN_OVER:
       return std::format("Run over - back to the lobby. Rooms cleared: {}, {} s.", (value >> 16) & 0xFF, value & 0xFFFF);
+    case SPIRE_BRIDGE_MSG_PAUSE_B:
+      return b ? "Reward taken. Quest Board: Shop (optional) or Ready = leave room."
+               : "Reward taken. Quest Board: Shop (optional) or Continue = leave room.";
+    case SPIRE_BRIDGE_MSG_DOWN:
+      return b ? "You are down - you get up when the room is clear." : "You are back on your feet.";
+    case SPIRE_BRIDGE_MSG_HINT:
+      return "Close the board and take a step.";
+    case SPIRE_BRIDGE_MSG_APPROACH:
+      switch (a) {
+        case 1:
+          return std::format("Room {} - Elite (harder, better reward)", b);
+        case 2:
+          return std::format("Room {} - Rest", b);
+        default:
+          return std::format("Room {}", b);
+      }
     default:
       return "";
   }
@@ -2065,8 +2097,8 @@ void spire_bridge_check_room_clear(
     size_t sent = 0;
     for (const auto& lc : l->clients) {
       if (lc) {
-        spire_send_ticker(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
         send_command_t(lc, 0x60, 0x00, cmd);
+        spire_send_ticker_later(lc, l, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY); // v36: after the r251
         sent++;
       }
     }
@@ -2118,8 +2150,8 @@ void spire_bridge_check_boss_defeated(
     size_t sent = 0;
     for (const auto& lc : l->clients) {
       if (lc) {
-        spire_send_ticker(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
         send_command_t(lc, 0x60, 0x00, cmd);
+        spire_send_ticker_later(lc, l, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY); // v36: after the r251
         sent++;
       }
     }

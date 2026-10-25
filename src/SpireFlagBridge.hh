@@ -65,17 +65,28 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 // v16: written to register 248 by the quest's leader at a room clear; answered with SPIRE_BRIDGE_ROOM_CLEAR_TEXT as a
 // text message to every client in the game.
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
-constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear!";
+constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear - open the Quest Board";
+// v36: the server's room clear (r251) sends its text this long after the r251, so the board text the quest shows on
+// the r251 does not push the line aside (pc 2026-10-25 09:06:48: B0 sent with r251, nothing seen)
+constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(1000);
 // v17: short run messages. A client writes kind << 24 | parameters to register 248 where it used to show a window_msg;
 // the bridge answers with the text (B0) to that client; the wave code (leader only) goes to every client. Kinds:
 //   'W' wave n/m (n << 8 | m) · 'L' life lost (last << 8 | lives left) · 'T' time warning (minutes left)
 //   'P' partner wait (1: your partner is waiting, 0: waiting for your partner) · 'X' run over (rooms << 16 | seconds)
-// The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM').
+//   v36 (quest spike/stadstart b29f310), each to the writer only: 'G' pause B (0: Continue, 1: Ready) · 'U' down
+//   (1: down, 0: back on its feet) · 'H' hint: close the board and take a step · 'A' pipe approach (type << 8 | room
+//   number; type 0 normal, 1 elite, 2 rest)
+// The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
+// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q') and the lab probe ('N').
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
 constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
 constexpr uint8_t SPIRE_BRIDGE_MSG_PARTNER = 'P';
 constexpr uint8_t SPIRE_BRIDGE_MSG_RUN_OVER = 'X';
+constexpr uint8_t SPIRE_BRIDGE_MSG_PAUSE_B = 'G';
+constexpr uint8_t SPIRE_BRIDGE_MSG_DOWN = 'U';
+constexpr uint8_t SPIRE_BRIDGE_MSG_HINT = 'H';
+constexpr uint8_t SPIRE_BRIDGE_MSG_APPROACH = 'A';
 // v18: records per character, kept by the server (system/spire-bridge/<serial>.<character>.records.json) instead of
 // quest counters 12-14 on the card. Codes in register 248, from each client for its own character:
 //   'B' run started (runs + 1) · 'K' final score (low 24 bits; held until 'F') · 'F' run finished (bit 23 won, low 16
