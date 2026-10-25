@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <vector>
 
 #include "Client.hh"
 #include "Lobby.hh"
@@ -327,6 +328,10 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   overlay fingerprint): the client writes its card when it leaves the game, so the card holds the real character
 //   from then on and the next login needs no push. Under RunInProgress or RestorePending nothing follows, and the 98 of
 //   a Spire (Battle) game never closes AwaitingSave.
+// - v43: after a verified lobby restore the lobby is refreshed like a normal lobby join: the restored client gets only
+//   a 67 (never a 69 for its own slot), the other players get the 69 first and the 68 SPIRE_GUARD_LOBBY_REFRESH_GAP
+//   later, never in the same frame. The $loadchar refresh (69 to all, then 67 and 68 at once) left the restored
+//   player invisible on the partner's screen (2026-10-25 20:46:49, BidX after a run in q921 with M4ia in the lobby).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -447,6 +452,13 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c);
 // v33: called at every 99 (the client's answer to a B1, sent only once the lobby is loaded); starts a lobby restore
 // that waits for it. Cheap no-op for every other client.
 void spire_guard_lobby_loaded(std::shared_ptr<Client> c);
+// v43: the lobby refresh after a lobby restore. The 69 goes to every other client in the lobby (never to the restored
+// client itself); after the gap the 68 goes only to those that got the 69 and are still in that lobby (a client that
+// joined in between already has the restored character in its 67). Ids are Client::id.
+constexpr auto SPIRE_GUARD_LOBBY_REFRESH_GAP = std::chrono::milliseconds(300);
+std::vector<uint64_t> spire_guard_refresh_leave_targets(const std::vector<uint64_t>& in_lobby, uint64_t self_id);
+std::vector<uint64_t> spire_guard_refresh_join_targets(
+    const std::vector<uint64_t>& told_leave, const std::vector<uint64_t>& in_lobby_now, uint64_t self_id);
 
 // Called before a client joins or creates a game (v10). Returns false, after sending the client a short message, if a
 // restore is running for the client or RestorePending is set; the caller must then not let the client into a game.
