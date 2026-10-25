@@ -2253,15 +2253,24 @@ void run_static_tests() {
     expect_raises(std::runtime_error, [&]() { spire_savestate_from_json("{\"RunId\":1,\"Episode\":0,\"Quest\":921,"
         "\"StartRoom\":1,\"Practice\":false,\"Values\":[1,2],\"Items\":[]}"); });
 
-    // Deleted only at a true end of its own run: dead, time up, Give up, won; never when a player left or is gone
-    expect(spire_savestate_end_deletes(false, false));
-    expect(!spire_savestate_end_deletes(true, false)); // run timer: player left (the partner's Wii froze)
-    expect(!spire_savestate_end_deletes(false, true)); // the partner's own 'X'/'F' after the other one is gone
+    // Deleted at every true end of its own run: dead, time up, Give up, won, also when a player is gone by then (regie
+    // 2026-10-25: a finished run must never be resumed); only the run timer's "player left" (a disconnect) keeps it
+    expect(spire_savestate_end_deletes(false));
+    expect(!spire_savestate_end_deletes(true)); // run timer: player left (the partner's Wii froze)
+    {
+      // the gone player's file is still deleted: it was written in the run, the present one is added, each once
+      auto files = spire_savestate_end_files({"a.savestate.json", "b.savestate.json"}, {"a.savestate.json", ""});
+      expect_eq(2u, files.size());
+      expect_eq(std::string("a.savestate.json"), files[0]);
+      expect_eq(std::string("b.savestate.json"), files[1]);
+      expect(spire_savestate_end_files({}, {"", ""}).empty());
+      expect_eq(1u, spire_savestate_end_files({}, {"c.savestate.json"}).size());
+    }
     expect(spire_savestate_is_of_run(read, 0x1234));
     expect(!spire_savestate_is_of_run(read, 0x9999)); // a savestate of another run is not this game's to delete
     expect(!spire_savestate_is_of_run(read, 0));
     expect(!spire_savestate_is_of_run(SpireSavestate(), 0x1234));
-    if (spire_savestate_end_deletes(false, false) && spire_savestate_is_of_run(read, 0x1234)) {
+    if (spire_savestate_end_deletes(false) && spire_savestate_is_of_run(read, 0x1234)) {
       std::filesystem::remove(file);
     }
     expect(!std::filesystem::exists(file));

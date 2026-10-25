@@ -5,6 +5,7 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <vector>
 
@@ -228,8 +229,13 @@ std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, ui
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
-// Whether a run end deletes the game's savestates: not on "player left", not when a client of the run is gone.
-bool spire_savestate_end_deletes(bool player_left_end, bool client_lost);
+// Whether a run end deletes the game's savestates: every true end (dead, time up, Give up, won), also when a client of
+// the run is gone by then; only the run timer's "player left" (the disconnect itself, no true end) keeps them.
+bool spire_savestate_end_deletes(bool player_left_end);
+// The savestate files a true run end looks at: the files the run's clients wrote or were answered from (also of a
+// client gone by then) and the files of the clients still in the game; each once, never "".
+std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& run_files,
+    const std::vector<std::string>& present_files);
 // Whether a run end deletes this savestate: only one of the game's run.
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
 // Whether a savestate fits a room quest's start: same episode, room and variant.

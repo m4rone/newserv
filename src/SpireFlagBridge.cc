@@ -471,8 +471,16 @@ bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_
   return !run_ended && has_overlay && began_run && (count == SPIRE_SAVESTATE_NUM_VALUES) && (num_values == count);
 }
 
-bool spire_savestate_end_deletes(bool player_left_end, bool client_lost) {
-  return !player_left_end && !client_lost;
+bool spire_savestate_end_deletes(bool player_left_end) {
+  return !player_left_end;
+}
+
+std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& run_files,
+    const std::vector<std::string>& present_files) {
+  std::set<std::string> all = run_files;
+  all.insert(present_files.begin(), present_files.end());
+  all.erase("");
+  return std::vector<std::string>(all.begin(), all.end());
 }
 
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
@@ -609,6 +617,7 @@ struct SpireGameRun {
   bool resumed = false; // the leader resumed from its savestate
   uint32_t elapsed = 0; // the leader's saved seconds (resumed only)
   size_t max_clients = 0; // the most clients the game had during the run
+  std::set<std::string> savestate_files; // written ('V') or answered from ('J') in this run, also of a client gone since
 };
 static std::unordered_map<uint32_t, SpireGameRun> spire_game_runs;
 
@@ -716,31 +725,39 @@ static std::string spire_savestate_describe(const SpireSavestate& ss) {
       ss.values[SPIRE_SS_ELAPSED], ss.start_room, ss.practice ? ", practice" : "");
 }
 
-// A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run, unless a
-// player of it is gone (B-E01-181)
+// A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run at every true
+// end, also of a client gone by then (regie 2026-10-25, reverses B-E01-181); the run timer's "player left" keeps them
 static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const char* why, bool player_left) {
   try {
     auto* run = spire_game_run_for(l);
     if (!run) {
       return;
     }
-    bool client_lost = l->count_clients() < run->max_clients;
-    if (!spire_savestate_end_deletes(player_left, client_lost)) {
-      l->log.info_f("Spire savestate: run over ({}) with {} of {} client(s){}; savestates of run {:08X} kept", why,
-          l->count_clients(), run->max_clients, player_left ? ", a player left" : "", run->run_id);
+    if (!spire_savestate_end_deletes(player_left)) {
+      l->log.info_f("Spire savestate: run over ({}) by a player who left; savestates of run {:08X} kept", why,
+          run->run_id);
       return;
     }
+    std::vector<std::string> present;
     for (const auto& lc : l->clients) {
-      if (!lc) {
+      if (lc) {
+        present.emplace_back(spire_savestate_filename(lc));
+      }
+    }
+    for (const auto& filename : spire_savestate_end_files(run->savestate_files, present)) {
+      SpireSavestate ss;
+      try {
+        ss = spire_savestate_load(filename);
+      } catch (const std::exception& e) {
+        l->log.warning_f("Spire savestate: unreadable file {} at the run end: {}; left alone", filename, e.what());
         continue;
       }
-      std::string filename = spire_savestate_filename(lc);
-      auto ss = spire_savestate_load_logged(lc);
       if (!spire_savestate_is_of_run(ss, run->run_id)) {
         continue;
       }
       std::filesystem::remove(filename);
-      lc->log.info_f("Spire savestate: run over ({}); deleted {} ({})", why, filename, spire_savestate_describe(ss));
+      l->log.info_f("Spire savestate: run over ({}) with {} of {} client(s); deleted {} ({})", why, l->count_clients(),
+          run->max_clients, filename, spire_savestate_describe(ss));
     }
   } catch (const std::exception& e) {
     l->log.warning_f("Spire savestate: failed to delete at the run end: {}", e.what());
@@ -1079,6 +1096,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   ss.values = std::move(values);
   ss.time_usecs = phosg::now();
   spire_bridge_write_durable(filename, spire_savestate_to_json(ss, serial_number));
+  run->savestate_files.emplace(filename);
   c->log.info_f("Spire savestate: stored {} in {}", spire_savestate_describe(ss), filename);
 }
 
@@ -1130,9 +1148,9 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     SpireSavestate leader_ss = leader ? spire_savestate_load_logged(leader) : SpireSavestate();
     if (!end && spire_savestate_matches(leader_ss, episode, k, variant)) {
       run = &spire_game_run_set(l, SpireGameRun{
-          .run_id = leader_ss.run_id, .resumed = true, .elapsed = leader_ss.values[SPIRE_SS_ELAPSED]});
+          .run_id = leader_ss.run_id, .resumed = true, .elapsed = leader_ss.values[SPIRE_SS_ELAPSED], .savestate_files = {}});
     } else {
-      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id()});
+      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
       l->log.info_f("Spire savestate: leader savestate {} does not fit room {} variant {} of episode {}",
           spire_savestate_describe(leader_ss), k, variant, episode);
     }
@@ -1142,6 +1160,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
   bool resume = spire_resume_client(!!end, run->resumed, run->run_id, spire_savestate_matches(own, episode, k, variant),
       own.run_id);
   if (resume) {
+    run->savestate_files.emplace(spire_savestate_filename(c)); // a true end deletes it even if this client is gone by then
     cr->answered_resume = true;
     cr->savestate = std::move(own);
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
@@ -1355,7 +1374,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     uint8_t start_k = value & 0xFF, first_k = (value >> 8) & 0xFF;
     auto* run = spire_game_run_for(l);
     if (!run) {
-      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id()});
+      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
     }
     auto* cr = spire_client_run_for(c, l, true);
     cr->began = true;
