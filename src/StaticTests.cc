@@ -51,6 +51,104 @@ void run_static_tests() {
     expect_eq(A::NONE, spire_guard_no_quest_action(false, false, true, true, false));
   }
 
+  phosg::log_info_f("-- Spire PvP: player targets stripped from attacks, support techs untouched (v42)");
+  {
+    auto make_targets = []() {
+      // two players (C-0, C-1), an enemy and an object; the hitbox index must survive the strip
+      return std::vector<TargetEntry>{{0x0001, 0x0003}, {0x1005, 0x0002}, {0x4002, 0x0001}, {0x0000, 0x0000}};
+    };
+    auto expect_enemy_and_object_kept = [](const std::vector<TargetEntry>& targets) {
+      expect_eq(2, targets.size());
+      expect_eq(0x1005, targets[0].entity_id);
+      expect_eq(0x0002, targets[0].hitbox_index);
+      expect_eq(0x4002, targets[1].entity_id);
+      expect_eq(0x0001, targets[1].hitbox_index);
+    };
+
+    // 6x46 attack strikes: players out, count and size follow
+    {
+      G_AttackFinished_Header_6x46 h;
+      h.header = {0x46, (sizeof(h) + 4 * 4) / 4, 0x0000};
+      h.target_count = 4;
+      auto targets = make_targets();
+      expect_eq(2, spire_pvp_strip_player_targets(h, targets));
+      expect_enemy_and_object_kept(targets);
+      expect_eq(2, h.target_count);
+      expect_eq((sizeof(h) + 2 * 4) / 4, h.header.size);
+    }
+    // 6x46 with only the partner as target: forwarded with zero targets (the swing still shows)
+    {
+      G_AttackFinished_Header_6x46 h;
+      h.header = {0x46, (sizeof(h) + 4) / 4, 0x0000};
+      h.target_count = 1;
+      std::vector<TargetEntry> targets{{0x0001, 0x0000}};
+      expect_eq(1, spire_pvp_strip_player_targets(h, targets));
+      expect_eq(0, targets.size());
+      expect_eq(0, h.target_count);
+      expect_eq(sizeof(h) / 4, h.header.size);
+    }
+    // 6x46 on enemies only: nothing changes
+    {
+      G_AttackFinished_Header_6x46 h;
+      h.header = {0x46, (sizeof(h) + 4) / 4, 0x0000};
+      h.target_count = 1;
+      std::vector<TargetEntry> targets{{0x1005, 0x0002}};
+      expect_eq(0, spire_pvp_strip_player_targets(h, targets));
+      expect_eq(1, targets.size());
+      expect_eq(1, h.target_count);
+      expect_eq((sizeof(h) + 4) / 4, h.header.size);
+    }
+    // 6x47 attack techs (Foie through Razonde, Grants, Jellen, Zalure, Megid): players out
+    for (uint8_t tech : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 18}) {
+      expect(!spire_pvp_tech_is_support(tech));
+      G_CastTechnique_Header_6x47 h;
+      h.header = {0x47, (sizeof(h) + 4 * 4) / 4, 0x0000};
+      h.technique_number = tech;
+      h.level = 15;
+      h.target_count = 4;
+      auto targets = make_targets();
+      expect_eq(2, spire_pvp_strip_player_targets(h, targets));
+      expect_enemy_and_object_kept(targets);
+      expect_eq(2, h.target_count);
+      expect_eq((sizeof(h) + 2 * 4) / 4, h.header.size);
+      expect_eq(tech, h.technique_number);
+      expect_eq(15, h.level);
+    }
+    // 6x47 support techs cast on the partner (Deband, Shifta, Ryuker, Resta, Anti, Reverser): untouched
+    for (const char* name : {"Resta", "Shifta", "Deband", "Anti", "Reverser", "Ryuker"}) {
+      uint8_t tech = technique_for_name(name);
+      expect(spire_pvp_tech_is_support(tech));
+      G_CastTechnique_Header_6x47 h;
+      h.header = {0x47, (sizeof(h) + 4 * 4) / 4, 0x0000};
+      h.technique_number = tech;
+      h.level = 15;
+      h.target_count = 4;
+      auto targets = make_targets();
+      expect_eq(0, spire_pvp_strip_player_targets(h, targets));
+      expect_eq(4, targets.size());
+      expect_eq(0x0001, targets[0].entity_id);
+      expect_eq(0x0003, targets[0].hitbox_index);
+      expect_eq(0x0000, targets[3].entity_id);
+      expect_eq(4, h.target_count);
+      expect_eq((sizeof(h) + 4 * 4) / 4, h.header.size);
+    }
+    // 6x49 photon blast: players out
+    {
+      G_ExecutePhotonBlast_Header_6x49 h;
+      h.header = {0x49, (sizeof(h) + 4 * 4) / 4, 0x0000};
+      h.pb_number = 3;
+      h.target_count = 4;
+      h.pb_meter_value = 100;
+      auto targets = make_targets();
+      expect_eq(2, spire_pvp_strip_player_targets(h, targets));
+      expect_enemy_and_object_kept(targets);
+      expect_eq(2, h.target_count);
+      expect_eq((sizeof(h) + 2 * 4) / 4, h.header.size);
+      expect_eq(3, h.pb_number);
+      expect_eq(100, h.pb_meter_value);
+    }
+  }
+
   phosg::log_info_f("-- Spire guard: login confirmation compares the items (v31)");
   {
     auto make = [](size_t n, uint32_t id_base) {

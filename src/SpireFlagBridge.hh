@@ -481,3 +481,19 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
 void spire_bridge_write_durable(const std::string& filename, const std::string& data);
+
+// v42 no player damage in a Spire run (regie pso-regie-9, 2026-10-25: players never damage each other in a Spire run;
+// the Wii hit the Dolphin player in Battle although the quest sends pl_pkoff). In a Spire game (spire_game_is_spire: a
+// quest listed in SpireGuardQuests or SpireBridgeQuests) the server removes every player target (entity id below
+// 0x1000) from 6x46 (attack strikes) and 6x49 (photon blast) before forwarding, and from 6x47 (technique) unless the
+// technique is a support technique (spire_pvp_tech_is_support: Deband, Shifta, Ryuker, Resta, Anti, Reverser), so a
+// Resta or Shifta on the partner still lands. Enemy and object targets are kept. The count and size fields are
+// rewritten; a command left without targets is still forwarded (count 0 is valid, a swing or tech that hits nothing),
+// so the other clients still see the animation. The first strip per attacker per game logs "Spire PvP: stripped ...".
+bool spire_game_is_spire(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l);
+bool spire_pvp_tech_is_support(uint8_t technique_number);
+// Each returns the number of player targets removed from targets (0: header and targets unchanged).
+size_t spire_pvp_strip_player_targets(G_AttackFinished_Header_6x46& header, std::vector<TargetEntry>& targets);
+size_t spire_pvp_strip_player_targets(G_CastTechnique_Header_6x47& header, std::vector<TargetEntry>& targets);
+size_t spire_pvp_strip_player_targets(G_ExecutePhotonBlast_Header_6x49& header, std::vector<TargetEntry>& targets);
+void spire_pvp_log_strip(std::shared_ptr<const Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand, size_t count);

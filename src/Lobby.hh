@@ -167,6 +167,8 @@ struct Lobby : public std::enable_shared_from_this<Lobby> {
   uint32_t enabled_flags = 0;
   std::shared_ptr<const Quest> quest;
   std::array<std::shared_ptr<Client>, 12> clients;
+  // v42 Spire PvP: bit n is set once the "Spire PvP: stripped" line was logged for client n in this game
+  uint16_t spire_pvp_logged_clients = 0;
   // Keys in this map are client_id
   std::unordered_map<size_t, std::weak_ptr<Client>> clients_to_add;
 

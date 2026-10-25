@@ -432,18 +432,35 @@ void forward_subcommand_with_entity_targets_transcode_and_track_hits_t(
   }
 
   phosg::StringReader r(msg.data, msg.size);
-  const auto& header = r.get<HeaderT>();
-  if (header.target_count > 10) {
+  const auto& in_header = r.get<HeaderT>();
+  if (in_header.target_count > 10) {
     throw std::runtime_error("invalid target count");
   }
-  if (header.target_count > std::min<size_t>(header.header.size - sizeof(HeaderT) / 4, 10)) {
+  if (in_header.target_count > std::min<size_t>(in_header.header.size - sizeof(HeaderT) / 4, 10)) {
     throw std::runtime_error("invalid target list command");
   }
-  const auto* targets = r.get_array<TargetEntry>(header.target_count);
+  const auto* in_targets = r.get_array<TargetEntry>(in_header.target_count);
 
   auto l = c->require_lobby();
   if (!l->is_game()) {
     throw std::runtime_error("command cannot be used outside of a game");
+  }
+
+  // v42: no player damage in a Spire run (SpireFlagBridge.hh); header and targets are the list after that strip
+  HeaderT header = in_header;
+  std::vector<TargetEntry> targets(in_targets, in_targets + in_header.target_count);
+  size_t spire_pvp_stripped = 0;
+  if (spire_game_is_spire(c, l)) {
+    spire_pvp_stripped = spire_pvp_strip_player_targets(header, targets);
+    uint8_t v3_subcommand;
+    if constexpr (std::is_same_v<HeaderT, G_AttackFinished_Header_6x46>) {
+      v3_subcommand = 0x46;
+    } else if constexpr (std::is_same_v<HeaderT, G_CastTechnique_Header_6x47>) {
+      v3_subcommand = 0x47;
+    } else {
+      v3_subcommand = 0x49;
+    }
+    spire_pvp_log_strip(c, l, v3_subcommand, spire_pvp_stripped);
   }
 
   struct TargetResolution {
@@ -499,6 +516,8 @@ void forward_subcommand_with_entity_targets_transcode_and_track_hits_t(
       } else {
         lc->log.info_f("Subcommand cannot be translated to client\'s version");
       }
+    } else if (spire_pvp_stripped) {
+      send_command_t_vt(lc, msg.command, msg.flag, header, targets);
     } else {
       send_command(lc, msg.command, msg.flag, msg.data, msg.size);
     }

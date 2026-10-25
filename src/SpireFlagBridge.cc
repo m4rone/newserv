@@ -2888,3 +2888,71 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c) {
   }
 }
 
+
+bool spire_game_is_spire(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  if (!l || !l->is_game() || !l->quest) {
+    return false;
+  }
+  uint32_t quest_number = l->quest->meta.quest_number;
+  return spire_guard_quest_is_guarded(c, quest_number) || spire_bridge_quest_is_bridged(c, quest_number);
+}
+
+bool spire_pvp_tech_is_support(uint8_t technique_number) {
+  // Tech ids of StaticGameData.cc tech_id_to_name: 10 Deband, 13 Shifta, 14 Ryuker, 15 Resta, 16 Anti, 17 Reverser.
+  // Everything else (Foie through Razonde, Grants, Jellen, Zalure, Megid, unknown ids) counts as an attack.
+  switch (technique_number) {
+    case 10:
+    case 13:
+    case 14:
+    case 15:
+    case 16:
+    case 17:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static size_t spire_pvp_remove_player_targets(std::vector<TargetEntry>& targets) {
+  size_t before = targets.size();
+  std::erase_if(targets, [](const TargetEntry& t) { return t.entity_id < 0x1000; });
+  return before - targets.size();
+}
+
+template <typename HeaderT>
+static size_t spire_pvp_strip_t(HeaderT& header, std::vector<TargetEntry>& targets) {
+  size_t removed = spire_pvp_remove_player_targets(targets);
+  if (removed) {
+    header.target_count = targets.size();
+    header.header.size = (sizeof(HeaderT) + sizeof(TargetEntry) * targets.size()) / 4;
+  }
+  return removed;
+}
+
+size_t spire_pvp_strip_player_targets(G_AttackFinished_Header_6x46& header, std::vector<TargetEntry>& targets) {
+  return spire_pvp_strip_t(header, targets);
+}
+
+size_t spire_pvp_strip_player_targets(G_CastTechnique_Header_6x47& header, std::vector<TargetEntry>& targets) {
+  if (spire_pvp_tech_is_support(header.technique_number)) {
+    return 0;
+  }
+  return spire_pvp_strip_t(header, targets);
+}
+
+size_t spire_pvp_strip_player_targets(G_ExecutePhotonBlast_Header_6x49& header, std::vector<TargetEntry>& targets) {
+  return spire_pvp_strip_t(header, targets);
+}
+
+void spire_pvp_log_strip(std::shared_ptr<const Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand, size_t count) {
+  if (!count || !c || !l || (c->lobby_client_id >= 16)) {
+    return;
+  }
+  uint16_t bit = 1 << c->lobby_client_id;
+  if (l->spire_pvp_logged_clients & bit) {
+    return;
+  }
+  l->spire_pvp_logged_clients |= bit;
+  l->log.info_f("Spire PvP: stripped {} player target(s) from 6x{:02X} of C-{:X} (no player damage in a Spire run)",
+      count, subcommand, c->id);
+}
