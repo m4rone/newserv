@@ -40,9 +40,15 @@ bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, u
 void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number);
 
 // Regie pso-regie-9: the stored flags go only into a game that runs a Spire quest (SpireBridgeQuests or
-// SpireGuardQuests, spire_game_is_spire). A normal game (Normal, Battle or Solo, with another quest or none) gets
-// nothing, so 0x380-0x3AF never reach a character outside a Spire quest. Pure, for the offline test.
-bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest);
+// SpireGuardQuests, spire_game_is_spire) or a quest listed in SpireMetaQuests (the E06 payout q925). A normal game
+// (Normal, Battle or Solo, with another quest or none) gets nothing, so 0x380-0x3AF never reach a character outside
+// those quests. Pure, for the offline test.
+bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest, bool meta_quest);
+
+// Whether a quest flag write is stored (spire_bridge_record_flag). In a SpireBridgeQuests quest every write in range
+// (v5). In a SpireMetaQuests quest only a clear of a payout flag (0x3A0-0x3A2): q925 clears what it paid, so the
+// delivery at the next quest load does not set it again; its other writes stay the client's own. Pure, for the test.
+bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t flag_num, bool is_set);
 
 // Called from the 'F' record code after the records are saved. Sets the run's unlock and payout flags for the
 // character on the game's difficulty, delivers them and returns the text lines to add to the record text (empty if

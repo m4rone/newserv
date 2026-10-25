@@ -804,11 +804,25 @@ void run_static_tests() {
 
   phosg::log_info_f("-- Spire meta: flags only in a game with a Spire quest (regie pso-regie-9)");
   {
-    // arguments: is_game, has_quest, spire_quest (spire_game_is_spire)
-    expect(spire_meta_delivery_applies(true, true, true));     // q920/q921/q940-q955 loaded: the run gets its flags
-    expect(!spire_meta_delivery_applies(true, false, false));  // Battle game before its quest (town start), or q0
-    expect(!spire_meta_delivery_applies(true, true, false));   // a normal game with another quest
-    expect(!spire_meta_delivery_applies(false, false, false)); // lobby
+    // arguments: is_game, has_quest, spire_quest (spire_game_is_spire), meta_quest (SpireMetaQuests)
+    expect(spire_meta_delivery_applies(true, true, true, false));     // q920/q921/q940-q955 loaded: the run's flags
+    expect(spire_meta_delivery_applies(true, true, false, true));     // q925 (SpireMetaQuests): the payout flags
+    expect(!spire_meta_delivery_applies(true, false, false, false));  // Battle game before its quest (town start), q0
+    expect(!spire_meta_delivery_applies(true, true, false, false));   // a normal game with another quest
+    expect(!spire_meta_delivery_applies(false, false, false, false)); // lobby
+    // arguments: bridged_quest, meta_quest, flag_num, is_set
+    expect(spire_meta_record_applies(true, false, SPIRE_META_FLAG_FIRST_RUN, true)); // run quest: every write
+    expect(spire_meta_record_applies(true, false, SPIRE_META_FLAG_PAY_WIN, false));
+    for (uint16_t f = SPIRE_META_FLAG_PAY_WIN; f <= SPIRE_META_FLAG_PAY_RECORD; f++) {
+      expect(spire_meta_record_applies(false, true, f, false));  // q925 paid: the clear is stored, not set again
+      expect(!spire_meta_record_applies(false, true, f, true));  // q925 never sets a payout flag on the server
+    }
+    expect(!spire_meta_record_applies(false, true, 0x03A8, true));  // S-rank received: the client's own
+    expect(!spire_meta_record_applies(false, true, 0x03A9, true));  // ever paid: the client's own
+    expect(!spire_meta_record_applies(false, true, SPIRE_META_FLAG_FIRST_RUN, false)); // no unlock clear from q925
+    expect(!spire_meta_record_applies(false, false, SPIRE_META_FLAG_PAY_WIN, false));  // a normal quest: nothing
+    DataIndex d;
+    expect(d.spire_meta_quest_numbers.empty()); // no key: no quest
   }
 
   phosg::log_info_f("-- Spire meta: the flags a finished run sets (v24)");

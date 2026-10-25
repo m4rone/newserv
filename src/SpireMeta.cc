@@ -95,8 +95,15 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
 }
 
-bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest) {
-  return is_game && has_quest && spire_quest;
+bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest, bool meta_quest) {
+  return is_game && has_quest && (spire_quest || meta_quest);
+}
+
+bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t flag_num, bool is_set) {
+  if (bridged_quest) {
+    return true;
+  }
+  return meta_quest && !is_set && (flag_num >= SPIRE_META_FLAG_PAY_WIN) && (flag_num <= SPIRE_META_FLAG_PAY_RECORD);
 }
 
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value) {

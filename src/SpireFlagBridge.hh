@@ -20,7 +20,8 @@
 //   in SpireBridgeQuests (v5; a missing or empty list records nothing), is recorded per GC license serial number in
 //   system/spire-bridge/<serial>.json. Both set and clear are recorded; the last write wins.
 // - The stored flags are sent to the same client as 6x75 commands (set or clear) only in a game that runs a Spire quest
-//   (spire_game_is_spire: SpireBridgeQuests or SpireGuardQuests; regie pso-regie-9): when such a quest loads
+//   (spire_game_is_spire: SpireBridgeQuests or SpireGuardQuests; regie pso-regie-9) or a quest listed in
+//   SpireMetaQuests (the E06 payout q925, which also has its clears of 0x3A0-0x3A2 recorded): when such a quest loads
 //   (set_lobby_quest, before the quest files and the AC barrier) and when the client joins a game that already runs
 //   one. A normal game (Normal, Battle or Solo without a Spire quest) gets nothing. Stored entries are never erased by
 //   delivery.
@@ -31,7 +32,7 @@
 //   client only: one 6x77 per stored register (0 if none), then 248 = 'DONE'. Registers 240-242 are left alone (Sega's
 //   q101 and Schtserv commands use them). If SpireBridgeQuests is missing or empty, the register bridge takes nothing:
 //   every register write is handled exactly as without the bridge. The flag part above records and delivers only in listed
-//   quests (v5, regie pso-regie-9): a quest that reads the flags in a normal game (E06 payout q925) must be listed.
+//   quests (v5, regie pso-regie-9): a quest that reads the flags in a normal game (E06 payout q925) goes in SpireMetaQuests.
 // - Battle end (v10b): a write of 'ENDB' to register 248 sends the phases in SpireBattleEndPhases as 6x7D (what = 0,
 //   set battle phase) to every client in the Battle game, 2 seconds apart. Off unless the key lists phases.
 // - Room clear (v16, lab probe): a write of 'ROOM' to register 248 sends the server text "Room clear!" (B0) to every
@@ -141,8 +142,8 @@ constexpr const char* SPIRE_BRIDGE_DRAW_DIRECTORY = "system/spire-draw";
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
 
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
-// a game running a quest listed in SpireBridgeQuests, the client has a GC license, and the flag is in the bridged
-// range. Never throws.
+// a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client
+// has a GC license, and the flag is in the bridged range. Never throws.
 void spire_bridge_record_flag(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, Difficulty difficulty, uint16_t flag_num, bool is_set);
 

@@ -169,14 +169,25 @@ static void spire_bridge_save(const std::string& filename, uint32_t serial_numbe
 
 static bool spire_bridge_quest_is_bridged(std::shared_ptr<const Client> c, uint32_t quest_number);
 
+// Regie pso-regie-9: SpireMetaQuests (quests outside the run that read the meta flags); a missing list means none
+static bool spire_meta_quest_is_listed(std::shared_ptr<const Client> c, uint32_t quest_number) {
+  try {
+    return c->require_server_state()->data->spire_meta_quest_numbers.count(quest_number) != 0;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 void spire_bridge_record_flag(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, Difficulty difficulty, uint16_t flag_num, bool is_set) {
   try {
     if (!l->is_game() || !spire_bridge_flag_in_range(flag_num)) {
       return;
     }
-    // Only flag writes made while a SpireBridgeQuests quest runs are stored (v5); delivery too is Spire-quest only
-    if (!l->quest || !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
+    // Only flag writes made while a SpireBridgeQuests quest runs are stored (v5), plus a payout clear in a
+    // SpireMetaQuests quest (regie pso-regie-9); delivery too is limited to those quests
+    if (!l->quest || !spire_meta_record_applies(spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number),
+                         spire_meta_quest_is_listed(c, l->quest->meta.quest_number), flag_num, is_set)) {
       return;
     }
     if (static_cast<size_t>(difficulty) > 3) {
@@ -199,9 +210,11 @@ void spire_bridge_record_flag(
 }
 
 void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
-  // Regie pso-regie-9: only a game running a Spire quest gets the flags; the join of a game without one (the town
-  // start's Battle game before its quest loads, any normal game) delivers nothing, set_lobby_quest delivers at load
-  if (!l || !spire_meta_delivery_applies(l->is_game(), !!l->quest, spire_game_is_spire(c, l))) {
+  // Regie pso-regie-9: only a game running a Spire quest or a SpireMetaQuests quest gets the flags; the join of a game
+  // without one (the town start's Battle game before its quest loads, any normal game) delivers nothing,
+  // set_lobby_quest delivers at load
+  if (!l || !spire_meta_delivery_applies(l->is_game(), !!l->quest, spire_game_is_spire(c, l),
+                l->quest && spire_meta_quest_is_listed(c, l->quest->meta.quest_number))) {
     return;
   }
   uint32_t serial_number = spire_bridge_serial_for_client(c);

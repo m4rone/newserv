@@ -162,6 +162,10 @@ struct DataIndex {
   std::unordered_set<uint32_t> spire_bridge_quest_numbers;
   // v15: quests the Spire guard protects; unset (the key is missing) means the guard uses spire_bridge_quest_numbers
   std::optional<std::unordered_set<uint32_t>> spire_guard_quest_numbers;
+  // Regie pso-regie-9: quests outside the Spire run that read the Spire meta flags (SpireMetaQuests, e.g. the E06
+  // payout q925). They get the flags delivered and their clears of the payout flags recorded, nothing else of the
+  // bridge (no records, replay, checkpoint, follow or guard); empty = none
+  std::unordered_set<uint32_t> spire_meta_quest_numbers;
   // v25 boss clear: quests (SpireBossClearQuests) in which a boss the quest cannot see clear with if_zone_clear (Vol Opt
   // phase 2) gets the server's room clear when it is defeated; empty = no boss clear on the server (k4/k8 unchanged)
   std::unordered_set<uint32_t> spire_boss_clear_quest_numbers;
