@@ -230,6 +230,9 @@ struct DataIndex {
   // Marck 2026-10-25: "$kit tech" drops one technique disk per technique the class can learn, at the class's max level
   // (MaxTechLevels in the item parameter table), never above level 30. Androids get none.
   static std::vector<ItemData> spire_kit_tech_disks(uint8_t char_class, const ItemParameterTable& pmt);
+  // Marck 2026-10-25: "$kit tools" drops full stacks of Dimate, Trimate, Difluid, Trifluid, Sol, Moon and Star
+  // Atomizer, and one Scape Doll.
+  static std::vector<ItemData> spire_kit_tools(const ItemData::StackLimits& limits);
   // The materials of "$kit mat" in the order Power, Mind, Evade, Def, Luck, HP, TP, as many items as limits needs per
   // stack (GC v3: one material per item). spire_kit_material_batch returns the next at most
   // SPIRE_KIT_MATERIAL_BATCH items after the first already_dropped ones; empty when all are dropped.

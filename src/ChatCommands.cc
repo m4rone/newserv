@@ -1286,8 +1286,9 @@ ChatCommandDefinition cc_kit(
       a.check_is_proxy(false);
       bool materials = (a.text == "mat");
       bool techs = (a.text == "tech");
-      if (!materials && !techs && !a.text.empty()) {
-        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat\nof $kit tech");
+      bool tools = (a.text == "tools");
+      if (!materials && !techs && !tools && !a.text.empty()) {
+        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat\nof $kit tech\nof $kit tools");
       }
       auto s = a.c->require_server_state();
       auto l = a.c->require_lobby();
@@ -1309,6 +1310,8 @@ ChatCommandDefinition cc_kit(
           a.c->spire_kit_materials_dropped = 0;
         }
         items = DataIndex::spire_kit_material_batch(limits, targets, a.c->spire_kit_materials_dropped);
+      } else if (tools) {
+        items = DataIndex::spire_kit_tools(limits);
       } else if (techs) {
         items = DataIndex::spire_kit_tech_disks(char_class, *s->data->item_parameter_table(a.c->version()));
       } else {
@@ -1332,6 +1335,8 @@ ChatCommandDefinition cc_kit(
         send_text_message(a.c, DataIndex::spire_kit_material_message(items.size(), remaining));
       } else if (techs) {
         send_text_message_fmt(a.c, "$C7{} disks neergelegd", items.size());
+      } else if (tools) {
+        send_text_message(a.c, "$C7Mates, fluids, atomizers\nen een Scape Doll neergelegd");
       } else {
         send_text_message_fmt(a.c, "$C7Startset neergelegd:\n{} items; materialen\nmet $kit mat", items.size());
       }

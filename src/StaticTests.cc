@@ -788,6 +788,11 @@ void run_static_tests() {
       }
     }
     expect_eq(29, DataIndex::spire_kit_tech_disks(6, *pmt).at(0).data1[2]); // FOmarl Foie Lv30
+    // $kit tools: full stacks (10 on GC), one Scape Doll
+    auto tools = DataIndex::spire_kit_tools(limits);
+    expect_eq(8, tools.size());
+    expect_eq(10, tools.at(3).data1[5]); // Trifluid x10
+    expect_eq(1, tools.at(7).data1[5]); // Scape Doll x1
     expect(DataIndex::spire_kit_material_message(0, 0).find("niets") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("30 neergelegd") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("nog 245 over") != std::string::npos);

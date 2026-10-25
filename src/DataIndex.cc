@@ -2407,6 +2407,23 @@ std::vector<ItemData> DataIndex::spire_kit_tech_disks(uint8_t char_class, const 
   return ret;
 }
 
+std::vector<ItemData> DataIndex::spire_kit_tools(const ItemData::StackLimits& limits) {
+  // Tool layout 03 <type> <subtype> 00 00 <count> (StaticTests.cc shop codes)
+  static const std::vector<const char*> codes = {
+      "030001", "030002", // Dimate, Trimate
+      "030101", "030102", // Difluid, Trifluid
+      "030300", "030400", "030500", // Sol, Moon, Star Atomizer
+      "030900", // Scape Doll
+  };
+  std::vector<ItemData> ret;
+  for (const char* code : codes) {
+    ItemData tool = ItemData::from_data(phosg::parse_data_string(code));
+    tool.data1[5] = (tool.data1[1] == 0x09) ? 1 : limits.get(tool.data1[0], tool.data1[1]);
+    ret.emplace_back(tool);
+  }
+  return ret;
+}
+
 std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits, const SpireKitMaterials& m) {
   std::vector<ItemData> ret;
   const std::vector<std::pair<uint8_t, size_t>> materials = {
