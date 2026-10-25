@@ -3,9 +3,11 @@
 
 #include <filesystem>
 #include <format>
+#include <unistd.h>
 
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
+#include "InventoryBackup.hh"
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -1086,6 +1088,96 @@ void run_static_tests() {
     for (const auto& rule : rules) {
       expect(rule.source && *rule.source && rule.reason && *rule.reason);
     }
+  }
+
+  phosg::log_info_f("-- Inventory backup: saved at game join, newest 20 kept, guard snapshot import (regie pso-regie-10)");
+  {
+    auto make_inventory = [](const std::vector<std::pair<uint64_t, uint64_t>>& codes, size_t equipped) {
+      PlayerInventory inv;
+      inv.language = Language::ENGLISH;
+      inv.num_items = codes.size();
+      for (size_t z = 0; z < codes.size(); z++) {
+        inv.items[z].state = (z < equipped) ? 2 : 1;
+        inv.items[z].flags = (z < equipped) ? 0x00000008 : 0;
+        inv.items[z].data = ItemData(codes[z].first, codes[z].second);
+        inv.items[z].data.id = 0x00010000 + z;
+      }
+      return inv;
+    };
+    auto make_disp = [](const char* name, uint32_t level, uint32_t meseta) {
+      PlayerDispDataV4 disp;
+      disp.visual.name.encode(name, Language::ENGLISH);
+      disp.stats.level = level - 1;
+      disp.stats.meseta = meseta;
+      return disp;
+    };
+    // The test character BidX on the Wii serial that also carries Wakiru (never Wakiru himself in a test)
+    InventoryBackup b;
+    b.serial_number = 3117539659;
+    b.disp = make_disp("BidX", 12, 300);
+    b.character_id = spire_guard_character_id(b.disp);
+    b.inventory = make_inventory({{0x0001000000000000, 0}, {0x0300000000030000, 0}}, 1); // Saber (equipped), Monomate x3
+    std::string root = std::format("{}/newserv-inventory-backup-test-{}",
+        std::filesystem::temp_directory_path().string(), getpid());
+    std::filesystem::remove_all(root);
+    std::string dir = inventory_backup_character_directory(root, b.serial_number, b.disp);
+    expect_eq(std::format("{}/3117539659.{}", root, b.character_id), dir);
+    expect(dir != inventory_backup_character_directory(root, b.serial_number, make_disp("Wakiru", 140, 0)));
+    expect(inventory_backup_basename_for_time(1000000) < inventory_backup_basename_for_time(2000000));
+    expect_eq("20261025-120741-000005.json", inventory_backup_basename_for_time(1792930061000005ULL));
+
+    // Save 22 joins: the newest 20 stay, the two oldest go
+    std::vector<std::string> written;
+    for (size_t z = 0; z < 22; z++) {
+      b.time_usecs = 1792930061000000ULL + z * 1000000;
+      b.disp.stats.meseta = 300 + z;
+      written.emplace_back(inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP));
+    }
+    auto names = inventory_backup_list(dir);
+    expect_eq(20u, names.size());
+    expect(!std::filesystem::exists(written[0]) && !std::filesystem::exists(written[1]));
+    expect(std::filesystem::exists(written[2]) && std::filesystem::exists(written[21]));
+    expect_eq(std::filesystem::path(written[21]).filename().string(), names.back());
+    expect_eq(2u, inventory_backup_files_to_delete(std::vector<std::string>(22, "x"), 20).size());
+    expect_eq(0u, inventory_backup_files_to_delete(std::vector<std::string>(20, "x"), 20).size());
+    // Items, meseta, level and name come back; the file is only written, never restored by itself
+    auto loaded = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(written[21])));
+    expect_eq(3117539659u, loaded.serial_number);
+    expect_eq(b.character_id, loaded.character_id);
+    expect_eq(321u, loaded.disp.stats.meseta.load());
+    expect_eq(11u, loaded.disp.stats.level.load());
+    expect_eq("BidX", loaded.disp.visual.name.decode(Language::ENGLISH));
+    expect_eq(2u, loaded.inventory.num_items);
+    expect(!memcmp(&loaded.inventory, &b.inventory, sizeof(b.inventory)));
+    expect(!loaded.restored && !loaded.left_normally && !loaded.has_exit && !loaded.spire);
+    auto json = phosg::JSON::parse(phosg::load_file(written[21]));
+    expect_eq("000100000000000000000000 00000000", json.at("Items").at(0).get_string("Code"));
+    expect(json.at("Items").at(0).get_bool("Equipped"));
+    // The end of the game: Exit (dropped out) and LeftNormally (98) survive a round trip
+    loaded.has_exit = true;
+    loaded.exit_inventory = make_inventory({{0x0001000000000000, 0}}, 1);
+    loaded.exit_meseta = 50;
+    inventory_backup_write_file(written[21], loaded);
+    auto ended = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(written[21])));
+    expect(ended.has_exit && (ended.exit_meseta == 50) && (ended.exit_inventory.num_items == 1) && !ended.left_normally);
+    expect_eq(20u, inventory_backup_list(dir).size()); // rewriting the end does not add a file
+
+    // spire-backup-import: a guard snapshot (SerialNumber, Inventory, Disp hex) becomes a restorable backup
+    std::string snapshot_filename = root + "/marker.bak";
+    phosg::save_file(snapshot_filename, phosg::JSON::dict({
+        {"SerialNumber", 3117539659u},
+        {"SnapshotTime", 1792929999000000ULL},
+        {"Inventory", spire_guard_hex_encode(&b.inventory, sizeof(b.inventory))},
+        {"Disp", spire_guard_hex_encode(&b.disp, sizeof(b.disp))},
+    }).serialize());
+    std::string imported_path = inventory_backup_import_snapshot(snapshot_filename, root, 1792940000000000ULL);
+    expect_eq(dir, std::filesystem::path(imported_path).parent_path().string());
+    auto imported = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(imported_path)));
+    expect(!imported.imported_from.empty() && !imported.restored && !imported.has_exit);
+    expect(!memcmp(&imported.inventory, &b.inventory, sizeof(b.inventory)));
+    expect_eq(b.character_id, imported.character_id);
+    expect_eq(std::filesystem::path(imported_path).filename().string(), inventory_backup_list(dir).back()); // newest
+    std::filesystem::remove_all(root);
   }
 
   phosg::log_info_f("-- All static tests passed");

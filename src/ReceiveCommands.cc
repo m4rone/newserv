@@ -17,6 +17,7 @@
 #include "ExpressionEnvironment.hh"
 #include "GameServer.hh"
 #include "HTTPServer.hh"
+#include "InventoryBackup.hh"
 #include "IPStackSimulator.hh"
 #include "ItemCreator.hh"
 #include "Loggers.hh"
@@ -74,6 +75,8 @@ asio::awaitable<void> on_disconnect(std::shared_ptr<Client> c) {
   // If the client was in a lobby, remove them and notify the other clients
   auto l = c->lobby.lock();
   if (l) {
+    // Inventory backup: dropped out of a game without a 98; keep the server's view of the inventory (InventoryBackup.hh)
+    inventory_backup_on_game_end(c, l, false);
     auto server = c->server.lock();
     if (server) {
       server->get_state()->remove_client_from_lobby(c);
@@ -3420,6 +3423,8 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
   // 98 should only be sent when leaving a game, and we should leave the client in no lobby (they will send an 84 soon
   // afterward to choose a lobby).
   if (msg.command == 0x98) {
+    // Inventory backup: the client left the game and saves its card (InventoryBackup.hh)
+    inventory_backup_on_game_end(c, c->lobby.lock(), true);
     // Spire guard (v8): a 98 is never proof of a clean end; it turns a running Spire run into a pending restore (see
     // SpireFlagBridge.hh)
     spire_guard_end_run(c, c->lobby.lock());
@@ -5101,6 +5106,8 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
   spire_replay_after_floor_load(c, l);
   // Spire guard (v21): every Battle game is guarded, also one without a quest (see SpireFlagBridge.hh)
   spire_guard_battle_join(c, l);
+  // Inventory backup at every game join, every character (regie pso-regie-10, see InventoryBackup.hh)
+  inventory_backup_on_game_join(c, l);
 
   if (c->check_flag(Client::Flag::DEBUG_ENABLED)) {
     std::string variations_str;

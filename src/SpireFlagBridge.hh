@@ -497,6 +497,9 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
 void spire_bridge_write_durable(const std::string& filename, const std::string& data);
+// Shared with InventoryBackup (regie pso-regie-10): the snapshot hex fields (decode throws on a length mismatch)
+std::string spire_guard_hex_encode(const void* data, size_t size);
+void spire_guard_hex_decode(const std::string& hex, void* data, size_t size);
 
 // v42 no player damage in a Spire run (regie pso-regie-9, 2026-10-25: players never damage each other in a Spire run;
 // the Wii hit the Dolphin player in Battle although the quest sends pl_pkoff). In a Spire game (spire_game_is_spire: a

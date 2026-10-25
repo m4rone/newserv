@@ -91,6 +91,7 @@ set(SOURCES
     src/IPStackSimulator.cc
     src/IPV4RangeSet.cc
     src/ItemCreator.cc
+    src/InventoryBackup.cc
     src/ItemData.cc
     src/ItemNameIndex.cc
     src/ItemParameterTable.cc

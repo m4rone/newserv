@@ -1,4 +1,5 @@
 #include <phosg/Platform.hh>
+#include <phosg/Time.hh>
 
 #include <signal.h>
 #include <string.h>
@@ -33,6 +34,7 @@
 #include "GameServer.hh"
 #include "HTTPServer.hh"
 #include "IPStackSimulator.hh"
+#include "InventoryBackup.hh"
 #include "ImageEncoder.hh"
 #include "Loggers.hh"
 #include "NetworkAddresses.hh"
@@ -245,6 +247,23 @@ Action a_version(
     Show newserv\'s revision and build date.\n",
     +[](phosg::Arguments&) -> void {
       print_version_info();
+    });
+
+Action a_spire_backup_import(
+    "spire-backup-import", "\
+  spire-backup-import SNAPSHOT-FILE [OUTPUT-ROOT]\n\
+    Convert a Spire guard snapshot (SpireGuardSnapshot JSON with Inventory and\n\
+    Disp, e.g. a moved-aside system/spire-bridge marker) into an inventory backup\n\
+    that $restore can use, written to OUTPUT-ROOT/<serial>.<character id>/\n\
+    (default system/inventory-backups). Prints the path written.\n",
+    +[](phosg::Arguments& args) {
+      std::string snapshot_filename = args.get<std::string>(1);
+      std::string root = args.get<std::string>(2, false);
+      if (root.empty()) {
+        root = INVENTORY_BACKUP_DIRECTORY;
+      }
+      std::string path = inventory_backup_import_snapshot(snapshot_filename, root, phosg::now());
+      phosg::log_info_f("Wrote {}", path);
     });
 
 Action a_run_static_tests(

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "Account.hh"
+#include "InventoryBackup.hh"
 #include "AsyncUtils.hh"
 #include "SpireLobbyGate.hh"
 #include "Channel.hh"
@@ -217,6 +218,10 @@ public:
   std::shared_ptr<AsyncPromise<void>> spire_lobby_settle_promise;
   // Security (regie pso-regie-10): one bit per CrashValueFilter rule already logged for this client
   uint64_t crash_value_rules_logged = 0;
+  // Inventory backups (regie pso-regie-10): the backup file written when this client joined its current game, and what
+  // the server saw leave the inventory since then (see InventoryBackup.hh)
+  std::string inventory_backup_current;
+  InventoryRemovals inventory_backup_removals;
 
   // File loading state
   std::unordered_map<std::string, std::shared_ptr<const std::string>> sending_files;

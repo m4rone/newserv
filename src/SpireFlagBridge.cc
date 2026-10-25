@@ -1125,7 +1125,7 @@ static std::string spire_guard_legacy_filename(uint32_t serial_number) {
   return std::format("{}/{:010}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial_number);
 }
 
-static std::string spire_guard_hex_encode(const void* data, size_t size) {
+std::string spire_guard_hex_encode(const void* data, size_t size) {
   static const char* digits = "0123456789ABCDEF";
   const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
   std::string ret;
@@ -1151,7 +1151,7 @@ static uint8_t spire_guard_hex_digit(char ch) {
 }
 
 // Decodes a hex string into a structure of exactly the given size; throws if the length does not match.
-static void spire_guard_hex_decode(const std::string& hex, void* data, size_t size) {
+void spire_guard_hex_decode(const std::string& hex, void* data, size_t size) {
   if (hex.size() != size * 2) {
     throw std::runtime_error(std::format("snapshot field has {} hex digits; expected {}", hex.size(), size * 2));
   }
