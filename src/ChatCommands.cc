@@ -1285,10 +1285,10 @@ ChatCommandDefinition cc_kit(
     +[](const Args& a) -> asio::awaitable<void> {
       a.check_is_proxy(false);
       bool materials = (a.text == "mat");
-      bool techs = (a.text == "tech");
+      bool techs = (a.text == "tech") || (a.text == "spells");
       bool tools = (a.text == "tools");
       if (!materials && !techs && !tools && !a.text.empty()) {
-        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat\nof $kit tech\nof $kit tools");
+        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat\nof $kit spells\nof $kit tools");
       }
       auto s = a.c->require_server_state();
       auto l = a.c->require_lobby();
