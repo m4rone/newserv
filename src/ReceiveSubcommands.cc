@@ -375,6 +375,24 @@ void forward_subcommand_with_item_transcode_t(std::shared_ptr<Client> c, uint8_t
   }
 }
 
+std::string entity_states_for_forwarding(std::shared_ptr<MapState> map_state, Version version, uint16_t entity_id,
+    std::shared_ptr<const MapState::EnemyState>& ene_st, std::shared_ptr<const MapState::ObjectState>& obj_st) {
+  ene_st = nullptr;
+  obj_st = nullptr;
+  try {
+    if ((entity_id >= 0x1000) && (entity_id < 0x4000)) {
+      ene_st = map_state->enemy_state_for_index(version, entity_id - 0x1000);
+    } else if ((entity_id >= 0x4000) && (entity_id < 0xFFFF)) {
+      obj_st = map_state->object_state_for_index(version, entity_id - 0x4000);
+    }
+  } catch (const std::out_of_range& e) {
+    ene_st = nullptr;
+    obj_st = nullptr;
+    return e.what();
+  }
+  return "";
+}
+
 template <typename CmdT, bool ForwardIfMissing = false, size_t EntityIDOffset = offsetof(G_EntityIDHeader, entity_id)>
 void forward_subcommand_with_entity_id_transcode_t(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   // I'm lazy and this should never happen for item commands (since all players need to stay in sync)
@@ -393,10 +411,10 @@ void forward_subcommand_with_entity_id_transcode_t(std::shared_ptr<Client> c, Su
 
   std::shared_ptr<const MapState::EnemyState> ene_st;
   std::shared_ptr<const MapState::ObjectState> obj_st;
-  if ((cmd_entity_id >= 0x1000) && (cmd_entity_id < 0x4000)) {
-    ene_st = l->map_state->enemy_state_for_index(c->version(), cmd_entity_id - 0x1000);
-  } else if ((cmd_entity_id >= 0x4000) && (cmd_entity_id < 0xFFFF)) {
-    obj_st = l->map_state->object_state_for_index(c->version(), cmd_entity_id - 0x4000);
+  std::string lookup_error = entity_states_for_forwarding(l->map_state, c->version(), cmd_entity_id, ene_st, obj_st);
+  if (!lookup_error.empty()) {
+    l->log.warning_f("6x{:02X} from client {}: entity {:04X} not in the server's map view ({}); forwarding unchanged",
+        cmd.header.subcommand, c->lobby_client_id, cmd_entity_id.load(), lookup_error);
   }
 
   for (auto& lc : l->clients) {

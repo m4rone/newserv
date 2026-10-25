@@ -13,6 +13,7 @@
 #include "PSOEncryption.hh"
 #include "Text.hh"
 #include "QuestScript.hh"
+#include "ReceiveSubcommands.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
 #include "CrashValueFilter.hh"
@@ -2248,6 +2249,61 @@ void run_static_tests() {
     expect_eq(EnemyType::DARK_FALZ_3, lookup(0x0E, EnemyType::DARK_FALZ_3)->super_ene->type);
     // last floor: the search runs to the end of the enemy list (was: stopped at index 0x12)
     expect_eq(EnemyType::BOOMA, lookup(0x11, EnemyType::BOOMA)->super_ene->type);
+  }
+
+  phosg::log_info_f("-- Entity id past the last enemy: forwarded unchanged, never a disconnect (Spire sweep 2026-10-25)");
+  {
+    // forward_subcommand_with_entity_id_transcode_t (6x76 and 25 more subcommands) looked the id up with
+    // enemy_state_for_index, whose .at() throws past the last enemy; the throw disconnected the sender
+    using ESE = MapFile::EnemySetEntry;
+    std::vector<ESE> sets(2);
+    for (auto& e : sets) {
+      e.base_type = 0x0044; // Booma
+      e.floor = 0x01;
+      e.room = 1;
+      e.wave_number = 1;
+    }
+    auto dat = std::make_shared<std::string>();
+    MapFile::SectionHeader h;
+    h.le_type = static_cast<uint32_t>(MapFile::SectionHeader::Type::ENEMY_SETS);
+    h.data_size = sets.size() * sizeof(ESE);
+    h.section_size = sizeof(h) + h.data_size;
+    h.floor = 0x01;
+    dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+    dat->append(reinterpret_cast<const char*>(sets.data()), h.data_size);
+    MapFile::SectionHeader end_h;
+    end_h.le_type = 0;
+    end_h.section_size = 0;
+    end_h.floor = 0;
+    end_h.data_size = 0;
+    dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+    std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+    map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+    auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+    auto map_state = std::make_shared<MapState>(
+        0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+
+    // the bug's condition: the lookup the forwarder used throws for the index after the last enemy
+    expect_raises(std::out_of_range, [&]() { map_state->enemy_state_for_index(Version::GC_V3, 2); });
+
+    std::shared_ptr<const MapState::EnemyState> ene_st;
+    std::shared_ptr<const MapState::ObjectState> obj_st;
+    expect_eq("", entity_states_for_forwarding(map_state, Version::GC_V3, 0x1001, ene_st, obj_st));
+    expect(ene_st != nullptr);
+    expect_eq(EnemyType::BOOMA, ene_st->super_ene->type);
+    expect(obj_st == nullptr);
+    expect(!entity_states_for_forwarding(map_state, Version::GC_V3, 0x1002, ene_st, obj_st).empty());
+    expect(ene_st == nullptr);
+    expect(obj_st == nullptr);
+    expect(!entity_states_for_forwarding(map_state, Version::GC_V3, 0x1FFF, ene_st, obj_st).empty());
+    expect(ene_st == nullptr);
+    // a player id (below 0x1000) and 0xFFFF name no entity: no lookup, no error
+    expect_eq("", entity_states_for_forwarding(map_state, Version::GC_V3, 0x0001, ene_st, obj_st));
+    expect(ene_st == nullptr);
+    expect(obj_st == nullptr);
+    expect_eq("", entity_states_for_forwarding(map_state, Version::GC_V3, 0xFFFF, ene_st, obj_st));
+    expect(ene_st == nullptr);
+    expect(obj_st == nullptr);
   }
 
   phosg::log_info_f("-- Spire savestate: written from the run copy, replaced by the next, deleted only at a true run end (v44)");
