@@ -1250,6 +1250,21 @@ void run_static_tests() {
     expect_eq(4u, (spire_draw(t, in, rnd0) & 0x3F));
     in.archetype = 3;
     expect_raises(std::runtime_error, [&]() { spire_draw(t, in, rnd0); });
+
+    // tot_k (act 3, Ruins): entry 1 ends at room 1, so from room 2 on its replacement is drawn, also by the walk
+    std::string ruins_json = table_json(4, 0);
+    for (size_t pos; (pos = ruins_json.find("\"vanaf_k\":1,\"android_ok\":false")) != std::string::npos;) {
+      ruins_json.replace(pos, 11, "\"vanaf_k\":1,\"tot_k\":1");
+    }
+    auto ruins = load(ruins_json);
+    std::filesystem::remove(filename);
+    expect_eq(1u, static_cast<uint32_t>(ruins.archetypes.at(0).entries.at(0).tot_k));
+    expect_eq(0xFFu, static_cast<uint32_t>(ruins.archetypes.at(0).entries.at(1).tot_k));  // no tot_k: every room
+    SpireDrawInput rin;
+    rin.k = 1;
+    expect_eq(1u, ((spire_draw(ruins, rin, rnd0) >> 6) & 0x3F));
+    rin.k = 2;
+    expect_eq(2u, ((spire_draw(ruins, rin, rnd0) >> 6) & 0x3F));
   }
 
   phosg::log_info_f("-- Spire meta: flags only in a game with a Spire quest (regie pso-regie-9)");

@@ -10,13 +10,14 @@
 
 // Spire reward draw (v20, server side). The same draw the quest's rewards.py hook draw_rewards runs on the client, on
 // the server: tag weighting, rarity, curse code, the 8 + 8 attempts in the sub-pool and the whole band, then the first
-// valid entry in table order, with caps, duplicates, vanaf_k and the android filter. The board, the pick dialog and
+// valid entry in table order, with caps, duplicates, vanaf_k, tot_k and the android filter. The board, the pick dialog and
 // item_create2 stay in the quest. The table comes from the quest build (build/spire-draw.json, written by rewards.py from
 // data/rewards.json), so rewards.json stays the only source of the pool.
 
 struct SpireDrawEntry {
   uint8_t cap = 2;
   uint8_t vanaf_k = 1;
+  uint8_t tot_k = 0xFF; // last room k it is drawn in (rewards.json tot_k: an act-3 entry replaces it), 0xFF = all
   bool android_ok = true;
   bool rare = false; // z == 'R'
   bool own_curse = false; // vloek: never a drawn curse on top

@@ -38,6 +38,7 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
       SpireDrawEntry e;
       e.cap = e_json->get_int("cap");
       e.vanaf_k = e_json->get_int("vanaf_k");
+      e.tot_k = e_json->get_int("tot_k", 0xFF);
       e.android_ok = e_json->get_bool("android_ok");
       e.rare = e_json->get_bool("rare");
       e.own_curse = e_json->get_bool("own_curse");
@@ -239,7 +240,7 @@ struct Draw {
         return;
       }
       const auto& e = a.entries[index];
-      bool invalid = (in.k < e.vanaf_k) || (!e.android_ok && (in.race == RACE_ANDROID)) ||
+      bool invalid = (in.k < e.vanaf_k) || (in.k > e.tot_k) || (!e.android_ok && (in.race == RACE_ANDROID)) ||
           already_or_capped(id, e.cap);
       if (!invalid) {
         if (e.rare) {
