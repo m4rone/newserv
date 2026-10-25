@@ -317,6 +317,87 @@ static void spire_bridge_end_battle(
   asio::co_spawn(*s->io_context, spire_bridge_send_battle_phases(l, phases, prefix), asio::detached);
 }
 
+// v35: no server window during a Spire run (Marck, pc 2026-10-25: a multi-line server text stood on the screen as a
+// window he had to press away, and his character could not move meanwhile). Every text the bridge sends in a run goes
+// out the way "Waiting for your partner..." does: one B0 line, no line break. Texts that are not about the moment
+// (the records and unlocks at the run end) wait for the lobby instead.
+std::string spire_ticker_line(const std::string& text) {
+  std::string ret;
+  ret.reserve(text.size());
+  for (char ch : text) {
+    if ((ch == '\n') || (ch == '\r')) {
+      if (!ret.empty() && (ret.back() != ' ')) {
+        ret.push_back(' ');
+      }
+    } else {
+      ret.push_back(ch);
+    }
+  }
+  while (!ret.empty() && (ret.back() == ' ')) {
+    ret.pop_back();
+  }
+  return ret;
+}
+
+static void spire_send_ticker(std::shared_ptr<Client> c, const std::string& text) {
+  send_text_message(c, spire_ticker_line(text));
+}
+
+// Texts held for the lobby, per client. The weak_ptr tells a reused Client address from the client that earned them.
+struct SpireLobbyTexts {
+  std::weak_ptr<Client> client;
+  std::vector<std::string> texts;
+};
+static std::unordered_map<const Client*, SpireLobbyTexts> spire_lobby_texts;
+
+static void spire_defer_to_lobby(std::shared_ptr<Client> c, const std::string& text) {
+  auto& e = spire_lobby_texts[c.get()];
+  if (e.client.lock() != c) {
+    e = SpireLobbyTexts{.client = c, .texts = {}};
+  }
+  if (e.texts.size() < 8) {
+    e.texts.emplace_back(text);
+  }
+  if (spire_lobby_texts.size() > 256) {
+    std::erase_if(spire_lobby_texts, [](const auto& it) { return it.second.client.expired(); });
+  }
+  c->log.info_f("Spire bridge: text held for the lobby ({} waiting): \"{}\"", e.texts.size(), spire_ticker_line(text));
+}
+
+static asio::awaitable<void> spire_lobby_texts_send(std::weak_ptr<Client> weak_c) {
+  co_await async_sleep(SPIRE_LOBBY_TEXT_DELAY);
+  auto c = weak_c.lock();
+  if (!c) {
+    co_return;
+  }
+  auto l = c->lobby.lock();
+  if (!l || l->is_game()) {
+    co_return; // already in a game again: the texts wait for the next lobby join
+  }
+  auto it = spire_lobby_texts.find(c.get());
+  if ((it == spire_lobby_texts.end()) || (it->second.client.lock() != c)) {
+    co_return;
+  }
+  auto texts = std::move(it->second.texts);
+  spire_lobby_texts.erase(it);
+  for (const auto& text : texts) {
+    send_text_message(c, text);
+  }
+  c->log.info_f("Spire bridge: {} held text(s) sent in the lobby", texts.size());
+}
+
+void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
+  try {
+    auto it = spire_lobby_texts.find(c.get());
+    if ((it == spire_lobby_texts.end()) || (it->second.client.lock() != c) || it->second.texts.empty()) {
+      return;
+    }
+    asio::co_spawn(*c->require_server_state()->io_context, spire_lobby_texts_send(c), asio::detached);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire bridge: failed to schedule the held texts: {}", e.what());
+  }
+}
+
 // v19: one run timer per game. The generation tells a coroutine that its timer was replaced or stopped; the key is
 // the lobby's address, and a coroutine whose lobby is gone (weak_ptr) removes nothing but its own generation.
 struct SpireRunTimer {
@@ -357,10 +438,10 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     } else if (!t.warned && (elapsed + t.warn_before_s >= t.limit_s)) {
       t.warned = true;
       uint32_t minutes = (t.limit_s - elapsed + 59) / 60;
-      std::string msg = std::format("$C4{} minutes left.$C7\nThe timer ends the run.", minutes);
+      std::string msg = std::format("$C4{} minutes left$C7 - the timer ends the run.", minutes);
       for (const auto& lc : l->clients) {
         if (lc) {
-          send_text_message(lc, msg);
+          spire_send_ticker(lc, msg);
         }
       }
       l->log.info_f("Spire bridge: run timer warning at {} s ({} minutes left) to {} client(s)", elapsed, minutes, clients);
@@ -375,11 +456,11 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     cmd.register_number = SPIRE_BRIDGE_TIMER_REGISTER;
     // v21: the server's seconds in the low 16 bits; the quest takes them as its run time (lab: quest 213 s, server 240 s)
     cmd.value.as_int = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) | (cause << 16) | std::min<uint32_t>(elapsed, 0xFFFF);
-    const char* text = (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "Time is up.\nThe run ends here."
-                                                             : "The second player left.\nThe run ends here.";
+    const char* text = (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "Time is up - the run ends here."
+                                                             : "The second player left - the run ends here.";
     for (const auto& lc : l->clients) {
       if (lc) {
-        send_text_message(lc, text);
+        spire_send_ticker(lc, text);
         send_command_t(lc, 0x60, 0x00, cmd);
       }
     }
@@ -457,23 +538,25 @@ static void spire_draw_answer(std::shared_ptr<Client> c, uint32_t serial_number,
       SPIRE_BRIDGE_DRAW_RESULT_REGISTER, drawn, SPIRE_BRIDGE_REQUEST_REGISTER);
 }
 
-// v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the same words as the quest's window_msg (spire.json
-// texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code.
-static std::string spire_bridge_message_text(uint32_t value) {
+// v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
+// texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code. v35: one line each, the form of
+// "Waiting for your partner..." (no window during a run, see spire_ticker_line); the run-over text says where the
+// server sends the player (spire_run_over).
+std::string spire_bridge_message_text(uint32_t value) {
   uint8_t kind = value >> 24;
   uint32_t a = (value >> 8) & 0xFF, b = value & 0xFF;
   switch (kind) {
     case SPIRE_BRIDGE_MSG_WAVE:
       return std::format("Wave {}/{}", a, b);
     case SPIRE_BRIDGE_MSG_LIFE:
-      return a ? std::format("$C1Life lost$C7 - {} left.\nNo more Scape Dolls:\nthe next death ends the run.", b)
-               : std::format("$C1Life lost$C7 - {} left.\nA new Scape Doll is yours.", b);
+      return a ? std::format("$C1Life lost$C7 - {} left. No more Scape Dolls: the next death ends the run.", b)
+               : std::format("$C1Life lost$C7 - {} left. A new Scape Doll is yours.", b);
     case SPIRE_BRIDGE_MSG_TIME:
-      return std::format("$C4{} minutes left.$C7\nThe timer ends the run.", value & 0xFFFF);
+      return std::format("$C4{} minutes left$C7 - the timer ends the run.", value & 0xFFFF);
     case SPIRE_BRIDGE_MSG_PARTNER:
-      return b ? "$C4Your partner is waiting.$C7\nOpen the quest board and\nmake your choice." : "Waiting for your partner...";
+      return b ? "$C4Your partner is waiting.$C7 Open the quest board and make your choice." : "Waiting for your partner...";
     case SPIRE_BRIDGE_MSG_RUN_OVER:
-      return std::format("Run over after {} s.\nRooms cleared: {}.\nLeave the game now.", value & 0xFFFF, (value >> 16) & 0xFF);
+      return std::format("Run over - back to the lobby. Rooms cleared: {}, {} s.", (value >> 16) & 0xFF, value & 0xFFFF);
     default:
       return "";
   }
@@ -555,7 +638,7 @@ static std::string spire_records_board_text(const SpireRecords& rec) {
   std::string time = rec.best_time
       ? std::format("{} min {} s", rec.best_time / 60, rec.best_time % 60)
       : std::string("none yet");
-  return std::format("Best score: {}\nBest time: {}\nRuns: {}  Won: {}", rec.best_score, time, rec.runs, rec.won);
+  return std::format("Best score: {} - best time: {} - runs: {}, won: {}", rec.best_score, time, rec.runs, rec.won);
 }
 
 // Handles a record code; returns false if the value is none. Throws if the file cannot be written (the caller logs).
@@ -584,7 +667,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     return true;
   }
   if (kind == SPIRE_BRIDGE_REC_BOARD) {
-    send_text_message(c, spire_records_board_text(rec));
+    spire_send_ticker(c, spire_records_board_text(rec)); // asked for on the quest board, during the run
     c->log.info_f("Spire records: board for {}", filename);
     return true;
   }
@@ -617,7 +700,9 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   // v24: unlocks and payout flags for the character (SpireMeta), on the game's difficulty
   text += spire_meta_on_finish(c, l, serial_number, value, new_time);
   text += "\nRecords saved.";
-  send_text_message(c, text);
+  // v35: never a window in the run (Marck, pc 2026-10-25: "New best score" had to be pressed away mid-game); the
+  // records text waits for the lobby (spire_deliver_lobby_texts)
+  spire_defer_to_lobby(c, text);
   c->log.info_f("Spire records: run finished (score {}, {} s, {}) for serial {:010} in q{}; {}: best {} / {} s, {} run(s), {} won",
       score, seconds, is_won ? "won" : "not won", serial_number, quest_number, filename, rec.best_score,
       rec.best_time, rec.runs, rec.won);
@@ -669,7 +754,7 @@ bool spire_bridge_handle_register(
         size_t sent = 0;
         for (const auto& lc : l->clients) {
           if (lc) {
-            send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+            spire_send_ticker(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
             sent++;
           }
         }
@@ -700,12 +785,12 @@ bool spire_bridge_handle_register(
         if ((value >> 24) == SPIRE_BRIDGE_MSG_WAVE) {
           for (const auto& lc : l->clients) {
             if (lc) {
-              send_text_message(lc, msg);
+              spire_send_ticker(lc, msg);
               sent++;
             }
           }
         } else {
-          send_text_message(c, msg);
+          spire_send_ticker(c, msg);
           sent = 1;
         }
         c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\" to {} client(s)", value,
@@ -1839,7 +1924,7 @@ void spire_bridge_check_room_clear(
     size_t sent = 0;
     for (const auto& lc : l->clients) {
       if (lc) {
-        send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+        spire_send_ticker(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
         send_command_t(lc, 0x60, 0x00, cmd);
         sent++;
       }
@@ -1887,7 +1972,7 @@ void spire_bridge_check_boss_defeated(
     size_t sent = 0;
     for (const auto& lc : l->clients) {
       if (lc) {
-        send_text_message(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
+        spire_send_ticker(lc, SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
         send_command_t(lc, 0x60, 0x00, cmd);
         sent++;
       }

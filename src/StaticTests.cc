@@ -230,6 +230,21 @@ void run_static_tests() {
     expect(!spire_follow_partner_pending(SPIRE_FOLLOW_CITY_FLOOR, 2, false)); // city: takes the Ragol warp itself
   }
 
+  phosg::log_info_f("-- Spire bridge: no window in a run, every run text is one line (v35)");
+  {
+    expect_eq(std::string("New best score: 5237! Records saved."), spire_ticker_line("New best score: 5237!\nRecords saved."));
+    expect_eq(std::string("a b"), spire_ticker_line("a \nb\n"));
+    expect_eq(std::string("Waiting for your partner..."), spire_ticker_line("Waiting for your partner..."));
+    for (uint32_t value : {0x57000102u, 0x4C000002u, 0x4C000101u, 0x5400000Fu, 0x50000000u, 0x50000001u, 0x580000A3u}) {
+      std::string text = spire_bridge_message_text(value);
+      expect(!text.empty());
+      expect(text.find('\n') == std::string::npos);
+    }
+    expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000));
+    expect_eq(std::string("Run over - back to the lobby. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3));
+    expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
+  }
+
   phosg::log_info_f("-- Spire protected characters: any quest, also one not listed (audit S-3)");
   {
     DataIndex d;

@@ -3141,6 +3141,8 @@ static asio::awaitable<void> on_84(std::shared_ptr<Client> c, Channel::Message& 
     // the next login. This is a no-op for other clients (see SpireFlagBridge.hh). v33: it waits for the 99 that
     // answers a B1 sent after the 67 (or 3 s), so the B2 never lands while the client is still loading the lobby.
     co_await spire_guard_restore_in_lobby(c);
+    // v35: texts the Spire bridge held during the run (records at the run end) go out now, in the lobby
+    spire_deliver_lobby_texts(c);
 
   } else {
     // If the client already is in a lobby, then they're using the lobby teleporter; add them to the lobby they

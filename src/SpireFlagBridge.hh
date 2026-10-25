@@ -39,6 +39,8 @@
 // - Records (v18): best score, best time, runs and wins per character on the server (SPIRE_BRIDGE_REC_*).
 // - Run timer (v19): the time limit, its warning and "player left" on the server (SPIRE_BRIDGE_TIMER_*).
 // - Reward draw (v20): the pause A draw on the server (SPIRE_BRIDGE_DRAW_*, SpireDraw.hh).
+// - No window in a run (v35): every bridge text during a run is one B0 line (spire_ticker_line), the form of "Waiting
+//   for your partner..."; the records text of a run end waits for the lobby (spire_deliver_lobby_texts).
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -330,6 +332,16 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c);
 // null-checks the BBA driver's TX-done callback. No-op for every other version, when SpireBBATxGuardPatch is false, or
 // when the client cannot run functions. Logs the client's answer (written / already present / no match).
 asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
+
+// v35: a text for the client during a Spire run as one line: line breaks become spaces, trailing spaces go.
+std::string spire_ticker_line(const std::string& text);
+// v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
+std::string spire_bridge_message_text(uint32_t value);
+// v35: called from on_84 once a client that left a game is in a lobby (after the guard's lobby restore). Texts the
+// bridge held during the run (the records at the run end) go out SPIRE_LOBBY_TEXT_DELAY later, if the client is still
+// in a lobby then. Never throws.
+constexpr auto SPIRE_LOBBY_TEXT_DELAY = std::chrono::seconds(3);
+void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
