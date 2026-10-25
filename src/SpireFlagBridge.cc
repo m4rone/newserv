@@ -1050,28 +1050,7 @@ bool spire_bridge_handle_register(
 // Spire guard (v6, v7). The snapshot file sits next to the bridge file and is never touched by spire_bridge_save, so
 // the markers and the snapshot cannot be dropped by a flag or register write.
 
-struct SpireGuardSnapshot {
-  // Set at quest load; a 98 or the next login turns it into restore_pending (v8)
-  bool run_in_progress = false;
-  // Cleared only when the 61 requested right after the restore push shows the snapshot's level and EXP (v8)
-  bool restore_pending = false;
-  // v10: set instead of clearing restore_pending when the lobby restore is verified. The real character is then only in
-  // the client's memory until the client saves it, so the card may still hold the overlay. Cleared at the next login
-  // whose 61 already shows the snapshot's level and EXP (no push); any other login turns it back into restore_pending.
-  bool awaiting_save = false;
-  // v12: what the client had in memory right before the lobby restore (from its 30): the overlay. Set together with
-  // awaiting_save. Only a login 61 that still shows exactly this gets a push; any other unequal 61 is real progress.
-  bool has_overlay = false;
-  uint32_t overlay_level = 0;
-  uint32_t overlay_exp = 0;
-  uint32_t overlay_meseta = 0;
-  uint32_t overlay_num_items = 0;
-  uint32_t quest_number = 0;
-  uint64_t snapshot_time_usecs = 0;
-  bool has_character = false;
-  PlayerInventory inventory;
-  PlayerDispDataV4 disp;
-};
+// SpireGuardSnapshot: see SpireFlagBridge.hh (v39: there for the static tests of the run-start and login decisions)
 
 // v11: one memory card holds several characters, and GC sends no character slot (only the BB login has one). So a
 // snapshot belongs to a serial number plus a character: its name, class and section ID from the 61, which the battle
@@ -1322,12 +1301,55 @@ bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDa
       spire_guard_same_materials(inventory, snapshot_inventory);
 }
 
-// v32: at a run start under AwaitingSave the stored snapshot is kept when the character data shows a lower level
-// (v10) or differs from the snapshot in items, meseta, level or EXP; a fresh snapshot replaces it only when the data
-// equals it (then the fresh one is the same snapshot). A snapshot under an open marker is never overwritten with
-// other data (lab 2026-10-24 18:14: a fresh snapshot with the run's 7 items replaced the one with the real 20).
-bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool lower_level, bool same_state) {
-  return awaiting_save && (lower_level || !same_state);
+// v32: at a run start under AwaitingSave the stored snapshot is kept when the character data differs from it in items,
+// meseta, level, EXP or (v38) material counters; a fresh snapshot replaces it only when the data equals it (then the
+// fresh one is the same snapshot). A snapshot under an open marker is never overwritten with other data (lab
+// 2026-10-24 18:14: a fresh snapshot with the run's 7 items replaced the one with the real 20). v39: the v10 "lower
+// level" term is gone; a higher level is kept the same way (a run copy can be stronger than the real character).
+bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool same_state) {
+  return awaiting_save && !same_state;
+}
+
+// v39: see SpireFlagBridge.hh; the criterion for a run copy is the open marker, never the level
+SpireGuardRunStart spire_guard_run_start_apply(SpireGuardSnapshot& snapshot, const PlayerInventory& inventory,
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
+  if (snapshot.run_in_progress || snapshot.restore_pending) {
+    return SpireGuardRunStart::KEPT_OPEN_RUN;
+  }
+  bool awaiting_save = snapshot.awaiting_save;
+  snapshot.awaiting_save = false;
+  snapshot.run_in_progress = true;
+  snapshot.quest_number = quest_number;
+  if (awaiting_save && snapshot.has_character &&
+      spire_guard_run_start_keeps_snapshot(true, spire_guard_same_state(inventory, disp, snapshot.inventory, snapshot.disp))) {
+    return SpireGuardRunStart::KEPT_UNCONFIRMED;
+  }
+  snapshot.snapshot_time_usecs = now_usecs;
+  snapshot.has_character = true;
+  snapshot.inventory = inventory;
+  snapshot.disp = disp;
+  return SpireGuardRunStart::FRESH;
+}
+
+bool spire_guard_awaiting_save_login_apply(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
+  snapshot.awaiting_save = false;
+  if (spire_guard_same_state(inventory, disp, snapshot.inventory, snapshot.disp)) {
+    snapshot.has_overlay = false;
+    return true;
+  }
+  snapshot.restore_pending = true;
+  return false;
+}
+
+bool spire_guard_follow_real_progress(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
+  if (!snapshot.awaiting_save || snapshot.run_in_progress || snapshot.restore_pending || !snapshot.has_character) {
+    return false;
+  }
+  snapshot.inventory = inventory;
+  snapshot.disp = disp;
+  return true;
 }
 
 // v32: the 61 after a push verifies the restore only if it shows the snapshot's level and EXP and its items and
@@ -1448,46 +1470,37 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
     std::string filename = spire_guard_filename_for(c, serial_number);
     spire_guard_run_files[c.get()] = SpireGuardRunFile{c, filename};
     auto snapshot = spire_guard_load(filename);
-    if (snapshot.run_in_progress || snapshot.restore_pending) {
-      c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
-          snapshot.restore_pending ? "restore pending" : "run already in progress", serial_number, quest_number,
-          spire_guard_describe(snapshot), snapshot.quest_number);
-      return true;
-    }
-
-    if (snapshot.awaiting_save) {
-      // v10: the lobby restore was verified, so since then the server's character data is the real character: the
-      // verifying 61, and after that only 61s and 98s from non-Spire games (a Spire game would have set a marker).
-      // v32: the stored snapshot is kept unless that data equals it in level, EXP, meseta and items; a fresh snapshot
-      // then changes nothing but the time. Progress from a normal game played in between is not taken over: the
-      // marker is open, and a snapshot under an open marker is never replaced by other data (lab 18:14).
-      bool lower_level = character->disp.stats.level < snapshot.disp.stats.level;
-      bool same_state = spire_guard_same_state(character->inventory, character->disp, snapshot.inventory, snapshot.disp);
-      if (spire_guard_run_start_keeps_snapshot(true, lower_level, same_state)) {
-        snapshot.awaiting_save = false;
-        snapshot.run_in_progress = true;
-        snapshot.quest_number = quest_number;
-        spire_guard_save(filename, serial_number, snapshot);
-        c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data {} ({} items meseta {}, snapshot {} items meseta {}); marker set, kept snapshot {}",
-            serial_number, quest_number, lower_level ? "shows a lower level" : "differs from the snapshot",
-            character->inventory.num_items, character->disp.stats.meseta.load(), snapshot.inventory.num_items,
-            snapshot.disp.stats.meseta.load(), spire_guard_describe(snapshot));
+    // v39: whether the character data may be a run copy follows from the snapshot's markers, never from its level
+    // (see SpireFlagBridge.hh); spire_guard_run_start_apply is the whole decision
+    bool was_awaiting_save = snapshot.awaiting_save;
+    std::string stored = spire_guard_describe(snapshot);
+    auto action = spire_guard_run_start_apply(
+        snapshot, character->inventory, character->disp, quest_number, phosg::now());
+    switch (action) {
+      case SpireGuardRunStart::KEPT_OPEN_RUN:
+        c->log.info_f("Spire guard: {} for serial {:010} (q{}); kept snapshot {} from q{}",
+            snapshot.restore_pending ? "restore pending" : "run already in progress", serial_number, quest_number,
+            stored, snapshot.quest_number);
         return true;
-      }
-      snapshot.awaiting_save = false;
-      c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data equals the snapshot, taking a fresh snapshot (was {})",
-          serial_number, quest_number, spire_guard_describe(snapshot));
+      case SpireGuardRunStart::KEPT_UNCONFIRMED:
+        // v10/v32: the lobby restore was verified, but no login has confirmed that the card holds the real character;
+        // character data unequal to the snapshot may be a run copy (also a stronger one), so the snapshot stays
+        spire_guard_save(filename, serial_number, snapshot);
+        c->log.warning_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data Lv{} ({} items meseta {}) differs from the snapshot ({} items meseta {}); marker set, kept snapshot {}",
+            serial_number, quest_number, character->disp.stats.level + 1, character->inventory.num_items,
+            character->disp.stats.meseta.load(), snapshot.inventory.num_items, snapshot.disp.stats.meseta.load(),
+            stored);
+        return true;
+      case SpireGuardRunStart::FRESH:
+        spire_guard_save(filename, serial_number, snapshot);
+        if (was_awaiting_save) {
+          c->log.info_f("Spire guard: run started for serial {:010} in q{} before a login confirmed the lobby restore; character data equals the snapshot, took a fresh snapshot (was {})",
+              serial_number, quest_number, stored);
+        }
+        c->log.info_f("Spire guard: run started for serial {:010} in q{}; marker set, snapshot {}",
+            serial_number, quest_number, spire_guard_describe(snapshot));
+        break;
     }
-
-    snapshot.run_in_progress = true;
-    snapshot.quest_number = quest_number;
-    snapshot.snapshot_time_usecs = phosg::now();
-    snapshot.has_character = true;
-    snapshot.inventory = character->inventory;
-    snapshot.disp = character->disp;
-    spire_guard_save(filename, serial_number, snapshot);
-    c->log.info_f("Spire guard: run started for serial {:010} in q{}; marker set, snapshot {}",
-        serial_number, quest_number, spire_guard_describe(snapshot));
 
   } catch (const std::exception& e) {
     // v12 (critic K2): fail closed; a run without a stored snapshot must not get the overlay
@@ -1497,7 +1510,12 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
   return true;
 }
 
+// v39: clients whose 98 from a Normal or Solo game under AwaitingSave is still to be taken into the snapshot. Keyed by
+// the Client's address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
+static std::unordered_set<const Client*> spire_guard_follow_pending;
+
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  spire_guard_follow_pending.erase(c.get());
   try {
     // v8: a 98 is never proof that the card holds the real character. Measured on the Wii: a normal end of a Spire run
     // (end, warp, Quit, "Wrote to Memory Card A") also saves the overlay character. So a 98 with RunInProgress set,
@@ -1519,6 +1537,11 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
       return;
     }
     if (!snapshot.run_in_progress) {
+      // v39: under AwaitingSave alone the client has had the verified real character in memory since the lobby
+      // restore; the 98 of a Normal or Solo game is its real progress, which the snapshot follows (spire_guard_after_98)
+      if (snapshot.awaiting_save && l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO))) {
+        spire_guard_follow_pending.emplace(c.get());
+      }
       return;
     }
     snapshot.run_in_progress = false;
@@ -1529,6 +1552,35 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to end run: {}", e.what());
+  }
+}
+
+void spire_guard_after_98(std::shared_ptr<Client> c) {
+  if (!spire_guard_follow_pending.erase(c.get())) {
+    return;
+  }
+  try {
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    auto character = c->character_file(false, false);
+    if (!serial_number || !character) {
+      return;
+    }
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    if (filename.empty()) {
+      return;
+    }
+    auto snapshot = spire_guard_load(filename);
+    if (!snapshot.has_character || !spire_guard_same_character(character->disp, snapshot.disp)) {
+      return;
+    }
+    std::string before = spire_guard_describe(snapshot);
+    if (spire_guard_follow_real_progress(snapshot, character->inventory, character->disp)) {
+      spire_guard_save(filename, serial_number, snapshot);
+      c->log.info_f("Spire guard: 98 of a normal game under AwaitingSave for serial {:010}; snapshot follows the real character: {} -> {} ({} items)",
+          serial_number, before, spire_guard_describe(snapshot), snapshot.inventory.num_items);
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to follow the real character after a 98: {}", e.what());
   }
 }
 
@@ -1768,11 +1820,11 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
       co_return true;
     }
     if (snapshot.awaiting_save && !snapshot.run_in_progress && !snapshot.restore_pending) {
-      // v10: after a verified lobby restore, the client may have saved the real character since. v12 (critic K1): the
-      // client may also have played a normal game since and saved real progress, which a push would undo. EXP never
-      // goes down in normal play, so only a 61 with less EXP than the snapshot, or one that still shows exactly the
-      // overlay the lobby restore replaced, means the card holds the overlay. Any other 61 clears the marker.
-      snapshot.awaiting_save = false;
+      // v10: after a verified lobby restore the card may still hold the run copy until the client saves. v39 (regie):
+      // the run copy is no longer told apart by level, EXP or the v12 fingerprint ("EXP never goes down in normal
+      // play" fails once a run copy is stronger than the real character); only a 61 that equals the snapshot confirms
+      // the restore. Real progress from a normal game since the lobby restore is in the snapshot already
+      // (spire_guard_after_98), so any other 61 may be a run copy and gets the snapshot pushed again.
       auto character = c->character_file(false, false);
       if (character) {
         uint32_t level = character->disp.stats.level;
@@ -1780,39 +1832,31 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
         bool shows_overlay = snapshot.has_overlay && (level == snapshot.overlay_level) && (exp == snapshot.overlay_exp) &&
             (character->disp.stats.meseta == snapshot.overlay_meseta) &&
             (character->inventory.num_items == snapshot.overlay_num_items);
-        bool lost_exp = exp < snapshot.disp.stats.exp;
-        // v14: a 61 with the snapshot's level and EXP is the real character, also if an (older) fingerprint matches it.
-        // v31: only with the snapshot's items and meseta too; a run character with the same level and EXP (no overlay
-        // fingerprint is kept then, v14) otherwise passes for the real one.
         bool same_stats = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
         bool same_inventory = spire_guard_same_inventory(
             character->inventory, character->disp.stats.meseta, snapshot.inventory, snapshot.disp.stats.meseta);
-        // v38: the material counters too, like the items
-        bool same_materials = spire_guard_same_materials(character->inventory, snapshot.inventory);
-        if (same_stats && same_inventory && !same_materials) {
+        if (same_stats && same_inventory && !spire_guard_same_materials(character->inventory, snapshot.inventory)) {
           c->log.warning_f("Spire guard: login 61 for serial {:010}: material counters {}, snapshot {}",
               serial_number, spire_guard_materials_str(character->inventory), spire_guard_materials_str(snapshot.inventory));
         }
-        bool same_items = same_inventory && same_materials;
-        bool same = same_stats && same_items;
-        if (same || (!same_stats && !shows_overlay && !lost_exp)) {
-          snapshot.has_overlay = false;
+        if (spire_guard_awaiting_save_login_apply(snapshot, character->inventory, character->disp)) {
           spire_guard_save(filename, serial_number, snapshot);
-          c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, snapshot Lv{} EXP {}; {}, marker cleared, no push",
-              serial_number, level + 1, exp, snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(),
-              same ? "lobby restore confirmed" : "progress since the lobby restore");
+          c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {}, equal to the snapshot; lobby restore confirmed, marker cleared, no push",
+              serial_number, level + 1, exp);
           co_return true;
         }
         c->log.info_f("Spire guard: login 61 for serial {:010} shows Lv{} EXP {} with {} items meseta {}, snapshot Lv{} EXP {} with {} items meseta {}; {}, pushing again",
             serial_number, level + 1, exp, character->inventory.num_items, character->disp.stats.meseta.load(),
             snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(), snapshot.inventory.num_items,
             snapshot.disp.stats.meseta.load(),
-            same_stats ? "the items or material counters differ from the snapshot (the card still holds the run)"
-                       : (shows_overlay ? "the card still holds the overlay" : "less EXP than the snapshot"));
+            shows_overlay ? "the card still holds the run copy (fingerprint)"
+                          : (same_stats ? "the items or material counters differ from the snapshot (the card may still hold the run)"
+                                        : "not the snapshot (the card may still hold a run copy)"));
       } else {
+        snapshot.awaiting_save = false;
+        snapshot.restore_pending = true;
         c->log.info_f("Spire guard: no login 61 for serial {:010}; cannot confirm the lobby restore, pushing again", serial_number);
       }
-      snapshot.restore_pending = true;
       spire_guard_save(filename, serial_number, snapshot);
     }
     if (snapshot.run_in_progress) {

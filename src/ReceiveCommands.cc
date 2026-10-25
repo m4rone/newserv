@@ -3601,6 +3601,11 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
 
   c->update_channel_name();
 
+  // Spire guard (v39): after a verified lobby restore the snapshot follows the real character's 98 from a normal game
+  if (msg.command == 0x98) {
+    spire_guard_after_98(c);
+  }
+
   // If the player is BB and has just left a game, sync their save file to the client to make sure it's up to date
   if ((c->version() == Version::BB_V4) && (msg.command == 0x98)) {
     send_complete_player_bb(c);

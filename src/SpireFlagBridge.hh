@@ -289,6 +289,9 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // - v15: the guard protects the quests in the config key SpireGuardQuests; if that key is missing, the quests in
 //   SpireBridgeQuests. So a probe quest with replace_char can be guarded without the bridge storing its flags and
 //   registers under the player's serial.
+// - v39: a run copy is never told apart by level or EXP (it may be stronger than the real character): under an open
+//   marker only data equal to the snapshot counts as the real character, and under AwaitingSave the snapshot follows the
+//   98 of a Normal or Solo game (see SpireGuardRunStart below).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -308,15 +311,69 @@ void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lo
 // the text and keeps the guard. spire_guard_no_quest_action is the decision, kept free of state for the static tests.
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
 
+// The guard's snapshot file of one character (serial number plus character, see spire_guard_character_id).
+struct SpireGuardSnapshot {
+  // Set at quest load; a 98 or the next login turns it into restore_pending (v8)
+  bool run_in_progress = false;
+  // Cleared only when the 61 requested right after the restore push shows the snapshot's state (v8, v32, v38)
+  bool restore_pending = false;
+  // v10: set instead of clearing restore_pending when the lobby restore is verified. The real character is then only in
+  // the client's memory until the client saves it, so the card may still hold the run copy. v39: cleared only at a
+  // login whose 61 equals the snapshot (spire_guard_same_state); any other login turns it back into restore_pending.
+  // While it is set, the snapshot follows the real character's 98 from a Normal or Solo game (real progress).
+  bool awaiting_save = false;
+  // v12: what the client had in memory right before the lobby restore (from its 30): the run copy. v39: only for the
+  // log; the login decision no longer uses it (it is not a complete record of the run copies a card can hold).
+  bool has_overlay = false;
+  uint32_t overlay_level = 0;
+  uint32_t overlay_exp = 0;
+  uint32_t overlay_meseta = 0;
+  uint32_t overlay_num_items = 0;
+  uint32_t quest_number = 0;
+  uint64_t snapshot_time_usecs = 0;
+  bool has_character = false;
+  PlayerInventory inventory;
+  PlayerDispDataV4 disp;
+};
+
+// v39 (regie, kracht-voorbij-normaal.md section 6): how the guard tells the real character from a run copy. Never by
+// level or EXP: a run copy may be stronger than the real character (start level, training rooms). The criterion is
+// the server's own state. While a marker is open (RunInProgress, RestorePending, AwaitingSave) the card or the server's
+// character data may hold a run copy, so that data counts as the real character only if it equals the snapshot
+// (level, EXP, meseta, items and material counters). The snapshot itself only takes data the server knows is real:
+// the data at a run start without an open marker, and the 98 of a Normal or Solo game while only AwaitingSave is set
+// (the client has had the verified real character in memory since the lobby restore).
+enum class SpireGuardRunStart {
+  KEPT_OPEN_RUN, // RunInProgress or RestorePending: the stored snapshot stays, nothing changes
+  KEPT_UNCONFIRMED, // AwaitingSave and the data differs from the snapshot: the stored snapshot stays, marker set
+  FRESH, // no open marker, or AwaitingSave with equal data: the snapshot takes the data, marker set
+};
+// The run-start step of spire_guard_take_snapshot on the stored snapshot, given the server's character data.
+SpireGuardRunStart spire_guard_run_start_apply(SpireGuardSnapshot& snapshot, const PlayerInventory& inventory,
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
+// A login 61 under AwaitingSave only (no other marker): true = confirmed (marker cleared, no push); false = the card may
+// hold a run copy, RestorePending is set and the login pushes the snapshot.
+bool spire_guard_awaiting_save_login_apply(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
+// The 98 of a Normal or Solo game under AwaitingSave only: the snapshot takes the real character's data. Returns false
+// (snapshot unchanged) if another marker is open, AwaitingSave is not set or the snapshot has no character.
+bool spire_guard_follow_real_progress(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
+// Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
+// spire_guard_follow_real_progress if spire_guard_end_run saw the client leave a Normal or Solo game under
+// AwaitingSave. Never throws.
+void spire_guard_after_98(std::shared_ptr<Client> c);
+
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
-// The login confirmation of a lobby restore requires this next to the snapshot's level and EXP.
+// The login confirmation of a lobby restore requires this (spire_guard_same_state, v39).
 bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta);
 // v32: level, EXP, meseta and items equal. The two decisions below are kept free of state for the static tests: a run
 // start under AwaitingSave keeps the stored snapshot unless the character data equals it; the 61 after a restore push
 // verifies the restore only with the snapshot's items and meseta next to its level and EXP.
 bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
     const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp);
-bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool lower_level, bool same_state);
+// v39: no level argument; an open AwaitingSave marker with data unequal to the snapshot keeps the snapshot
+bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool same_state);
 bool spire_guard_push_verified(bool same_stats, bool same_items);
 // v38: the material usage counters equal (Power, Mind, Evade, Def, Luck in items[8..12].extension_data2; HP and TP in
 // hp_from_materials / tp_from_materials); part of spire_guard_same_state and of both restore checks, like the items.

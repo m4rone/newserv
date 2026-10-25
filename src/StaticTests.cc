@@ -81,13 +81,149 @@ void run_static_tests() {
     expect(spire_guard_same_inventory(make(0, 0), 5, make(0, 0), 5));
   }
 
-  phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32)");
+  phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
-    // arguments: awaiting_save, lower_level, same_state
-    expect(!spire_guard_run_start_keeps_snapshot(false, false, false)); // no open marker: fresh snapshot
-    expect(spire_guard_run_start_keeps_snapshot(true, true, false));    // lower level: keep (v10)
-    expect(!spire_guard_run_start_keeps_snapshot(true, false, true));   // same data: the fresh snapshot is the same
-    expect(spire_guard_run_start_keeps_snapshot(true, false, false));   // lab 18:14: same level, the run's 7 items: keep
+    // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)
+    expect(!spire_guard_run_start_keeps_snapshot(false, false)); // no open marker: fresh snapshot
+    expect(!spire_guard_run_start_keeps_snapshot(true, true));   // same data: the fresh snapshot is the same
+    expect(spire_guard_run_start_keeps_snapshot(true, false));   // lab 18:14: the run's 7 items, or another level: keep
+  }
+
+  phosg::log_info_f("-- Spire guard: a run copy stronger than the real character never becomes the snapshot (v39)");
+  {
+    // BidX Lv52 (level 51 zero-based) with 20 items is the real character; the run copy is Lv150 with more EXP, more
+    // meseta, other items and other material counters (start level, training rooms)
+    auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t exp, uint32_t meseta, uint16_t power) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[0] = kind;
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      ret.first.items[8].extension_data2 = power;
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      return ret;
+    };
+    auto real = make(20, 0x00, 51, 370758, 1000, 125);
+    auto copy = make(30, 0x01, 149, 9000000, 50000, 0);
+    auto stored = [&](bool run_in_progress, bool restore_pending, bool awaiting_save) {
+      SpireGuardSnapshot ret;
+      ret.run_in_progress = run_in_progress;
+      ret.restore_pending = restore_pending;
+      ret.awaiting_save = awaiting_save;
+      ret.has_character = true;
+      ret.quest_number = 920;
+      ret.snapshot_time_usecs = 1;
+      ret.inventory = real.first;
+      ret.disp = real.second;
+      return ret;
+    };
+    auto is_real = [&](const SpireGuardSnapshot& snap) {
+      return snap.has_character && (snap.disp.stats.level == 51) && (snap.disp.stats.exp == 370758) &&
+          spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second) && (snap.snapshot_time_usecs == 1);
+    };
+    // the server's character data holds the run copy at a run start under each open marker: the Lv52 snapshot stays
+    for (auto [run, restore, awaiting] : std::vector<std::tuple<bool, bool, bool>>{
+             {true, false, false}, {false, true, false}, {true, true, false}, {false, false, true}}) {
+      auto snap = stored(run, restore, awaiting);
+      auto action = spire_guard_run_start_apply(snap, copy.first, copy.second, 921, 2);
+      expect(action != SpireGuardRunStart::FRESH);
+      expect(is_real(snap));
+      expect(snap.run_in_progress || snap.restore_pending); // a marker stays open
+    }
+    {
+      auto snap = stored(false, false, true);
+      expect_eq(SpireGuardRunStart::KEPT_UNCONFIRMED, spire_guard_run_start_apply(snap, copy.first, copy.second, 921, 2));
+      expect(snap.run_in_progress && !snap.awaiting_save);
+      expect_eq(921u, snap.quest_number);
+    }
+    // a login 61 with the Lv150 run copy under AwaitingSave (no fingerprint kept, v14): no confirmation, push again
+    // (the v12 rule "more EXP than the snapshot is real progress" took the copy as the real character and cleared the
+    // marker, so the next run start would have taken its snapshot of the copy)
+    {
+      auto snap = stored(false, false, true);
+      expect(!spire_guard_awaiting_save_login_apply(snap, copy.first, copy.second));
+      expect(snap.restore_pending && !snap.awaiting_save);
+      expect(is_real(snap));
+      // and the run start that follows while the push is still open keeps the Lv52 snapshot
+      expect_eq(SpireGuardRunStart::KEPT_OPEN_RUN, spire_guard_run_start_apply(snap, copy.first, copy.second, 920, 3));
+      expect(is_real(snap));
+    }
+    // the same login 61 with the real character confirms the restore
+    {
+      auto snap = stored(false, false, true);
+      expect(spire_guard_awaiting_save_login_apply(snap, real.first, real.second));
+      expect(!snap.restore_pending && !snap.awaiting_save && !snap.run_in_progress);
+      expect(is_real(snap));
+    }
+    // a run copy with the real level and EXP but the run's items or material counters is no confirmation either
+    {
+      auto items = make(7, 0x00, 51, 370758, 1000, 125);
+      auto snap = stored(false, false, true);
+      expect(!spire_guard_awaiting_save_login_apply(snap, items.first, items.second));
+      auto power = make(20, 0x00, 51, 370758, 1000, 0);
+      snap = stored(false, false, true);
+      expect(!spire_guard_awaiting_save_login_apply(snap, power.first, power.second));
+    }
+    // real progress: the 98 of a normal game under AwaitingSave alone moves the snapshot along, so the login with
+    // that progress confirms; under any other marker the 98 changes nothing
+    {
+      auto progress = make(21, 0x00, 52, 380000, 1500, 125);
+      auto snap = stored(false, false, true);
+      expect(spire_guard_follow_real_progress(snap, progress.first, progress.second));
+      expect(spire_guard_awaiting_save_login_apply(snap, progress.first, progress.second));
+      for (auto [run, restore] : std::vector<std::pair<bool, bool>>{{true, false}, {false, true}, {false, false}}) {
+        auto other = stored(run, restore, false);
+        expect(!spire_guard_follow_real_progress(other, copy.first, copy.second));
+        expect(is_real(other));
+      }
+    }
+    // no open marker: the run start takes the server's data, which no open marker can hold as a run copy
+    {
+      SpireGuardSnapshot snap;
+      expect_eq(SpireGuardRunStart::FRESH, spire_guard_run_start_apply(snap, real.first, real.second, 920, 1));
+      expect(snap.run_in_progress && is_real(snap));
+    }
+  }
+
+  phosg::log_info_f("-- Spire guard: the restore check finds a different item count or material counter (v32, v38, v39)");
+  {
+    PlayerInventory real;
+    real.num_items = 20;
+    for (size_t z = 0; z < 20; z++) {
+      real.items[z].data.data1[1] = 0x01 + z;
+    }
+    real.items[8].extension_data2 = 125;
+    real.hp_from_materials = 2 * 37;
+    PlayerDispDataV4 disp;
+    disp.stats.level = 51;
+    disp.stats.exp = 370758;
+    expect(spire_guard_same_state(real, disp, real, disp));
+    PlayerInventory fewer = real; // the same first 19 items, one missing
+    fewer.num_items = 19;
+    expect(!spire_guard_same_inventory(fewer, 0, real, 0));
+    expect(!spire_guard_same_state(fewer, disp, real, disp));
+    expect(!spire_guard_push_verified(true, spire_guard_same_inventory(fewer, 0, real, 0) && spire_guard_same_materials(fewer, real)));
+    PlayerInventory more = real;
+    more.num_items = 21;
+    more.items[20].data.data1[1] = 0x30;
+    expect(!spire_guard_same_state(more, disp, real, disp));
+    for (size_t z = 8; z <= 12; z++) {
+      PlayerInventory mat = real;
+      mat.items[z].extension_data2++;
+      expect(spire_guard_same_inventory(mat, 0, real, 0)); // the items alone are equal
+      expect(!spire_guard_same_state(mat, disp, real, disp));
+      expect(!spire_guard_push_verified(true, spire_guard_same_inventory(mat, 0, real, 0) && spire_guard_same_materials(mat, real)));
+    }
+    PlayerInventory hp = real;
+    hp.hp_from_materials = 0;
+    expect(!spire_guard_same_state(hp, disp, real, disp));
+    PlayerInventory tp = real;
+    tp.tp_from_materials = 2;
+    expect(!spire_guard_same_state(tp, disp, real, disp));
   }
 
   phosg::log_info_f("-- Spire guard: the 61 after a push verifies only with the snapshot's items (v32)");
