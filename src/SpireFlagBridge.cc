@@ -179,6 +179,8 @@ static bool spire_meta_quest_is_listed(std::shared_ptr<const Client> c, uint32_t
   }
 }
 
+static bool spire_client_run_is_practice(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
 void spire_bridge_record_flag(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, Difficulty difficulty, uint16_t flag_num, bool is_set) {
   try {
@@ -196,6 +198,11 @@ void spire_bridge_record_flag(
     }
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     if (!serial_number) {
+      return;
+    }
+    // v44: a practice run unlocks nothing, so its flag writes (relics seen) are not stored
+    if (spire_practice_blocks_flag(spire_client_run_is_practice(c, l), flag_num)) {
+      c->log.info_f("Spire bridge: quest flag {:04X} in a practice run; not recorded", flag_num);
       return;
     }
 
@@ -555,6 +562,18 @@ bool spire_run_counts_as_new(uint8_t start_k, bool resumed, bool practice) {
   return !start_k || (!resumed && !practice);
 }
 
+bool spire_practice_blocks_flag(bool practice, uint16_t flag_num) {
+  return practice && (flag_num >= SPIRE_BRIDGE_FIRST_FLAG) && (flag_num <= SPIRE_BRIDGE_LAST_FLAG);
+}
+
+std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss) {
+  if (resumed && ss && (ss->values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
+    return std::format("{} resumed at room {}: {} lives, {} min. Equip your gear.", practice ? "Practice run" : "Run",
+        ss->values[SPIRE_SS_K], ss->values[SPIRE_SS_LIVES], ss->values[SPIRE_SS_ELAPSED] / 60);
+  }
+  return practice ? "Practice run: records and unlocks do not count." : "";
+}
+
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values) {
   // FNV-1a over the fields, then splitmix64's finalizer
   uint64_t h = 0xCBF29CE484222325ULL;
@@ -654,6 +673,11 @@ static SpireClientRun* spire_client_run_for(std::shared_ptr<Client> c, std::shar
     it->second.lobby_id = l->lobby_id;
   }
   return &it->second;
+}
+
+static bool spire_client_run_is_practice(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  auto* cr = spire_client_run_for(c, l, false);
+  return cr && cr->began && cr->practice;
 }
 
 // The savestate file of the client's character (the server's character data, never the overlay), "" without one
@@ -963,7 +987,14 @@ static void spire_run_timer_start(
 // v20: the draw inputs a client sent to SPIRE_BRIDGE_DRAW_DATA_REGISTER since its last request.
 static std::unordered_map<const Client*, std::vector<uint32_t>> spire_draw_inputs;
 
-static void spire_draw_answer(std::shared_ptr<Client> c, uint32_t serial_number,
+static uint64_t spire_splitmix_next(uint64_t& state) {
+  uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
   spire_draw_inputs.erase(c.get());
@@ -982,9 +1013,23 @@ static void spire_draw_answer(std::shared_ptr<Client> c, uint32_t serial_number,
     return;
   }
   auto in = spire_draw_input_from_values(values);
-  uint32_t drawn = spire_draw(table, in, [](uint32_t n) -> uint32_t {
-    return n ? (phosg::random_object<uint32_t>() % n) : 0;
-  });
+  // v44: seeded per (run, room, n-th draw, inputs), so replaying a room from its savestate draws the same; without a
+  // run (a quest from before v44) random as before
+  auto* run = spire_game_run_for(l);
+  auto* cr = spire_client_run_for(c, l, false);
+  uint32_t drawn;
+  if (run && cr && cr->began) {
+    uint32_t nth = cr->draws_per_room[in.k]++;
+    uint64_t state = spire_draw_seed(run->run_id, in.k, nth, values);
+    drawn = spire_draw(table, in, [&state](uint32_t n) -> uint32_t {
+      return n ? static_cast<uint32_t>(spire_splitmix_next(state) % n) : 0;
+    });
+    c->log.info_f("Spire savestate: draw {} of room {} seeded from run {:08X}", nth + 1, in.k, run->run_id);
+  } else {
+    drawn = spire_draw(table, in, [](uint32_t n) -> uint32_t {
+      return n ? (phosg::random_object<uint32_t>() % n) : 0;
+    });
+  }
 
   G_SyncQuestRegister_6x77 cmd;
   cmd.header.subcommand = 0x77;
@@ -1320,6 +1365,10 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       rec.runs++;
       spire_records_save(filename, serial_number, rec);
     }
+    std::string ticker = spire_run_start_ticker(cr->resumed, cr->practice, cr->resumed ? &cr->savestate : nullptr);
+    if (!ticker.empty()) {
+      spire_send_ticker(c, ticker);
+    }
     c->log.info_f("Spire records: run started (start room {}, first room {}{}{}), run {:08X}, {} run(s) in {}", start_k,
         first_k, cr->resumed ? ", resumed" : "", cr->practice ? ", practice" : "", run->run_id, rec.runs, filename);
     return true;
@@ -1330,6 +1379,15 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     return true;
   }
 
+  // v44: a practice run (B-E01-182) changes no record, unlocks nothing and opens no payout
+  if (auto* cr = spire_client_run_for(c, l, false); cr && cr->began && cr->practice) {
+    spire_records_pending_score.erase(c.get());
+    spire_run_mark_ended(l, "records: run finished");
+    spire_defer_to_lobby(c, "Practice run: no records, unlocks or payout.");
+    c->log.info_f("Spire records: practice run finished ({:08X}) for serial {:010} in q{} (start room {}); records, "
+        "unlocks and payout unchanged", value, serial_number, quest_number, cr->start_room);
+    return true;
+  }
   // 'F': the run's score ('K' before it) and time against the records
   bool is_won = spire_meta_decode_finish(value).won;
   uint32_t seconds = value & 0xFFFF;
@@ -1409,7 +1467,7 @@ bool spire_bridge_handle_register(
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
-        spire_draw_answer(c, serial_number, quest_number, value);
+        spire_draw_answer(c, l, serial_number, quest_number, value);
         return true;
       }
       if (value == SPIRE_BRIDGE_BATTLE_END_VALUE) {

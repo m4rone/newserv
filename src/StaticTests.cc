@@ -2314,5 +2314,51 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire practice: a run from a later room counts for nothing; a resumed run keeps its start (v44)");
+  {
+    // arguments: start room, K0 (the run's first room), resumed, the savestate's practice bit
+    expect(!spire_run_is_practice(1, 1, false, false)); // q921 from room 1
+    expect(!spire_run_is_practice(16, 16, false, false)); // Spire Run II starts in k16: its first room
+    expect(spire_run_is_practice(5, 1, false, false)); // q944 "Spire room 5" without a savestate
+    expect(spire_run_is_practice(20, 16, false, false));
+    expect(!spire_run_is_practice(5, 1, true, false)); // q944 resumed from a run that began in room 1: it counts
+    expect(spire_run_is_practice(7, 1, true, true)); // resumed from a practice run: stays practice
+    expect(!spire_run_is_practice(0, 0, false, false)); // a 'B' from before v44: as before
+    // a new run in the records only from the first room, never on a resume or a practice start
+    expect(spire_run_counts_as_new(1, false, false));
+    expect(!spire_run_counts_as_new(5, false, true));
+    expect(!spire_run_counts_as_new(5, true, false));
+    expect(spire_run_counts_as_new(0, false, false));
+    // practice stores no unlock or relic flag, the real run stores them all
+    expect(spire_practice_blocks_flag(true, 0x0390));
+    expect(spire_practice_blocks_flag(true, SPIRE_META_FLAG_PAY_WIN));
+    expect(!spire_practice_blocks_flag(false, 0x0390));
+    expect(!spire_practice_blocks_flag(true, 0x0021)); // outside the bridged range: not the bridge's
+    // the one ticker line at the start
+    SpireSavestate ss;
+    ss.exists = true;
+    ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+    ss.values[SPIRE_SS_K] = 5;
+    ss.values[SPIRE_SS_LIVES] = 2;
+    ss.values[SPIRE_SS_ELAPSED] = 1865;
+    expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, false, &ss));
+    expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, true, &ss));
+    expect_eq(std::string("Practice run: records and unlocks do not count."), spire_run_start_ticker(false, true, nullptr));
+    expect(spire_run_start_ticker(false, false, nullptr).empty());
+    for (const auto& line : {spire_run_start_ticker(true, true, &ss), spire_run_start_ticker(false, true, nullptr)}) {
+      expect_eq(line, spire_ticker_line(line)); // one line, no window in a run (v35)
+    }
+
+    // the draw seed: the same run, room, n-th draw and inputs give the same draw; anything else another one
+    std::vector<uint32_t> in(16, 3);
+    uint64_t a = spire_draw_seed(0xA1, 5, 0, in);
+    expect_eq(a, spire_draw_seed(0xA1, 5, 0, in)); // the room replayed from its savestate
+    expect(a != spire_draw_seed(0xA2, 5, 0, in)); // another run
+    expect(a != spire_draw_seed(0xA1, 6, 0, in)); // another room
+    expect(a != spire_draw_seed(0xA1, 5, 1, in)); // the reroll: the second draw of the room
+    in[9] ^= 1; // another relic
+    expect(a != spire_draw_seed(0xA1, 5, 0, in));
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }

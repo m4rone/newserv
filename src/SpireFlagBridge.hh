@@ -243,6 +243,11 @@ SpireSavestate spire_savestate_from_json(const std::string& data); // throws on 
 // it counts as a new run in the records (neither practice nor resumed). start_k 0 = a 'B' from before v44.
 bool spire_run_is_practice(uint8_t start_k, uint8_t first_k, bool resumed, bool savestate_practice);
 bool spire_run_counts_as_new(uint8_t start_k, bool resumed, bool practice);
+// A practice run stores no quest flag of the bridged range (relics seen are unlocks too)
+bool spire_practice_blocks_flag(bool practice, uint16_t flag_num);
+// The one ticker line at 'B': "Run resumed at room k: ..." (with the savestate), "Practice run: ...", or "" for a run
+// from its first room
+std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss);
 // The seed of the draw 'Q' of a run: run id, room, n-th draw of the client in that room and the input values.
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
