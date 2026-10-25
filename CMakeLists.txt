@@ -64,6 +64,7 @@ set(SOURCES
     src/CommandCensorData.cc
     src/CommonItemSet.cc
     src/Compression.cc
+    src/CrashValueFilter.cc
     src/DCSerialNumbers.cc
     src/DNSServer.cc
     src/DOLFileIndex.cc

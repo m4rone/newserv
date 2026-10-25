@@ -9,6 +9,7 @@
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
+#include "CrashValueFilter.hh"
 #include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
@@ -1036,6 +1037,54 @@ void run_static_tests() {
       it = ItemData();
       expect(spire_drops_filter_item(no_boss_rule, *pmt, it, lv1(0, 5), true, pity, 0) == nullptr);
       expect(it.empty());
+    }
+  }
+
+  phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
+  {
+    const auto& rules = crash_value_rules();
+    auto npc = [](uint16_t command, uint16_t param1, uint16_t param2) {
+      G_NPCControl_6x69 cmd;
+      cmd.header = {0x69, sizeof(G_NPCControl_6x69) / 4, 0};
+      cmd.param1 = param1;
+      cmd.param2 = param2;
+      cmd.command = command;
+      cmd.param3 = 13;
+      return cmd;
+    };
+    auto check = [&](const G_NPCControl_6x69& cmd, uint32_t* value = nullptr) {
+      return crash_value_rule_violated(rules, 0x69, &cmd, sizeof(cmd), value);
+    };
+    uint32_t value = 0;
+    auto q903 = npc(0, 0, 13); // the q903 freeze: create follower NPC in "slot" 13
+    expect_eq(0, check(q903, &value));
+    expect_eq(13u, value);
+    expect_eq("Security: 6x69 from C-1 refused: npc_entity_id 13 >= 4 (client crash value)",
+        crash_value_refusal_message(rules[0], 1, value));
+    expect_eq(0, check(npc(3, 0, 4))); // attacker NPC: the first bad slot
+    expect_eq(0, check(npc(0, 0, 0xFFFF)));
+    for (uint16_t slot = 0; slot < 4; slot++) {
+      expect_eq(-1, check(npc(0, 0, slot))); // Sega's NPCs: slots 0-3 pass
+      expect_eq(-1, check(npc(3, 0, slot)));
+      expect_eq(-1, check(npc(1, slot, 0)));
+    }
+    expect_eq(1, check(npc(1, 13, 0), &value)); // stop acting: param1 is the slot
+    expect_eq(13u, value);
+    expect_eq(-1, check(npc(2, 13, 0))); // start acting: param1 is the player to follow, no rule
+    expect_eq(-1, check(npc(0, 13, 1))); // create: param1 is the state, not the slot
+    expect_eq(-1, crash_value_rule_violated(rules, 0x68, &q903, sizeof(q903), nullptr)); // another subcommand
+    expect_eq(-1, crash_value_rule_violated(rules, 0x69, &q903, 8, nullptr)); // too short: the handler rejects it
+    // Logged once per client per rule
+    uint64_t logged = 0;
+    expect(crash_value_should_log(logged, 0));
+    expect(!crash_value_should_log(logged, 0));
+    expect(crash_value_should_log(logged, 1));
+    expect(!crash_value_should_log(logged, 1));
+    uint64_t other_client = 0;
+    expect(crash_value_should_log(other_client, 0));
+    // Every rule in the table names its source and a reason
+    for (const auto& rule : rules) {
+      expect(rule.source && *rule.source && rule.reason && *rule.reason);
     }
   }
 

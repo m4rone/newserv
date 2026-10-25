@@ -10,6 +10,7 @@
 
 #include "Client.hh"
 #include "Compression.hh"
+#include "CrashValueFilter.hh"
 #include "GameServer.hh"
 #include "HTTPServer.hh"
 #include "Items.hh"
@@ -5963,6 +5964,13 @@ asio::awaitable<void> on_subcommand_multi(std::shared_ptr<Client> c, Channel::Me
     void* cmd_data = msg.data.data() + offset;
 
     const auto* def = def_for_subcommand(c->version(), header->subcommand);
+    // Security (regie pso-regie-10): a subcommand with a known client-crash value is dropped before its handler runs, so
+    // it is never forwarded (see CrashValueFilter.hh)
+    if (def && (offset + cmd_size <= msg.data.size()) &&
+        crash_value_filter_refuses(c, def->final_subcommand, cmd_data, cmd_size)) {
+      offset += cmd_size;
+      continue;
+    }
     SubcommandMessage sub_msg{.command = msg.command, .flag = msg.flag, .data = cmd_data, .size = cmd_size};
     if (std::holds_alternative<SubcommandHandlerFn>(def->handler)) {
       std::get<SubcommandHandlerFn>(def->handler)(c, sub_msg);
