@@ -27,6 +27,7 @@
 #include "SendCommands.hh"
 #include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMeta.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
 
@@ -3295,6 +3296,17 @@ static asio::awaitable<void> on_A2(std::shared_ptr<Client> c, Channel::Message& 
 
   send_quest_categories_menu(c, menu_type, l->episode);
   l->set_flag(Lobby::Flag::QUEST_SELECTION_IN_PROGRESS);
+  // Spire ladder: a run quest hidden on this difficulty (AvailableIf SPIRE_RUN1/2) gets one info line, never silence
+  if ((l->mode == GameMode::BATTLE) && (l->difficulty != Difficulty::NORMAL) &&
+      !s->data->spire_bridge_quest_numbers.empty() && (c->version() == Version::GC_V3) && c->login &&
+      c->login->gc_license) {
+    std::string note = spire_meta_ladder_menu_note(spire_meta_ladder_rung_for_client(c, 1),
+        spire_meta_ladder_rung_for_client(c, 2), static_cast<uint8_t>(l->difficulty));
+    if (!note.empty()) {
+      send_text_message(c, note);
+      c->log.info_f("Spire ladder: quest menu note: {}", note);
+    }
+  }
 }
 
 static asio::awaitable<void> on_A9(std::shared_ptr<Client> c, Channel::Message&) {
@@ -4596,11 +4608,32 @@ std::shared_ptr<Lobby> create_game_generic(
 
   auto p = creator_c->character_file();
   if (!creator_c->login->account->check_flag(Account::Flag::FREE_JOIN_GAMES) && (min_level > p->disp.stats.level)) {
-    // Note: We don't throw here because this is a situation players might encounter while playing the game normally
-    std::string msg = std::format(
-        "You must be level {}\nor above to play\nthis difficulty.", static_cast<size_t>(min_level + 1));
-    send_lobby_message_box(creator_c, msg);
-    return nullptr;
+    // Spire ladder (plan-unlockables S3): a Battle game skips the check if a run's rung of the creator's real character
+    // covers the difficulty (the run plays on the overlay at the rung's level); else a refusal that names the win
+    // which opens it, never a silent nothing (regie 2026-10-25)
+    bool spire_character = !s->data->spire_bridge_quest_numbers.empty() && (creator_c->version() == Version::GC_V3) &&
+        creator_c->login->gc_license;
+    uint8_t rung = spire_character ? std::max(spire_meta_ladder_rung_for_client(creator_c, 1),
+                                         spire_meta_ladder_rung_for_client(creator_c, 2))
+                                   : 0;
+    auto gate = spire_meta_ladder_gate(mode == GameMode::BATTLE, spire_character, rung,
+        static_cast<uint8_t>(difficulty), p->disp.stats.level, min_level);
+    if (gate == SpireLadderGate::RUNG_OPEN) {
+      creator_c->log.info_f("Spire ladder: level {} below {} for {}, rung {} open; minimum level skipped",
+          p->disp.stats.level + 1, min_level + 1, name_for_difficulty(difficulty), rung);
+      min_level = 0;
+    } else if (spire_character) {
+      creator_c->log.info_f("Spire ladder: level {} below {} for {}, rung {}; refused", p->disp.stats.level + 1,
+          min_level + 1, name_for_difficulty(difficulty), rung);
+      send_lobby_message_box(creator_c, spire_meta_ladder_refuse_text(static_cast<uint8_t>(difficulty), min_level));
+      return nullptr;
+    } else {
+      // Note: We don't throw here because this is a situation players might encounter while playing the game normally
+      std::string msg = std::format(
+          "You must be level {}\nor above to play\nthis difficulty.", static_cast<size_t>(min_level + 1));
+      send_lobby_message_box(creator_c, msg);
+      return nullptr;
+    }
   }
 
   std::shared_ptr<Lobby> game = s->create_lobby(true);
