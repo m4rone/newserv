@@ -398,6 +398,41 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
   }
 }
 
+// v35: the end of a run, per game (lobby id; a game's id is never reused while the server runs). Set at the first
+// 'F' (records: run finished), 'X' (run over) or run timer end in the game; cleared at a quest start, 'B' and 'S'.
+// Measured on the pc journal 2026-10-25: the run ended at 08:47:58, yet at 08:49:56 the server still sent "Room clear!"
+// and r251 for room 1 of q940 and stored it as a checkpoint (SPIRE_K1 unlocked by a lost run). After the end no room
+// clear is sent and no checkpoint is stored.
+struct SpireRunEnd {
+  std::string why;
+  bool over_announced = false; // the run-over text went to every client (spire_run_over)
+  std::unordered_set<uint8_t> exit_sent; // lobby client ids sent back to the lobby (spire_run_over)
+};
+static std::unordered_map<uint32_t, SpireRunEnd> spire_run_ends;
+
+static SpireRunEnd& spire_run_mark_ended(std::shared_ptr<const Lobby> l, const char* why) {
+  if (spire_run_ends.size() > 4096) {
+    spire_run_ends.clear();
+  }
+  auto [it, added] = spire_run_ends.try_emplace(l->lobby_id);
+  if (added) {
+    it->second.why = why;
+    l->log.info_f("Spire bridge: run over in this game ({}); no room clear or checkpoint from now on", why);
+  }
+  return it->second;
+}
+
+static void spire_run_forget_end(uint32_t lobby_id, const char* why, const phosg::PrefixedLogger& log) {
+  if (spire_run_ends.erase(lobby_id)) {
+    log.info_f("Spire bridge: new run in this game ({}); room clears count again", why);
+  }
+}
+
+static const SpireRunEnd* spire_run_end_for(std::shared_ptr<const Lobby> l) {
+  auto it = spire_run_ends.find(l->lobby_id);
+  return (it == spire_run_ends.end()) ? nullptr : &it->second;
+}
+
 // v19: one run timer per game. The generation tells a coroutine that its timer was replaced or stopped; the key is
 // the lobby's address, and a coroutine whose lobby is gone (weak_ptr) removes nothing but its own generation.
 struct SpireRunTimer {
@@ -467,6 +502,7 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     l->log.info_f("Spire bridge: run timer end ({}) at {} s with {} of {} client(s); sent r{}={:08X}",
         (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "time up" : "player left", elapsed, clients, t.clients_at_start,
         SPIRE_BRIDGE_TIMER_REGISTER, cmd.value.as_int.load());
+    spire_run_mark_ended(l, (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "run timer: time up" : "run timer: player left");
     spire_run_timers.erase(it);
     co_return;
   }
@@ -491,6 +527,7 @@ static void spire_run_timer_start(
     t.warn_before_s = lab->second;
   }
   spire_run_timers[l.get()] = t;
+  spire_run_forget_end(l->lobby_id, "run timer start", c->log);
   c->log.info_f("Spire bridge: run timer for serial {:010} in q{}: limit {} s, warning {} s before, {} client(s)",
       serial_number, quest_number, t.limit_s, t.warn_before_s, t.clients_at_start);
   auto s = c->require_server_state();
@@ -585,6 +622,9 @@ static std::unordered_set<const Client*> spire_follow_pending;
 
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
+  if (auto l = c->lobby.lock()) {
+    spire_run_forget_end(l->lobby_id, "quest start", c->log);
+  }
   if (spire_checkpoint_lives_forget(c.get())) {
     c->log.info_f("Spire checkpoint: lives of the previous run forgotten at the quest start");
   }
@@ -661,6 +701,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   auto rec = spire_records_load(filename);
   if (kind == SPIRE_BRIDGE_REC_BEGIN) {
+    spire_run_forget_end(l->lobby_id, "run started", c->log);
     rec.runs++;
     spire_records_save(filename, serial_number, rec);
     c->log.info_f("Spire records: run started, {} run(s) in {}", rec.runs, filename);
@@ -692,6 +733,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     rec.best_time = seconds;
   }
   spire_records_save(filename, serial_number, rec);
+  spire_run_mark_ended(l, "records: run finished");
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
                                : std::format("Best score: {}.", rec.best_score);
   if (new_time) {
@@ -775,6 +817,7 @@ bool spire_bridge_handle_register(
       }
       if ((value >> 24) == SPIRE_BRIDGE_MSG_RUN_OVER) {
         spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
+        spire_run_mark_ended(l, "run over");
       }
       std::string msg = spire_bridge_message_text(value);
       if (!msg.empty()) {
@@ -1889,6 +1932,11 @@ void spire_bridge_check_room_clear(
         !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
       return;
     }
+    if (auto end = spire_run_end_for(l)) {
+      l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} done after the run ended ({}); no room clear, no checkpoint",
+          wave_number, room, floor, end->why);
+      return;
+    }
     Version v = c->version();
     // A wave with a boss sends nothing: the boss rooms (k4, k8) keep their own clear in the quest
     for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
@@ -1955,6 +2003,11 @@ void spire_bridge_check_boss_defeated(
     if (!data->spire_boss_clear_quest_numbers.count(quest_number) || !spire_bridge_quest_is_bridged(c, quest_number)) {
       l->log.info_f("Spire bridge: {} defeated in q{}, which is not in SpireBossClearQuests; no room clear",
           phosg::name_for_enum(type), quest_number);
+      return;
+    }
+    if (auto end = spire_run_end_for(l)) {
+      l->log.info_f("Spire bridge: {} defeated (room {} on floor {:02X}) after the run ended ({}); no room clear, no checkpoint",
+          phosg::name_for_enum(type), room, floor, end->why);
       return;
     }
     uint64_t key = (static_cast<uint64_t>(l->lobby_id) << 32) | (static_cast<uint32_t>(floor) << 16) | room;
@@ -2251,8 +2304,13 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
     const auto& arrivals = c->require_server_state()->data->spire_checkpoint_arrivals;
     auto arr = arrivals.find(c->floor);
     if (arr != arrivals.end()) {
-      std::array<std::shared_ptr<Client>, 1> just_c{c}; // each arriving client for its own character
-      spire_checkpoint_store(l, just_c, arr->second);
+      if (auto end = spire_run_end_for(l)) {
+        c->log.info_f("Spire checkpoint: arrival on floor {:02X} after the run ended ({}); room {} not stored", c->floor,
+            end->why, arr->second);
+      } else {
+        std::array<std::shared_ptr<Client>, 1> just_c{c}; // each arriving client for its own character
+        spire_checkpoint_store(l, just_c, arr->second);
+      }
     }
     if (!spire_replay_state_for(l, false)) {
       return;
