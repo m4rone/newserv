@@ -774,6 +774,20 @@ void run_static_tests() {
     expect_eq(105, caseal.power);
     expect_eq(150, caseal.shared());
     expect_eq(0x8A, DataIndex::spire_start_kit(9)[0].data1[1]);
+    // $kit tech: forces get disks at their max level, capped at 30; androids none
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      auto disks = DataIndex::spire_kit_tech_disks(cls, *pmt);
+      if (char_class_is_android(cls)) {
+        expect_eq(0, disks.size());
+      }
+      for (const auto& d : disks) {
+        expect_eq(0x03, d.data1[0]);
+        expect_eq(0x02, d.data1[1]);
+        expect(d.data1[2] <= 29);
+        expect_eq(pmt->get_max_tech_level(cls, d.data1[4]) >= 29 ? 29 : pmt->get_max_tech_level(cls, d.data1[4]), d.data1[2]);
+      }
+    }
+    expect_eq(29, DataIndex::spire_kit_tech_disks(6, *pmt).at(0).data1[2]); // FOmarl Foie Lv30
     expect(DataIndex::spire_kit_material_message(0, 0).find("niets") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("30 neergelegd") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("nog 245 over") != std::string::npos);

@@ -2391,6 +2391,22 @@ std::vector<ItemData> DataIndex::spire_start_kit(uint8_t char_class) {
   return ret;
 }
 
+std::vector<ItemData> DataIndex::spire_kit_tech_disks(uint8_t char_class, const ItemParameterTable& pmt) {
+  // Disk layout 03 02 <level - 1> 00 <technique> (ItemCreator.cc tech_disk_mode, ItemNameIndex.cc data1[4])
+  std::vector<ItemData> ret;
+  for (uint8_t tech_num = 0; tech_num < 0x13; tech_num++) {
+    uint8_t max_level = pmt.get_max_tech_level(char_class, tech_num);
+    if (max_level == 0xFF) {
+      continue;
+    }
+    ItemData disk = ItemData::from_data(phosg::parse_data_string("0302"));
+    disk.data1[2] = std::min<uint8_t>(max_level, 29);
+    disk.data1[4] = tech_num;
+    ret.emplace_back(disk);
+  }
+  return ret;
+}
+
 std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits, const SpireKitMaterials& m) {
   std::vector<ItemData> ret;
   const std::vector<std::pair<uint8_t, size_t>> materials = {

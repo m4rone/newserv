@@ -227,6 +227,9 @@ struct DataIndex {
   // a frame, a shield and four units the class can equip, and a level 200 mag split for the class. The item ids are
   // left for the caller to assign.
   static std::vector<ItemData> spire_start_kit(uint8_t char_class);
+  // Marck 2026-10-25: "$kit tech" drops one technique disk per technique the class can learn, at the class's max level
+  // (MaxTechLevels in the item parameter table), never above level 30. Androids get none.
+  static std::vector<ItemData> spire_kit_tech_disks(uint8_t char_class, const ItemParameterTable& pmt);
   // The materials of "$kit mat" in the order Power, Mind, Evade, Def, Luck, HP, TP, as many items as limits needs per
   // stack (GC v3: one material per item). spire_kit_material_batch returns the next at most
   // SPIRE_KIT_MATERIAL_BATCH items after the first already_dropped ones; empty when all are dropped.

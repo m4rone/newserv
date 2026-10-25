@@ -1285,8 +1285,9 @@ ChatCommandDefinition cc_kit(
     +[](const Args& a) -> asio::awaitable<void> {
       a.check_is_proxy(false);
       bool materials = (a.text == "mat");
-      if (!materials && !a.text.empty()) {
-        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat");
+      bool techs = (a.text == "tech");
+      if (!materials && !techs && !a.text.empty()) {
+        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat\nof $kit tech");
       }
       auto s = a.c->require_server_state();
       auto l = a.c->require_lobby();
@@ -1308,6 +1309,8 @@ ChatCommandDefinition cc_kit(
           a.c->spire_kit_materials_dropped = 0;
         }
         items = DataIndex::spire_kit_material_batch(limits, targets, a.c->spire_kit_materials_dropped);
+      } else if (techs) {
+        items = DataIndex::spire_kit_tech_disks(char_class, *s->data->item_parameter_table(a.c->version()));
       } else {
         items = DataIndex::spire_start_kit(char_class);
       }
@@ -1327,6 +1330,8 @@ ChatCommandDefinition cc_kit(
         size_t total = DataIndex::spire_kit_materials(limits, targets).size();
         size_t remaining = total - std::min(total, a.c->spire_kit_materials_dropped);
         send_text_message(a.c, DataIndex::spire_kit_material_message(items.size(), remaining));
+      } else if (techs) {
+        send_text_message_fmt(a.c, "$C7{} disks neergelegd", items.size());
       } else {
         send_text_message_fmt(a.c, "$C7Startset neergelegd:\n{} items; materialen\nmet $kit mat", items.size());
       }
