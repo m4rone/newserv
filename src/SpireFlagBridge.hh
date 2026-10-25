@@ -234,6 +234,9 @@ bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t 
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
+// The ack of an item request: index + 1 (| SPIRE_RESUME_ITEM_GLASS for the Glass item), 0 = no item sent (the run
+// ended, this client was not answered with a resume, or no such item).
+uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index);
 std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_number);
 SpireSavestate spire_savestate_from_json(const std::string& data); // throws on a malformed file
 // 'B': whether the run counts as a practice run (start room not K0, or resumed from a practice savestate), and whether

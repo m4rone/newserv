@@ -2266,5 +2266,53 @@ void run_static_tests() {
     std::filesystem::remove_all(dir);
   }
 
+  phosg::log_info_f("-- Spire savestate: resume only into the same room, variant and run; every item once per index (v44)");
+  {
+    SpireSavestate ss;
+    ss.exists = true;
+    ss.run_id = 0xA1;
+    ss.episode = 0;
+    ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+    ss.values[SPIRE_SS_K] = 5;
+    ss.values[SPIRE_SS_VARIANT] = 1; // k5 elite
+    ss.values[SPIRE_SS_LIVES] = 2;
+    ss.values[SPIRE_SS_ELAPSED] = 31 * 60 + 5;
+    expect(spire_savestate_matches(ss, 0, 5, 1)); // "Spire room 5 elite"
+    expect(!spire_savestate_matches(ss, 0, 5, 0)); // the normal k5 quest: no free swap from elite to normal
+    expect(!spire_savestate_matches(ss, 0, 6, 1)); // another room
+    expect(!spire_savestate_matches(ss, 1, 5, 1)); // another episode
+    expect(!spire_savestate_matches(SpireSavestate(), 0, 5, 1));
+    expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played"), spire_savestate_continue_text(ss));
+    ss.practice = true;
+    expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played (practice run)"),
+        spire_savestate_continue_text(ss));
+
+    // Two clients: the leader's savestate sets the game's run; the partner resumes only from the same run
+    // arguments: run_ended, game_resumed, game_run_id, own_matches, own_run_id
+    expect(spire_resume_client(false, true, 0xA1, true, 0xA1)); // leader, and a partner of the same run
+    expect(!spire_resume_client(false, true, 0xA1, true, 0xB2)); // a partner's savestate of another run: fresh
+    expect(!spire_resume_client(false, true, 0xA1, false, 0xA1)); // the partner's savestate is of another room
+    expect(!spire_resume_client(false, false, 0xC3, true, 0xC3)); // the leader starts fresh: so does the partner
+    expect(!spire_resume_client(true, true, 0xA1, true, 0xA1)); // never after the run end ("dead stays dead")
+    expect(!spire_resume_client(false, true, 0, true, 0));
+
+    // Items: index + 1, the Glass flag on its own index, nothing outside the copy or without a resume answer
+    expect_eq(1u, spire_resume_item_ack(false, true, 0, 3, 1));
+    expect_eq(2u | SPIRE_RESUME_ITEM_GLASS, spire_resume_item_ack(false, true, 1, 3, 1));
+    expect_eq(3u, spire_resume_item_ack(false, true, 2, 3, 1));
+    expect_eq(3u, spire_resume_item_ack(false, true, 2, 3, 1)); // asked again after a floor load: the same item
+    expect_eq(0u, spire_resume_item_ack(false, true, 3, 3, 1)); // past the end: nothing
+    expect_eq(0u, spire_resume_item_ack(false, false, 0, 3, 1)); // a client answered fresh gets no item
+    expect_eq(0u, spire_resume_item_ack(true, true, 0, 3, 1)); // after the run end: nothing
+    // the start answer: no header register overlaps the item bytes, the ack or the answer itself
+    for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
+      expect(index < SPIRE_SAVESTATE_NUM_VALUES);
+      expect((reg < SPIRE_RESUME_ITEM_FIRST_REGISTER) || (reg >= SPIRE_RESUME_ITEM_FIRST_REGISTER + 12));
+      expect(reg != SPIRE_RESUME_ITEM_ACK_REGISTER);
+      expect(reg != SPIRE_RESUME_ANSWER_REGISTER);
+      expect(reg < 59); // the quest's own block r20-r58, below the engine registers
+    }
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }

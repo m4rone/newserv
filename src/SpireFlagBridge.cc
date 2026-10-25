@@ -477,6 +477,13 @@ bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t 
       (ss.values[SPIRE_SS_K] == k) && (ss.values[SPIRE_SS_VARIANT] == variant);
 }
 
+uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index) {
+  if (run_ended || !answered_resume || (index >= num_items)) {
+    return 0;
+  }
+  return (index + 1) | ((static_cast<int32_t>(index) == glass_index) ? SPIRE_RESUME_ITEM_GLASS : 0);
+}
+
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id) {
   return !run_ended && game_resumed && game_run_id && own_matches && (own_run_id == game_run_id);
 }
@@ -940,6 +947,11 @@ static void spire_run_timer_start(
     t.limit_s = lab->first;
     t.warn_before_s = lab->second;
   }
+  if (auto* run = spire_game_run_for(l); run && run->resumed && run->elapsed) {
+    // v44: a resumed run goes on with its saved time (the quest's own clock does the same)
+    t.start -= std::chrono::seconds(std::min(run->elapsed, t.limit_s));
+    c->log.info_f("Spire savestate: run timer of the resumed run starts {} s back", std::min(run->elapsed, t.limit_s));
+  }
   spire_run_timers[l.get()] = t;
   spire_run_forget_end(l->lobby_id, "run timer start", c->log);
   c->log.info_f("Spire bridge: run timer for serial {:010} in q{}: limit {} s, warning {} s before, {} client(s)",
@@ -1023,6 +1035,85 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   ss.time_usecs = phosg::now();
   spire_bridge_write_durable(filename, spire_savestate_to_json(ss, serial_number));
   c->log.info_f("Spire savestate: stored {} in {}", spire_savestate_describe(ss), filename);
+}
+
+static void spire_send_register(std::shared_ptr<Client> c, uint8_t register_number, uint32_t value) {
+  G_SyncQuestRegister_6x77 cmd;
+  cmd.header.subcommand = 0x77;
+  cmd.header.size = sizeof(cmd) / 4;
+  cmd.header.unused = 0;
+  cmd.register_number = register_number;
+  cmd.value.as_int = value;
+  send_command_t(c, 0x60, 0x00, cmd);
+}
+
+// v44: 'J' (SpireFlagBridge.hh), always answered with 'DONE' so the quest never waits on a race. Start (bits 16-23 0):
+// the game's run is the leader's savestate if it fits this quest's room and variant, and this client resumes from its
+// own savestate only with the same run id. Item (bits 16-23 1): item i of the copy taken at the start answer.
+static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint32_t sub = (value >> 16) & 0xFF;
+  const SpireRunEnd* end = spire_run_end_for(l);
+  if (sub == 1) {
+    uint32_t index = value & 0xFFFF;
+    auto* cr = spire_client_run_for(c, l, false);
+    uint32_t ack = spire_resume_item_ack(!!end, cr && cr->answered_resume, index,
+        cr ? cr->savestate.items.size() : 0, cr ? cr->savestate.glass_index : -1);
+    if (ack) {
+      const auto& item = cr->savestate.items[index];
+      for (size_t z = 0; z < 12; z++) {
+        spire_send_register(c, SPIRE_RESUME_ITEM_FIRST_REGISTER + z, item.data1[z]);
+      }
+      c->log.info_f("Spire savestate: item {} of {} for serial {:010} in q{}: {}", index + 1,
+          cr->savestate.items.size(), serial_number, quest_number, item.hex());
+    } else {
+      c->log.warning_f("Spire savestate: item {} for serial {:010} in q{} not sent ({})", index + 1, serial_number,
+          quest_number, end ? "run ended" : (cr && cr->answered_resume) ? "no such item" : "no resume in this game");
+    }
+    spire_send_register(c, SPIRE_RESUME_ITEM_ACK_REGISTER, ack);
+    spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+    return;
+  }
+
+  uint8_t k = value & 0xFF, variant = (value >> 8) & 0xFF, episode = static_cast<uint8_t>(l->episode);
+  auto* run = spire_game_run_for(l);
+  if (!run) {
+    // the first request of the game decides its run from the leader's savestate
+    const auto& follow = c->require_server_state()->data->spire_follow_leader;
+    uint8_t leader_id = follow ? follow->first : 0;
+    auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
+    SpireSavestate leader_ss = leader ? spire_savestate_load_logged(leader) : SpireSavestate();
+    if (!end && spire_savestate_matches(leader_ss, episode, k, variant)) {
+      run = &spire_game_run_set(l, SpireGameRun{
+          .run_id = leader_ss.run_id, .resumed = true, .elapsed = leader_ss.values[SPIRE_SS_ELAPSED]});
+    } else {
+      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id()});
+      l->log.info_f("Spire savestate: leader savestate {} does not fit room {} variant {} of episode {}",
+          spire_savestate_describe(leader_ss), k, variant, episode);
+    }
+  }
+  auto* cr = spire_client_run_for(c, l, true);
+  SpireSavestate own = spire_savestate_load_logged(c);
+  bool resume = spire_resume_client(!!end, run->resumed, run->run_id, spire_savestate_matches(own, episode, k, variant),
+      own.run_id);
+  if (resume) {
+    cr->answered_resume = true;
+    cr->savestate = std::move(own);
+    for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
+      spire_send_register(c, reg, cr->savestate.values[index]);
+    }
+    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ANSWER_RESUME | cr->savestate.items.size());
+    c->log.info_f("Spire savestate: serial {:010} resumes in q{} room {} from {}", serial_number, quest_number, k,
+        spire_savestate_describe(cr->savestate));
+  } else {
+    cr->answered_resume = false;
+    cr->savestate = SpireSavestate();
+    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, 0);
+    c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh (own savestate {}, game run {:08X}{})",
+        serial_number, quest_number, k, variant, spire_savestate_describe(own), run->run_id,
+        run->resumed ? " resumed" : "");
+  }
+  spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
 }
 
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
@@ -1311,6 +1402,10 @@ bool spire_bridge_handle_register(
     if (is_request) {
       if ((value >> 24) == SPIRE_BRIDGE_SAVESTATE_WRITE) {
         spire_savestate_write(c, l, serial_number, quest_number, value);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_RESUME) {
+        spire_resume_answer(c, l, serial_number, quest_number, value);
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
@@ -3495,6 +3590,11 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
                     : std::string("No rooms cleared yet");
   }
   if (arg == "continue") {
+    // v44: a savestate names the exact room quest and what the run had at its start
+    auto ss = spire_savestate_load_logged(c);
+    if (ss.exists) {
+      return spire_savestate_continue_text(ss);
+    }
     if (!cp.last_room) {
       return "No checkpoint yet: start at room 1";
     }
