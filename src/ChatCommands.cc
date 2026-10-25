@@ -1034,6 +1034,10 @@ ChatCommandDefinition cc_lv(
       if (a.text.empty() || (a.text.find_first_not_of("0123456789") != std::string::npos)) {
         throw precondition_failed("$C6Gebruik: $lv <level>");
       }
+      if (!is_v1_or_v2(a.c->version()) && (a.c->version() != Version::BB_V4)) {
+        // $edit refuses these versions: the client owns its character and sends it to the server (on_61_98)
+        throw precondition_failed("$C6This command cannot\nbe used for your\nversion of PSO.\n($edit werkt niet\nvoor GC)");
+      }
       co_await cc_edit.handler(Args{"level " + a.text, a.check_permissions, a.c});
     });
 
@@ -1273,12 +1277,17 @@ ChatCommandDefinition cc_item(
     });
 
 // Regie pso-regie-10: "$kit" drops a fixed start set (DataIndex::spire_start_kit) at the player's feet, as $item does
-// for one item. Only in a normal game: refused in a lobby and in a Spire run; refused for a protected character by the
-// dispatcher (spire_cheat_refused).
+// for one item; "$kit mat" drops the next batch of at most 30 materials (spire_kit_material_batch), counted per client
+// and game so the player picks up between calls. Only in a normal game: refused in a lobby and in a Spire run; refused
+// for a protected character by the dispatcher (spire_cheat_refused).
 ChatCommandDefinition cc_kit(
     {"$kit"},
     +[](const Args& a) -> asio::awaitable<void> {
       a.check_is_proxy(false);
+      bool materials = (a.text == "mat");
+      if (!materials && !a.text.empty()) {
+        throw precondition_failed("$C6Gebruik: $kit\nof $kit mat");
+      }
       auto s = a.c->require_server_state();
       auto l = a.c->require_lobby();
       bool spire_quest = spire_game_is_spire(a.c, l) ||
@@ -1289,9 +1298,19 @@ ChatCommandDefinition cc_kit(
       }
       a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
 
-      auto items = DataIndex::spire_start_kit(*s->data->item_stack_limits(a.c->version()));
+      const auto& limits = *s->data->item_stack_limits(a.c->version());
+      std::vector<ItemData> items;
+      if (materials) {
+        if (a.c->spire_kit_game.lock() != l) {
+          a.c->spire_kit_game = l;
+          a.c->spire_kit_materials_dropped = 0;
+        }
+        items = DataIndex::spire_kit_material_batch(limits, a.c->spire_kit_materials_dropped);
+      } else {
+        items = DataIndex::spire_start_kit();
+      }
       for (auto& item : items) {
-        item.enforce_stack_size_limits(*s->data->item_stack_limits(a.c->version()));
+        item.enforce_stack_size_limits(limits);
         item.id = l->generate_item_id(0xFF);
         if ((l->drop_mode == ServerDropMode::SERVER_PRIVATE) || (l->drop_mode == ServerDropMode::SERVER_DUPLICATE)) {
           l->add_item(a.c->floor, item, a.c->pos, nullptr, nullptr, 0x1000 | (1 << a.c->lobby_client_id));
@@ -1301,7 +1320,14 @@ ChatCommandDefinition cc_kit(
           send_drop_stacked_item_to_lobby(l, item, a.c->floor, a.c->pos);
         }
       }
-      send_text_message_fmt(a.c, "$C7Startset neergelegd:\n{} items", items.size());
+      if (materials) {
+        a.c->spire_kit_materials_dropped += items.size();
+        size_t total = DataIndex::spire_kit_materials(limits).size();
+        size_t remaining = total - std::min(total, a.c->spire_kit_materials_dropped);
+        send_text_message(a.c, DataIndex::spire_kit_material_message(items.size(), remaining));
+      } else {
+        send_text_message_fmt(a.c, "$C7Startset neergelegd:\n{} items; materialen\nmet $kit mat", items.size());
+      }
       co_return;
     });
 

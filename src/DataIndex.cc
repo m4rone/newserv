@@ -2237,7 +2237,7 @@ bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protec
   return protected_character && refused.count(command_name);
 }
 
-std::vector<ItemData> DataIndex::spire_start_kit(const ItemData::StackLimits& limits) {
+std::vector<ItemData> DataIndex::spire_start_kit() {
   // Codes as Marck gave them, padded with zeros to 16 bytes by the $item hex parser (ItemData::from_data)
   static const std::vector<const char*> codes = {
       "008A0200000003320432053200000000", // weapons
@@ -2271,7 +2271,11 @@ std::vector<ItemData> DataIndex::spire_start_kit(const ItemData::StackLimits& li
   stats.color = 0;
   mag.assign_mag_stats(stats);
   ret.emplace_back(mag);
+  return ret;
+}
 
+std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits) {
+  std::vector<ItemData> ret;
   static const std::vector<std::pair<uint8_t, size_t>> materials = {
       {0x00, 72}, // Power
       {0x05, 33}, // Def
@@ -2291,6 +2295,24 @@ std::vector<ItemData> DataIndex::spire_start_kit(const ItemData::StackLimits& li
     }
   }
   return ret;
+}
+
+std::vector<ItemData> DataIndex::spire_kit_material_batch(const ItemData::StackLimits& limits, size_t already_dropped) {
+  auto all = DataIndex::spire_kit_materials(limits);
+  size_t start = std::min(already_dropped, all.size());
+  size_t end = std::min(start + DataIndex::SPIRE_KIT_MATERIAL_BATCH, all.size());
+  return std::vector<ItemData>(all.begin() + start, all.begin() + end);
+}
+
+std::string DataIndex::spire_kit_material_message(size_t dropped, size_t remaining) {
+  if (dropped == 0) {
+    return "$C7Materialen: niets\nmeer over.";
+  }
+  if (remaining == 0) {
+    return std::format("$C7Materialen: {} neergelegd,\nniets meer over.", dropped);
+  }
+  return std::format("$C7Materialen: {} neergelegd,\nnog {} over; typ $kit mat\nvoor de volgende {}.", dropped,
+      remaining, DataIndex::SPIRE_KIT_MATERIAL_BATCH);
 }
 
 const char* DataIndex::spire_kit_refused(bool is_game, bool spire_quest) {

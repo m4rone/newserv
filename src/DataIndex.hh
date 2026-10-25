@@ -207,10 +207,16 @@ struct DataIndex {
   // command's first name ("$item" for "$i"). Other commands ($fastkill, $infhp, $secid, ...) stay allowed.
   static bool spire_cheat_refused(const std::string& command_name, bool protected_character);
   // Regie pso-regie-10: the fixed start set that $kit drops at the player's feet: five weapons, a frame, a shield,
-  // four units, a level 200 mag (DEF 5 / POW 128 / DEX 67 / MIND 0) and materials (Power 72, Def 33, Luck 45, HP 125),
-  // split into as many items as limits allows per stack (GC v3: one material per item). The item ids are left for the
-  // caller to assign.
-  static std::vector<ItemData> spire_start_kit(const ItemData::StackLimits& limits);
+  // four units and a level 200 mag (DEF 5 / POW 128 / DEX 67 / MIND 0). The item ids are left for the caller to assign.
+  static std::vector<ItemData> spire_start_kit();
+  // The materials of "$kit mat": Power 72, Def 33, Luck 45, HP 125 in that order, as many items as limits needs per
+  // stack (GC v3: one material per item). spire_kit_material_batch returns the next at most
+  // SPIRE_KIT_MATERIAL_BATCH items after the first already_dropped ones; empty when all are dropped.
+  static constexpr size_t SPIRE_KIT_MATERIAL_BATCH = 30;
+  static std::vector<ItemData> spire_kit_materials(const ItemData::StackLimits& limits);
+  static std::vector<ItemData> spire_kit_material_batch(const ItemData::StackLimits& limits, size_t already_dropped);
+  // The reply to "$kit mat" after dropping dropped items with remaining items still to come
+  static std::string spire_kit_material_message(size_t dropped, size_t remaining);
   // Why $kit is refused, or null if it may run: only in a game (not a lobby) and never in a Spire run (a Spire quest,
   // spire_game_is_spire, or a SpireMetaQuests quest). The protected-character refusal is spire_cheat_refused.
   static const char* spire_kit_refused(bool is_game, bool spire_quest);

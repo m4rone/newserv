@@ -672,7 +672,7 @@ void run_static_tests() {
           static_cast<uint32_t>(item.data2db));
     };
     const auto& limits = ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4;
-    auto kit = DataIndex::spire_start_kit(limits);
+    auto kit = DataIndex::spire_start_kit();
     // Weapons, frame, shield and units: Marck's codes padded to 16 bytes
     const std::vector<std::string> fixed = {
         "008A0200000003320432053200000000",
@@ -687,7 +687,7 @@ void run_static_tests() {
         "01030B00000000000000000000000000",
         "01030F00000000000000000000000000",
     };
-    expect_eq(fixed.size() + 1 + 72 + 33 + 45 + 125, kit.size()); // GC v3: one material per item
+    expect_eq(12, kit.size()); // the base call: no materials
     for (size_t z = 0; z < fixed.size(); z++) {
       expect_eq(fixed[z], raw(kit[z]));
     }
@@ -700,28 +700,43 @@ void run_static_tests() {
     expect_eq(0, mag.data1w[5] / 100);
     expect_eq(200, mag.compute_mag_level());
     expect_eq(200, mag.data1[2]);
-    // Materials: the totals Marck asked for, no stack above the client's limit (GC v3: 030B is not stackable)
-    auto material_totals = [&](const std::vector<ItemData>& items, const ItemData::StackLimits& lim) {
-      std::map<uint8_t, size_t> totals;
-      for (size_t z = fixed.size() + 1; z < items.size(); z++) {
-        const auto& item = items[z];
+    // "$kit mat" ten times: at most 30 per call, together exactly Power 72, Def 33, Luck 45, HP 125 in that order, no
+    // stack above the client's limit (GC v3: 030B is not stackable, 275 items); the eleventh call drops nothing
+    expect_eq(1, DataIndex::spire_kit_materials(limits).back().max_stack_size(limits));
+    std::map<uint8_t, size_t> totals;
+    std::vector<uint8_t> order;
+    size_t dropped = 0;
+    for (size_t call = 0; call < 10; call++) {
+      auto batch = DataIndex::spire_kit_material_batch(limits, dropped);
+      expect(!batch.empty());
+      expect(batch.size() <= 30);
+      for (const auto& item : batch) {
         expect_eq(0x030B, (item.data1[0] << 8) | item.data1[1]);
-        expect(item.stack_size(lim) <= item.max_stack_size(lim));
-        totals[item.data1[2]] += item.stack_size(lim);
+        expect(item.stack_size(limits) <= item.max_stack_size(limits));
+        totals[item.data1[2]] += item.stack_size(limits);
+        if (order.empty() || (order.back() != item.data1[2])) {
+          order.emplace_back(item.data1[2]);
+        }
       }
-      return totals;
-    };
-    expect_eq(1, kit.back().max_stack_size(limits));
+      dropped += batch.size();
+    }
     std::map<uint8_t, size_t> expected_totals = {{0x00, 72}, {0x05, 33}, {0x06, 45}, {0x03, 125}};
-    expect(expected_totals == material_totals(kit, limits));
-    // A server with stackable materials (limit 99) gets fewer items with the same totals: HP 125 is 99 + 26
+    expect(expected_totals == totals);
+    expect(std::vector<uint8_t>({0x00, 0x05, 0x06, 0x03}) == order);
+    expect_eq(275, dropped);
+    expect(DataIndex::spire_kit_material_batch(limits, dropped).empty());
+    expect(DataIndex::spire_kit_material_message(0, 0).find("niets") != std::string::npos);
+    expect(DataIndex::spire_kit_material_message(30, 245).find("30 neergelegd") != std::string::npos);
+    expect(DataIndex::spire_kit_material_message(30, 245).find("nog 245 over") != std::string::npos);
+    expect(DataIndex::spire_kit_material_message(5, 0).find("niets meer") != std::string::npos);
+    // A server with stackable materials (limit 99): fewer items, same totals; HP 125 is 99 + 26
     auto stacked_limits_vector = ItemData::StackLimits::DEFAULT_TOOL_LIMITS_V3_V4;
     stacked_limits_vector.at(0x0B) = 99;
     ItemData::StackLimits stacked_limits(Version::GC_V3, stacked_limits_vector, 999999);
-    auto stacked_kit = DataIndex::spire_start_kit(stacked_limits);
-    expect_eq(fixed.size() + 1 + 1 + 1 + 1 + 2, stacked_kit.size());
-    expect(expected_totals == material_totals(stacked_kit, stacked_limits));
-    expect_eq(26, stacked_kit.back().stack_size(stacked_limits));
+    auto stacked = DataIndex::spire_kit_material_batch(stacked_limits, 0);
+    expect_eq(5, stacked.size());
+    expect_eq(26, stacked.back().stack_size(stacked_limits));
+    expect(DataIndex::spire_kit_material_batch(stacked_limits, 5).empty());
     // Only in a game, never in a Spire run
     expect(DataIndex::spire_kit_refused(false, false) != nullptr); // lobby
     expect(DataIndex::spire_kit_refused(false, true) != nullptr);

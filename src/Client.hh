@@ -191,6 +191,9 @@ public:
   bool should_update_play_time;
   std::unordered_set<uint32_t> blocked_senders;
   std::unique_ptr<PlayerDispDataV123> v1_v2_last_reported_disp;
+  // Regie pso-regie-10: how many of the $kit materials this client already got in spire_kit_game ($kit mat)
+  std::weak_ptr<Lobby> spire_kit_game;
+  size_t spire_kit_materials_dropped = 0;
   std::shared_ptr<Parsed6x70Data> last_reported_6x70;
   std::unordered_set<uint16_t> expected_game_state_sync_commands; // (command_num << 8) | target_client_id
   // These are null unless the client is within the trade sequence (D0-D4 or EE commands)
