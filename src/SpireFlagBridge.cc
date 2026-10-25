@@ -456,7 +456,7 @@ std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, ui
     const auto& item = inventory.items[z].data;
     // critic-savestates: a mag stays out; forbid_mags 0 keeps the real mag in every run copy, so a mag from the
     // savestate would come back as a second one
-    if (item.empty() || (item.data1[0] == 0x02)) {
+    if (item.empty() || (item.data1[0] == 0x02) || spire_drop_is_forbidden(item)) { // never a Scape Doll (B-E01-96)
       continue;
     }
     if (glass_item_id && (item.id == glass_item_id)) {

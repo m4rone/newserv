@@ -2202,6 +2202,8 @@ void run_static_tests() {
     }
     expect_eq(3u, spire_savestate_items(overlay, 0, &glass).size());
     expect_eq(-1, glass); // no Glass item
+    put(3, {0x03, 0x09, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810004); // a Scape Doll: lives are a counter
+    expect_eq(3u, spire_savestate_items(overlay, 0, &glass).size());
 
     // 'V' writes only from a run copy, after 'B', before the run end, with all values
     const size_t n = SPIRE_SAVESTATE_NUM_VALUES;
