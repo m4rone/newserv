@@ -450,6 +450,25 @@ void run_static_tests() {
     expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105));
     expect_eq(std::string("Room 7 - Rest"), spire_bridge_message_text(0x41000207));
     expect_eq(std::string("Last life: fall again and you stay down until the clear."), spire_bridge_message_text(0x4C000100));
+    expect_eq(std::string("$C1Life lost$C7 - 2 left. You get up on the spot."), spire_bridge_message_text(0x4C000002));
+  }
+
+  phosg::log_info_f("-- Spire lives: a counter, no Scape Doll, no respawn to the city (v41)");
+  {
+    expect_eq(std::string("Spire lives: death of serial 0012345678 revived on the spot, lives 3->2, no respawn to city"),
+        spire_lives_revive_log_line(12345678, 0x4C000002));
+    expect_eq(std::string("Spire lives: death of serial 0012345678 revived on the spot, lives 2->1, no respawn to city"),
+        spire_lives_revive_log_line(12345678, 0x4C000101)); // the death that leaves the last life
+    ItemData doll, mate, frame;
+    doll.data1[0] = 0x03;
+    doll.data1[1] = 0x09;
+    mate.data1[0] = 0x03;
+    mate.data1[1] = 0x00;
+    frame.data1[0] = 0x01;
+    frame.data1[1] = 0x09;
+    expect(spire_drop_is_forbidden(doll));
+    expect(!spire_drop_is_forbidden(mate));
+    expect(!spire_drop_is_forbidden(frame));
   }
 
   phosg::log_info_f("-- Spire bridge: an enemy never hit holds no wave forever (v36)");

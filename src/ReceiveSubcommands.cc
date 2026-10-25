@@ -2997,7 +2997,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
   }
 
   if (rec.should_drop) {
-    auto generate_item_for_client = [&](std::shared_ptr<Client> c) -> ItemCreator::DropResult {
+    auto generate_item_unfiltered = [&](std::shared_ptr<Client> c) -> ItemCreator::DropResult {
       bool force_rare = c->check_flag(Client::Flag::ALL_RARES_ENABLED);
       if (rec.obj_st) {
         if (!rec.obj_st->super_obj) {
@@ -3026,6 +3026,11 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
       } else {
         throw std::runtime_error("neither object nor enemy were present");
       }
+    };
+    auto generate_item_for_client = [&](std::shared_ptr<Client> c) -> ItemCreator::DropResult {
+      auto res = generate_item_unfiltered(c);
+      spire_drop_filter(c, l, res.item); // v41: no Scape Doll in a Spire run (lives are a counter)
+      return res;
     };
 
     auto get_entity_index = [&](Version v) -> uint16_t {

@@ -696,7 +696,7 @@ std::string spire_bridge_message_text(uint32_t value) {
       return std::format("Wave {}/{}", a, b);
     case SPIRE_BRIDGE_MSG_LIFE:
       return a ? std::string("Last life: fall again and you stay down until the clear.")
-               : std::format("$C1Life lost$C7 - {} left. A new Scape Doll is yours.", b);
+               : std::format("$C1Life lost$C7 - {} left. You get up on the spot.", b);
     case SPIRE_BRIDGE_MSG_TIME:
       return std::format("$C4{} minutes left$C7 - the timer ends the run.", value & 0xFFFF);
     case SPIRE_BRIDGE_MSG_PARTNER:
@@ -739,6 +739,30 @@ std::string spire_bridge_message_text(uint32_t value) {
     default:
       return "";
   }
+}
+
+// v41 (B-E01-96): lives are the quest's counter r172, never a Scape Doll, and the Battle respawn to the city is always
+// off. Every 'L' code is a death the quest stands up on the spot (player_recovery): the log line says so, with the
+// lives before and after (the code carries the lives left).
+std::string spire_lives_revive_log_line(uint32_t serial_number, uint32_t value) {
+  uint32_t left = value & 0xFF;
+  return std::format("Spire lives: death of serial {:010} revived on the spot, lives {}->{}, no respawn to city",
+      serial_number, left + 1, left);
+}
+
+bool spire_drop_is_forbidden(const ItemData& item) {
+  return (item.data1[0] == 0x03) && (item.data1[1] == 0x09); // Scape Doll
+}
+
+bool spire_drop_filter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, ItemData& item) {
+  if (item.empty() || !spire_drop_is_forbidden(item) || !l->is_game() || !l->quest ||
+      !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
+    return false;
+  }
+  l->log.info_f("Spire drops: Scape Doll removed from a server drop in q{} (lives are a counter)",
+      l->quest->meta.quest_number);
+  item.clear();
+  return true;
 }
 
 // v23: lives per client from its 'L' codes, for the checkpoint; v29: cleared at every quest start, so a second run on
@@ -948,6 +972,7 @@ bool spire_bridge_handle_register(
       }
       if ((value >> 24) == SPIRE_BRIDGE_MSG_LIFE) {
         spire_checkpoint_lives_note(c.get(), value & 0xFF); // falls through to the life text below
+        c->log.info_f("{}", spire_lives_revive_log_line(serial_number, value));
       }
       if (spire_records_handle(c, l, serial_number, quest_number, value)) {
         return true;

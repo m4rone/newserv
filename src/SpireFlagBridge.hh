@@ -423,6 +423,15 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
 std::string spire_ticker_line(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
+// v41 (B-E01-96, B-REGIE-9-1): lives are the quest's counter r172, never a Scape Doll; the Battle respawn to the city
+// is always off and the quest stands a dead player with lives left up on the spot. Its 'L' code (lives left in the low
+// byte) gets this log line: "Spire lives: death of serial S revived on the spot, lives N->N-1, no respawn to city".
+std::string spire_lives_revive_log_line(uint32_t serial_number, uint32_t value);
+// v41: a Scape Doll (03 09) never drops in a Spire quest. spire_drop_filter clears a server drop (SERVER_* drop modes)
+// of a forbidden item in a quest listed in SpireBridgeQuests, logs it and returns true; false for anything else. The
+// quest's rule block (ba_forbid_scape_dolls 1) covers the client drop mode and the Battle bag.
+bool spire_drop_is_forbidden(const ItemData& item);
+bool spire_drop_filter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, ItemData& item);
 // v36 (regie, pc 2026-10-25 09:26: q921 room 10 wave 2 stayed open, E-02C sat in a warp and was never hit): safety net
 // for an enemy nobody can reach. In a quest listed in SpireBridgeQuests (GC V3), when a defeat leaves a wave held only by
 // enemies that were never hit (no hit claim, no damage, no 6x0A update; never a boss), the server waits
