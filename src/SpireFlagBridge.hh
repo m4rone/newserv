@@ -529,6 +529,8 @@ bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
 // room counts as finished (flag 0018 on the event, flag 8 on its enemies; the server's map state only), logs "event n
 // of room r on floor ff running without a living enemy; counted as finished", and the room check runs again. One
 // watch per room; it stops at the room clear, at the run end, or when every started event has a living enemy again.
+// v43 (pc 2026-10-25 20:43): the watch also starts when the room is held only by a trigger_event of an event that has
+// not started yet (the check ran before the clients' 6x67); it then needs one look more.
 bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.

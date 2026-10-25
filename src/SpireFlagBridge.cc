@@ -2382,8 +2382,10 @@ std::string spire_room_actions_hold(const void* action_stream, size_t action_str
 // (covers the moment between the client's 6x76 and its 6x67 for the next wave), or a construct_enemies (09/0D) of a
 // wave whose enemies are not all defeated.
 // treat_finished (v42): W-ids of events the dead-event net counts as finished (flag 0008 not yet set).
+// waits_on_trigger (v43): set when the room is held only by a finished event's trigger_event of an event that has not
+// started yet (the moment between a wave's 6x76 and the clients' 6x67 for the next one).
 static bool spire_bridge_room_is_clear(std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room,
-    std::string* why, const std::unordered_set<size_t>* treat_finished = nullptr) {
+    std::string* why, const std::unordered_set<size_t>* treat_finished = nullptr, bool* waits_on_trigger = nullptr) {
   auto& ms = l->map_state;
   std::vector<std::shared_ptr<MapState::EventState>> room_evs;
   for (const auto& ev_st : ms->event_states_for_floor(v, floor)) {
@@ -2395,9 +2397,11 @@ static bool spire_bridge_room_is_clear(std::shared_ptr<Lobby> l, Version v, uint
   auto finished = [&](const MapState::EventState& ev_st) -> bool {
     return (ev_st.flags & 0x08) || (treat_finished && treat_finished->count(ev_st.w_id));
   };
+  bool trigger_held = false;
   auto event_unfinished = [&](uint32_t event_id) -> bool {
     for (const auto& ev_st : room_evs) {
       if ((ev_st->super_ev->version(v).set_entry->event_id == event_id) && !finished(*ev_st)) {
+        trigger_held = true;
         return true;
       }
     }
@@ -2424,14 +2428,17 @@ static bool spire_bridge_room_is_clear(std::shared_ptr<Lobby> l, Version v, uint
         ev_ver.action_stream, ev_ver.action_stream_size, room, wave_undefeated, event_unfinished);
     if (!hold.empty()) {
       *why = std::format("W-{:03X} {}", ev_st->w_id, hold);
+      if (waits_on_trigger) {
+        *waits_on_trigger = trigger_held;
+      }
       return false;
     }
   }
   return !room_evs.empty();
 }
 
-static void spire_dead_event_watch(
-    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number);
+static void spire_dead_event_watch(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
+    uint16_t wave_number, bool waits_on_trigger);
 
 void spire_bridge_check_room_clear(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number) {
@@ -2459,10 +2466,11 @@ void spire_bridge_check_room_clear(
     // Event rule (spire-server-all): a wave that never started (the elite wave on the normal path) does not hold the
     // room; a started or chained one does until it is finished
     std::string why;
-    if (!spire_bridge_room_is_clear(l, v, floor, room, &why)) {
+    bool waits_on_trigger = false;
+    if (!spire_bridge_room_is_clear(l, v, floor, room, &why, nullptr, &waits_on_trigger)) {
       l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} done, room not clear: {}", wave_number, room,
           floor, why.empty() ? "no wave events" : why);
-      spire_dead_event_watch(c, l, floor, room, wave_number);
+      spire_dead_event_watch(c, l, floor, room, wave_number, waits_on_trigger);
       return;
     }
 
@@ -2699,11 +2707,15 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
   }
 }
 
-static void spire_dead_event_watch(
-    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number) {
+// v43 (pc 2026-10-25 20:43, q921 room 7): the last wave's check ran before the clients' 6x67 started the chained elite
+// wave (event 117), so no started event was dead yet and the watch never ran; the elite never spawned and the room
+// stayed open. A room held by a trigger of an event not yet started gets the watch too: its first look (after
+// SPIRE_UNHIT_ENEMY_SECONDS) finds the event started or gives up, the second counts it as above.
+static void spire_dead_event_watch(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
+    uint16_t wave_number, bool waits_on_trigger) {
   try {
     auto seen = spire_dead_room_events(l, c->version(), floor, room);
-    if (seen.empty()) {
+    if (seen.empty() && !waits_on_trigger) {
       return;
     }
     auto key = std::make_tuple(l->lobby_id, floor, room);
@@ -2715,8 +2727,13 @@ static void spire_dead_event_watch(
     }
     uint64_t generation = spire_dead_event_next_generation++;
     spire_dead_event_waits[key] = generation;
-    l->log.info_f("Spire bridge: room {} on floor {:02X} has {} started event(s) without a living enemy; counted as finished after {} s unless one is hit",
-        room, floor, seen.size(), SPIRE_UNHIT_ENEMY_SECONDS.count());
+    if (seen.empty()) {
+      l->log.info_f("Spire bridge: room {} on floor {:02X} waits on a chained event; watching it for a wave without a living enemy",
+          room, floor);
+    } else {
+      l->log.info_f("Spire bridge: room {} on floor {:02X} has {} started event(s) without a living enemy; counted as finished after {} s unless one is hit",
+          room, floor, seen.size(), SPIRE_UNHIT_ENEMY_SECONDS.count());
+    }
     asio::co_spawn(*c->require_server_state()->io_context,
         spire_dead_event_wait(c, l, floor, room, wave_number, generation, std::move(seen)), asio::detached);
   } catch (const std::exception& e) {
