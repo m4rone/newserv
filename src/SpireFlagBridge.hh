@@ -353,6 +353,29 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
 std::string spire_ticker_line(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
+// v36 (regie, pc 2026-10-25 09:26: q921 room 10 wave 2 stayed open, E-02C sat in a warp and was never hit): safety net
+// for an enemy nobody can reach. In a quest listed in SpireBridgeQuests (GC V3), when a defeat leaves a wave held only by
+// enemies that were never hit (no hit claim, no damage, no 6x0A update; never a boss), the server waits
+// SPIRE_UNHIT_ENEMY_SECONDS. If no other enemy of the wave died and none of them was hit meanwhile, it counts them as
+// defeated (set flag 8 on the server's map state only), logs "E-xxx never hit 30 s after the rest of wave n of room
+// r; counted as defeated", and runs the normal wave check again (events finished, then the room clear). Enemies
+// that were hit are never touched. Not after the run ended.
+constexpr auto SPIRE_UNHIT_ENEMY_SECONDS = std::chrono::seconds(30);
+struct SpireWaveEnemy {
+  bool defeated = false;
+  bool ever_hit = false;
+  bool is_boss = false;
+};
+// The decision, free of state for the static tests: at least one enemy defeated, at least one not, and every one not
+// defeated never hit and no boss.
+bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
+// Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
+// false). Never throws.
+using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,
+    uint16_t wave_number, bool was_defeat);
+void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
+    uint16_t wave_number, SpireWaveCheck recheck);
+
 // v35: the lobby return after 'X' (see above). spire_run_over_exit_action is the decision, free of state for the static
 // tests: nothing if the client left the game or was already sent; 6x73 while a quest runs; ExitAnywhere without a
 // quest if the client runs functions; else only the log (the client leaves itself).

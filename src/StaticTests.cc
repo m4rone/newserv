@@ -257,6 +257,19 @@ void run_static_tests() {
         spire_bridge_message_text(0x4C000100));
   }
 
+  phosg::log_info_f("-- Spire bridge: an enemy never hit holds no wave forever (v36)");
+  {
+    using E = SpireWaveEnemy;
+    E dead{.defeated = true}, unhit{}, hit{.ever_hit = true}, boss{.is_boss = true};
+    expect(spire_wave_held_only_by_unhit({dead, dead, unhit}));        // pc 09:26: E-02C in a warp, the rest defeated
+    expect(spire_wave_held_only_by_unhit({dead, unhit, unhit}));
+    expect(!spire_wave_held_only_by_unhit({dead, unhit, hit}));        // a hit enemy is reachable: wait for it
+    expect(!spire_wave_held_only_by_unhit({dead, boss}));              // never a boss
+    expect(!spire_wave_held_only_by_unhit({unhit, unhit}));            // nothing defeated yet: the wave has not run
+    expect(!spire_wave_held_only_by_unhit({dead, dead}));              // already done
+    expect(!spire_wave_held_only_by_unhit({}));
+  }
+
   phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");
   {
     using X = SpireRunOverExit;

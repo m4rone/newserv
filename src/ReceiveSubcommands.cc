@@ -3287,6 +3287,115 @@ static void on_sync_quest_register(std::shared_ptr<Client> c, SubcommandMessage&
   }
 }
 
+// When all enemies in a wave event have (set_flags & 8), which means they are defeated, set event_flags =
+// (event_flags | 0x18) & (~4), which means it is done and should not trigger again. was_defeat: the 6x76 that led
+// here set a defeated flag (8); the Spire safety net (v36) calls this again with false.
+static void check_wave_defeated(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number, bool was_defeat) {
+  bool all_enemies_defeated = true;
+  l->log.info_f("Checking for defeated enemies with room={:04X} wave_number={:04X}", room, wave_number);
+  for (auto ene_st : l->map_state->enemy_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
+    if (ene_st->super_ene->child_index) {
+      l->log.info_f("E-{:03X} is a child of another enemy", ene_st->e_id);
+    } else if (!(ene_st->set_flags & 8)) {
+      l->log.info_f("E-{:03X} is not defeated; cannot advance event to finished state", ene_st->e_id);
+      all_enemies_defeated = false;
+      break;
+    } else {
+      l->log.info_f("E-{:03X} is defeated", ene_st->e_id);
+    }
+  }
+  if (!all_enemies_defeated) {
+    // Spire safety net (v36): a wave held only by enemies nobody ever hit is counted as done after a while
+    if (was_defeat) {
+      spire_bridge_watch_unhit_wave(c, l, floor, room, wave_number, check_wave_defeated);
+    }
+    return;
+  }
+  l->log.info_f("All enemies defeated; setting events with room={:04X} wave_number={:04X} to finished state",
+      room, wave_number);
+  // Spire room clear (v19): only the first report of this wave counts; every later 6x76 finds it finished
+  bool wave_newly_finished = false;
+  for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
+    if (!(ev_st->flags & 0x08)) {
+      wave_newly_finished = true;
+    }
+  }
+  for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
+    ev_st->flags = (ev_st->flags | 0x18) & (~4);
+    l->log.info_f("Set flags on W-{:03X} to {:04X}", ev_st->w_id, ev_st->flags);
+
+    const auto& ev_ver = ev_st->super_ev->version(c->version());
+    phosg::StringReader actions_r(ev_ver.action_stream, ev_ver.action_stream_size);
+    while (!actions_r.eof()) {
+      uint8_t opcode = actions_r.get_u8();
+      switch (opcode) {
+        case 0x00: // nop
+          l->log.info_f("(W-{:03X} script) nop", ev_st->w_id);
+          break;
+        case 0x01: // stop
+          l->log.info_f("(W-{:03X} script) stop", ev_st->w_id);
+          actions_r.go(actions_r.size());
+          break;
+        case 0x08: { // construct_objects
+          uint16_t room = actions_r.get_u16l();
+          uint16_t group = actions_r.get_u16l();
+          l->log.info_f("(W-{:03X} script) construct_objects {:04X} {:04X}", ev_st->w_id, room, group);
+          auto obj_sts = l->map_state->object_states_for_floor_room_group(
+              c->version(), ev_st->super_ev->floor, room, group);
+          for (auto obj_st : obj_sts) {
+            if (!(obj_st->set_flags & 0x0A)) {
+              l->log.info_f("(W-{:03X} script)   Setting flags 0010 on object K-{:03X}", ev_st->w_id, obj_st->k_id);
+              obj_st->set_flags |= 0x10;
+            }
+          }
+          break;
+        }
+        case 0x09: // construct_enemies
+        case 0x0D: { // construct_enemies_stop
+          uint16_t room = actions_r.get_u16l();
+          uint16_t wave_number = actions_r.get_u16l();
+          l->log.info_f("(W-{:03X} script) construct_enemies {:04X} {:04X}", ev_st->w_id, room, wave_number);
+          auto ene_sts = l->map_state->enemy_states_for_floor_room_wave(
+              c->version(), ev_st->super_ev->floor, room, wave_number);
+          for (auto ene_st : ene_sts) {
+            if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 0x0A)) {
+              l->log.info_f("(W-{:03X} script)   Setting flags 0002 on enemy set E-{:X}", ev_st->w_id, ene_st->e_id);
+              ene_st->set_flags |= 0x0002;
+            }
+          }
+          if (opcode == 0x0D) {
+            actions_r.go(actions_r.size());
+          }
+          break;
+        }
+        case 0x0A: // set_switch_flag
+        case 0x0B: { // clear_switch_flag
+          // These opcodes cause the client to send 6x05 commands, so we don't have to do anything here.
+          uint16_t switch_flag_num = actions_r.get_u16l();
+          l->log.info_f("(W-{:03X} script) {}able_switch_flag {:04X}",
+              ev_st->w_id, (opcode & 1) ? "dis" : "en", switch_flag_num);
+          break;
+        }
+        case 0x0C: { // trigger_event
+          // This opcode causes the client to send a 6x67 command, so we don't have to do anything here.
+          uint32_t event_id = actions_r.get_u32l();
+          l->log.info_f("(W-{:03X} script) trigger_event {:08X}", ev_st->w_id, event_id);
+          break;
+        }
+        default:
+          l->log.warning_f("(W-{:03X}) Invalid opcode {:02X} at offset {:X} in event action stream",
+              ev_st->w_id, opcode, actions_r.where() - 1);
+          actions_r.go(actions_r.size());
+      }
+    }
+  }
+  // after the wave's events are finished, so the event rule sees them as done (spire-server-all)
+  if (wave_newly_finished) {
+    spire_bridge_check_room_clear(c, l, floor, room, wave_number);
+  }
+}
+
 static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   auto l = c->require_lobby();
   if (!l->is_game()) {
@@ -3337,105 +3446,7 @@ static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage&
     }
 
     if ((room >= 0) && (wave_number >= 0)) {
-      // When all enemies in a wave event have (set_flags & 8), which means they are defeated, set event_flags =
-      // (event_flags | 0x18) & (~4), which means it is done and should not trigger again
-      bool all_enemies_defeated = true;
-      l->log.info_f("Checking for defeated enemies with room={:04X} wave_number={:04X}", room, wave_number);
-      for (auto ene_st : l->map_state->enemy_states_for_floor_room_wave(c->version(), cmd.floor, room, wave_number)) {
-        if (ene_st->super_ene->child_index) {
-          l->log.info_f("E-{:03X} is a child of another enemy", ene_st->e_id);
-        } else if (!(ene_st->set_flags & 8)) {
-          l->log.info_f("E-{:03X} is not defeated; cannot advance event to finished state", ene_st->e_id);
-          all_enemies_defeated = false;
-          break;
-        } else {
-          l->log.info_f("E-{:03X} is defeated", ene_st->e_id);
-        }
-      }
-      if (all_enemies_defeated) {
-        l->log.info_f("All enemies defeated; setting events with room={:04X} wave_number={:04X} to finished state",
-            room, wave_number);
-        // Spire room clear (v19): only the first report of this wave counts; every later 6x76 finds it finished
-        bool wave_newly_finished = false;
-        for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), cmd.floor, room, wave_number)) {
-          if (!(ev_st->flags & 0x08)) {
-            wave_newly_finished = true;
-          }
-        }
-        for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), cmd.floor, room, wave_number)) {
-          ev_st->flags = (ev_st->flags | 0x18) & (~4);
-          l->log.info_f("Set flags on W-{:03X} to {:04X}", ev_st->w_id, ev_st->flags);
-
-          const auto& ev_ver = ev_st->super_ev->version(c->version());
-          phosg::StringReader actions_r(ev_ver.action_stream, ev_ver.action_stream_size);
-          while (!actions_r.eof()) {
-            uint8_t opcode = actions_r.get_u8();
-            switch (opcode) {
-              case 0x00: // nop
-                l->log.info_f("(W-{:03X} script) nop", ev_st->w_id);
-                break;
-              case 0x01: // stop
-                l->log.info_f("(W-{:03X} script) stop", ev_st->w_id);
-                actions_r.go(actions_r.size());
-                break;
-              case 0x08: { // construct_objects
-                uint16_t room = actions_r.get_u16l();
-                uint16_t group = actions_r.get_u16l();
-                l->log.info_f("(W-{:03X} script) construct_objects {:04X} {:04X}", ev_st->w_id, room, group);
-                auto obj_sts = l->map_state->object_states_for_floor_room_group(
-                    c->version(), ev_st->super_ev->floor, room, group);
-                for (auto obj_st : obj_sts) {
-                  if (!(obj_st->set_flags & 0x0A)) {
-                    l->log.info_f("(W-{:03X} script)   Setting flags 0010 on object K-{:03X}", ev_st->w_id, obj_st->k_id);
-                    obj_st->set_flags |= 0x10;
-                  }
-                }
-                break;
-              }
-              case 0x09: // construct_enemies
-              case 0x0D: { // construct_enemies_stop
-                uint16_t room = actions_r.get_u16l();
-                uint16_t wave_number = actions_r.get_u16l();
-                l->log.info_f("(W-{:03X} script) construct_enemies {:04X} {:04X}", ev_st->w_id, room, wave_number);
-                auto ene_sts = l->map_state->enemy_states_for_floor_room_wave(
-                    c->version(), ev_st->super_ev->floor, room, wave_number);
-                for (auto ene_st : ene_sts) {
-                  if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 0x0A)) {
-                    l->log.info_f("(W-{:03X} script)   Setting flags 0002 on enemy set E-{:X}", ev_st->w_id, ene_st->e_id);
-                    ene_st->set_flags |= 0x0002;
-                  }
-                }
-                if (opcode == 0x0D) {
-                  actions_r.go(actions_r.size());
-                }
-                break;
-              }
-              case 0x0A: // set_switch_flag
-              case 0x0B: { // clear_switch_flag
-                // These opcodes cause the client to send 6x05 commands, so we don't have to do anything here.
-                uint16_t switch_flag_num = actions_r.get_u16l();
-                l->log.info_f("(W-{:03X} script) {}able_switch_flag {:04X}",
-                    ev_st->w_id, (opcode & 1) ? "dis" : "en", switch_flag_num);
-                break;
-              }
-              case 0x0C: { // trigger_event
-                // This opcode causes the client to send a 6x67 command, so we don't have to do anything here.
-                uint32_t event_id = actions_r.get_u32l();
-                l->log.info_f("(W-{:03X} script) trigger_event {:08X}", ev_st->w_id, event_id);
-                break;
-              }
-              default:
-                l->log.warning_f("(W-{:03X}) Invalid opcode {:02X} at offset {:X} in event action stream",
-                    ev_st->w_id, opcode, actions_r.where() - 1);
-                actions_r.go(actions_r.size());
-            }
-          }
-        }
-        // after the wave's events are finished, so the event rule sees them as done (spire-server-all)
-        if (wave_newly_finished) {
-          spire_bridge_check_room_clear(c, l, cmd.floor, room, wave_number);
-        }
-      }
+      check_wave_defeated(c, l, cmd.floor, room, wave_number, cmd.flags & 8);
     }
   }
 

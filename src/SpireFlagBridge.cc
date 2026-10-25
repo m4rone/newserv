@@ -2112,6 +2112,111 @@ void spire_bridge_check_room_clear(
   }
 }
 
+// v36: safety net for an enemy nobody ever hit (SpireFlagBridge.hh)
+bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies) {
+  size_t defeated = 0, held = 0;
+  for (const auto& e : enemies) {
+    if (e.defeated) {
+      defeated++;
+    } else if (e.ever_hit || e.is_boss) {
+      return false;
+    } else {
+      held++;
+    }
+  }
+  return defeated && held;
+}
+
+static bool spire_enemy_ever_hit(const MapState::EnemyState& ene_st) {
+  return (ene_st.server_flags & MapState::EnemyState::Flag::ALL_HITS_MASK) || ene_st.total_damage || ene_st.game_flags;
+}
+
+static std::vector<SpireWaveEnemy> spire_wave_enemies(
+    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
+  std::vector<SpireWaveEnemy> ret;
+  for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
+    if (ene_st->super_ene->child_index) {
+      continue; // as in the wave check: a child counts through its parent
+    }
+    ret.emplace_back(SpireWaveEnemy{.defeated = !!(ene_st->set_flags & 8), .ever_hit = spire_enemy_ever_hit(*ene_st),
+        .is_boss = type_definition_for_enemy(ene_st->super_ene->type).is_boss()});
+  }
+  return ret;
+}
+
+// Per (game, floor, room, wave): the generation of the latest wait; a later defeat in the wave starts a new one
+static std::map<std::tuple<uint32_t, uint8_t, uint16_t, uint16_t>, uint64_t> spire_unhit_waits;
+static uint64_t spire_unhit_next_generation = 1;
+
+static asio::awaitable<void> spire_unhit_wave_wait(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l,
+    uint8_t floor, uint16_t room, uint16_t wave_number, uint64_t generation, SpireWaveCheck recheck) {
+  co_await async_sleep(SPIRE_UNHIT_ENEMY_SECONDS);
+  auto l = weak_l.lock();
+  if (!l || !l->is_game() || !l->map_state) {
+    co_return;
+  }
+  auto key = std::make_tuple(l->lobby_id, floor, room, wave_number);
+  auto it = spire_unhit_waits.find(key);
+  if ((it == spire_unhit_waits.end()) || (it->second != generation)) {
+    co_return; // another enemy of the wave died meanwhile: its own wait runs
+  }
+  spire_unhit_waits.erase(it);
+  auto c = weak_c.lock();
+  if (!c || (c->lobby.lock() != l)) {
+    c = nullptr;
+    for (const auto& lc : l->clients) {
+      if (lc && (lc->version() == Version::GC_V3)) {
+        c = lc;
+        break;
+      }
+    }
+    if (!c) {
+      co_return;
+    }
+  }
+  if (spire_run_end_for(l)) {
+    co_return;
+  }
+  Version v = c->version();
+  if (!spire_wave_held_only_by_unhit(spire_wave_enemies(l, v, floor, room, wave_number))) {
+    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} no longer held only by enemies never hit; not counted",
+        wave_number, room, floor);
+    co_return;
+  }
+  for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
+    if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8) && !spire_enemy_ever_hit(*ene_st)) {
+      ene_st->set_flags |= 8;
+      l->log.info_f("Spire bridge: E-{:03X} never hit {} s after the rest of wave {} of room {}; counted as defeated",
+          ene_st->e_id, SPIRE_UNHIT_ENEMY_SECONDS.count(), wave_number, room);
+    }
+  }
+  recheck(c, l, floor, room, wave_number, false);
+}
+
+void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
+    uint16_t wave_number, SpireWaveCheck recheck) {
+  try {
+    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest || !l->map_state ||
+        !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number) || spire_run_end_for(l)) {
+      return;
+    }
+    if (!spire_wave_held_only_by_unhit(spire_wave_enemies(l, c->version(), floor, room, wave_number))) {
+      return;
+    }
+    if (spire_unhit_waits.size() > 4096) {
+      spire_unhit_waits.clear();
+    }
+    uint64_t generation = spire_unhit_next_generation++;
+    spire_unhit_waits[std::make_tuple(l->lobby_id, floor, room, wave_number)] = generation;
+    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} is held only by enemies never hit; counted as defeated in {} s unless one is hit or another dies",
+        wave_number, room, floor, SPIRE_UNHIT_ENEMY_SECONDS.count());
+    asio::co_spawn(*c->require_server_state()->io_context,
+        spire_unhit_wave_wait(c, l, floor, room, wave_number, generation, recheck), asio::detached);
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: unhit enemy watch failed: {}", e.what());
+  }
+}
+
 // The boss types whose defeat is the room clear (v25): the last part of a boss Sega's quests never zone-clear.
 static bool spire_bridge_is_server_clear_boss(EnemyType type) {
   return type == EnemyType::VOL_OPT_2;
