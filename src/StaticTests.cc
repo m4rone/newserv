@@ -9,6 +9,7 @@
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
 #include "InventoryBackup.hh"
+#include "Text.hh"
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -1529,6 +1530,112 @@ void run_static_tests() {
     expect_eq(3, inventory_backup_pick_restore(pick_names, {F{}, F{}, F{}, F{}, F{}}, current_game));
     expect_eq(4, inventory_backup_pick_restore(pick_names, {F{}, F{}, F{}, F{}, F{}}, ""));
     expect_eq(-1, inventory_backup_pick_restore({}, {}, current_game));
+  }
+
+  phosg::log_info_f("-- Inventory backup: hard ends (register item karakter-verlies-battle, 2026-10-25)");
+  {
+    using V = InventoryLossVerdict;
+    using F = InventoryBackupPickFlags;
+    auto inv = [](const std::vector<uint64_t>& codes, size_t equipped) {
+      PlayerInventory i;
+      i.language = Language::ENGLISH;
+      i.num_items = codes.size();
+      for (size_t z = 0; z < codes.size(); z++) {
+        i.items[z].state = (z < equipped) ? 2 : 1;
+        i.items[z].flags = (z < equipped) ? 0x00000008 : 0;
+        i.items[z].data = ItemData(codes[z], 0);
+        i.items[z].data.id = 0x00010000 + z;
+      }
+      return i;
+    };
+    // Rule b (Exit at every hard end): a disconnect or a server stop records the server's view as Exit; a 98 only
+    // LeftNormally. The game is a Spire backup only if the guard took its snapshot (q925 and a Battle game without a
+    // quest stay restorable)
+    InventoryBackup b;
+    b.serial_number = 3117539659;
+    b.disp.visual.name.encode("BidX", Language::ENGLISH);
+    b.character_id = spire_guard_character_id(b.disp);
+    b.quest_number = 925;
+    b.inventory = inv({0x0001000000000000, 0x0101000000000000, 0x0034001A00000000, 0x0300000000030000}, 2);
+    b.disp.stats.meseta = 1350;
+    InventoryBackup hard = b;
+    auto exit_inv = inv({0x0001000000000000, 0x0101000000000000, 0x0034001A00000000, 0x0300000000030000}, 2);
+    inventory_backup_record_end(hard, false, false, &exit_inv, 1350);
+    expect(hard.has_exit && !hard.left_normally && !hard.spire);
+    expect_eq(4u, hard.exit_inventory.num_items);
+    expect_eq(1350u, hard.exit_meseta);
+    InventoryBackup clean = b;
+    inventory_backup_record_end(clean, true, false, nullptr, 0);
+    expect(clean.left_normally && !clean.has_exit && !clean.spire);
+    InventoryBackup run = b;
+    inventory_backup_record_end(run, false, true, &exit_inv, 1350);
+    expect(run.spire && run.has_exit);
+    // Rule c ($restore after a Spire hard end): refused only where the guard restores
+    expect(inventory_restore_refusal(true, false, false, b.serial_number, b.character_id, &hard) == InventoryRestoreRefusal::NONE);
+    expect(inventory_restore_refusal(true, false, false, b.serial_number, b.character_id, &run) == InventoryRestoreRefusal::SPIRE_BACKUP);
+
+    // Rule a (next login): Sega's penalty leaves only the equipped items and no meseta
+    auto after = inv({0x0001000000000000, 0x0101000000000000}, 2);
+    auto plan = inventory_restore_missing(hard.exit_inventory, hard.exit_meseta, after, 0, InventoryRemovals());
+    expect_eq(2u, plan.items.size());
+    expect_eq(1350u, plan.meseta);
+    expect(inventory_loss_verdict(hard, false, plan.items.size(), plan.meseta) == V::RESTORABLE);
+    expect(inventory_loss_verdict(clean, false, plan.items.size(), plan.meseta) == V::NONE); // a 98: the card saved
+    expect(inventory_loss_verdict(run, false, plan.items.size(), plan.meseta) == V::NONE); // the guard restores it
+    expect(inventory_loss_verdict(hard, false, 0, 0) == V::NONE); // nothing missing
+    InventoryBackup done = hard;
+    done.restored = true;
+    expect(inventory_loss_verdict(done, false, 2, 0) == V::NONE);
+    // No end at all (crash or SIGKILL): not restorable, unless the older connection is still in that game
+    expect(inventory_loss_verdict(b, false, 2, 0) == V::SERVER_STOP);
+    expect(inventory_loss_verdict(b, true, 2, 0) == V::RESTORABLE);
+    std::string text = inventory_loss_text(V::RESTORABLE, 2, 1350);
+    expect(text.find("2 items en 1350 Meseta") != std::string::npos);
+    expect(text.find("%srestore in een gewone game") != std::string::npos); // add_color turns %s into a literal $
+    expect(add_color(text).find("$restore") != std::string::npos);
+    expect(inventory_loss_text(V::SERVER_STOP, 1, 0).find("1 item bij") != std::string::npos);
+    expect(inventory_loss_text(V::NONE, 2, 0).empty());
+
+    // Rule d (retention): a loss-marked or imported backup that is not restored never rotates out and wins the pick
+    std::vector<std::string> names;
+    for (size_t z = 0; z < 25; z++) {
+      names.emplace_back(std::format("20261025-{:02}0000-000000.json", z));
+    }
+    std::vector<F> flags(25);
+    flags[0].loss = true;
+    auto del = inventory_backup_files_to_delete(names, 20, flags);
+    expect_eq(4u, del.size());
+    expect(std::find(del.begin(), del.end(), names[0]) == del.end());
+    expect_eq(names[1], del.front());
+    expect_eq(names[4], del.back());
+    flags[0].restored = true; // once restored it rotates like any other
+    expect_eq(5u, inventory_backup_files_to_delete(names, 20, flags).size());
+    expect_eq(5u, inventory_backup_files_to_delete(names, 20).size());
+    expect(inventory_backup_pinned(F{false, false, true}) && inventory_backup_pinned(F{true, false, false}));
+    expect(!inventory_backup_pinned(F{false, true, true}) && !inventory_backup_pinned(F{}));
+    expect_eq(1, inventory_backup_pick_restore({names[0], names[1], names[2]}, {F{}, F{false, false, true}, F{}}, names[2]));
+    // On disk: a reconnect loop of 30 joins after the loss keeps the loss-marked backup
+    std::string root = std::format("{}/newserv-inventory-loss-test-{}", std::filesystem::temp_directory_path().string(), getpid());
+    std::filesystem::remove_all(root);
+    std::string dir = inventory_backup_character_directory(root, b.serial_number, b.disp);
+    InventoryBackup marked = hard;
+    marked.time_usecs = 1792930061000000ULL;
+    marked.loss_time_usecs = 1792930100000000ULL;
+    marked.loss_items = 2;
+    marked.loss_meseta = 1350;
+    std::string marked_path = inventory_backup_save(dir, marked, INVENTORY_BACKUP_KEEP);
+    auto reloaded = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(marked_path)));
+    expect_eq(marked.loss_time_usecs, reloaded.loss_time_usecs);
+    expect_eq(2u, reloaded.loss_items);
+    expect_eq(1350u, reloaded.loss_meseta);
+    for (size_t z = 1; z <= 30; z++) {
+      InventoryBackup join = b;
+      join.time_usecs = marked.time_usecs + z * 1000000;
+      inventory_backup_save(dir, join, INVENTORY_BACKUP_KEEP);
+    }
+    expect(std::filesystem::exists(marked_path));
+    expect_eq(21u, inventory_backup_list(dir).size());
+    std::filesystem::remove_all(root);
   }
 
   phosg::log_info_f("-- All static tests passed");

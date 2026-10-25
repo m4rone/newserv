@@ -14,6 +14,7 @@
 
 class Client;
 class Lobby;
+class ServerState;
 
 // Inventory backups (regie pso-regie-10, Marck 2026-10-25: security in the server, after Wakiru lost 14 items to
 // Sega's own penalty for a game that did not end cleanly: the q903 freeze of 13:35).
@@ -36,6 +37,19 @@ class Lobby;
 // same backup (Restored mark). Protected characters are allowed (regie: Marck must be able to restore Wakiru). What the
 // server saw leave the inventory since the current game began (drops, trades, sales, bank, use, mag feed, shop meseta)
 // is not counted as missing. Restored items get fresh item ids from the game (Lobby::generate_item_id).
+//
+// Hard ends (register item karakter-verlies-battle, 2026-10-25):
+// - Spire: a backup is a Spire backup (refused by $restore) only if the Spire guard took its snapshot for this character
+//   in that game (spire_guard_begin_run, inventory_backup_note_guarded); a q925 or other Spire-listed game without the
+//   guard's snapshot stays restorable, because nothing else would put it back.
+// - Server stop: SIGTERM/SIGINT (systemctl restart, apply-on-pc.sh) first writes Exit for every client still in a game
+//   (inventory_backup_on_server_stop), then the process ends as before. A crash or SIGKILL writes none: that game's
+//   backup stays without an end and $restore refuses it (UNKNOWN_END).
+// - Next login: the 61 shows what the client kept. If the backup $restore would use (inventory_backup_pick_restore) ended
+//   without a 98 and the 61 misses items or meseta of it, the server logs it, writes a Loss mark into that backup and
+//   tells the player in the lobby to type $restore in a normal game (inventory_loss_verdict). It never restores itself.
+// - Retention: an unrestored backup with a Loss mark or an import is never rotated out, and $restore picks it before
+//   later join backups, so a burst of joins (a reconnect loop) cannot push the pre-loss state away.
 
 constexpr const char* INVENTORY_BACKUP_DIRECTORY = "system/inventory-backups";
 constexpr size_t INVENTORY_BACKUP_KEEP = 20;
@@ -45,7 +59,7 @@ struct InventoryBackup {
   std::string character_id;
   uint64_t time_usecs = 0;
   uint32_t quest_number = 0;
-  bool spire = false;
+  bool spire = false; // the Spire guard took its snapshot for this character in this game (it restores the run)
   bool left_normally = false;
   bool restored = false;
   uint64_t restored_time_usecs = 0;
@@ -55,6 +69,10 @@ struct InventoryBackup {
   bool has_exit = false;
   PlayerInventory exit_inventory;
   uint32_t exit_meseta = 0;
+  // Loss mark (next login after a hard end): when the 61 first showed items or meseta of this backup missing
+  uint64_t loss_time_usecs = 0;
+  uint32_t loss_items = 0;
+  uint32_t loss_meseta = 0;
 };
 
 phosg::JSON inventory_backup_to_json(const InventoryBackup& b);
@@ -64,21 +82,27 @@ std::string inventory_backup_character_directory(const std::string& root, uint32
 std::string inventory_backup_basename_for_time(uint64_t usecs);
 // The *.json files of dir, oldest first (by name); empty if dir does not exist
 std::vector<std::string> inventory_backup_list(const std::string& dir);
-// The names (from a list sorted oldest first) to delete so only the newest keep remain
-std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std::string>& sorted_names, size_t keep);
+struct InventoryBackupPickFlags {
+  bool imported = false; // ImportedFrom set
+  bool restored = false; // Restored mark set
+  bool loss = false; // Loss mark set (the next login saw items missing after a hard end)
+};
+// Whether rotation must keep this backup and $restore prefers it: imported or loss-marked, and not yet restored
+bool inventory_backup_pinned(const InventoryBackupPickFlags& f);
+// The names (from a list sorted oldest first) to delete so only the newest keep remain; a name whose flags (flags[z] for
+// sorted_names[z], if present) are pinned is never deleted and does not count against keep
+std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std::string>& sorted_names, size_t keep,
+    const std::vector<InventoryBackupPickFlags>& flags = {});
 // Writes path atomically (temp file, fsync, rename)
 void inventory_backup_write_file(const std::string& path, const InventoryBackup& b);
 // Writes a new backup into dir, deletes all but the newest keep, and returns the path written
 std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep);
 // The index of the newest name that is not current_basename, or -1
 ssize_t inventory_backup_pick_previous(const std::vector<std::string>& sorted_names, const std::string& current_basename);
-struct InventoryBackupPickFlags {
-  bool imported = false; // ImportedFrom set
-  bool restored = false; // Restored mark set
-};
 // The backup $restore (and $restore check) uses, from names sorted oldest first and flags[z] for sorted_names[z]
-// (regie pso-regie-10): the newest imported backup that is not yet restored always wins over join backups, also over
-// later ones; otherwise the newest name that is not current_basename. Never current_basename; -1 if nothing is left
+// (regie pso-regie-10): the newest pinned backup (imported or loss-marked, not yet restored) always wins over join
+// backups, also over later ones; otherwise the newest name that is not current_basename. Never current_basename; -1 if
+// nothing is left
 ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_names,
     const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename);
 
@@ -124,10 +148,34 @@ InventoryRestorePlan inventory_restore_take(InventoryBackup& backup, const Inven
     uint64_t now_usecs);
 const char* inventory_restore_refusal_name(InventoryRestoreRefusal r);
 
+// The end of a game, written into its backup. normal: a 98. guard_covered: the Spire guard took its snapshot for this
+// character in this game (it restores the run itself). Otherwise inventory (the server's view at the end, null if
+// unknown) becomes Exit
+void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_covered, const PlayerInventory* inventory,
+    uint32_t meseta);
+
+// What the next login does with the backup $restore would use, given what is missing from it in the 61.
+// session_alive: an older connection of this character is still in that game (its Exit is still to come).
+enum class InventoryLossVerdict {
+  NONE = 0, // nothing to say: nothing missing, a 98, already restored, or the guard restores it
+  RESTORABLE, // tell the player to type $restore in a normal game
+  SERVER_STOP, // lost, but the game ended without any end state (crash or SIGKILL): $restore refuses it
+};
+InventoryLossVerdict inventory_loss_verdict(const InventoryBackup& b, bool session_alive, size_t missing_items,
+    uint32_t missing_meseta);
+// The lobby text for a verdict (empty for NONE); uses %s for a literal $ (add_color)
+std::string inventory_loss_text(InventoryLossVerdict v, size_t missing_items, uint32_t missing_meseta);
+
 // Server hooks
 void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);
 // normal: the client sent 98; otherwise it dropped out of the game (disconnect)
 void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, bool normal);
+// The Spire guard stored its snapshot for c in its current game (spire_guard_begin_run)
+void inventory_backup_note_guarded(std::shared_ptr<Client> c);
+// After the 61 of a login: the hard-end check above (logs, Loss mark, lobby text). Never throws
+void inventory_backup_on_login(std::shared_ptr<Client> c);
+// SIGTERM/SIGINT: writes Exit for every client still in a game; returns how many
+size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s);
 void inventory_backup_note_removed(std::shared_ptr<Client> c, const ItemData& item);
 void inventory_backup_note_meseta_removed(std::shared_ptr<Client> c, uint64_t meseta);
 // $restore / $restore check: returns the lines to show the player

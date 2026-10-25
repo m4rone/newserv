@@ -7,6 +7,7 @@
 #include <phosg/Random.hh>
 #include <phosg/Strings.hh>
 
+#include "InventoryBackup.hh"
 #include "ReceiveCommands.hh"
 #include "SendCommands.hh"
 #include "ServerState.hh"
@@ -21,6 +22,10 @@ asio::awaitable<void> SignalWatcher::signal_handler_task() {
 #ifndef PHOSG_WINDOWS
   this->signals.add(SIGUSR1);
   this->signals.add(SIGUSR2);
+  // Inventory backups (karakter-verlies-battle): a stop (systemctl restart, apply-on-pc.sh) is a hard end for every
+  // client in a game; write their Exit first, then end exactly as the default action would
+  this->signals.add(SIGTERM);
+  this->signals.add(SIGINT);
   for (;;) {
     int signum = co_await this->signals.async_wait(asio::use_awaitable);
     switch (signum) {
@@ -49,6 +54,19 @@ asio::awaitable<void> SignalWatcher::signal_handler_task() {
           phosg::fwrite_fmt(stderr, "Some configuration may have been reloaded. Fix the underlying issue and try again.\n");
         }
         break;
+      case SIGTERM:
+      case SIGINT: {
+        size_t count = 0;
+        try {
+          count = inventory_backup_on_server_stop(this->state);
+        } catch (const std::exception& e) {
+          this->log.warning_f("Inventory backup: server stop failed: {}", e.what());
+        }
+        this->log.info_f("Received signal {}; exit state written for {} client(s) in a game; stopping", signum, count);
+        ::signal(signum, SIG_DFL);
+        ::raise(signum);
+        break;
+      }
       default:
         this->log.warning_f("Unknown signal received: {}", signum);
     }

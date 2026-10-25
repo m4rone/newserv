@@ -309,6 +309,8 @@ asio::awaitable<void> start_login_server_procedure(std::shared_ptr<Client> c) {
     // send_get_player_info is required to differentiate Ep3 from Ep3 NTE. We send it early in the login procedure
     // because the contents of the card list update and the tournament entry depend on this difference.
     co_await send_get_player_info(c, false);
+    // Inventory backup: did the previous game end hard and Sega take items? Log it and tell the player (InventoryBackup.hh)
+    inventory_backup_on_login(c);
   }
 
   if (is_ep3(c->version())) {

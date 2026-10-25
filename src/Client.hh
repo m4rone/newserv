@@ -222,6 +222,9 @@ public:
   // the server saw leave the inventory since then (see InventoryBackup.hh)
   std::string inventory_backup_current;
   InventoryRemovals inventory_backup_removals;
+  // The Spire guard took its snapshot for this client in its current game; the login hard-end text went out already
+  bool inventory_backup_guarded = false;
+  bool inventory_loss_told = false;
 
   // File loading state
   std::unordered_map<std::string, std::shared_ptr<const std::string>> sending_files;

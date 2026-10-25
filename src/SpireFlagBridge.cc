@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "AsyncUtils.hh"
+#include "InventoryBackup.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireBBATxGuard.hh"
@@ -1448,7 +1449,12 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
       case SpireGuardStart::MARKER:
         break;
     }
-    return spire_guard_take_snapshot(c, quest_number);
+    if (!spire_guard_take_snapshot(c, quest_number)) {
+      return false;
+    }
+    // This game's inventory backup is now covered by the guard: $restore leaves it to the guard (InventoryBackup.hh)
+    inventory_backup_note_guarded(c);
+    return true;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to start run: {}; no overlay", e.what());
     return false;

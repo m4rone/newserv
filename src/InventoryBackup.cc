@@ -11,12 +11,15 @@
 #include <phosg/Filesystem.hh>
 #include <phosg/Time.hh>
 #include <stdexcept>
+#include <unordered_map>
 
+#include "AsyncUtils.hh"
 #include "Client.hh"
 #include "Lobby.hh"
 #include "SendCommands.hh"
 #include "ServerState.hh"
 #include "SpireFlagBridge.hh"
+#include "GameServer.hh"
 
 static std::string item_code(const ItemData& item) {
   // The $item form: data1 (24 hex digits), a space, data2 (8 hex digits)
@@ -58,6 +61,14 @@ phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
   if (!b.imported_from.empty()) {
     json.emplace("ImportedFrom", b.imported_from);
   }
+  if (b.loss_time_usecs) {
+    json.emplace("Loss", phosg::JSON::dict({
+        {"Time", b.loss_time_usecs},
+        {"TimeText", phosg::format_time(b.loss_time_usecs)},
+        {"Items", b.loss_items},
+        {"Meseta", b.loss_meseta},
+    }));
+  }
   if (b.has_exit) {
     json.emplace("Exit", phosg::JSON::dict({
         {"Meseta", b.exit_meseta},
@@ -81,6 +92,12 @@ InventoryBackup inventory_backup_from_json(const phosg::JSON& json) {
   b.imported_from = json.get_string("ImportedFrom", "");
   spire_guard_hex_decode(json.get_string("Inventory"), &b.inventory, sizeof(b.inventory));
   spire_guard_hex_decode(json.get_string("Disp"), &b.disp, sizeof(b.disp));
+  if (json.contains("Loss")) {
+    const auto& loss = json.at("Loss");
+    b.loss_time_usecs = loss.get_int("Time");
+    b.loss_items = loss.get_int("Items", 0);
+    b.loss_meseta = loss.get_int("Meseta", 0);
+  }
   if (json.contains("Exit")) {
     const auto& exit = json.at("Exit");
     b.has_exit = true;
@@ -118,11 +135,44 @@ std::vector<std::string> inventory_backup_list(const std::string& dir) {
   return ret;
 }
 
-std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std::string>& sorted_names, size_t keep) {
-  if (sorted_names.size() <= keep) {
-    return {};
+bool inventory_backup_pinned(const InventoryBackupPickFlags& f) {
+  return (f.imported || f.loss) && !f.restored;
+}
+
+std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std::string>& sorted_names, size_t keep,
+    const std::vector<InventoryBackupPickFlags>& flags) {
+  // Newest first: keep the newest keep unpinned names; pinned names always stay and do not use up keep
+  std::vector<std::string> ret;
+  size_t kept = 0;
+  for (ssize_t z = static_cast<ssize_t>(sorted_names.size()) - 1; z >= 0; z--) {
+    if ((static_cast<size_t>(z) < flags.size()) && inventory_backup_pinned(flags[z])) {
+      continue;
+    }
+    if (kept < keep) {
+      kept++;
+    } else {
+      ret.emplace_back(sorted_names[z]);
+    }
   }
-  return std::vector<std::string>(sorted_names.begin(), sorted_names.end() - keep);
+  std::reverse(ret.begin(), ret.end());
+  return ret;
+}
+
+static InventoryBackupPickFlags backup_pick_flags(const InventoryBackup& b) {
+  return InventoryBackupPickFlags{!b.imported_from.empty(), b.restored, b.loss_time_usecs != 0};
+}
+
+// The flags of every backup in dir (an unreadable file has none)
+static std::vector<InventoryBackupPickFlags> backup_flags_in(const std::string& dir, const std::vector<std::string>& names) {
+  std::vector<InventoryBackupPickFlags> ret;
+  for (const auto& name : names) {
+    try {
+      ret.emplace_back(backup_pick_flags(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(dir + "/" + name)))));
+    } catch (const std::exception&) {
+      ret.emplace_back();
+    }
+  }
+  return ret;
 }
 
 void inventory_backup_write_file(const std::string& path, const InventoryBackup& b) {
@@ -159,7 +209,9 @@ std::string inventory_backup_save(const std::string& dir, const InventoryBackup&
     path = std::format("{}/{}.{}.json", dir, basename.substr(0, basename.size() - 5), z);
   }
   inventory_backup_write_file(path, b);
-  for (const auto& name : inventory_backup_files_to_delete(inventory_backup_list(dir), keep)) {
+  auto names = inventory_backup_list(dir);
+  auto flags = (names.size() > keep) ? backup_flags_in(dir, names) : std::vector<InventoryBackupPickFlags>();
+  for (const auto& name : inventory_backup_files_to_delete(names, keep, flags)) {
     std::filesystem::remove(dir + "/" + name);
   }
   return path;
@@ -178,7 +230,7 @@ ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_nam
     const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename) {
   for (ssize_t z = static_cast<ssize_t>(sorted_names.size()) - 1; z >= 0; z--) {
     if ((sorted_names[z] != current_basename) && (static_cast<size_t>(z) < flags.size()) &&
-        flags[z].imported && !flags[z].restored) {
+        inventory_backup_pinned(flags[z])) {
       return z;
     }
   }
@@ -340,6 +392,43 @@ const char* inventory_restore_refusal_text(InventoryRestoreRefusal r) {
   return "";
 }
 
+void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_covered, const PlayerInventory* inventory,
+    uint32_t meseta) {
+  b.spire = b.spire || guard_covered;
+  if (normal) {
+    b.left_normally = true;
+  } else if (inventory) {
+    b.has_exit = true;
+    b.exit_inventory = *inventory;
+    b.exit_meseta = meseta;
+  }
+}
+
+InventoryLossVerdict inventory_loss_verdict(const InventoryBackup& b, bool session_alive, size_t missing_items,
+    uint32_t missing_meseta) {
+  using V = InventoryLossVerdict;
+  if (b.restored || b.left_normally || b.spire || (!missing_items && !missing_meseta)) {
+    return V::NONE;
+  }
+  return (b.has_exit || !b.imported_from.empty() || session_alive) ? V::RESTORABLE : V::SERVER_STOP;
+}
+
+std::string inventory_loss_text(InventoryLossVerdict v, size_t missing_items, uint32_t missing_meseta) {
+  std::string what = std::format("{} item{}", missing_items, (missing_items == 1) ? "" : "s");
+  if (missing_meseta) {
+    what = missing_items ? std::format("{} en {} Meseta", what, missing_meseta) : std::format("{} Meseta", missing_meseta);
+  }
+  switch (v) {
+    case InventoryLossVerdict::NONE:
+      return "";
+    case InventoryLossVerdict::RESTORABLE:
+      return std::format("Je verloor {} bij een\nhard einde van je vorige game.\nTyp %srestore in een gewone game.", what);
+    case InventoryLossVerdict::SERVER_STOP:
+      return std::format("Je verloor {} bij een\nharde serverstop. %srestore kan\ndit niet terugzetten.", what);
+  }
+  return "";
+}
+
 const char* inventory_restore_refusal_name(InventoryRestoreRefusal r) {
   switch (r) {
     case InventoryRestoreRefusal::NONE:
@@ -387,7 +476,21 @@ static bool lobby_is_spire(std::shared_ptr<const Client> c, std::shared_ptr<cons
   return l->quest && s->data->spire_meta_quest_numbers.count(l->quest->meta.quest_number);
 }
 
+// The backups whose game is still running, with the client in it: a login of the same character while the older
+// connection still sits in the game (until its idle timeout) sees no Exit yet, but one will come
+static std::unordered_map<std::string, std::weak_ptr<Client>> open_backups;
+
+static bool backup_session_alive(const std::string& path) {
+  auto it = open_backups.find(path);
+  if (it == open_backups.end()) {
+    return false;
+  }
+  auto c = it->second.lock();
+  return c && (c->inventory_backup_current == path);
+}
+
 void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  open_backups.erase(c->inventory_backup_current);
   c->inventory_backup_current.clear();
   c->inventory_backup_removals = InventoryRemovals();
   if (!l || !l->is_game()) {
@@ -405,11 +508,14 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
     b.character_id = spire_guard_character_id(p->disp);
     b.time_usecs = phosg::now();
     b.quest_number = l->quest ? l->quest->meta.quest_number : 0;
-    b.spire = lobby_is_spire(c, l);
+    // A Spire backup only once the guard takes its snapshot in this game (inventory_backup_note_guarded)
+    b.spire = false;
+    c->inventory_backup_guarded = false;
     b.inventory = p->inventory;
     b.disp = p->disp;
     std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
     c->inventory_backup_current = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
+    open_backups[c->inventory_backup_current] = c;
     c->log.info_f("Inventory backup: saved {} Lv{} ({} items, {} Meseta{}) to {}",
         p->disp.visual.name.decode(c->language()), p->disp.stats.level + 1, p->inventory.num_items,
         p->disp.stats.meseta.load(), c->is_spire_protected() ? ", protected character, read only" : "",
@@ -425,25 +531,98 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   }
   std::string path = c->inventory_backup_current;
   c->inventory_backup_current.clear();
+  open_backups.erase(path);
+  bool guarded = c->inventory_backup_guarded;
+  c->inventory_backup_guarded = false;
   try {
     auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
-    b.spire = b.spire || lobby_is_spire(c, l);
-    if (normal) {
-      b.left_normally = true;
-    } else {
-      auto p = c->character_file(false, false);
-      if (p) {
-        b.has_exit = true;
-        b.exit_inventory = p->inventory;
-        b.exit_meseta = p->disp.stats.meseta;
-      }
-    }
+    auto p = normal ? nullptr : c->character_file(false, false);
+    inventory_backup_record_end(b, normal, guarded, p ? &p->inventory : nullptr, p ? p->disp.stats.meseta.load() : 0);
     inventory_backup_write_file(path, b);
     c->log.info_f("Inventory backup: game ended {} ({}{})", normal ? "normally (98)" : "without a 98 (exit state saved)",
         path, b.spire ? ", Spire run" : "");
   } catch (const std::exception& e) {
     c->log.warning_f("Inventory backup: cannot record the end of the game in {}: {}", path, e.what());
   }
+}
+
+void inventory_backup_note_guarded(std::shared_ptr<Client> c) {
+  c->inventory_backup_guarded = true;
+}
+
+static asio::awaitable<void> send_loss_text(std::weak_ptr<Client> weak_c, std::string text) {
+  // After the login the client goes to the lobby; the text waits for it (at most two minutes)
+  for (size_t tries = 0; tries < 24; tries++) {
+    co_await async_sleep(std::chrono::seconds(5));
+    auto c = weak_c.lock();
+    if (!c || !c->channel->connected()) {
+      co_return;
+    }
+    auto l = c->lobby.lock();
+    if (l && !l->is_game() && !c->check_flag(Client::Flag::LOADING)) {
+      send_text_message(c, text);
+      c->log.info_f("Inventory backup: hard-end text sent in the lobby");
+      co_return;
+    }
+  }
+}
+
+void inventory_backup_on_login(std::shared_ptr<Client> c) {
+  try {
+    uint32_t serial = backup_serial_for_client(c);
+    auto p = c->character_file(false, false);
+    if (!serial || !p || c->inventory_loss_told) {
+      return;
+    }
+    std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
+    auto names = inventory_backup_list(dir);
+    auto flags = backup_flags_in(dir, names);
+    ssize_t index = inventory_backup_pick_restore(names, flags, "");
+    if (index < 0) {
+      return;
+    }
+    std::string path = dir + "/" + names[index];
+    auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
+    const auto& source = b.has_exit ? b.exit_inventory : b.inventory;
+    uint32_t source_meseta = b.has_exit ? b.exit_meseta : b.disp.stats.meseta.load();
+    auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta, InventoryRemovals());
+    auto verdict = inventory_loss_verdict(b, backup_session_alive(path), plan.items.size(), plan.meseta);
+    if (verdict == InventoryLossVerdict::NONE) {
+      return;
+    }
+    std::string name = p->disp.visual.name.decode(c->language());
+    c->log.warning_f("Inventory backup: login 61 of {} ({}) misses {} items and {} Meseta of {} ({} items, {} Meseta{}): {}",
+        name, c->is_spire_protected() ? "protected character" : "character", plan.items.size(), plan.meseta, path,
+        source.num_items, source_meseta, b.has_exit ? ", Exit" : ", join",
+        (verdict == InventoryLossVerdict::RESTORABLE) ? "hard end, $restore told" : "server stop without an end state, not restorable");
+    if (!b.loss_time_usecs) {
+      b.loss_time_usecs = phosg::now();
+      b.loss_items = plan.items.size();
+      b.loss_meseta = plan.meseta;
+      inventory_backup_write_file(path, b); // the Loss mark pins it against rotation and later join backups
+    }
+    c->inventory_loss_told = true;
+    asio::co_spawn(*c->require_server_state()->io_context,
+        send_loss_text(c, inventory_loss_text(verdict, plan.items.size(), plan.meseta)), asio::detached);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Inventory backup: login check failed: {}", e.what());
+  }
+}
+
+size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s) {
+  size_t count = 0;
+  if (!s->game_server) {
+    return 0;
+  }
+  for (const auto& c : s->game_server->all_clients()) {
+    auto l = c->lobby.lock();
+    if (c->inventory_backup_current.empty() || !l || !l->is_game()) {
+      continue;
+    }
+    inventory_backup_on_game_end(c, l, false);
+    count++;
+  }
+  return count;
 }
 
 void inventory_backup_note_removed(std::shared_ptr<Client> c, const ItemData& item) {
@@ -482,7 +661,7 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
     } catch (const std::exception& e) {
       c->log.warning_f("Restore: cannot read {}/{}: {}", dir, backup_name, e.what());
     }
-    flags.emplace_back(InventoryBackupPickFlags{b && !b->imported_from.empty(), b && b->restored});
+    flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());
     loaded.emplace_back(std::move(b));
   }
   ssize_t index = inventory_backup_pick_restore(names, flags, current);
