@@ -127,6 +127,36 @@ void run_static_tests() {
     expect(!spire_guard_same_state(level.first, level.second, snapshot.first, snapshot.second));
   }
 
+  phosg::log_info_f("-- Spire guard: the restore checks compare the material counters too (v38)");
+  {
+    PlayerInventory real, back;
+    real.num_items = back.num_items = 20;
+    real.items[8].extension_data2 = back.items[8].extension_data2 = 125; // Power at the limit (Omgzors)
+    real.hp_from_materials = back.hp_from_materials = 2 * 37;
+    expect(spire_guard_same_materials(real, back));
+    for (size_t z = 8; z <= 12; z++) { // each of Power, Mind, Evade, Def, Luck
+      PlayerInventory off = back;
+      off.items[z].extension_data2++;
+      expect(!spire_guard_same_materials(off, real));
+    }
+    PlayerInventory hp = back;
+    hp.hp_from_materials += 2;
+    expect(!spire_guard_same_materials(hp, real));
+    PlayerInventory tp = back;
+    tp.tp_from_materials = 2;
+    expect(!spire_guard_same_materials(tp, real));
+    PlayerInventory stamp = back; // items[4..7] hold the save time and [13..15] are unknown: not compared
+    stamp.items[4].extension_data2 = 0x55;
+    stamp.items[13].extension_data2 = 1;
+    expect(spire_guard_same_materials(stamp, real));
+    PlayerDispDataV4 disp;
+    expect(spire_guard_same_state(back, disp, real, disp));
+    PlayerInventory used = back;
+    used.items[9].extension_data2 = 3;
+    expect(!spire_guard_same_state(used, disp, real, disp)); // same items, level, EXP and meseta: not the same state
+    expect_eq(std::string("pow 125 mind 0 evade 0 def 0 luck 0 hp 37 tp 0"), spire_guard_materials_str(real));
+  }
+
   phosg::log_info_f("-- Spire guard: the lobby restore waits for the 99 after the 67 and the B1 (v33)");
   {
     using E = SpireGuardLobbyGate::Event;
@@ -257,6 +287,8 @@ void run_static_tests() {
     expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000602));
     expect_eq(std::string("Partner has not taken a reward. The way is open."), spire_bridge_message_text(0x43000702));
     expect_eq(std::string("Partner is in the shop. The warp waits for him."), spire_bridge_message_text(0x43000802));
+    expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000901)); // leader
+    expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000900)); // follower
     for (uint32_t value : {0x43000302u, 0x43000402u, 0x43000502u}) {
       expect(spire_bridge_message_text(value).empty());
     }

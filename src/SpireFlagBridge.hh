@@ -76,7 +76,7 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   v36 (quest spike/stadstart b29f310), each to the writer only: 'G' pause B (0: Continue, 1: Ready) · 'U' down
 //   (1: down, 0: back on its feet) · 'H' hint: close the board and take a step · 'A' pipe approach (type << 8 | room
 //   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
-//   (point << 8 | room number; points 1, 2, 6, 7, 8; 3-5 are retired and taken without a text or a log line)
+//   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q') and the lab probe ('N').
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
@@ -318,6 +318,10 @@ bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDa
     const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp);
 bool spire_guard_run_start_keeps_snapshot(bool awaiting_save, bool lower_level, bool same_state);
 bool spire_guard_push_verified(bool same_stats, bool same_items);
+// v38: the material usage counters equal (Power, Mind, Evade, Def, Luck in items[8..12].extension_data2; HP and TP in
+// hp_from_materials / tp_from_materials); part of spire_guard_same_state and of both restore checks, like the items.
+bool spire_guard_same_materials(const PlayerInventory& a, const PlayerInventory& b);
+std::string spire_guard_materials_str(const PlayerInventory& inv);
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS = 30;
 enum class SpireNoQuestAction { NONE, WAIT, EXIT, TELL };
 SpireNoQuestAction spire_guard_no_quest_action(

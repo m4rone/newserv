@@ -722,6 +722,8 @@ std::string spire_bridge_message_text(uint32_t value) {
           return "Partner has not taken a reward. The way is open.";
         case 8:
           return "Partner is in the shop. The warp waits for him.";
+        case 9: // v38: the low byte is 1 on the leader, 0 on the follower; same text
+          return "Waiting for your partner at Forest 1.";
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
@@ -1290,11 +1292,34 @@ bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, con
   return ka == kb;
 }
 
-// v32: level, EXP, meseta and items equal (spire_guard_same_inventory)
+// v38 (regie, output/materials-diagnose-2026-10-25.md): the material usage counters. Power, Mind, Evade, Def and Luck
+// sit in items[8..12].extension_data2 (by position, not with an item), HP and TP in hp_from_materials and
+// tp_from_materials (see PlayerInventory.hh and PSOBBCharacterFile::get_material_usage). The run overlay keeps the five
+// stat counters, so a restore that left them wrong would pass the item check unnoticed.
+bool spire_guard_same_materials(const PlayerInventory& a, const PlayerInventory& b) {
+  if ((a.hp_from_materials != b.hp_from_materials) || (a.tp_from_materials != b.tp_from_materials)) {
+    return false;
+  }
+  for (size_t z = 8; z <= 12; z++) {
+    if (a.items[z].extension_data2 != b.items[z].extension_data2) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string spire_guard_materials_str(const PlayerInventory& inv) {
+  return std::format("pow {} mind {} evade {} def {} luck {} hp {} tp {}", inv.items[8].extension_data2,
+      inv.items[9].extension_data2, inv.items[10].extension_data2, inv.items[11].extension_data2,
+      inv.items[12].extension_data2, inv.hp_from_materials >> 1, inv.tp_from_materials >> 1);
+}
+
+// v32: level, EXP, meseta and items equal (spire_guard_same_inventory); v38: and the material counters
 bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
     const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp) {
   return (disp.stats.level == snapshot_disp.stats.level) && (disp.stats.exp == snapshot_disp.stats.exp) &&
-      spire_guard_same_inventory(inventory, disp.stats.meseta, snapshot_inventory, snapshot_disp.stats.meseta);
+      spire_guard_same_inventory(inventory, disp.stats.meseta, snapshot_inventory, snapshot_disp.stats.meseta) &&
+      spire_guard_same_materials(inventory, snapshot_inventory);
 }
 
 // v32: at a run start under AwaitingSave the stored snapshot is kept when the character data shows a lower level
@@ -1575,12 +1600,20 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
       num_items, snapshot_num_items, (num_items == snapshot_num_items) ? "equal" : "different");
   // v32: the items and meseta must equal the snapshot's too
   bool same_stats = (level == snapshot_level) && (exp == snapshot_exp);
-  bool same_items = spire_guard_same_inventory(
+  bool same_inventory = spire_guard_same_inventory(
       character->inventory, character->disp.stats.meseta, snapshot.inventory, snapshot.disp.stats.meseta);
+  // v38: the material counters too, handled like an item mismatch (marker kept, the next login pushes again)
+  bool same_materials = spire_guard_same_materials(character->inventory, snapshot.inventory);
+  if (!same_materials) {
+    c->log.warning_f("Spire guard: material counters after the restore for serial {:010} differ: 61 shows {}, snapshot {}",
+        serial_number, spire_guard_materials_str(character->inventory), spire_guard_materials_str(snapshot.inventory));
+  }
+  bool same_items = same_inventory && same_materials;
   if (!spire_guard_push_verified(same_stats, same_items)) {
     c->log.warning_f("Spire guard: restore not verified for serial {:010}: 61 shows Lv{} EXP {} meseta {}, snapshot Lv{} EXP {} meseta {}; {}; {}; marker kept",
         serial_number, level + 1, exp, character->disp.stats.meseta.load(), snapshot_level + 1, snapshot_exp,
-        snapshot.disp.stats.meseta.load(), items_str, same_stats ? "the items or meseta differ" : "level or EXP differ");
+        snapshot.disp.stats.meseta.load(), items_str,
+        !same_stats ? "level or EXP differ" : (same_inventory ? "the material counters differ" : "the items or meseta differ"));
     return false;
   }
   snapshot.restore_pending = false;
@@ -1752,8 +1785,15 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
         // v31: only with the snapshot's items and meseta too; a run character with the same level and EXP (no overlay
         // fingerprint is kept then, v14) otherwise passes for the real one.
         bool same_stats = (level == snapshot.disp.stats.level) && (exp == snapshot.disp.stats.exp);
-        bool same_items = spire_guard_same_inventory(
+        bool same_inventory = spire_guard_same_inventory(
             character->inventory, character->disp.stats.meseta, snapshot.inventory, snapshot.disp.stats.meseta);
+        // v38: the material counters too, like the items
+        bool same_materials = spire_guard_same_materials(character->inventory, snapshot.inventory);
+        if (same_stats && same_inventory && !same_materials) {
+          c->log.warning_f("Spire guard: login 61 for serial {:010}: material counters {}, snapshot {}",
+              serial_number, spire_guard_materials_str(character->inventory), spire_guard_materials_str(snapshot.inventory));
+        }
+        bool same_items = same_inventory && same_materials;
         bool same = same_stats && same_items;
         if (same || (!same_stats && !shows_overlay && !lost_exp)) {
           snapshot.has_overlay = false;
@@ -1767,7 +1807,7 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
             serial_number, level + 1, exp, character->inventory.num_items, character->disp.stats.meseta.load(),
             snapshot.disp.stats.level + 1, snapshot.disp.stats.exp.load(), snapshot.inventory.num_items,
             snapshot.disp.stats.meseta.load(),
-            same_stats ? "the items differ from the snapshot (the card still holds the run)"
+            same_stats ? "the items or material counters differ from the snapshot (the card still holds the run)"
                        : (shows_overlay ? "the card still holds the overlay" : "less EXP than the snapshot"));
       } else {
         c->log.info_f("Spire guard: no login 61 for serial {:010}; cannot confirm the lobby restore, pushing again", serial_number);
