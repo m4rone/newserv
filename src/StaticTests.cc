@@ -633,6 +633,31 @@ void run_static_tests() {
     expect(!empty.is_spire_blocked_quest(123, nullptr, 929, true)); // no protected characters: nothing blocked
   }
 
+  phosg::log_info_f("-- Spire protected characters: character cheats refused everywhere (regie pso-regie-9)");
+  {
+    for (const char* cmd : {"$edit", "$item", "$matcount", "$loadchar", "$qset", "$qclear", "$qgwrite", "$bank",
+             "$switchchar", "$patch", "$writemem", "$nativecall"}) {
+      expect(DataIndex::spire_cheat_refused(cmd, true));    // the protected character: refused
+      expect(!DataIndex::spire_cheat_refused(cmd, false));  // any other character: allowed
+    }
+    expect(!DataIndex::spire_cheat_refused("$i", true));    // the dispatcher passes the first name ($item), not the alias
+    for (const char* cmd : {"$fastkill", "$infhp", "$inftp", "$secid", "$savechar", "$bbchar", "$spire", "$li"}) {
+      expect(!DataIndex::spire_cheat_refused(cmd, true));   // does not change the character: allowed
+    }
+    // Per character, never by serial alone: serial 3117539659 is the Wii that carries Wakiru and the test character BidX
+    DataIndex d;
+    d.spire_blocked_quest_numbers.emplace(929);
+    d.spire_blocked_characters.emplace_back(3117539659, "Wakiru");
+    for (const char* cmd : {"$edit", "$item", "$matcount"}) {
+      expect(DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "Wakiru")));
+      expect(DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "\tEWakiru")));
+      expect(!DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "BidX")));
+      expect(!DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, ""))); // no character data
+      expect(!DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539666, "Wakiru")));
+    }
+    expect(!DataIndex::spire_cheat_refused("$fastkill", d.is_spire_protected_character(3117539659, "Wakiru")));
+  }
+
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
   {
     DataIndex d;

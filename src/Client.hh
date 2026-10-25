@@ -272,6 +272,8 @@ public:
       bool v1_present) const;
   // v27: true when this client's GC serial and character name are in SpireBlockedCharacters for that quest
   bool is_spire_blocked(std::shared_ptr<const Quest> q) const;
+  // True when this client's GC serial and character name are in SpireBlockedCharacters, whatever the quest
+  bool is_spire_protected() const;
   bool can_see_quest(
       std::shared_ptr<const Quest> q,
       std::shared_ptr<const Lobby> game,

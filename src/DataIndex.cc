@@ -2204,6 +2204,24 @@ bool DataIndex::is_spire_blocked_quest(
                    : this->is_spire_blocked(gc_serial, *name, quest_number);
 }
 
+bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protected_character) {
+  static const std::unordered_set<std::string> refused = {
+      "$bank", // BB: switches the bank the character uses
+      "$edit", // stats, level, exp, materials, name, section ID, class
+      "$item", // creates an item (alias $i)
+      "$loadchar", // replaces the character with a server backup
+      "$matcount", // regie B-REGIE-9-4 (it only reads the material counts)
+      "$nativecall", // runs client code
+      "$patch", // writes client memory
+      "$qclear", // clears a quest flag on the character
+      "$qgwrite", // BB: writes a quest counter on the character
+      "$qset", // sets a quest flag on the character
+      "$switchchar", // BB: replaces the character
+      "$writemem", // writes client memory
+  };
+  return protected_character && refused.count(command_name);
+}
+
 bool DataIndex::is_spire_protected_character(uint32_t gc_serial, const std::string& name) const {
   // The client's name can carry a language marker (\tE, \tJ); names compare without it and without case
   auto plain = [](const std::string& n) -> std::string {

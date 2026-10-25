@@ -3241,6 +3241,17 @@ asio::awaitable<void> on_chat_command(std::shared_ptr<Client> c, const std::stri
     co_return;
   }
 
+  // Regie pso-regie-9: a protected character (SpireBlockedCharacters) never runs a cheat that changes it, in a lobby or
+  // a game, with or without a Spire quest
+  if (DataIndex::spire_cheat_refused(def->names.at(0), c->is_spire_protected())) {
+    auto p = c->character_file(false);
+    c->log.info_f("Spire guard: cheat {} refused for blocked character {} serial {}", cmd.name,
+        p ? p->disp.visual.name.decode(c->language()) : "(none)",
+        c->login && c->login->gc_license ? c->login->gc_license->serial_number : 0);
+    send_text_message(c, "$C6Niet op dit personage.");
+    co_return;
+  }
+
   try {
     co_await def->handler(Args{cmd.args, check_permissions, c});
   } catch (const precondition_failed& e) {

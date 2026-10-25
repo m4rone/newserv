@@ -193,6 +193,10 @@ struct DataIndex {
   bool is_spire_blocked(uint32_t gc_serial, const std::string& name, uint32_t quest_number) const;
   // True if the character is listed in SpireBlockedCharacters, whatever the quest
   bool is_spire_protected_character(uint32_t gc_serial, const std::string& name) const;
+  // Regie pso-regie-9: the stock chat commands that change a character's data (stats, level, items, quest flags, the
+  // whole character, or client memory) are refused everywhere for a protected character; command_name is the
+  // command's first name ("$item" for "$i"). Other commands ($fastkill, $infhp, $secid, ...) stay allowed.
+  static bool spire_cheat_refused(const std::string& command_name, bool protected_character);
   // The decision behind Client::is_spire_blocked. name is null if the client has no character to read it from (fail
   // closed: every listed quest and every Challenge quest is blocked). A Challenge quest is blocked for a protected
   // character whatever its number (audit S-3).

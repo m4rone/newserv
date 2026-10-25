@@ -419,6 +419,18 @@ bool Client::is_spire_blocked(std::shared_ptr<const Quest> q) const {
       this->login->gc_license->serial_number, p ? &name : nullptr, q->meta.quest_number, challenge);
 }
 
+bool Client::is_spire_protected() const {
+  if (!this->login || !this->login->gc_license) {
+    return false;
+  }
+  auto s = this->require_server_state();
+  // Per character, never by serial alone: one console carries the real character and the test characters (regie
+  // pso-regie-9, serial 3117539659 is Wakiru and BidX). Without character data only a Name-empty entry matches.
+  auto p = this->character_file(false);
+  return s->data->is_spire_protected_character(
+      this->login->gc_license->serial_number, p ? p->disp.visual.name.decode(this->language()) : "");
+}
+
 bool Client::can_see_quest(
     std::shared_ptr<const Quest> q,
     std::shared_ptr<const Lobby> game,
