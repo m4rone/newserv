@@ -45,16 +45,40 @@ constexpr uint16_t SPIRE_META_SERVER_LAST_FLAG = SPIRE_META_FLAG_PAY_RECORD;
 // The v5-v21 file <serial>.json (one per card) is never read, merged or moved: it cannot tell which character wrote a
 // flag, so it would hand the first character's unlocks to every character on the card.
 std::string spire_meta_filename_for(uint32_t serial_number, const PlayerDispDataV4* disp);
-SpireMetaFlags spire_meta_load(const std::string& filename); // empty if the file does not exist
+
+// Regie B-REGIE-10-2: a character without a meta file loses nothing at its first delivery. The file is adopted then:
+// with the 0x380-0x3A2 flags the character has (KNOWN, "Adopted": "known") if the server knows them, else with none and
+// the marker "Adopted": "unknown". The server does not know them on GC v3: the 61/98 player data has no quest flags
+// (C_CharacterData_V3_61_98, CommandFormats.hh; on_61_98 copies inventory, disp and records only), the server's own
+// character quest_flags follow a 6x75 on BB only (on_set_quest_flag), and a 6x6F join sync carries the leader's
+// game, not the joiner's card. So the delivery adopts UNKNOWN, and an UNKNOWN file never clears a flag it has no entry
+// for: an entry is a flag the character wrote in a Spire quest or the server set for it ('F' record code).
+enum class SpireMetaAdopted : uint8_t {
+  NO_MARKER = 0, // a file from before B-REGIE-10-2: cleared as before (audit S-6)
+  KNOWN,
+  UNKNOWN,
+};
+struct SpireMetaFile {
+  bool exists = false;
+  SpireMetaAdopted adopted = SpireMetaAdopted::NO_MARKER;
+  SpireMetaFlags flags;
+};
+SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
+SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags
+// The file adopted for a character without one; current = the character's quest flags, nullptr if the server does not
+// know them. Pure, for the offline test.
+SpireMetaFile spire_meta_adopt(const QuestFlags* current);
 
 // What a delivery sends: every stored entry, plus a clear of each server-owned flag (0x380-0x3A2) the character has no
-// entry for on the game's difficulty. Pure, for the offline test.
+// entry for on the game's difficulty (audit S-6). No such clears in the delivery that adopted the file (just_adopted)
+// and none ever for an UNKNOWN file. Pure, for the offline test.
 struct SpireMetaDelivery {
   uint8_t difficulty = 0;
   uint16_t flag = 0;
   bool set = false;
 };
-std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFlags& stored, uint8_t difficulty);
+std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFile& file, uint8_t difficulty,
+    bool just_adopted);
 
 // Audit S-6: in a game where the meta flags apply (spire_meta_delivery_applies), a quest flag write in 0x380-0x3AF
 // belongs to the writer: it is not forwarded to the other clients and not kept in the game's flag state (which a

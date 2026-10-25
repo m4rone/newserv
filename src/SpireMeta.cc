@@ -26,15 +26,21 @@ std::string spire_meta_filename_for(uint32_t serial_number, const PlayerDispData
   return std::format("{}/{:010}.{}.meta.json", SPIRE_BRIDGE_DIRECTORY, serial_number, spire_guard_character_id(*disp));
 }
 
-std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFlags& stored, uint8_t difficulty) {
+std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFile& file, uint8_t difficulty,
+    bool just_adopted) {
   std::vector<SpireMetaDelivery> ret;
-  for (const auto& [key, is_set] : stored) {
+  for (const auto& [key, is_set] : file.flags) {
     ret.emplace_back(SpireMetaDelivery{key.first, key.second, is_set});
+  }
+  // B-REGIE-10-2: the delivery that adopted the file clears nothing (the character keeps what it has), and an UNKNOWN
+  // file never clears a flag without an entry: the server never saw it, so it may be the character's own
+  if (just_adopted || (file.adopted == SpireMetaAdopted::UNKNOWN)) {
+    return ret;
   }
   // Audit S-6: what the server owns but this character never wrote is cleared on the game's difficulty, so a flag the
   // leader's join sync or an earlier character put into the client's game is not taken over
   for (uint16_t flag_num = SPIRE_BRIDGE_FIRST_FLAG; flag_num <= SPIRE_META_SERVER_LAST_FLAG; flag_num++) {
-    if (!stored.count(std::make_pair(difficulty, flag_num))) {
+    if (!file.flags.count(std::make_pair(difficulty, flag_num))) {
       ret.emplace_back(SpireMetaDelivery{difficulty, flag_num, false});
     }
   }
@@ -45,30 +51,78 @@ bool spire_meta_flag_is_shared(bool meta_game, uint16_t flag_num) {
   return !meta_game || (flag_num < SPIRE_BRIDGE_FIRST_FLAG) || (flag_num > SPIRE_BRIDGE_LAST_FLAG);
 }
 
-SpireMetaFlags spire_meta_load(const std::string& filename) {
-  SpireMetaFlags ret;
+SpireMetaFile spire_meta_load_file(const std::string& filename) {
+  SpireMetaFile ret;
   if (!std::filesystem::is_regular_file(filename)) {
     return ret;
   }
+  ret.exists = true;
   auto json = phosg::JSON::parse(phosg::load_file(filename));
+  std::string adopted = json.get_string("Adopted", "");
+  if (adopted == "unknown") {
+    ret.adopted = SpireMetaAdopted::UNKNOWN;
+  } else if (adopted == "known") {
+    ret.adopted = SpireMetaAdopted::KNOWN;
+  }
   for (const auto& entry_json : json.get_list("Flags")) {
     uint8_t difficulty = entry_json->get_int("Difficulty");
     uint16_t flag_num = entry_json->get_int("Flag");
     if ((difficulty <= 3) && (flag_num >= SPIRE_BRIDGE_FIRST_FLAG) && (flag_num <= SPIRE_BRIDGE_LAST_FLAG)) {
-      ret[std::make_pair(difficulty, flag_num)] = entry_json->get_bool("Set");
+      ret.flags[std::make_pair(difficulty, flag_num)] = entry_json->get_bool("Set");
     }
   }
   return ret;
 }
 
-static void spire_meta_save(const std::string& filename, uint32_t serial_number, const SpireMetaFlags& flags) {
+SpireMetaFlags spire_meta_load(const std::string& filename) {
+  return spire_meta_load_file(filename).flags;
+}
+
+SpireMetaFile spire_meta_adopt(const QuestFlags* current) {
+  SpireMetaFile ret;
+  ret.exists = true;
+  if (!current) {
+    ret.adopted = SpireMetaAdopted::UNKNOWN;
+    return ret;
+  }
+  ret.adopted = SpireMetaAdopted::KNOWN;
+  for (uint8_t difficulty = 0; difficulty <= 3; difficulty++) {
+    for (uint16_t flag_num = SPIRE_BRIDGE_FIRST_FLAG; flag_num <= SPIRE_META_SERVER_LAST_FLAG; flag_num++) {
+      if (current->get(static_cast<Difficulty>(difficulty), flag_num)) {
+        ret.flags[std::make_pair(difficulty, flag_num)] = true;
+      }
+    }
+  }
+  return ret;
+}
+
+static void spire_meta_save(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file) {
   phosg::JSON flags_json = phosg::JSON::list();
-  for (const auto& [key, is_set] : flags) {
+  for (const auto& [key, is_set] : file.flags) {
     flags_json.emplace_back(phosg::JSON::dict({{"Difficulty", key.first}, {"Flag", key.second}, {"Set", is_set}}));
   }
   auto json = phosg::JSON::dict({{"SerialNumber", serial_number}, {"Flags", std::move(flags_json)}});
+  if (file.adopted == SpireMetaAdopted::UNKNOWN) {
+    json.emplace("Adopted", "unknown");
+  } else if (file.adopted == SpireMetaAdopted::KNOWN) {
+    json.emplace("Adopted", "known");
+  }
   spire_bridge_write_durable(filename,
       json.serialize(phosg::JSON::SerializeOption::FORMAT | phosg::JSON::SerializeOption::HEX_INTEGERS));
+}
+
+// B-REGIE-10-2: the character's file, adopted (and written) first if it has none. The server does not know a GC v3
+// character's quest flags (see SpireMeta.hh), so the adoption is UNKNOWN. Sets *adopted if it adopted the file now.
+static SpireMetaFile spire_meta_load_or_adopt(
+    std::shared_ptr<Client> c, const std::string& filename, uint32_t serial_number, bool* adopted) {
+  auto file = spire_meta_load_file(filename);
+  *adopted = !file.exists;
+  if (*adopted) {
+    file = spire_meta_adopt(nullptr);
+    spire_meta_save(filename, serial_number, file);
+    c->log.info_f("Spire meta: adopted {} (Adopted: unknown); no flag cleared that the server never saw", filename);
+  }
+  return file;
 }
 
 bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, uint8_t difficulty, uint16_t flag_num,
@@ -77,9 +131,11 @@ bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, u
   if (filename.empty()) {
     return false;
   }
-  auto flags = spire_meta_load(filename);
+  bool adopted;
+  auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
+  auto& flags = file.flags;
   flags[std::make_pair(difficulty, flag_num)] = is_set;
-  spire_meta_save(filename, serial_number, flags);
+  spire_meta_save(filename, serial_number, file);
   c->log.info_f("Spire meta: recorded {} quest flag {}:{:04X} in {} ({} stored)", is_set ? "set" : "cleared",
       name_for_difficulty(static_cast<Difficulty>(difficulty)), flag_num, filename, flags.size());
   return true;
@@ -92,8 +148,13 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
       c->log.info_f("Spire meta: no character data for serial {:010}; no flags delivered", serial_number);
       return;
     }
-    auto flags = spire_meta_load(filename);
-    auto entries = spire_meta_delivery_entries(flags, static_cast<uint8_t>(l->difficulty));
+    bool adopted;
+    auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
+    auto entries = spire_meta_delivery_entries(file, static_cast<uint8_t>(l->difficulty), adopted);
+    if (entries.empty()) {
+      c->log.info_f("Spire meta: nothing to deliver from {} ({})", filename, adopted ? "just adopted" : "no entries");
+      return;
+    }
     // Same 6x75 form and 6D path as the bridge's delivery (send_game_flag_state_t); action 0 sets, 1 clears
     phosg::StringWriter w;
     for (const auto& e : entries) {
@@ -109,7 +170,7 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
       send_command(c, 0x6D, c->lobby_client_id, w.str());
     }
     c->log.info_f("Spire meta: delivered {} quest flag(s) from {} ({} stored) in {} game", entries.size(), filename,
-        flags.size(),
+        file.flags.size(),
         (l->mode == GameMode::BATTLE) ? "Battle" : "non-Battle");
   } catch (const std::exception& e) {
     c->log.warning_f("Spire meta: failed to deliver quest flags: {}", e.what());
@@ -196,7 +257,9 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   auto finish = spire_meta_decode_finish(finish_value);
   uint8_t difficulty = static_cast<uint8_t>(l->difficulty);
-  auto flags = spire_meta_load(filename);
+  bool adopted;
+  auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
+  auto& flags = file.flags;
   std::string unlocked;
   bool payout = false;
   std::string set_str;
@@ -214,7 +277,7 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
       }
     }
   }
-  spire_meta_save(filename, serial_number, flags);
+  spire_meta_save(filename, serial_number, file);
   spire_meta_deliver_flags(c, l, serial_number);
   c->log.info_f("Spire meta: finish {:08X} (exams {}, {}, {}) on {}: flags{} (* = new) in {}", finish_value,
       finish.exams, finish.won ? "won" : "not won", finish.deathless ? "deathless" : "deaths",

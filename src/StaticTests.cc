@@ -797,8 +797,15 @@ void run_static_tests() {
       }
       return ret;
     };
-    auto to_a = spire_meta_delivery_entries(stored_a, 0);
-    auto to_b = spire_meta_delivery_entries(stored_b, 0);
+    expect(spire_meta_load_file(local(spire_meta_filename_for(42, &a))).exists);
+    expect(spire_meta_load_file(local(spire_meta_filename_for(42, &a))).adopted == SpireMetaAdopted::NO_MARKER);
+    expect(!spire_meta_load_file(local(spire_meta_filename_for(42, &b))).exists);
+    // A's file is from before B-REGIE-10-2 (no marker); B here has an empty file of its own from then: both cleared
+    // as before
+    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a};
+    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b};
+    auto to_a = spire_meta_delivery_entries(file_a, 0, false);
+    auto to_b = spire_meta_delivery_entries(file_b, 0, false);
     expect_eq(1, value_of(to_a, 0x0384));                    // A's own unlock
     expect_eq(1, value_of(to_a, SPIRE_META_FLAG_PAY_WIN));   // A's payout
     expect_eq(1, value_of(to_a, SPIRE_META_FLAG_PAY_DEATHLESS));
@@ -818,6 +825,87 @@ void run_static_tests() {
     expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_FIRST_FLAG - 1)); // a quest's own flags: shared as before
     expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_LAST_FLAG + 1));
     expect(spire_meta_flag_is_shared(false, SPIRE_META_FLAG_PAY_WIN));    // a normal game: unchanged
+    std::filesystem::remove_all(dir);
+  }
+
+  phosg::log_info_f("-- Spire meta flags: a character without a meta file loses nothing at its first delivery (B-REGIE-10-2)");
+  {
+    auto value_of = [](const std::vector<SpireMetaDelivery>& v, uint8_t difficulty, uint16_t flag) -> int {
+      int ret = -1;
+      for (const auto& e : v) {
+        if ((e.difficulty == difficulty) && (e.flag == flag)) {
+          expect_eq(-1, ret); // one entry per flag
+          ret = e.set ? 1 : 0;
+        }
+      }
+      return ret;
+    };
+    auto clears = [](const std::vector<SpireMetaDelivery>& v) {
+      size_t ret = 0;
+      for (const auto& e : v) {
+        ret += e.set ? 0 : 1;
+      }
+      return ret;
+    };
+    // Known source: A has 0x380 and 0x384 on Normal, 0x3A0 on Hard, and 0x3A8 (q925's, not server-owned)
+    QuestFlags current;
+    current.set(Difficulty::NORMAL, 0x0380);
+    current.set(Difficulty::NORMAL, 0x0384);
+    current.set(Difficulty::HARD, SPIRE_META_FLAG_PAY_WIN);
+    current.set(Difficulty::NORMAL, 0x03A8);
+    current.set(Difficulty::NORMAL, 0x0200);
+    auto adopted = spire_meta_adopt(&current);
+    expect(adopted.exists);
+    expect(adopted.adopted == SpireMetaAdopted::KNOWN);
+    SpireMetaFlags expected_flags{{{0, 0x0380}, true}, {{0, 0x0384}, true}, {{1, SPIRE_META_FLAG_PAY_WIN}, true}};
+    expect(adopted.flags == expected_flags); // exactly the server-owned flags it has, per difficulty
+    auto first = spire_meta_delivery_entries(adopted, 0, true);
+    expect_eq(0u, clears(first)); // the first delivery clears nothing
+    expect_eq(1, value_of(first, 0, 0x0380));
+    expect_eq(1, value_of(first, 0, 0x0384));
+    expect_eq(1, value_of(first, 1, SPIRE_META_FLAG_PAY_WIN));
+    expect_eq(-1, value_of(first, 0, 0x0381));
+    expect_eq(3u, first.size());
+    // The next delivery (file exists, KNOWN) clears only the server-owned flags without an entry
+    auto second = spire_meta_delivery_entries(adopted, 0, false);
+    expect_eq(1, value_of(second, 0, 0x0380));
+    expect_eq(1, value_of(second, 0, 0x0384));
+    expect_eq(0, value_of(second, 0, 0x0381));
+    expect_eq(0, value_of(second, 0, SPIRE_META_FLAG_PAY_RECORD));
+    expect_eq(-1, value_of(second, 0, 0x03A8)); // not server-owned: never cleared
+    expect_eq(static_cast<size_t>(SPIRE_META_SERVER_LAST_FLAG - SPIRE_BRIDGE_FIRST_FLAG + 1 - 2), clears(second));
+
+    // Unknown source (GC v3): an empty file marked unknown; no delivery ever clears a flag it never saw
+    auto unknown = spire_meta_adopt(nullptr);
+    expect(unknown.exists);
+    expect(unknown.adopted == SpireMetaAdopted::UNKNOWN);
+    expect(unknown.flags.empty());
+    expect(spire_meta_delivery_entries(unknown, 0, true).empty());
+    expect(spire_meta_delivery_entries(unknown, 0, false).empty());
+    // After a run the server set 0x380 for it and the character cleared 0x3A0 in q925: those entries are sent, nothing else
+    unknown.flags[std::make_pair(0, SPIRE_META_FLAG_FIRST_RUN)] = true;
+    unknown.flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)] = false;
+    auto later = spire_meta_delivery_entries(unknown, 0, false);
+    expect_eq(2u, later.size());
+    expect_eq(1, value_of(later, 0, SPIRE_META_FLAG_FIRST_RUN));
+    expect_eq(0, value_of(later, 0, SPIRE_META_FLAG_PAY_WIN));
+    expect_eq(-1, value_of(later, 0, 0x0384));
+
+    // The marker survives on disk; a file without it keeps the S-6 clears
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-adopt-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto unknown_name = (dir / "unknown.meta.json").string();
+    auto known_name = (dir / "known.meta.json").string();
+    auto old_name = (dir / "old.meta.json").string();
+    phosg::save_file(unknown_name, "{\"SerialNumber\":42,\"Adopted\":\"unknown\",\"Flags\":[]}");
+    phosg::save_file(known_name, "{\"SerialNumber\":42,\"Adopted\":\"known\",\"Flags\":[]}");
+    phosg::save_file(old_name, "{\"SerialNumber\":42,\"Flags\":[]}");
+    expect(spire_meta_load_file(unknown_name).adopted == SpireMetaAdopted::UNKNOWN);
+    expect(spire_meta_load_file(known_name).adopted == SpireMetaAdopted::KNOWN);
+    expect(spire_meta_load_file(old_name).adopted == SpireMetaAdopted::NO_MARKER);
+    expect(spire_meta_delivery_entries(spire_meta_load_file(unknown_name), 0, false).empty());
+    expect_eq(static_cast<size_t>(SPIRE_META_SERVER_LAST_FLAG - SPIRE_BRIDGE_FIRST_FLAG + 1),
+        clears(spire_meta_delivery_entries(spire_meta_load_file(old_name), 0, false)));
     std::filesystem::remove_all(dir);
   }
 
