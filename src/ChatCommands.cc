@@ -1276,7 +1276,7 @@ ChatCommandDefinition cc_item(
       co_return;
     });
 
-// Regie pso-regie-10: "$kit" drops a fixed start set (DataIndex::spire_start_kit) at the player's feet, as $item does
+// Regie pso-regie-10: "$kit" drops the class's start set (DataIndex::spire_start_kit) at the player's feet, as $item does
 // for one item; "$kit mat" drops the next batch of at most 30 materials (spire_kit_material_batch), counted per client
 // and game so the player picks up between calls. Only in a normal game: refused in a lobby and in a Spire run; refused
 // for a protected character by the dispatcher (spire_cheat_refused).
@@ -1299,15 +1299,17 @@ ChatCommandDefinition cc_kit(
       a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
 
       const auto& limits = *s->data->item_stack_limits(a.c->version());
+      uint8_t char_class = a.c->character_file()->disp.visual.sh.char_class;
+      auto targets = DataIndex::spire_kit_material_targets(char_class, *s->data->level_table(a.c->version()));
       std::vector<ItemData> items;
       if (materials) {
         if (a.c->spire_kit_game.lock() != l) {
           a.c->spire_kit_game = l;
           a.c->spire_kit_materials_dropped = 0;
         }
-        items = DataIndex::spire_kit_material_batch(limits, a.c->spire_kit_materials_dropped);
+        items = DataIndex::spire_kit_material_batch(limits, targets, a.c->spire_kit_materials_dropped);
       } else {
-        items = DataIndex::spire_start_kit();
+        items = DataIndex::spire_start_kit(char_class);
       }
       for (auto& item : items) {
         item.enforce_stack_size_limits(limits);
@@ -1322,7 +1324,7 @@ ChatCommandDefinition cc_kit(
       }
       if (materials) {
         a.c->spire_kit_materials_dropped += items.size();
-        size_t total = DataIndex::spire_kit_materials(limits).size();
+        size_t total = DataIndex::spire_kit_materials(limits, targets).size();
         size_t remaining = total - std::min(total, a.c->spire_kit_materials_dropped);
         send_text_message(a.c, DataIndex::spire_kit_material_message(items.size(), remaining));
       } else {

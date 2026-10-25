@@ -667,65 +667,113 @@ void run_static_tests() {
 
   phosg::log_info_f("-- Spire $kit: the start set; only in a normal game, never for Wakiru (regie pso-regie-10)");
   {
-    auto raw = [](const ItemData& item) -> std::string {
-      return std::format("{:08X}{:08X}{:08X}{:08X}", static_cast<uint32_t>(item.data1db[0]),
-          static_cast<uint32_t>(item.data1db[1]), static_cast<uint32_t>(item.data1db[2]),
-          static_cast<uint32_t>(item.data2db));
-    };
     const auto& limits = ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4;
-    auto kit = DataIndex::spire_start_kit();
-    // Weapons, frame, shield and units: Marck's codes padded to 16 bytes
-    const std::vector<std::string> fixed = {
-        "008A0200000003320432053200000000",
-        "00040600000003320432053200000000",
-        "00340000000003320432053200000000",
-        "001F0000000003320432053200000000",
-        "00330000000003320432053200000000",
-        "01013000000400000000000000000000",
-        "01022700000000000000000000000000",
-        "01030300000000000000000000000000",
-        "01031300000000000000000000000000",
-        "01030B00000000000000000000000000",
-        "01030F00000000000000000000000000",
-    };
-    expect_eq(12, kit.size()); // the base call: no materials
-    for (size_t z = 0; z < fixed.size(); z++) {
-      expect_eq(fixed[z], raw(kit[z]));
-    }
-    // The mag: type 1D, DEF 5 / POW 128 / DEX 67 / MIND 0, level 200, synchro 120 and IQ 200 (data2 78C80000)
-    const auto& mag = kit[fixed.size()];
-    expect_eq("021DC800F40100322C1A000078C80000", raw(mag));
-    expect_eq(5, mag.data1w[2] / 100);
-    expect_eq(128, mag.data1w[3] / 100);
-    expect_eq(67, mag.data1w[4] / 100);
-    expect_eq(0, mag.data1w[5] / 100);
-    expect_eq(200, mag.compute_mag_level());
-    expect_eq(200, mag.data1[2]);
-    // "$kit mat" ten times: at most 30 per call, together exactly Power 72, Def 33, Luck 45, HP 125 in that order, no
-    // stack above the client's limit (GC v3: 030B is not stackable, 275 items); the eleventh call drops nothing
-    expect_eq(1, DataIndex::spire_kit_materials(limits).back().max_stack_size(limits));
-    std::map<uint8_t, size_t> totals;
-    std::vector<uint8_t> order;
-    size_t dropped = 0;
-    for (size_t call = 0; call < 10; call++) {
-      auto batch = DataIndex::spire_kit_material_batch(limits, dropped);
-      expect(!batch.empty());
-      expect(batch.size() <= 30);
-      for (const auto& item : batch) {
-        expect_eq(0x030B, (item.data1[0] << 8) | item.data1[1]);
-        expect(item.stack_size(limits) <= item.max_stack_size(limits));
-        totals[item.data1[2]] += item.stack_size(limits);
-        if (order.empty() || (order.back() != item.data1[2])) {
-          order.emplace_back(item.data1[2]);
+    auto pmt = ItemParameterTable::from_json(
+        phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable kit_levels(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    // Per class (all 12 GC classes): every weapon, frame and shield has the class's bits in UsabilityFlags (units have
+    // no usability field); the mag is level 200 and fits the class; the material plan keeps every cap and no stat
+    // goes over the class's MaxStats at level 200; "$kit mat" drops exactly that plan in batches of at most 30
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      bool android = char_class_is_android(cls);
+      uint8_t bits = spire_weapon_usability_bits(cls);
+      auto kit = DataIndex::spire_start_kit(cls);
+      expect_eq(12, kit.size());
+      size_t weapons = 0, frames = 0, shields = 0, units = 0;
+      for (size_t z = 0; z + 1 < kit.size(); z++) {
+        const auto& item = kit[z];
+        if (item.data1[0] == 0x00) {
+          weapons++;
+          expect_eq(bits, pmt->get_weapon(item.data1[1], item.data1[2]).usability_flags & bits);
+        } else {
+          expect_eq(0x01, item.data1[0]);
+          if (item.data1[1] == 0x03) {
+            units++;
+            pmt->get_unit(item.data1[2]);
+          } else {
+            (item.data1[1] == 0x01) ? frames++ : shields++;
+            expect_eq(bits, pmt->get_armor_or_shield(item.data1[1], item.data1[2]).usability_flags & bits);
+          }
         }
       }
-      dropped += batch.size();
+      expect_eq(5, weapons);
+      expect_eq(1, frames);
+      expect_eq(1, shields);
+      expect_eq(4, units);
+      const auto& mag = kit.back();
+      expect_eq(0x02, mag.data1[0]);
+      expect_eq(200, mag.compute_mag_level());
+      expect_eq(200, mag.data1[2]);
+      expect_eq(0x78C80700, static_cast<uint32_t>(mag.data2db));
+      expect_eq(0xA3, mag.data1[3]); // the code Marck was given: 021DC8A3 ... 78C80700
+      expect_eq(3, mag.mag_photon_blast_for_slot(0)); // Pilla
+      expect_eq(4, mag.mag_photon_blast_for_slot(1)); // Leilla
+      expect_eq(2, mag.mag_photon_blast_for_slot(2)); // Golla
+      if (android) {
+        expect_eq(0, mag.data1w[5] / 100);
+      }
+      if (char_class_is_force(cls)) {
+        expect(mag.data1w[5] > mag.data1w[3]); // MIND over POW
+      } else {
+        expect_eq(0, mag.data1w[5] / 100);
+      }
+
+      auto m = DataIndex::spire_kit_material_targets(cls, kit_levels);
+      expect(m.shared() <= (android ? DataIndex::SPIRE_KIT_MATERIAL_CAP_ANDROID : DataIndex::SPIRE_KIT_MATERIAL_CAP));
+      expect_eq(125, m.hp);
+      expect_eq(android ? 0 : 125, m.tp);
+      if (android) {
+        expect_eq(0, m.mind);
+      }
+      if (char_class_is_force(cls)) {
+        expect(m.mind > 0);
+      }
+      PSOBBCharacterFile ch;
+      ch.disp.visual.sh.char_class = cls;
+      spire_kit_lobby_apply(ch, std::make_shared<JSONLevelTable>(kit_levels), 200);
+      const auto& max = kit_levels.max_stats_for_class(cls).char_stats;
+      const auto& st = ch.disp.stats.char_stats;
+      expect(st.atp <= max.atp);
+      expect(st.mst <= max.mst);
+      expect(st.evp <= max.evp);
+      expect(st.dfp <= max.dfp);
+      expect(st.lck <= max.lck);
+
+      std::map<uint8_t, size_t> totals;
+      size_t dropped = 0;
+      for (;;) {
+        auto batch = DataIndex::spire_kit_material_batch(limits, m, dropped);
+        if (batch.empty()) {
+          break;
+        }
+        expect(batch.size() <= 30);
+        for (const auto& item : batch) {
+          expect_eq(0x030B, (item.data1[0] << 8) | item.data1[1]);
+          expect(item.stack_size(limits) <= item.max_stack_size(limits));
+          totals[item.data1[2]] += item.stack_size(limits);
+        }
+        dropped += batch.size();
+      }
+      expect_eq(m.power, totals[0x00]);
+      expect_eq(m.mind, totals[0x01]);
+      expect_eq(m.evade, totals[0x02]);
+      expect_eq(m.hp, totals[0x03]);
+      expect_eq(m.tp, totals[0x04]);
+      expect_eq(m.def, totals[0x05]);
+      expect_eq(m.luck, totals[0x06]);
+      expect_eq(DataIndex::spire_kit_materials(limits, m).size(), dropped);
     }
-    std::map<uint8_t, size_t> expected_totals = {{0x00, 72}, {0x05, 33}, {0x06, 45}, {0x03, 125}};
-    expect(expected_totals == totals);
-    expect(std::vector<uint8_t>({0x00, 0x05, 0x06, 0x03}) == order);
-    expect_eq(275, dropped);
-    expect(DataIndex::spire_kit_material_batch(limits, dropped).empty());
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      auto m = DataIndex::spire_kit_material_targets(cls, kit_levels);
+      phosg::log_info_f("   class {}: Pow {} Mind {} Evade {} Def {} Luck {} HP {} TP {}", cls, m.power, m.mind, m.evade,
+          m.def, m.luck, m.hp, m.tp);
+    }
+    // HUcaseal: Luck to its cap 100, the rest of the android cap 150 in Power; the old hunter weapons
+    auto caseal = DataIndex::spire_kit_material_targets(9, kit_levels);
+    expect_eq(45, caseal.luck);
+    expect_eq(105, caseal.power);
+    expect_eq(150, caseal.shared());
+    expect_eq(0x8A, DataIndex::spire_start_kit(9)[0].data1[1]);
     expect(DataIndex::spire_kit_material_message(0, 0).find("niets") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("30 neergelegd") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("nog 245 over") != std::string::npos);
@@ -734,10 +782,10 @@ void run_static_tests() {
     auto stacked_limits_vector = ItemData::StackLimits::DEFAULT_TOOL_LIMITS_V3_V4;
     stacked_limits_vector.at(0x0B) = 99;
     ItemData::StackLimits stacked_limits(Version::GC_V3, stacked_limits_vector, 999999);
-    auto stacked = DataIndex::spire_kit_material_batch(stacked_limits, 0);
+    auto stacked = DataIndex::spire_kit_material_batch(stacked_limits, caseal, 0);
     expect_eq(5, stacked.size());
     expect_eq(26, stacked.back().stack_size(stacked_limits));
-    expect(DataIndex::spire_kit_material_batch(stacked_limits, 5).empty());
+    expect(DataIndex::spire_kit_material_batch(stacked_limits, caseal, 5).empty());
     // Only in a game, never in a Spire run
     expect(DataIndex::spire_kit_refused(false, false) != nullptr); // lobby
     expect(DataIndex::spire_kit_refused(false, true) != nullptr);
@@ -762,35 +810,40 @@ void run_static_tests() {
     ch.disp.visual.sh.char_class = 8;
     level_table->reset_to_base(ch.disp.stats, 8);
     spire_kit_lobby_apply(ch, level_table, 200);
+    auto t8 = DataIndex::spire_kit_material_targets(8, *level_table);
     const auto& base = level_table->base_stats_for_class(8);
-    uint32_t atp = base.atp, dfp = base.dfp, mst = base.mst, hp = base.hp;
+    uint32_t atp = base.atp, dfp = base.dfp, mst = base.mst, hp = base.hp, evp = base.evp;
     for (uint32_t lv = 1; lv < 200; lv++) {
       const auto& delta = level_table->stats_delta_for_level(8, lv);
       atp += delta.atp;
       dfp += delta.dfp;
       mst += delta.mst;
       hp += delta.hp;
+      evp += delta.evp;
     }
     expect_eq(199, ch.disp.stats.level);
     expect_eq(level_table->stats_delta_for_level(8, 199).exp, ch.disp.stats.exp);
     expect(ch.disp.stats.exp > 0);
-    expect_eq(atp + 72 * 2, ch.disp.stats.char_stats.atp);
-    expect_eq(dfp + 33 * 2, ch.disp.stats.char_stats.dfp);
-    expect_eq(mst, ch.disp.stats.char_stats.mst);
+    expect_eq(atp + t8.power * 2, ch.disp.stats.char_stats.atp);
+    expect_eq(dfp + t8.def * 2, ch.disp.stats.char_stats.dfp);
+    expect_eq(mst + t8.mind * 2, ch.disp.stats.char_stats.mst);
+    expect_eq(evp + t8.evade * 2, ch.disp.stats.char_stats.evp);
+    expect(t8.mind > 0);
     expect_eq(hp, ch.disp.stats.char_stats.hp); // HP from materials is in hp_from_materials, not here
-    expect_eq(base.lck + 45 * 2, ch.disp.stats.char_stats.lck);
-    expect_eq(72, ch.get_material_usage(MatType::POWER));
-    expect_eq(33, ch.get_material_usage(MatType::DEF));
-    expect_eq(45, ch.get_material_usage(MatType::LUCK));
+    expect_eq(base.lck + t8.luck * 2, ch.disp.stats.char_stats.lck);
+    expect_eq(t8.power, ch.get_material_usage(MatType::POWER));
+    expect_eq(t8.def, ch.get_material_usage(MatType::DEF));
+    expect_eq(t8.luck, ch.get_material_usage(MatType::LUCK));
+    expect_eq(125, ch.get_material_usage(MatType::TP));
     expect_eq(125, ch.get_material_usage(MatType::HP));
     expect_eq(250, ch.inventory.hp_from_materials);
-    expect_eq(72, ch.inventory.items[8 + static_cast<uint8_t>(MatType::POWER)].extension_data2);
-    expect_eq(0, ch.get_material_usage(MatType::MIND));
-    expect_eq(0, ch.get_material_usage(MatType::EVADE));
+    expect_eq(t8.power, ch.inventory.items[8 + static_cast<uint8_t>(MatType::POWER)].extension_data2);
+    expect_eq(t8.mind, ch.get_material_usage(MatType::MIND));
+    expect_eq(t8.evade, ch.get_material_usage(MatType::EVADE));
     // Twice gives the same: counters are never added twice
     spire_kit_lobby_apply(ch, level_table, 200);
-    expect_eq(72, ch.get_material_usage(MatType::POWER));
-    expect_eq(atp + 72 * 2, ch.disp.stats.char_stats.atp);
+    expect_eq(t8.power, ch.get_material_usage(MatType::POWER));
+    expect_eq(atp + t8.power * 2, ch.disp.stats.char_stats.atp);
     // Level 50 on request; out-of-range levels clamp
     PSOBBCharacterFile low;
     low.disp.visual.sh.char_class = 8;
@@ -809,13 +862,15 @@ void run_static_tests() {
     expect_eq(0, cast.get_material_usage(MatType::LUCK));
     expect_eq(100, cast.get_material_usage(MatType::EVADE));
     expect_eq(125, cast.get_material_usage(MatType::HP));
+    expect_eq(0, cast.get_material_usage(MatType::TP));
+    expect_eq(0, cast.get_material_usage(MatType::MIND));
     // A non-android with 200 Mind: the cap 250 leaves 50
     PSOBBCharacterFile mind;
     mind.disp.visual.sh.char_class = 8;
     mind.set_material_usage(MatType::MIND, 200);
-    mind.set_material_usage(MatType::POWER, 80); // higher than 72: kept
+    mind.set_material_usage(MatType::POWER, 80); // higher than the target: kept
     spire_kit_lobby_apply(mind, level_table, 200);
-    expect_eq(80, mind.get_material_usage(MatType::POWER));
+    expect_eq(std::max<uint8_t>(80, t8.power), mind.get_material_usage(MatType::POWER));
     expect_eq(0, mind.get_material_usage(MatType::DEF)); // 200 + 80 is over the cap already
     // Gates: Wakiru refused, BidX allowed, never in a Spire run or a game, never while a restore is pending
     DataIndex d;

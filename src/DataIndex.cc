@@ -2238,51 +2238,150 @@ bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protec
   return protected_character && refused.count(command_name);
 }
 
-std::vector<ItemData> DataIndex::spire_start_kit() {
-  // Codes as Marck gave them, padded with zeros to 16 bytes by the $item hex parser (ItemData::from_data)
-  static const std::vector<const char*> codes = {
-      "008A0200000003320432053200000000", // weapons
-      "00040600000003320432053200000000",
-      "00340000000003320432053200000000",
-      "001F0000000003320432053200000000",
-      "00330000000003320432053200000000",
-      "01013000000400000000000000000000", // frame
-      "01022700000000000000000000000000", // shield
-      "010303", // units
-      "010313",
-      "01030B",
-      "01030F",
+DataIndex::SpireKitMaterials DataIndex::spire_kit_material_targets(uint8_t char_class, const LevelTable& level_table) {
+  // Build source: the GameFAQs plan "My Updated Max Stats Plans For All Classes"
+  // (https://gamefaqs.gamespot.com/boards/516243-phantasy-star-online-episode-i-and-ii/77947485) could not be fetched
+  // (HTTP 403, 2026-10-25), so the plan follows Sega's own per-class stat caps instead: each stat gets as many
+  // materials as it takes to reach the class's MaxStats at level 200 (system/tables/level-table-v3.json "MaxStats",
+  // read through LevelTable::max_stats_for_class), 2 points per material (Items.cc:60-87), in a per-class priority
+  // order within the shared cap.
+  // Shared cap (Power, Mind, Evade, Def, Luck): 250, android 150. Source: the v3 client rule as kept in
+  // SpireFlagBridge.hh:458 (SPIRE_KIT_LOBBY_MATERIAL_CAP*); newserv itself names 250 in SaveFileFormats.cc:1369.
+  // HP and TP: at most 125 each, separately: the counters are stored doubled in a uint8_t
+  // (PlayerInventory.hh:122-123, hp_from_materials / tp_from_materials; SaveFileFormats.cc:1301-1330), so 127 is the
+  // field's limit and 125 the v3 per-material limit.
+  // Androids use no Mind and no TP material (the TP counter is meaningless without techniques; Marck's rule).
+  bool android = char_class_is_android(char_class);
+  size_t cap = android ? SPIRE_KIT_MATERIAL_CAP_ANDROID : SPIRE_KIT_MATERIAL_CAP;
+
+  const auto& base = level_table.base_stats_for_class(char_class);
+  uint32_t atp = base.atp, mst = base.mst, evp = base.evp, dfp = base.dfp, lck = base.lck;
+  for (uint32_t lv = 1; lv < 200; lv++) {
+    const auto& delta = level_table.stats_delta_for_level(char_class, lv);
+    atp += delta.atp;
+    mst += delta.mst;
+    evp += delta.evp;
+    dfp += delta.dfp;
+    lck += delta.lck;
+  }
+  const auto& max = level_table.max_stats_for_class(char_class).char_stats;
+  auto headroom = [](uint32_t now, uint32_t max_value) -> size_t {
+    return (max_value > now) ? ((max_value - now) / 2) : 0;
   };
+  SpireKitMaterials ret;
+  enum Which { POW, MIND, EVADE, DEF, LUCK };
+  std::vector<Which> order;
+  // Luck first (its cap is 100 for every class, so it costs at most 45), then the class's main stat to its cap
+  // (Power for hunters and rangers, Mind for forces), then Def and Evade with what is left of the shared cap
+  if (char_class_is_force(char_class)) {
+    order = {LUCK, MIND, DEF, EVADE, POW};
+  } else {
+    order = {LUCK, POW, DEF, EVADE};
+  }
+  size_t used = 0;
+  for (Which w : order) {
+    if (android && (w == MIND)) {
+      continue;
+    }
+    size_t room = 0;
+    uint8_t* target = nullptr;
+    switch (w) {
+      case POW:
+        room = headroom(atp, max.atp), target = &ret.power;
+        break;
+      case MIND:
+        room = headroom(mst, max.mst), target = &ret.mind;
+        break;
+      case EVADE:
+        room = headroom(evp, max.evp), target = &ret.evade;
+        break;
+      case DEF:
+        room = headroom(dfp, max.dfp), target = &ret.def;
+        break;
+      case LUCK:
+        room = headroom(lck, max.lck), target = &ret.luck;
+        break;
+    }
+    size_t add = std::min(room, cap - used);
+    *target = add;
+    used += add;
+  }
+  ret.hp = SPIRE_KIT_MATERIAL_HP_TP_CAP;
+  ret.tp = android ? 0 : SPIRE_KIT_MATERIAL_HP_TP_CAP;
+  return ret;
+}
+
+std::vector<ItemData> DataIndex::spire_start_kit(uint8_t char_class) {
+  // Codes padded with zeros to 16 bytes by the $item hex parser (ItemData::from_data). Weapons carry 50% Native,
+  // A.Beast and Machine. Every weapon, frame and shield has the class's bits in UsabilityFlags in
+  // system/tables/item-parameter-table-gc-v3.json (checked per class by the static tests); units have no usability
+  // field in the parameter table (ItemParameterTable.hh, struct Unit), so every class can wear them.
+  static const std::vector<const char*> hunter = {
+      "008A0200000003320432053200000000", // KAMUI (F9)
+      "00040600000003320432053200000000", // VJAYA (F9)
+      "00340000000003320432053200000000", // RED SWORD (F9)
+      "001F0000000003320432053200000000", // LAVIS CANNON (F9)
+      "00330000000003320432053200000000", // SEALED J-SWORD (F9)
+      "01013000000400000000000000000000", // BRIGHTNESS CIRCLE (FF), 4 slots
+      "01022700000000000000000000000000", // RED RING (FF)
+      "010303", "010313", "01030B", "01030F", // God/Power, God/HP, God/Arm, God/Legs
+  };
+  static const std::vector<const char*> ranger = {
+      "001E0000000003320432053200000000", // HEAVEN PUNISHER (FA)
+      "004B0000000003320432053200000000", // GULD MILLA (FA)
+      "00450000000003320432053200000000", // FROZEN SHOOTER (FA)
+      "00120000000003320432053200000000", // SPREAD NEEDLE (FA)
+      "00660000000003320432053200000000", // ANO RIFLE (FA)
+      "01013000000400000000000000000000", // BRIGHTNESS CIRCLE (FF), 4 slots
+      "01022700000000000000000000000000", // RED RING (FF)
+      "01030B", "010303", "010313", "01031D", // God/Arm, God/Power, God/HP, God/Luck
+  };
+  static const std::vector<const char*> force = {
+      "001D0000000003320432053200000000", // PSYCHO WAND (FC)
+      "00220000000003320432053200000000", // CADUCEUS (FC)
+      "00240000000003320432053200000000", // MAGICAL PIECE (FC)
+      "005A0000000003320432053200000000", // PROPHETS OF MOTAV (FC)
+      "000A0600000003320432053200000000", // CLUB OF ZUMIURAN (FC)
+      "01013000000400000000000000000000", // BRIGHTNESS CIRCLE (FF), 4 slots
+      "01022700000000000000000000000000", // RED RING (FF)
+      "010307", "010317", "010313", "01030F", // God/Mind, God/TP, God/HP, God/Legs
+  };
+  const auto& codes = char_class_is_force(char_class) ? force : char_class_is_ranger(char_class) ? ranger : hunter;
   std::vector<ItemData> ret;
   for (const char* code : codes) {
     ret.emplace_back(ItemData::from_data(phosg::parse_data_string(code)));
   }
 
-  // Mag type 1D, level 200; synchro 120 and IQ 200 as in Marck's own mag (data2 78C80000), no photon blasts
+  // Mag type 1D, level 200 (DEF + POW + DEX + MIND levels = 200); synchro 120 and IQ 200; photon blasts Pilla
+  // (center), Leilla (right), Golla (left): pb_nums A3, flags 07, data2 78C80700 (Marck's wish via regie pso-regie-11,
+  // encoding per ItemData::mag_photon_blast_for_slot). Hunters: POW (DEF 5 / POW 128 / DEX 67); rangers: POW and DEX for accuracy (5 / 95 / 100); forces: MIND
+  // with DEX (5 / 0 / 45 / 150). Androids never get Mind.
   ItemData mag = ItemData::from_data(phosg::parse_data_string("021D"));
   ItemMagStats stats;
-  stats.def = 500;
-  stats.pow = 12800;
-  stats.dex = 6700;
-  stats.mind = 0;
+  if (char_class_is_force(char_class)) {
+    stats.def = 500, stats.pow = 0, stats.dex = 4500, stats.mind = 15000;
+  } else if (char_class_is_ranger(char_class)) {
+    stats.def = 500, stats.pow = 9500, stats.dex = 10000, stats.mind = 0;
+  } else {
+    stats.def = 500, stats.pow = 12800, stats.dex = 6700, stats.mind = 0;
+  }
   stats.synchro = 120;
   stats.iq = 200;
   stats.flags = 0;
   stats.photon_blasts = 0;
   stats.color = 0;
   mag.assign_mag_stats(stats);
+  mag.add_mag_photon_blast(3); // Pilla, center
+  mag.add_mag_photon_blast(4); // Leilla, right
+  mag.add_mag_photon_blast(2); // Golla, left
   ret.emplace_back(mag);
   return ret;
 }
 
-std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits) {
+std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits, const SpireKitMaterials& m) {
   std::vector<ItemData> ret;
-  static const std::vector<std::pair<uint8_t, size_t>> materials = {
-      {0x00, 72}, // Power
-      {0x05, 33}, // Def
-      {0x06, 45}, // Luck
-      {0x03, 125}, // HP
-  };
+  const std::vector<std::pair<uint8_t, size_t>> materials = {
+      {0x00, m.power}, {0x01, m.mind}, {0x02, m.evade}, {0x05, m.def}, {0x06, m.luck}, {0x03, m.hp}, {0x04, m.tp}};
   for (const auto& [which, total] : materials) {
     ItemData material = ItemData::from_data(phosg::parse_data_string("030B00"));
     material.data1[2] = which;
@@ -2298,8 +2397,9 @@ std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits
   return ret;
 }
 
-std::vector<ItemData> DataIndex::spire_kit_material_batch(const ItemData::StackLimits& limits, size_t already_dropped) {
-  auto all = DataIndex::spire_kit_materials(limits);
+std::vector<ItemData> DataIndex::spire_kit_material_batch(
+    const ItemData::StackLimits& limits, const SpireKitMaterials& m, size_t already_dropped) {
+  auto all = DataIndex::spire_kit_materials(limits, m);
   size_t start = std::min(already_dropped, all.size());
   size_t end = std::min(start + DataIndex::SPIRE_KIT_MATERIAL_BATCH, all.size());
   return std::vector<ItemData>(all.begin() + start, all.begin() + end);

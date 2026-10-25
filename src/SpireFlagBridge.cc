@@ -1881,22 +1881,27 @@ const char* spire_kit_lobby_refused(bool protected_character, bool is_game, bool
 void spire_kit_lobby_apply(PSOBBCharacterFile& ch, std::shared_ptr<const LevelTable> level_table, uint32_t level) {
   using MatType = PSOBBCharacterFile::MaterialType;
   level = std::clamp<uint32_t>(level, 1, 200);
-  // Never lower a counter; add up to the target within the shared cap (Power, Mind, Evade, Def, Luck)
-  size_t cap = char_class_is_android(ch.disp.visual.sh.char_class) ? SPIRE_KIT_LOBBY_MATERIAL_CAP_ANDROID
-                                                                   : SPIRE_KIT_LOBBY_MATERIAL_CAP;
+  // Never lower a counter; add up to the class's target (DataIndex::spire_kit_material_targets) within the shared cap
+  uint8_t cls = ch.disp.visual.sh.char_class;
+  auto targets = DataIndex::spire_kit_material_targets(cls, *level_table);
+  size_t cap = char_class_is_android(cls) ? DataIndex::SPIRE_KIT_MATERIAL_CAP_ANDROID : DataIndex::SPIRE_KIT_MATERIAL_CAP;
   size_t used = 0;
   for (auto which : {MatType::POWER, MatType::MIND, MatType::EVADE, MatType::DEF, MatType::LUCK}) {
     used += ch.get_material_usage(which);
   }
-  for (const auto& [which, target] : std::initializer_list<std::pair<MatType, uint8_t>>{
-           {MatType::POWER, SPIRE_KIT_LOBBY_POWER}, {MatType::DEF, SPIRE_KIT_LOBBY_DEF}, {MatType::LUCK, SPIRE_KIT_LOBBY_LUCK}}) {
+  for (const auto& [which, target] : std::initializer_list<std::pair<MatType, uint8_t>>{{MatType::POWER, targets.power},
+           {MatType::MIND, targets.mind}, {MatType::EVADE, targets.evade}, {MatType::DEF, targets.def},
+           {MatType::LUCK, targets.luck}}) {
     size_t current = ch.get_material_usage(which);
     size_t add = (target > current) ? std::min<size_t>(target - current, (cap > used) ? (cap - used) : 0) : 0;
     ch.set_material_usage(which, current + add);
     used += add;
   }
-  if (ch.get_material_usage(MatType::HP) < SPIRE_KIT_LOBBY_HP) {
-    ch.set_material_usage(MatType::HP, SPIRE_KIT_LOBBY_HP);
+  for (const auto& [which, target] : std::initializer_list<std::pair<MatType, uint8_t>>{
+           {MatType::HP, targets.hp}, {MatType::TP, targets.tp}}) {
+    if (ch.get_material_usage(which) < target) {
+      ch.set_material_usage(which, target);
+    }
   }
   // The level table's stats and EXP for the class at that level, plus 2 per used material (as $edit level on BB)
   ch.disp.stats.level = level - 1;
