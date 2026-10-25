@@ -426,7 +426,7 @@ bool Client::is_spire_protected() const {
   auto s = this->require_server_state();
   // Per character, never by serial alone: one console carries the real character and the test characters (regie
   // pso-regie-9, serial 3117539659 is Wakiru and BidX). Without character data only a Name-empty entry matches.
-  auto p = this->character_file(false);
+  auto p = this->character_file(false, false); // the real character, never the overlay
   return s->data->is_spire_protected_character(
       this->login->gc_license->serial_number, p ? p->disp.visual.name.decode(this->language()) : "");
 }

@@ -304,15 +304,28 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // snapshot. The caller then drops the client instead of creating the overlay.
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
-// v21: at every Battle game join (also without a quest) the guard stores the real character, like a run start; no
-// snapshot means the connection is dropped (fail closed).
+// v21 (narrowed by regie pso-regie-9, 2026-10-25): a Battle game join takes no snapshot and sets no marker any more; it
+// only starts the no-quest watcher (v30). Measured on the pc 13:05-13:08: a q0 Battle join set RunInProgress for BidX
+// (normal play, disconnect without a 98, next login pushed back an older snapshot: progress lost) and for Wakiru.
 void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+
+// Regie pso-regie-9: what a run start does. MARKER only for a Battle game whose quest uses replace_char and is guarded
+// (SpireGuardQuests); spire_guard_begin_run is called from on_quest_loaded right before create_battle_overlay, so the
+// marker is on disk before the overlay exists. A protected character (SpireBlockedCharacters) gets no marker and no
+// overlay (REFUSE: the caller drops it). Everything else, a Battle game without a quest included: NONE.
+enum class SpireGuardStart { NONE, MARKER, REFUSE };
+SpireGuardStart spire_guard_start_action(
+    bool battle_game, bool has_quest, bool replace_char, bool guarded_quest, bool protected_character);
+
+// Regie pso-regie-9: whether a snapshot's markers make the guard act (login restore, lobby restore, game join refusal).
+// Never for a protected character: an old marker file of one is logged and ignored, never restored onto it.
+bool spire_guard_marker_open(bool protected_character, bool run_in_progress, bool restore_pending, bool awaiting_save);
 
 // v30: a Battle game without a quest. A GC client that joins a Battle game without one is watched: if the game still
 // has no quest SPIRE_GUARD_NO_QUEST_SECONDS later (and nobody is picking one at the counter), the server tells it and
-// sends it back to the lobby (ExitAnywhere, as $exit does). Its join snapshot (v21) becomes a pending restore at the 98
-// and the lobby restore puts the real character back, so no item is lost. A client that cannot run functions only gets
-// the text and keeps the guard. spire_guard_no_quest_action is the decision, kept free of state for the static tests.
+// sends it back to the lobby (ExitAnywhere, as $exit does). Since regie pso-regie-9 the join takes no snapshot, so
+// nothing is restored afterwards. A client that cannot run functions only gets the text. spire_guard_no_quest_action
+// is the decision, kept free of state for the static tests.
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
 
 // The guard's snapshot file of one character (serial number plus character, see spire_guard_character_id).

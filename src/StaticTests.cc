@@ -658,6 +658,31 @@ void run_static_tests() {
     expect(!DataIndex::spire_cheat_refused("$fastkill", d.is_spire_protected_character(3117539659, "Wakiru")));
   }
 
+  phosg::log_info_f("-- Spire guard: a marker only for a guarded quest, never for a protected character (regie pso-regie-9)");
+  {
+    using G = SpireGuardStart;
+    // arguments: battle_game, has_quest, replace_char, guarded_quest, protected_character
+    expect_eq(G::MARKER, spire_guard_start_action(true, true, true, true, false));    // Spire quest game: marker
+    expect_eq(G::NONE, spire_guard_start_action(true, false, false, false, false));   // q0 Battle game (BidX 13:05): none
+    expect_eq(G::NONE, spire_guard_start_action(true, false, false, false, true));    // q0 Battle game, Wakiru 13:07: none
+    expect_eq(G::NONE, spire_guard_start_action(false, true, true, true, false));     // not a Battle game
+    expect_eq(G::NONE, spire_guard_start_action(true, true, false, true, false));     // Battle quest without replace_char
+    expect_eq(G::NONE, spire_guard_start_action(true, true, true, false, false));     // replace_char, not guarded
+    expect_eq(G::REFUSE, spire_guard_start_action(true, true, true, true, true));     // protected: no marker, no overlay
+    // arguments: protected_character, run_in_progress, restore_pending, awaiting_save
+    expect(spire_guard_marker_open(false, true, false, false));
+    expect(spire_guard_marker_open(false, false, true, false));
+    expect(spire_guard_marker_open(false, false, false, true));
+    expect(!spire_guard_marker_open(false, false, false, false));
+    expect(!spire_guard_marker_open(true, true, false, false));   // Wakiru's old RunInProgress file: ignored
+    expect(!spire_guard_marker_open(true, false, true, true));    // never a restore onto a protected character
+    DataIndex d;
+    d.spire_blocked_quest_numbers.emplace(929);
+    d.spire_blocked_characters.emplace_back(3117539659, "Wakiru");
+    expect(!spire_guard_marker_open(d.is_spire_protected_character(3117539659, "Wakiru"), true, false, false));
+    expect(spire_guard_marker_open(d.is_spire_protected_character(3117539659, "BidX"), true, false, false));
+  }
+
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
   {
     DataIndex d;

@@ -1253,7 +1253,7 @@ static std::string spire_guard_filename_for(std::shared_ptr<Client> c, uint32_t 
 
 // True if any snapshot file of this serial (v6-v10 file included) has a marker set. Used only when the server has no
 // character data for the client, so it cannot tell which character is on the card.
-static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
+static bool spire_guard_serial_has_open_marker(std::shared_ptr<const Client> c, uint32_t serial_number) {
   if (!std::filesystem::is_directory(SPIRE_BRIDGE_DIRECTORY)) {
     return false;
   }
@@ -1264,7 +1264,10 @@ static bool spire_guard_serial_has_open_marker(uint32_t serial_number) {
       continue;
     }
     auto snapshot = spire_guard_load(entry.path().string());
-    if (snapshot.run_in_progress || snapshot.restore_pending || snapshot.awaiting_save) {
+    // Regie pso-regie-9: a protected character's file never holds back another character of the same console
+    bool protected_character = snapshot.has_character &&
+        c->require_server_state()->data->is_spire_protected_character(serial_number, snapshot.disp.visual.name.decode(c->language()));
+    if (spire_guard_marker_open(protected_character, snapshot.run_in_progress, snapshot.restore_pending, snapshot.awaiting_save)) {
       return true;
     }
   }
@@ -1387,21 +1390,38 @@ bool spire_guard_push_verified(bool same_stats, bool same_items) {
 }
 static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l);
 
+SpireGuardStart spire_guard_start_action(
+    bool battle_game, bool has_quest, bool replace_char, bool guarded_quest, bool protected_character) {
+  if (!battle_game || !has_quest || !replace_char || !guarded_quest) {
+    return SpireGuardStart::NONE;
+  }
+  return protected_character ? SpireGuardStart::REFUSE : SpireGuardStart::MARKER;
+}
+
+bool spire_guard_marker_open(bool protected_character, bool run_in_progress, bool restore_pending, bool awaiting_save) {
+  return !protected_character && (run_in_progress || restore_pending || awaiting_save);
+}
+
 bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   try {
-    if (!l->is_game() || (l->mode != GameMode::BATTLE) || !l->quest) {
-      return true;
-    }
-    const auto& rules = l->quest->meta.battle_rules;
-    if (!rules || !rules->replace_char) {
-      return true;
-    }
-    uint32_t quest_number = l->quest->meta.quest_number;
-    if (!spire_guard_quest_is_guarded(c, quest_number)) {
+    bool battle_game = l->is_game() && (l->mode == GameMode::BATTLE);
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    bool replace_char = rules && rules->replace_char;
+    uint32_t quest_number = l->quest ? l->quest->meta.quest_number : 0;
+    bool guarded = battle_game && replace_char && spire_guard_quest_is_guarded(c, quest_number);
+    if (battle_game && replace_char && !guarded) {
       // v12 (critic K5): a replace_char quest outside the list runs without the guard; say so
       c->log.warning_f("Spire guard: q{} is a replace_char Battle quest but not in SpireGuardQuests (or SpireBridgeQuests if that key is missing); no guard for this run",
           quest_number);
-      return true;
+    }
+    switch (spire_guard_start_action(battle_game, !!l->quest, replace_char, guarded, c->is_spire_protected())) {
+      case SpireGuardStart::NONE:
+        return true;
+      case SpireGuardStart::REFUSE:
+        c->log.warning_f("Spire guard: blocked character in q{}; no marker, no snapshot, no overlay", quest_number);
+        return false;
+      case SpireGuardStart::MARKER:
+        break;
     }
     return spire_guard_take_snapshot(c, quest_number);
   } catch (const std::exception& e) {
@@ -1410,27 +1430,20 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
   }
 }
 
-// v21: every Battle game is guarded, also one without a quest (lab 10:26: Kamako 23 -> 8 items, BidX 20 -> 7 in a
-// Battle game without quest). The join takes the snapshot (quest 0); the guarded quest that may follow in the same game
-// keeps it (run already in progress), and the 98 at the end turns it into a pending restore, as for a run.
+// v21, narrowed (regie pso-regie-9): the join of a Battle game sets no marker; the run's marker comes from
+// spire_guard_begin_run when a guarded quest loads, before its overlay. The join only starts the no-quest watcher.
 void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
-  if (!l || !l->is_game() || (l->mode != GameMode::BATTLE)) {
+  if (!l || !l->is_game() || (l->mode != GameMode::BATTLE) || l->quest) {
     return;
   }
   try {
-    if (spire_guard_take_snapshot(c, 0)) {
-      if (!l->quest) {
-        auto ml = std::const_pointer_cast<Lobby>(l);
-        asio::co_spawn(*c->require_server_state()->io_context, spire_guard_watch_no_quest(c, ml), asio::detached);
-      }
-      return;
+    if (spire_bridge_serial_for_client(c)) {
+      auto ml = std::const_pointer_cast<Lobby>(l);
+      asio::co_spawn(*c->require_server_state()->io_context, spire_guard_watch_no_quest(c, ml), asio::detached);
     }
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire guard: failed to guard the Battle game join: {}", e.what());
+    c->log.warning_f("Spire guard: failed to watch the Battle game without a quest: {}", e.what());
   }
-  // fail closed, like begin_run: no Battle game without a stored snapshot
-  c->log.warning_f("Spire guard: no snapshot at the Battle game join; dropping the connection");
-  c->channel->disconnect();
 }
 
 SpireNoQuestAction spire_guard_no_quest_action(
@@ -1465,7 +1478,7 @@ static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> we
     }
     c->log.warning_f("Spire guard: Battle game without a quest for {} s; {}", SPIRE_GUARD_NO_QUEST_SECONDS,
         (action == SpireNoQuestAction::EXIT) ? "sending the client back to the lobby" : "client cannot run functions, told to leave");
-    send_text_message(c, "$C6Spire: no quest was\nloaded. Back to the\nlobby; your character\nis restored there.");
+    send_text_message(c, "$C6Spire: no quest was\nloaded. Back to the\nlobby.");
     if (action == SpireNoQuestAction::EXIT) {
       try {
         auto s = c->require_server_state();
@@ -1549,8 +1562,8 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
     // (end, warp, Quit, "Wrote to Memory Card A") also saves the overlay character. So a 98 with RunInProgress set,
     // from whichever game, turns the run into a pending restore; only a verified restore at the next login closes it.
     uint32_t serial_number = spire_bridge_serial_for_client(c);
-    if (!serial_number) {
-      return;
+    if (!serial_number || c->is_spire_protected()) {
+      return; // regie pso-regie-9: the guard never touches a protected character's file
     }
     uint32_t quest_number = (l && l->is_game() && l->quest) ? l->quest->meta.quest_number : 0;
 
@@ -1590,7 +1603,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
   try {
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     auto character = c->character_file(false, false);
-    if (!serial_number || !character) {
+    if (!serial_number || !character || c->is_spire_protected()) {
       return;
     }
     std::string filename = spire_guard_filename_for(c, serial_number);
@@ -1830,7 +1843,7 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
     filename = spire_guard_filename_for(c, serial_number);
     if (filename.empty()) {
       // No 61 yet, so the character on the card is unknown; only a serial without any open marker may save
-      if (spire_guard_serial_has_open_marker(serial_number)) {
+      if (spire_guard_serial_has_open_marker(c, serial_number)) {
         c->log.warning_f("Spire guard: no login 61 for serial {:010} and a marker is open; no 97", serial_number);
         co_return false;
       }
@@ -1846,7 +1859,12 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
         co_return false;
       }
     }
-    if (!snapshot.run_in_progress && !snapshot.restore_pending && !snapshot.awaiting_save) {
+    bool protected_character = c->is_spire_protected();
+    if (!spire_guard_marker_open(protected_character, snapshot.run_in_progress, snapshot.restore_pending, snapshot.awaiting_save)) {
+      if (protected_character && (snapshot.run_in_progress || snapshot.restore_pending || snapshot.awaiting_save)) {
+        c->log.warning_f("Spire guard: blocked character for serial {:010} has an old marker in {} ({}); ignored, no restore",
+            serial_number, filename, spire_guard_describe(snapshot));
+      }
       co_return true;
     }
     if (snapshot.awaiting_save && !snapshot.run_in_progress && !snapshot.restore_pending) {
@@ -1991,7 +2009,7 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} after a game: {}", serial_number, e.what());
     co_return;
   }
-  if (!snapshot.restore_pending) {
+  if (!spire_guard_marker_open(c->is_spire_protected(), false, snapshot.restore_pending, false)) {
     co_return;
   }
   // v33: not while the client is still loading the lobby
@@ -2064,12 +2082,13 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   try {
     std::string filename = spire_guard_filename_for(c, serial_number);
     if (filename.empty()) {
-      pending = spire_guard_serial_has_open_marker(serial_number);
+      pending = spire_guard_serial_has_open_marker(c, serial_number);
     } else {
       // v12 (critic K7): a run that never got its 98 counts too
       auto snapshot = spire_guard_load(filename);
-      pending = snapshot.restore_pending || snapshot.run_in_progress;
-      can_restore_now = snapshot.restore_pending;
+      bool protected_character = c->is_spire_protected();
+      pending = spire_guard_marker_open(protected_character, snapshot.run_in_progress, snapshot.restore_pending, false);
+      can_restore_now = pending && snapshot.restore_pending;
     }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
