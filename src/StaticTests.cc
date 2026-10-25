@@ -253,8 +253,7 @@ void run_static_tests() {
     expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002));
     expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105));
     expect_eq(std::string("Room 7 - Rest"), spire_bridge_message_text(0x41000207));
-    expect_eq(std::string("$C1Life lost$C7 - 0 left. No more Scape Dolls: fall now and you stay down until the room is clear."),
-        spire_bridge_message_text(0x4C000100));
+    expect_eq(std::string("Last life: fall again and you stay down until the clear."), spire_bridge_message_text(0x4C000100));
   }
 
   phosg::log_info_f("-- Spire bridge: an enemy never hit holds no wave forever (v36)");

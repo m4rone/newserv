@@ -695,7 +695,7 @@ std::string spire_bridge_message_text(uint32_t value) {
     case SPIRE_BRIDGE_MSG_WAVE:
       return std::format("Wave {}/{}", a, b);
     case SPIRE_BRIDGE_MSG_LIFE:
-      return a ? std::format("$C1Life lost$C7 - {} left. No more Scape Dolls: fall now and you stay down until the room is clear.", b)
+      return a ? std::string("Last life: fall again and you stay down until the clear.")
                : std::format("$C1Life lost$C7 - {} left. A new Scape Doll is yours.", b);
     case SPIRE_BRIDGE_MSG_TIME:
       return std::format("$C4{} minutes left$C7 - the timer ends the run.", value & 0xFFFF);
