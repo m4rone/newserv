@@ -704,7 +704,11 @@ void run_static_tests() {
       expect_eq(0x02, mag.data1[0]);
       expect_eq(200, mag.compute_mag_level());
       expect_eq(200, mag.data1[2]);
-      expect_eq(0x78C80000, static_cast<uint32_t>(mag.data2db));
+      expect_eq(0x78C80700, static_cast<uint32_t>(mag.data2db));
+      expect_eq(0xA3, mag.data1[3]); // the code Marck was given: 021DC8A3 ... 78C80700
+      expect_eq(3, mag.mag_photon_blast_for_slot(0)); // Pilla
+      expect_eq(4, mag.mag_photon_blast_for_slot(1)); // Leilla
+      expect_eq(2, mag.mag_photon_blast_for_slot(2)); // Golla
       if (android) {
         expect_eq(0, mag.data1w[5] / 100);
       }

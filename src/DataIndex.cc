@@ -2352,8 +2352,9 @@ std::vector<ItemData> DataIndex::spire_start_kit(uint8_t char_class) {
     ret.emplace_back(ItemData::from_data(phosg::parse_data_string(code)));
   }
 
-  // Mag type 1D, level 200 (DEF + POW + DEX + MIND levels = 200); synchro 120 and IQ 200 (data2 78C80000), no photon
-  // blasts. Hunters: POW (DEF 5 / POW 128 / DEX 67); rangers: POW and DEX for accuracy (5 / 95 / 100); forces: MIND
+  // Mag type 1D, level 200 (DEF + POW + DEX + MIND levels = 200); synchro 120 and IQ 200; photon blasts Pilla
+  // (center), Leilla (right), Golla (left): pb_nums A3, flags 07, data2 78C80700 (Marck's wish via regie pso-regie-11,
+  // encoding per ItemData::mag_photon_blast_for_slot). Hunters: POW (DEF 5 / POW 128 / DEX 67); rangers: POW and DEX for accuracy (5 / 95 / 100); forces: MIND
   // with DEX (5 / 0 / 45 / 150). Androids never get Mind.
   ItemData mag = ItemData::from_data(phosg::parse_data_string("021D"));
   ItemMagStats stats;
@@ -2370,6 +2371,9 @@ std::vector<ItemData> DataIndex::spire_start_kit(uint8_t char_class) {
   stats.photon_blasts = 0;
   stats.color = 0;
   mag.assign_mag_stats(stats);
+  mag.add_mag_photon_blast(3); // Pilla, center
+  mag.add_mag_photon_blast(4); // Leilla, right
+  mag.add_mag_photon_blast(2); // Golla, left
   ret.emplace_back(mag);
   return ret;
 }
