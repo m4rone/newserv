@@ -89,7 +89,7 @@ void run_static_tests() {
     expect(spire_guard_run_start_keeps_snapshot(true, false));   // lab 18:14: the run's 7 items, or another level: keep
   }
 
-  phosg::log_info_f("-- Spire guard: a run copy stronger than the real character never becomes the snapshot (v39)");
+  phosg::log_info_f("-- Spire guard: a run copy stronger than the real character never becomes the snapshot (v39, v40)");
   {
     // BidX Lv52 (level 51 zero-based) with 20 items is the real character; the run copy is Lv150 with more EXP, more
     // meseta, other items and other material counters (start level, training rooms)
@@ -168,17 +168,35 @@ void run_static_tests() {
       snap = stored(false, false, true);
       expect(!spire_guard_awaiting_save_login_apply(snap, power.first, power.second));
     }
-    // real progress: the 98 of a normal game under AwaitingSave alone moves the snapshot along, so the login with
-    // that progress confirms; under any other marker the 98 changes nothing
+    // real progress: the 98 of a normal game under AwaitingSave alone moves the snapshot along and (v40) closes
+    // AwaitingSave, since the client writes its card when it leaves the game; under any other marker the 98 changes
+    // nothing
     {
       auto progress = make(21, 0x00, 52, 380000, 1500, 125);
       auto snap = stored(false, false, true);
+      snap.has_overlay = true;
+      snap.overlay_level = 149;
       expect(spire_guard_follow_real_progress(snap, progress.first, progress.second));
-      expect(spire_guard_awaiting_save_login_apply(snap, progress.first, progress.second));
-      for (auto [run, restore] : std::vector<std::pair<bool, bool>>{{true, false}, {false, true}, {false, false}}) {
+      expect(!snap.awaiting_save && !snap.has_overlay && !snap.run_in_progress && !snap.restore_pending);
+      expect(spire_guard_same_state(snap.inventory, snap.disp, progress.first, progress.second));
+      expect_eq(52u, snap.disp.stats.level.load());
+      // the login 61 that follows shows that data and finds no open marker: no push (the login path's early return)
+      expect(!snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(spire_guard_same_state(progress.first, progress.second, snap.inventory, snap.disp));
+      // a second 98 after the close changes nothing (the marker is no longer AwaitingSave)
+      auto again = snap;
+      expect(!spire_guard_follow_real_progress(snap, copy.first, copy.second));
+      expect(!snap.awaiting_save && spire_guard_same_state(snap.inventory, snap.disp, again.inventory, again.disp));
+      for (auto [run, restore] : std::vector<std::tuple<bool, bool>>{{true, false}, {false, true}, {false, false}}) {
         auto other = stored(run, restore, false);
         expect(!spire_guard_follow_real_progress(other, copy.first, copy.second));
         expect(is_real(other));
+      }
+      // RunInProgress or RestorePending next to AwaitingSave: nothing follows, AwaitingSave stays
+      for (auto [run, restore] : std::vector<std::tuple<bool, bool>>{{true, false}, {false, true}, {true, true}}) {
+        auto other = stored(run, restore, true);
+        expect(!spire_guard_follow_real_progress(other, copy.first, copy.second));
+        expect(is_real(other) && other.awaiting_save);
       }
     }
     // no open marker: the run start takes the server's data, which no open marker can hold as a run copy

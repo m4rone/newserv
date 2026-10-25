@@ -1349,6 +1349,9 @@ bool spire_guard_follow_real_progress(
   }
   snapshot.inventory = inventory;
   snapshot.disp = disp;
+  // v40: the client writes its card when it leaves the game, so the card holds the real character from now on
+  snapshot.awaiting_save = false;
+  snapshot.has_overlay = false;
   return true;
 }
 
@@ -1578,6 +1581,8 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
       spire_guard_save(filename, serial_number, snapshot);
       c->log.info_f("Spire guard: 98 of a normal game under AwaitingSave for serial {:010}; snapshot follows the real character: {} -> {} ({} items)",
           serial_number, before, spire_guard_describe(snapshot), snapshot.inventory.num_items);
+      c->log.info_f("Spire guard: v40: first 98 of a normal game closes AwaitingSave for serial {:010}; the card holds the real character",
+          serial_number);
     }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to follow the real character after a 98: {}", e.what());
@@ -1824,7 +1829,8 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
       // the run copy is no longer told apart by level, EXP or the v12 fingerprint ("EXP never goes down in normal
       // play" fails once a run copy is stronger than the real character); only a 61 that equals the snapshot confirms
       // the restore. Real progress from a normal game since the lobby restore is in the snapshot already
-      // (spire_guard_after_98), so any other 61 may be a run copy and gets the snapshot pushed again.
+      // (spire_guard_after_98, which since v40 also closes AwaitingSave), so any other 61 may be a run copy and gets
+      // the snapshot pushed again.
       auto character = c->character_file(false, false);
       if (character) {
         uint32_t level = character->disp.stats.level;

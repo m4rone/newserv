@@ -292,6 +292,10 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // - v39: a run copy is never told apart by level or EXP (it may be stronger than the real character): under an open
 //   marker only data equal to the snapshot counts as the real character, and under AwaitingSave the snapshot follows the
 //   98 of a Normal or Solo game (see SpireGuardRunStart below).
+// - v40: that first 98 of a Normal or Solo game under AwaitingSave alone also closes AwaitingSave (and drops the
+//   overlay fingerprint): the client writes its card when it leaves the game, so the card holds the real character
+//   from then on and the next login needs no push. Under RunInProgress or RestorePending nothing follows, and the 98 of
+//   a Spire (Battle) game never closes AwaitingSave.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -320,7 +324,8 @@ struct SpireGuardSnapshot {
   // v10: set instead of clearing restore_pending when the lobby restore is verified. The real character is then only in
   // the client's memory until the client saves it, so the card may still hold the run copy. v39: cleared only at a
   // login whose 61 equals the snapshot (spire_guard_same_state); any other login turns it back into restore_pending.
-  // While it is set, the snapshot follows the real character's 98 from a Normal or Solo game (real progress).
+  // While it is set, the snapshot follows the real character's 98 from a Normal or Solo game (real progress); v40: that
+  // 98 also clears it, since the client writes its card when it leaves the game.
   bool awaiting_save = false;
   // v12: what the client had in memory right before the lobby restore (from its 30): the run copy. v39: only for the
   // log; the login decision no longer uses it (it is not a complete record of the run copies a card can hold).
@@ -355,8 +360,10 @@ SpireGuardRunStart spire_guard_run_start_apply(SpireGuardSnapshot& snapshot, con
 // hold a run copy, RestorePending is set and the login pushes the snapshot.
 bool spire_guard_awaiting_save_login_apply(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
-// The 98 of a Normal or Solo game under AwaitingSave only: the snapshot takes the real character's data. Returns false
-// (snapshot unchanged) if another marker is open, AwaitingSave is not set or the snapshot has no character.
+// The 98 of a Normal or Solo game under AwaitingSave only: the snapshot takes the real character's data and (v40)
+// AwaitingSave is closed (awaiting_save and has_overlay false): the client writes its card when it leaves the game.
+// Returns false (snapshot unchanged) if another marker is open, AwaitingSave is not set or the snapshot has no
+// character.
 bool spire_guard_follow_real_progress(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
 // Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
