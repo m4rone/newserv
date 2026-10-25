@@ -206,15 +206,29 @@ struct DataIndex {
   // whole character, or client memory) are refused everywhere for a protected character; command_name is the
   // command's first name ("$item" for "$i"). Other commands ($fastkill, $infhp, $secid, ...) stay allowed.
   static bool spire_cheat_refused(const std::string& command_name, bool protected_character);
-  // Regie pso-regie-10: the fixed start set that $kit drops at the player's feet: five weapons, a frame, a shield,
-  // four units and a level 200 mag (DEF 5 / POW 128 / DEX 67 / MIND 0). The item ids are left for the caller to assign.
-  static std::vector<ItemData> spire_start_kit();
-  // The materials of "$kit mat": Power 72, Def 33, Luck 45, HP 125 in that order, as many items as limits needs per
+  // The per-class material plan of $kit mat and $kitlobby (see spire_kit_material_targets in DataIndex.cc for the
+  // source of every cap): shared cap over Power/Mind/Evade/Def/Luck, and HP and TP each separately
+  static constexpr size_t SPIRE_KIT_MATERIAL_CAP = 250;
+  static constexpr size_t SPIRE_KIT_MATERIAL_CAP_ANDROID = 150;
+  static constexpr uint8_t SPIRE_KIT_MATERIAL_HP_TP_CAP = 125;
+  struct SpireKitMaterials {
+    uint8_t power = 0, mind = 0, evade = 0, def = 0, luck = 0, hp = 0, tp = 0;
+    size_t shared() const {
+      return power + mind + evade + def + luck;
+    }
+  };
+  static SpireKitMaterials spire_kit_material_targets(uint8_t char_class, const LevelTable& level_table);
+  // Regie pso-regie-10, per class since 2026-10-25: the start set that $kit drops at the player's feet: five weapons,
+  // a frame, a shield and four units the class can equip, and a level 200 mag split for the class. The item ids are
+  // left for the caller to assign.
+  static std::vector<ItemData> spire_start_kit(uint8_t char_class);
+  // The materials of "$kit mat" in the order Power, Mind, Evade, Def, Luck, HP, TP, as many items as limits needs per
   // stack (GC v3: one material per item). spire_kit_material_batch returns the next at most
   // SPIRE_KIT_MATERIAL_BATCH items after the first already_dropped ones; empty when all are dropped.
   static constexpr size_t SPIRE_KIT_MATERIAL_BATCH = 30;
-  static std::vector<ItemData> spire_kit_materials(const ItemData::StackLimits& limits);
-  static std::vector<ItemData> spire_kit_material_batch(const ItemData::StackLimits& limits, size_t already_dropped);
+  static std::vector<ItemData> spire_kit_materials(const ItemData::StackLimits& limits, const SpireKitMaterials& m);
+  static std::vector<ItemData> spire_kit_material_batch(
+      const ItemData::StackLimits& limits, const SpireKitMaterials& m, size_t already_dropped);
   // The reply to "$kit mat" after dropping dropped items with remaining items still to come
   static std::string spire_kit_material_message(size_t dropped, size_t remaining);
   // Why $kit is refused, or null if it may run: only in a game (not a lobby) and never in a Spire run (a Spire quest,

@@ -454,19 +454,13 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c);
 
 // "$kitlobby [n]" (regie, 2026-10-25): in the lobby, the player's own character is brought to level n (default 200)
 // with the level table's EXP and base stats for its class at that level (PSOBBCharacterFile::recompute_stats, as
-// $edit level does on BB), and the $kit materials (Power 72, Def 33, Luck 45, HP 125) are put in its material counters
-// (never lower than they are, within the shared cap: 150 for an android, 250 otherwise; HP at most 125). The character
+// $edit level does on BB), and the class's $kit materials (DataIndex::spire_kit_material_targets) are put in its material
+// counters (never lower than they are, within the shared cap: 150 for an android, 250 otherwise; HP and TP at most 125). The character
 // is pushed to the client with the guard's restore push (full character 30, SetExtendedPlayerInfo, verifying 61).
 constexpr uint32_t SPIRE_KIT_LOBBY_DEFAULT_LEVEL = 200;
 // $kitlobby works only in the lobby, where cheat mode is never on (CheatModeBehavior OnByDefault applies to games),
 // so it is gated on spire_kit_lobby_refused and the guard marker alone, never on cheat mode (regie pso-regie-10)
 constexpr bool SPIRE_KIT_LOBBY_NEEDS_CHEAT_MODE = false;
-constexpr uint8_t SPIRE_KIT_LOBBY_POWER = 72;
-constexpr uint8_t SPIRE_KIT_LOBBY_DEF = 33;
-constexpr uint8_t SPIRE_KIT_LOBBY_LUCK = 45;
-constexpr uint8_t SPIRE_KIT_LOBBY_HP = 125;
-constexpr size_t SPIRE_KIT_LOBBY_MATERIAL_CAP = 250;
-constexpr size_t SPIRE_KIT_LOBBY_MATERIAL_CAP_ANDROID = 150;
 // Why $kitlobby is refused, or null if it may run. Free of state for the static tests.
 const char* spire_kit_lobby_refused(bool protected_character, bool is_game, bool spire_run, bool restore_pending);
 // Sets level (1-based, clamped to 1..200), EXP, stats and the material counters on ch. Free of state for the static tests.
