@@ -182,7 +182,9 @@ asio::awaitable<C_ExecuteCodeResult_B3> send_function_call(
     bool ignore_actually_runs_code_flag = false);
 asio::awaitable<void> send_function_call_multi(
     std::shared_ptr<Client> c, std::unordered_set<std::shared_ptr<const ClientFunctionIndex::Function>> codes);
-asio::awaitable<bool> send_protected_command(std::shared_ptr<Client> c, const void* data, size_t size, bool echo_to_lobby);
+bool protected_command_allowed_v3_v4(bool config_enabled, bool force, bool has_function_call, bool runs_code);
+asio::awaitable<bool> send_protected_command(
+    std::shared_ptr<Client> c, const void* data, size_t size, bool echo_to_lobby, bool force = false);
 asio::awaitable<void> send_dol_file(std::shared_ptr<Client> c, std::shared_ptr<DOLFileIndex::File> dol);
 
 void send_reconnect(std::shared_ptr<Client> c, uint32_t address, uint16_t port);

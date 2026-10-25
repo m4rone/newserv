@@ -19,6 +19,7 @@
 #include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMeta.hh"
+#include "SendCommands.hh"
 
 void run_static_tests() {
   phosg::log_info_f("-- Quest opcode definitions");
@@ -1854,6 +1855,15 @@ void run_static_tests() {
     expect(std::filesystem::exists(marked_path));
     expect_eq(21u, inventory_backup_list(dir).size());
     std::filesystem::remove_all(root);
+  }
+
+  phosg::log_info_f("-- $infhp revive on GC: sent with EnableV3V4ProtectedSubcommands off (regie pso-regie-10)");
+  {
+    expect(protected_command_allowed_v3_v4(false, true, true, true)); // the $infhp revive, config off
+    expect(!protected_command_allowed_v3_v4(false, false, true, true)); // other protected commands keep the config
+    expect(protected_command_allowed_v3_v4(true, false, true, true));
+    expect(!protected_command_allowed_v3_v4(false, true, false, true)); // no function calls: nothing to send
+    expect(!protected_command_allowed_v3_v4(true, true, true, false));
   }
 
   phosg::log_info_f("-- All static tests passed");

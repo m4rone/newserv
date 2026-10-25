@@ -1749,7 +1749,11 @@ static asio::awaitable<void> on_player_revivable(std::shared_ptr<Client> c, Subc
         : static_cast<const void*>(&v2_cmd);
     // TODO: We might need to send different versions of the command here to different clients in certain crossplay
     // scenarios, so just using echo_to_lobby would not suffice. Figure out a way to handle this.
-    co_await send_protected_command(c, c_data, sizeof(v3_cmd), true);
+    if (!co_await send_protected_command(c, c_data, sizeof(v3_cmd), true, true)) {
+      c->log.warning_f("Infinite HP: revive not sent to {}", c->lobby_client_id);
+    } else {
+      c->log.info_f("Infinite HP: revive sent (6x{:02X})", *static_cast<const uint8_t*>(c_data));
+    }
   }
 }
 

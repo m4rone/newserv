@@ -492,7 +492,14 @@ void send_function_call(
   ch->send(0xB2, 0x00, data);
 }
 
-asio::awaitable<bool> send_protected_command(std::shared_ptr<Client> c, const void* data, size_t size, bool echo_to_lobby) {
+bool protected_command_allowed_v3_v4(bool config_enabled, bool force, bool has_function_call, bool runs_code) {
+  // force: a server cheat the player switched on himself ($infhp revive), which works only through the protected
+  // handler on V3/V4 and must not depend on EnableV3V4ProtectedSubcommands (regie pso-regie-10, 17:18 Nyra in Ultimate)
+  return (config_enabled || force) && has_function_call && runs_code;
+}
+
+asio::awaitable<bool> send_protected_command(
+    std::shared_ptr<Client> c, const void* data, size_t size, bool echo_to_lobby, bool force) {
   switch (c->version()) {
     case Version::DC_NTE:
     case Version::DC_11_2000:
@@ -516,9 +523,12 @@ asio::awaitable<bool> send_protected_command(std::shared_ptr<Client> c, const vo
     case Version::GC_EP3:
     case Version::BB_V4: {
       auto s = c->require_server_state();
-      if (!s->data->enable_v3_v4_protected_subcommands ||
-          !c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
-          !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE)) {
+      if (!protected_command_allowed_v3_v4(s->data->enable_v3_v4_protected_subcommands, force,
+              c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL),
+              c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE))) {
+        if (force) {
+          c->log.warning_f("Protected command {:02X} not sent: the client has no function calls", size ? *reinterpret_cast<const uint8_t*>(data) : 0);
+        }
         co_return false;
       }
 
