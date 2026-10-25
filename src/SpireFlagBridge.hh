@@ -161,8 +161,8 @@ constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
 //   unless the end is "player left" (run timer) or the game has fewer clients than its run had: a crash of one player
 //   must not cost the other one his savestate.
 // - Resume: a room quest that starts after K0 writes 'J' << 24 | variant << 8 | k at its kit point and waits for 'DONE'.
-//   The server always answers that client: register SPIRE_RESUME_ANSWER_REGISTER = 0 (fresh) or
-//   SPIRE_RESUME_ANSWER_RESUME | item count, the values in SPIRE_RESUME_HEADER (value index -> register) before it, then
+//   The server always answers that client: register SPIRE_RESUME_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_TAG (fresh) or
+//   SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | item count, the values in SPIRE_RESUME_HEADER (value index -> register) before it, then
 //   r248 = 'DONE'. It resumes only from a savestate of this episode, room and variant, with the game's run id (the
 //   leader's), and never after the run ended. Then 'J' << 24 | 1 << 16 | i asks for item i: data1 in
 //   SPIRE_RESUME_ITEM_FIRST_REGISTER.. (12 registers), SPIRE_RESUME_ITEM_ACK_REGISTER = i + 1 (| SPIRE_RESUME_ITEM_GLASS
@@ -195,6 +195,9 @@ enum SpireSavestateValue : size_t {
   SPIRE_SAVESTATE_NUM_VALUES,
 };
 constexpr uint8_t SPIRE_RESUME_ANSWER_REGISTER = 41;
+// The answer always carries 'J' in its top byte, so the quest tells it from the 0 it set before asking (another
+// request's 'DONE' on r248 can come first)
+constexpr uint32_t SPIRE_RESUME_ANSWER_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24;
 constexpr uint32_t SPIRE_RESUME_ANSWER_RESUME = 0x100;
 constexpr uint8_t SPIRE_RESUME_ITEM_FIRST_REGISTER = 20; // r20-r31
 constexpr uint8_t SPIRE_RESUME_ITEM_ACK_REGISTER = 44;

@@ -1147,13 +1147,14 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
       spire_send_register(c, reg, cr->savestate.values[index]);
     }
-    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ANSWER_RESUME | cr->savestate.items.size());
+    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER,
+        SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | cr->savestate.items.size());
     c->log.info_f("Spire savestate: serial {:010} resumes in q{} room {} from {}", serial_number, quest_number, k,
         spire_savestate_describe(cr->savestate));
   } else {
     cr->answered_resume = false;
     cr->savestate = SpireSavestate();
-    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, 0);
+    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ANSWER_TAG);
     c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh (own savestate {}, game run {:08X}{})",
         serial_number, quest_number, k, variant, spire_savestate_describe(own), run->run_id,
         run->resumed ? " resumed" : "");
