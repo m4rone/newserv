@@ -802,6 +802,15 @@ void run_static_tests() {
     expect_raises(std::runtime_error, [&]() { spire_draw(t, in, rnd0); });
   }
 
+  phosg::log_info_f("-- Spire meta: flags only in a game with a Spire quest (regie pso-regie-9)");
+  {
+    // arguments: is_game, has_quest, spire_quest (spire_game_is_spire)
+    expect(spire_meta_delivery_applies(true, true, true));     // q920/q921/q940-q955 loaded: the run gets its flags
+    expect(!spire_meta_delivery_applies(true, false, false));  // Battle game before its quest (town start), or q0
+    expect(!spire_meta_delivery_applies(true, true, false));   // a normal game with another quest
+    expect(!spire_meta_delivery_applies(false, false, false)); // lobby
+  }
+
   phosg::log_info_f("-- Spire meta: the flags a finished run sets (v24)");
   {
     auto has = [](const std::vector<uint16_t>& v, uint16_t f) { return std::find(v.begin(), v.end(), f) != v.end(); };

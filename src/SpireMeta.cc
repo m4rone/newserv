@@ -95,6 +95,10 @@ void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
 }
 
+bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest) {
+  return is_game && has_quest && spire_quest;
+}
+
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value) {
   SpireMetaFinish ret;
   ret.won = (finish_value >> 23) & 1;

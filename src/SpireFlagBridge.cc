@@ -175,7 +175,7 @@ void spire_bridge_record_flag(
     if (!l->is_game() || !spire_bridge_flag_in_range(flag_num)) {
       return;
     }
-    // Only flag writes made while a SpireBridgeQuests quest runs are stored (v5); delivery on join stays unconditional
+    // Only flag writes made while a SpireBridgeQuests quest runs are stored (v5); delivery too is Spire-quest only
     if (!l->quest || !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number)) {
       return;
     }
@@ -199,7 +199,9 @@ void spire_bridge_record_flag(
 }
 
 void spire_bridge_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
-  if (!l->is_game()) {
+  // Regie pso-regie-9: only a game running a Spire quest gets the flags; the join of a game without one (the town
+  // start's Battle game before its quest loads, any normal game) delivers nothing, set_lobby_quest delivers at load
+  if (!l || !spire_meta_delivery_applies(l->is_game(), !!l->quest, spire_game_is_spire(c, l))) {
     return;
   }
   uint32_t serial_number = spire_bridge_serial_for_client(c);

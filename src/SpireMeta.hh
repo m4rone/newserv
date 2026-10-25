@@ -39,6 +39,11 @@ bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, u
 // Called from spire_bridge_deliver_flags. Sends the character's stored flags (6x75 in one 6D). Never throws.
 void spire_meta_deliver_flags(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number);
 
+// Regie pso-regie-9: the stored flags go only into a game that runs a Spire quest (SpireBridgeQuests or
+// SpireGuardQuests, spire_game_is_spire). A normal game (Normal, Battle or Solo, with another quest or none) gets
+// nothing, so 0x380-0x3AF never reach a character outside a Spire quest. Pure, for the offline test.
+bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest);
+
 // Called from the 'F' record code after the records are saved. Sets the run's unlock and payout flags for the
 // character on the game's difficulty, delivers them and returns the text lines to add to the record text (empty if
 // nothing is new). Throws on a file error.

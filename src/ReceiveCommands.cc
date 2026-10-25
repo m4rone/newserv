@@ -2519,6 +2519,11 @@ void set_lobby_quest(std::shared_ptr<Lobby> l, std::shared_ptr<const Quest> q, b
     }
     lc->log.info_f("Sending {} version of quest \"{}\"", name_for_language(vq->meta.language), vq->meta.name);
 
+    // Spire flag bridge (regie pso-regie-9): the flags go in now, before the quest files and the AC barrier, so a
+    // Spire quest's script reads them from its first frame; the same moment as the old join delivery of the town
+    // start (game joined, no quest running yet). No-op for a quest not in SpireBridgeQuests/SpireGuardQuests.
+    spire_bridge_deliver_flags(lc, l);
+
     std::string bin_filename = vq->bin_filename();
     std::string dat_filename = vq->dat_filename();
     std::string xb_filename = vq->xb_filename();
@@ -5085,10 +5090,9 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
 
   send_server_time(c);
 
-  // Spire flag bridge: send this GC V3 client's stored bridged quest flags (set and clear) on every game join, Battle
-  // or not. At this point the client has finished loading into the game (including any flag state synced from the
-  // leader), and no quest can have started yet, so the flags are in place before any quest script reads them. This is
-  // a no-op for other versions (see SpireFlagBridge.hh).
+  // Spire flag bridge: send this GC V3 client's stored bridged quest flags (set and clear) when it joins a game that
+  // already runs a Spire quest (a joinable one). A game without a Spire quest gets nothing here (regie pso-regie-9);
+  // a Spire quest loaded later delivers in set_lobby_quest. A no-op for other versions (see SpireFlagBridge.hh).
   spire_bridge_deliver_flags(c, l);
   spire_replay_after_floor_load(c, l);
   // Spire guard (v21): every Battle game is guarded, also one without a quest (see SpireFlagBridge.hh)

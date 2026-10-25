@@ -19,17 +19,19 @@
 // - Every quest flag write in the bridged range by a GC V3 client, in any game (Battle or not) that runs a quest listed
 //   in SpireBridgeQuests (v5; a missing or empty list records nothing), is recorded per GC license serial number in
 //   system/spire-bridge/<serial>.json. Both set and clear are recorded; the last write wins.
-// - Every time the same client finishes loading into any game (Battle or not), all stored flags are sent to it as
-//   6x75 commands (set or clear), so quest scripts in that game read the server's state. Stored entries are never
-//   erased by delivery.
+// - The stored flags are sent to the same client as 6x75 commands (set or clear) only in a game that runs a Spire quest
+//   (spire_game_is_spire: SpireBridgeQuests or SpireGuardQuests; regie pso-regie-9): when such a quest loads
+//   (set_lobby_quest, before the quest files and the AC barrier) and when the client joins a game that already runs
+//   one. A normal game (Normal, Battle or Solo without a Spire quest) gets nothing. Stored entries are never erased by
+//   delivery.
 // - Spire meta registers (v4): in the quests listed in the server config key SpireBridgeQuests (a JSON list of quest
 //   numbers; any game mode), 6x77 writes to registers 232-239 and 243-247 by a GC V3 client are merged into a file per
 //   character (audit S-6: <serial>.<character id>.registers.json, like the flags and records) (232/233 max, 234 min with 0 ignored, 235-239 and 245 OR, 243/244/246/247 last write wins) and
 //   are not forwarded, so a co-op partner never takes them over. A write of 'SPIR' to register 248 is answered to that
 //   client only: one 6x77 per stored register (0 if none), then 248 = 'DONE'. Registers 240-242 are left alone (Sega's
 //   q101 and Schtserv commands use them). If SpireBridgeQuests is missing or empty, the register bridge takes nothing:
-//   every register write is handled exactly as without the bridge. The flag part above records only in listed quests
-//   (v5) but delivers stored flags on every join, so E06 keeps reading its payout flag in normal games.
+//   every register write is handled exactly as without the bridge. The flag part above records and delivers only in listed
+//   quests (v5, regie pso-regie-9): a quest that reads the flags in a normal game (E06 payout q925) must be listed.
 // - Battle end (v10b): a write of 'ENDB' to register 248 sends the phases in SpireBattleEndPhases as 6x7D (what = 0,
 //   set battle phase) to every client in the Battle game, 2 seconds apart. Off unless the key lists phases.
 // - Room clear (v16, lab probe): a write of 'ROOM' to register 248 sends the server text "Room clear!" (B0) to every
