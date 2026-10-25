@@ -3810,6 +3810,39 @@ static void on_battle_scores(std::shared_ptr<Client> c, SubcommandMessage& msg) 
   }
 }
 
+// Spire: a boss-action command whose entity id does not resolve to the expected boss in the server's map view must
+// never end the game for everyone. Log what was expected and found, and forward the command unchanged to the other
+// clients (the pre-conversion behavior). Returns nullptr when the command was forwarded this way.
+static std::shared_ptr<MapState::EnemyState> boss_enemy_state_or_forward(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, SubcommandMessage& msg, uint8_t subcommand,
+    uint16_t entity_id, EnemyType expected_type) {
+  std::shared_ptr<MapState::EnemyState> ene_st;
+  std::string problem;
+  if (entity_id < 0x1000) {
+    problem = "entity id is not an enemy";
+  } else {
+    try {
+      ene_st = l->map_state->enemy_state_for_index(c->version(), entity_id - 0x1000);
+    } catch (const std::exception& e) {
+      problem = std::format("enemy lookup failed ({})", e.what());
+    }
+  }
+  if (ene_st && (!ene_st->super_ene || (ene_st->super_ene->type != expected_type))) {
+    problem = std::format("found type {} on floor {:02X}",
+        ene_st->super_ene ? phosg::name_for_enum(ene_st->super_ene->type) : "(none)",
+        ene_st->super_ene ? ene_st->super_ene->floor : 0xFF);
+  } else if (ene_st && ene_st->alias_target_ene_st) {
+    problem = std::format("{} enemy is an alias", phosg::name_for_enum(expected_type));
+  }
+  if (problem.empty()) {
+    return ene_st;
+  }
+  l->log.warning_f("6x{:02X} from client {} on floor {:02X}: entity {:04X} expected {}, {}; forwarding unchanged",
+      subcommand, c->lobby_client_id, c->floor, entity_id, phosg::name_for_enum(expected_type), problem);
+  forward_subcommand(c, msg);
+  return nullptr;
+}
+
 static void on_dragon_actions_6x12(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   auto& cmd = msg.check_size_t<G_DragonBossActions_DC_PC_XB_BB_6x12>();
 
@@ -3821,12 +3854,9 @@ static void on_dragon_actions_6x12(std::shared_ptr<Client> c, SubcommandMessage&
     return;
   }
 
-  auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.header.entity_id - 0x1000);
-  if (ene_st->super_ene->type != EnemyType::DRAGON) {
-    throw std::runtime_error("6x12 command sent for incorrect enemy type");
-  }
-  if (ene_st->alias_target_ene_st) {
-    throw std::runtime_error("DRAGON enemy is an alias");
+  auto ene_st = boss_enemy_state_or_forward(c, l, msg, 0x12, cmd.header.entity_id, EnemyType::DRAGON);
+  if (!ene_st) {
+    return;
   }
 
   G_DragonBossActions_GC_6x12 sw_cmd = {{cmd.header.subcommand, cmd.header.size, cmd.header.entity_id.load()},
@@ -3883,12 +3913,10 @@ static void on_gol_dragon_actions(std::shared_ptr<Client> c, SubcommandMessage& 
     cmd = msg.check_size_t<G_GolDragonBossActions_XB_BB_6xA8>();
   }
 
-  auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.header.entity_id - 0x1000);
-  if (ene_st->super_ene->type != EnemyType::GOL_DRAGON) {
-    throw std::runtime_error("6xA8 command sent for incorrect enemy type");
-  }
-  if (ene_st->alias_target_ene_st) {
-    throw std::runtime_error("GOL_DRAGON enemy is an alias");
+  auto ene_st = boss_enemy_state_or_forward(c, l, msg, msg.check_size_t<G_UnusedHeader>(0xFFFF).subcommand,
+      cmd.header.entity_id, EnemyType::GOL_DRAGON);
+  if (!ene_st) {
+    return;
   }
 
   G_GolDragonBossActions_GC_6xA8 gc_cmd{{cmd.header.subcommand, cmd.header.size, cmd.header.entity_id},
