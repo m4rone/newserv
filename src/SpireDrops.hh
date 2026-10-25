@@ -78,8 +78,11 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
 // (k11, plan-mines-volopt-2026-10-25 section 5), so only VOL_OPT_2 gives each player his boss weapon. Dragon, De Rol Le
 // and every other boss are unchanged. Dark Falz (k15): DARK_FALZ_1 carries the flag but is not the end, so it gives no
 // boss drop; the final phase (DARK_FALZ_2 on Normal, DARK_FALZ_3 above, the type newserv's flag route drops for) does.
-// Darvants have no BOSS flag.
-bool spire_drops_is_boss_drop(EnemyType type);
+// Darvants have no BOSS flag. Only the head of an enemy set gives the boss drop (child_index 0, the drop target after
+// alias resolution): Gol Dragon's set expands to the head plus 5 children of type GOL_DRAGON, and Barba Ray's ends on
+// a second BARBA_RAY child; each child has its own drop flag, so a drop request for one would otherwise be a second
+// boss drop. Dark Falz and Olga Flow children alias their head, which keeps child_index 0 as the target.
+bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index = 0);
 
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
 // counter. Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a

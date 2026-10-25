@@ -1107,6 +1107,18 @@ void run_static_tests() {
     expect(type_definition_for_enemy(EnemyType::BARBA_RAY_JOINT).is_boss()); // Sega's flag: a boss part
     expect(!spire_drops_is_boss_drop(EnemyType::BARBA_RAY_JOINT));
     expect(!spire_drops_is_boss_drop(EnemyType::PIG_RAY));
+    expect(!spire_drops_is_boss_drop(EnemyType::BARBA_RAY, 0x2F)); // the trailing BARBA_RAY child of the set
+
+    // Boss drop: only the head of a boss set. Gol Dragon's set is the head plus 5 GOL_DRAGON children (Map.cc
+    // TBoss8Dragon, default_num_children = 5), each with its own drop flag; only the head gives the boss drop
+    expect(spire_drops_is_boss_drop(EnemyType::GOL_DRAGON));
+    expect(spire_drops_is_boss_drop(EnemyType::GOL_DRAGON, 0));
+    for (uint16_t child = 1; child <= 5; child++) {
+      expect(!spire_drops_is_boss_drop(EnemyType::GOL_DRAGON, child));
+    }
+    expect(spire_drops_is_boss_drop(EnemyType::GAL_GRYPHON)); // no children in its set
+    expect(spire_drops_is_boss_drop(EnemyType::OLGA_FLOW_2)); // its 0x200 children alias the head
+    expect(spire_drops_is_boss_drop(EnemyType::DARK_FALZ_3)); // Dark Falz's phases alias the head
   }
 
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");

@@ -200,7 +200,10 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
   return nullptr;
 }
 
-bool spire_drops_is_boss_drop(EnemyType type) {
+bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
+  if (child_index != 0) { // a child of a boss set (Gol Dragon's 5, Barba Ray's trailing BARBA_RAY): the head drops
+    return false;
+  }
   switch (type) {
     case EnemyType::VOL_OPT_1:
     case EnemyType::VOL_OPT_AMP:

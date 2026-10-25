@@ -3068,7 +3068,8 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
       // Regie pso-regie-9 (B-E01-108): the Spire drop rules per receiving player (SpireDrops.hh); a boss gives each
       // player one weapon he can equip (of Vol Opt only phase 2, of Dark Falz only the final phase,
       // see spire_drops_is_boss_drop)
-      bool is_boss = rec.target_ene_st && spire_drops_is_boss_drop(rec.effective_enemy_type);
+      bool is_boss = rec.target_ene_st && rec.target_ene_st->super_ene &&
+          spire_drops_is_boss_drop(rec.effective_enemy_type, rec.target_ene_st->super_ene->child_index);
       spire_drops_filter(c, l, res.item, is_boss);
       return res;
     };
