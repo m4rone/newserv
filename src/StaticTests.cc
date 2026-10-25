@@ -1,6 +1,7 @@
 #include <phosg/Filesystem.hh>
 #include <phosg/UnitTest.hh>
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <unistd.h>
@@ -1178,6 +1179,155 @@ void run_static_tests() {
     expect_eq(b.character_id, imported.character_id);
     expect_eq(std::filesystem::path(imported_path).filename().string(), inventory_backup_list(dir).back()); // newest
     std::filesystem::remove_all(root);
+  }
+
+  phosg::log_info_f("-- $restore: own character, no Spire run, once per backup, anti-dup, Wakiru allowed, check (regie pso-regie-10)");
+  {
+    using R = InventoryRestoreRefusal;
+    auto code = [](const ItemData& i) {
+      return std::format("{:08X}{:08X}{:08X} {:08X}", i.data1db[0], i.data1db[1], i.data1db[2], i.data2db);
+    };
+    auto parse = [](const std::string& c) {
+      // "<24 hex> <8 hex>", the $item form of item-herstel-2026-10-25.md
+      uint64_t first = std::stoull(c.substr(0, 16), nullptr, 16);
+      uint64_t second = (std::stoull(c.substr(16, 8), nullptr, 16) << 32) | std::stoull(c.substr(25, 8), nullptr, 16);
+      return ItemData(first, second);
+    };
+    auto inventory_of = [&](const std::vector<std::string>& codes, size_t equipped) {
+      PlayerInventory inv;
+      inv.language = Language::ENGLISH;
+      inv.num_items = codes.size();
+      for (size_t z = 0; z < codes.size(); z++) {
+        inv.items[z].state = (z < equipped) ? 2 : 1;
+        inv.items[z].flags = (z < equipped) ? 0x00000008 : 0;
+        inv.items[z].data = parse(codes[z]);
+        inv.items[z].data.id = 0x00210000 + z;
+      }
+      return inv;
+    };
+    // The 13:35 case (pso-roguelike new-features/roguelike/output/item-herstel-2026-10-25.md): the 13:34:52 dump had 21
+    // items and 1350 Meseta; after the freeze only the 7 equipped ones were left and 0 Meseta. The 7 equipped codes are
+    // synthetic (the doc names them, not their bytes); the 14 lost ones are the doc's codes.
+    const std::vector<std::string> equipped = {
+        "000A05000000000000000000 00000000", // Ila (synthetic)
+        "010128000000000000000000 00000000", // Smoking Plate (synthetic)
+        "010228000000000000000000 00000000", // Tripolic Shield (synthetic)
+        "01030F000000000000000000 00000000", // God/Mind (synthetic)
+        "010305000000000000000000 00000000", // God/HP (synthetic)
+        "010305000000000000000000 00000000", // God/HP (synthetic)
+        "010336000000000000000000 00000000", // TP/Revival (synthetic)
+    };
+    const std::vector<std::string> lost = {
+        "002200000000021900000000 00000000", // Caduceus 0/25/0/0
+        "0101290000042C0005000000 00000000", // Guard Wave (4 slots) +44DEF +5EVP
+        "01020C000000020004000000 00000000", // General Shield +2DEF +4EVP
+        "010335000000000000000000 00000000", // HP/Revival
+        "02000500F401000000000000 2800000A", // Mag LV5
+        "030000000001000000000000 00000000", // Monomate x1
+        "030001000001000000000000 00000000", // Dimate x1
+        "030100000003000000000000 00000000", // Monofluid x3
+        "03010200000A000000000000 00000000", // Trifluid x10
+        "030300000002000000000000 00000000", // Sol Atomizer x2
+        "030400000001000000000000 00000000", // Moon Atomizer x1
+        "030700000001000000000000 00000000", // Telepipe x1
+        "030E04000000000000000000 00000000", // Syncesta
+        "031000000004000000000000 00000000", // Photon Drop x4
+    };
+    std::vector<std::string> all = equipped;
+    all.insert(all.end(), lost.begin(), lost.end());
+    InventoryBackup snap; // what spire-backup-import makes of the 13:07 marker
+    snap.serial_number = 3117539659;
+    snap.disp.visual.name.encode("Wakiru", Language::ENGLISH);
+    snap.disp.stats.level = 139;
+    snap.disp.stats.meseta = 1350;
+    snap.character_id = spire_guard_character_id(snap.disp);
+    snap.inventory = inventory_of(all, equipped.size());
+    snap.imported_from = "wakiru-marker-13-07.bak";
+    expect_eq(21u, snap.inventory.num_items);
+    auto after_freeze = inventory_of(equipped, equipped.size());
+    InventoryRemovals none;
+
+    // $restore check lists exactly the 14 documented items and the 1350 Meseta
+    auto plan = inventory_restore_missing(snap.inventory, 1350, after_freeze, 0, none);
+    expect_eq(lost.size(), plan.items.size());
+    for (size_t z = 0; z < lost.size(); z++) {
+      expect_eq(lost[z], code(plan.items[z]));
+      expect_eq(0xFFFFFFFFu, plan.items[z].id.load()); // fresh ids come from the game at drop time
+    }
+    expect_eq(1350u, plan.meseta);
+
+    // Wakiru (protected) is allowed; the protected-character cheat gate does not stop $restore either
+    expect_eq(R::NONE, inventory_restore_refusal(true, false, true, 3117539659, snap.character_id, &snap));
+    expect(!DataIndex::spire_cheat_refused("$restore", true));
+
+    // Check mode: nothing to drop, nothing marked, a real $restore still possible afterwards
+    expect(inventory_restore_take(snap, plan, true, 123).empty());
+    expect(!snap.restored && (snap.restored_time_usecs == 0));
+    expect_eq(R::NONE, inventory_restore_refusal(true, false, true, 3117539659, snap.character_id, &snap));
+    // Once per backup: the first $restore marks it, the second is refused and drops nothing
+    auto taken = inventory_restore_take(snap, plan, false, 456);
+    expect_eq(lost.size(), taken.items.size());
+    expect(snap.restored && (snap.restored_time_usecs == 456));
+    auto json_after = inventory_backup_to_json(snap);
+    expect(inventory_backup_from_json(json_after).restored); // the mark is in the file
+    expect_eq(R::ALREADY_RESTORED, inventory_restore_refusal(true, false, true, 3117539659, snap.character_id, &snap));
+    snap.restored = false;
+
+    // Own character only: a backup of another serial or another character on the same card is refused
+    expect_eq(R::OTHER_CHARACTER, inventory_restore_refusal(true, false, false, 3117539666, snap.character_id, &snap));
+    PlayerDispDataV4 bidx;
+    bidx.visual.name.encode("BidX", Language::ENGLISH);
+    expect_eq(R::OTHER_CHARACTER,
+        inventory_restore_refusal(true, false, false, 3117539659, spire_guard_character_id(bidx), &snap));
+    // Spire run refused, and outside a game (the drop needs a game)
+    expect_eq(R::SPIRE_GAME, inventory_restore_refusal(true, true, false, 3117539659, snap.character_id, &snap));
+    expect_eq(R::NOT_IN_GAME, inventory_restore_refusal(false, false, false, 3117539659, snap.character_id, &snap));
+    expect_eq(R::NO_BACKUP, inventory_restore_refusal(true, false, false, 3117539659, snap.character_id, nullptr));
+    // Only a game that did not end with a 98: LeftNormally refused, Exit or an imported snapshot allowed, neither refused
+    InventoryBackup b = snap;
+    b.imported_from.clear();
+    expect_eq(R::UNKNOWN_END, inventory_restore_refusal(true, false, false, 3117539659, b.character_id, &b));
+    b.has_exit = true;
+    expect_eq(R::NONE, inventory_restore_refusal(true, false, false, 3117539659, b.character_id, &b));
+    b.left_normally = true;
+    expect_eq(R::LEFT_NORMALLY, inventory_restore_refusal(true, false, false, 3117539659, b.character_id, &b));
+    b.left_normally = false;
+    b.spire = true;
+    expect_eq(R::SPIRE_BACKUP, inventory_restore_refusal(true, false, false, 3117539659, b.character_id, &b));
+
+    // Anti-dup: what the player dropped, traded, sold or banked since the current game began is not missing, and
+    // neither is what he already has again (a ground Guard Wave, a fed mag, a Syncesta made with $item)
+    InventoryRemovals removed;
+    inventory_removals_add(removed, parse("002200000000021900000000 00000000")); // dropped the Caduceus (6x2A)
+    inventory_removals_add(removed, parse("030102000003000000000000 00000000")); // sold 3 Trifluid (6x29)
+    ItemData meseta_drop;
+    meseta_drop.data1[0] = 0x04;
+    meseta_drop.data2d = 350;
+    inventory_removals_add(removed, meseta_drop); // dropped 350 Meseta
+    auto now_has = equipped;
+    now_has.emplace_back("0101290300042C0005000000 00000000"); // Guard Wave, other bytes (ground)
+    now_has.emplace_back("02000600F401000000000000 2800000A"); // the mag, fed to LV6
+    now_has.emplace_back("030E04000000000000000000 00000000"); // Syncesta
+    auto dup_plan = inventory_restore_missing(snap.inventory, 1350, inventory_of(now_has, equipped.size()), 0, removed);
+    std::vector<std::string> dup_codes;
+    for (const auto& it : dup_plan.items) {
+      dup_codes.emplace_back(code(it));
+    }
+    expect_eq(10u, dup_codes.size());
+    for (const char* gone : {"002200000000021900000000 00000000", "0101290000042C0005000000 00000000",
+             "02000500F401000000000000 2800000A", "030E04000000000000000000 00000000"}) {
+      expect(std::find(dup_codes.begin(), dup_codes.end(), gone) == dup_codes.end());
+    }
+    expect(std::find(dup_codes.begin(), dup_codes.end(), "030102000007000000000000 00000000") != dup_codes.end());
+    expect_eq(1000u, dup_plan.meseta);
+    // Nothing missing: nothing to drop
+    expect(inventory_restore_missing(snap.inventory, 1350, snap.inventory, 1350, none).empty());
+
+    // The previous backup is the newest one that is not the current game's own
+    std::vector<std::string> names = {"20261025-120000-000000.json", "20261025-130741-000000.json", "20261025-150000-000000.json"};
+    expect_eq(1, inventory_backup_pick_previous(names, "20261025-150000-000000.json"));
+    expect_eq(2, inventory_backup_pick_previous(names, ""));
+    expect_eq(-1, inventory_backup_pick_previous({"20261025-150000-000000.json"}, "20261025-150000-000000.json"));
   }
 
   phosg::log_info_f("-- All static tests passed");

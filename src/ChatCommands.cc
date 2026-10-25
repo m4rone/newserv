@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "Client.hh"
+#include "InventoryBackup.hh"
 #include "GameServer.hh"
 #include "Lobby.hh"
 #include "Loggers.hh"
@@ -1257,6 +1258,28 @@ ChatCommandDefinition cc_item(
         send_text_message(a.c, "$C7Next item:\n" + name);
       } else {
         send_text_message(a.c, "$C7Item created:\n" + name);
+      }
+      co_return;
+    });
+
+// Regie pso-regie-10: "$restore" drops what Sega took from the player's own character after a game that did not end
+// cleanly; "$restore check" only lists it (see InventoryBackup.hh). Allowed for protected characters (Wakiru).
+ChatCommandDefinition cc_restore(
+    {"$restore"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      bool check_only = (a.text == "check");
+      if (!check_only && !a.text.empty()) {
+        send_text_message(a.c, "$C6Gebruik: $restore\nof $restore check");
+        co_return;
+      }
+      auto lines = inventory_restore_command(a.c, check_only);
+      // A text message shows only a few lines: send the list in groups of four
+      for (size_t z = 0; z < lines.size(); z += 4) {
+        std::string text;
+        for (size_t y = z; (y < z + 4) && (y < lines.size()); y++) {
+          text += (text.empty() ? "" : "\n") + lines[y];
+        }
+        send_text_message(a.c, "$C7" + text);
       }
       co_return;
     });

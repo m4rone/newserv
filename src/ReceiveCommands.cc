@@ -5282,6 +5282,9 @@ static asio::awaitable<void> on_D2_V3_BB(std::shared_ptr<Client> c, Channel::Mes
 
   auto s = c->require_server_state();
   auto complete_trade_for_side = [s, l](std::shared_ptr<Client> c, std::shared_ptr<Client> other_c) -> void {
+    for (const auto& item : c->pending_item_trade->items) {
+      inventory_backup_note_removed(c, item); // traded away: not missing for $restore
+    }
     if (c->version() == Version::BB_V4) {
       const auto& stack_limits = *s->data->item_stack_limits(c->version());
 

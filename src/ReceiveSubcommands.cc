@@ -10,6 +10,7 @@
 
 #include "Client.hh"
 #include "Compression.hh"
+#include "InventoryBackup.hh"
 #include "CrashValueFilter.hh"
 #include "GameServer.hh"
 #include "HTTPServer.hh"
@@ -2012,6 +2013,7 @@ static void on_player_drop_item(std::shared_ptr<Client> c, SubcommandMessage& ms
     throw std::logic_error("Stack should not be split when entire stack was dropped");
   }
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
+  inventory_backup_note_removed(c, item); // not missing for $restore (InventoryBackup.hh)
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -2181,6 +2183,7 @@ static void on_buy_shop_item(std::shared_ptr<Client> c, SubcommandMessage& msg) 
 
   size_t price = s->data->item_parameter_table(c->version())->price_for_item(item);
   p->remove_meseta(price, c->version() != Version::BB_V4);
+  inventory_backup_note_meseta_removed(c, price);
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto name = s->data->describe_item(c->version(), item);
@@ -2462,6 +2465,11 @@ static void on_use_item(std::shared_ptr<Client> c, SubcommandMessage& msg) {
     // break the reference, so we don't want to accidentally use it again after that.
     const auto& item = p->inventory.items[index].data;
     name = s->data->describe_item(c->version(), item);
+    ItemData used = item; // one of the stack is used up: not missing for $restore
+    if ((used.data1[0] == 0x03) && used.data1[5]) {
+      used.data1[5] = 1;
+    }
+    inventory_backup_note_removed(c, used);
   }
   player_use_item(c, index, l->rand_crypt);
 
@@ -2500,7 +2508,7 @@ static void on_feed_mag(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   // fed item. So on BB, we should remove the fed item here, but on other versions, we allow the following 6x29 command
   // to do that.
   if (c->version() == Version::BB_V4) {
-    p->remove_item(cmd.fed_item_id, 1, *s->data->item_stack_limits(c->version()));
+    inventory_backup_note_removed(c, p->remove_item(cmd.fed_item_id, 1, *s->data->item_stack_limits(c->version())).first);
   }
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
@@ -2700,6 +2708,7 @@ static void on_ep3_private_word_select_bb_bank_action(std::shared_ptr<Client> c,
         } else {
           bank->meseta += cmd.meseta_amount;
           p->disp.stats.meseta -= cmd.meseta_amount;
+          inventory_backup_note_meseta_removed(c, cmd.meseta_amount);
           l->log.info_f("Player {} deposited {} Meseta in the bank (bank now has {}; inventory now has {})",
               c->lobby_client_id, cmd.meseta_amount, bank->meseta, p->disp.stats.meseta);
         }
@@ -2707,6 +2716,7 @@ static void on_ep3_private_word_select_bb_bank_action(std::shared_ptr<Client> c,
       } else { // Deposit item
         const auto& limits = *s->data->item_stack_limits(c->version());
         auto [item, stack_was_split] = p->remove_item(cmd.item_id, cmd.item_amount, limits);
+        inventory_backup_note_removed(c, item);
         // If a stack was split, the bank item retains the same item ID as the inventory item. This is annoying but
         // doesn't cause any problems because we always generate a new item ID when withdrawing from the bank, so
         // there's no chance of conflict later.
@@ -4535,6 +4545,8 @@ static void on_destroy_inventory_item(std::shared_ptr<Client> c, SubcommandMessa
   auto s = c->require_server_state();
   auto p = c->character_file();
   auto [item, _] = p->remove_item(cmd.item_id, cmd.amount, *s->data->item_stack_limits(c->version()));
+  // V3 sends this after a sale, a trade, a partial stack drop (also meseta) and a mag feed: not missing for $restore
+  inventory_backup_note_removed(c, item);
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto name = s->data->describe_item(c->version(), item);
@@ -4691,6 +4703,7 @@ static void on_sell_item_at_shop_bb(std::shared_ptr<Client> c, SubcommandMessage
   auto p = c->character_file();
   auto& stack_limits = *s->data->item_stack_limits(c->version());
   auto [item, _] = p->remove_item(cmd.item_id, cmd.amount, stack_limits);
+  inventory_backup_note_removed(c, item);
   if (item.stack_size(stack_limits) != cmd.amount) {
     throw std::runtime_error("Invalid stack size at sale time");
   }
@@ -4732,6 +4745,7 @@ static void on_buy_shop_item_bb(std::shared_ptr<Client> c, SubcommandMessage& ms
   item.data2d = 0;
   auto p = c->character_file();
   p->remove_meseta(price, false);
+  inventory_backup_note_meseta_removed(c, price);
 
   item.id = cmd.shop_item_id;
   l->on_item_id_generated_externally(item.id);
