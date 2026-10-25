@@ -27,6 +27,8 @@ constexpr uint16_t SPIRE_META_FLAG_DEROLLE = 0x0382;
 constexpr uint16_t SPIRE_META_FLAG_DEATHLESS_WIN = 0x0383;
 constexpr uint16_t SPIRE_META_FLAG_PACT_FIRST = 0x0384; // Iron man, Haste, Bare, Hungry
 constexpr uint16_t SPIRE_META_FLAG_KIT2_FIRST = 0x0388; // HU, RA, FO
+constexpr uint16_t SPIRE_META_FLAG_RUN1_WON = 0x038B; // ladder (plan-unlockables §2): Spire Run I won on that difficulty
+constexpr uint16_t SPIRE_META_FLAG_RUN2_WON = 0x038C; // the same for Spire Run II
 constexpr uint16_t SPIRE_META_FLAG_PAY_WIN = 0x03A0;
 constexpr uint16_t SPIRE_META_FLAG_PAY_DEATHLESS = 0x03A1;
 constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
@@ -104,11 +106,37 @@ bool spire_meta_delivery_applies(bool is_game, bool has_quest, bool spire_quest,
 // delivery at the next quest load does not set it again; its other writes stay the client's own. Pure, for the test.
 bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t flag_num, bool is_set);
 
+// The difficulty ladder (plan-unlockables-2026-10-25 §2): per character and per run, a win on a difficulty opens the
+// next one. Run I is q921 (and the retired q920) on Normal plus q981-q983 (Hard, Very Hard, Ultimate); Run II is q922
+// plus q984-q986. 0 = a quest of neither run (no ladder flag).
+uint8_t spire_meta_ladder_run(uint32_t quest_number);
+uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
+// The highest difficulty open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
+uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
+// The difficulty a finish flag is stored on: the payout flags (0x3A0-0x3A2) on Normal (q925 pays there, plan §5), every
+// other flag on the game's difficulty.
+uint8_t spire_meta_flag_difficulty(uint16_t flag_num, uint8_t game_difficulty);
+// The ladder in a game the client creates or a quest menu it opens (pure, for the offline test).
+enum class SpireLadderGate : uint8_t {
+  LEVEL_OK = 0, // the character's own level allows the difficulty: Sega's check passes
+  RUNG_OPEN, // too low, but a run's rung covers the difficulty: the minimum-level check is skipped (the run is an overlay)
+  REFUSED, // too low and no rung: refused with spire_meta_ladder_refuse_text
+};
+SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, uint8_t rung, uint8_t difficulty,
+    uint32_t char_level, uint32_t min_level);
+// One line (a lobby message box) for a refused difficulty: the level Sega asks and the Spire win that opens it.
+std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level);
+// The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
+// runs are open there), so a hidden run quest is never a silent nothing.
+std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty);
+// The rung of a run for a client's real character (its meta file; 0 without one or on a read error). Never throws.
+uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run);
+
 // Called from the 'F' record code after the records are saved. Sets the run's unlock and payout flags for the
 // character on the game's difficulty, delivers them and returns the text lines to add to the record text (empty if
 // nothing is new). Throws on a file error.
 std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
-    uint32_t finish_value, bool new_best_time);
+    uint32_t quest_number, uint32_t finish_value, bool new_best_time);
 
 // Pure part of spire_meta_on_finish, for the offline test: the flags a finished run sets, for a class (0-11).
 struct SpireMetaFinish {

@@ -1305,7 +1305,10 @@ struct SpireRecords {
   uint32_t best_time = 0; // seconds; 0 = no won run yet
   uint32_t runs = 0;
   uint32_t won = 0;
+  // ladder (plan-unlockables §2): won runs and best won time per difficulty (0 Normal ... 3 Ultimate), for the board
+  std::map<uint8_t, std::pair<uint32_t, uint32_t>> per_difficulty;
 };
+static const char* SPIRE_RECORDS_DIFFICULTY_KEYS[4] = {"Normal", "Hard", "VeryHard", "Ultimate"};
 // The score of the run ('K'), per client until its 'F'
 static std::unordered_map<const Client*, uint32_t> spire_records_pending_score;
 
@@ -1326,6 +1329,15 @@ static SpireRecords spire_records_load(const std::string& filename) {
     ret.best_time = json.get_int("BestTime");
     ret.runs = json.get_int("Runs");
     ret.won = json.get_int("Won");
+    if (json.contains("Difficulties")) {
+      const auto& d = json.at("Difficulties");
+      for (uint8_t z = 0; z < 4; z++) {
+        if (d.contains(SPIRE_RECORDS_DIFFICULTY_KEYS[z])) {
+          const auto& e = d.at(SPIRE_RECORDS_DIFFICULTY_KEYS[z]);
+          ret.per_difficulty[z] = std::make_pair(e.get_int("Won"), e.get_int("BestTime"));
+        }
+      }
+    }
   }
   return ret;
 }
@@ -1338,6 +1350,13 @@ static void spire_records_save(const std::string& filename, uint32_t serial_numb
       {"Runs", rec.runs},
       {"Won", rec.won},
   });
+  if (!rec.per_difficulty.empty()) {
+    auto d = phosg::JSON::dict();
+    for (const auto& [difficulty, e] : rec.per_difficulty) {
+      d.emplace(SPIRE_RECORDS_DIFFICULTY_KEYS[difficulty & 3], phosg::JSON::dict({{"Won", e.first}, {"BestTime", e.second}}));
+    }
+    json.emplace("Difficulties", std::move(d));
+  }
   spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
 }
 
@@ -1345,7 +1364,14 @@ static std::string spire_records_board_text(const SpireRecords& rec) {
   std::string time = rec.best_time
       ? std::format("{} min {} s", rec.best_time / 60, rec.best_time % 60)
       : std::string("none yet");
-  return std::format("Best score: {} - best time: {} - runs: {}, won: {}", rec.best_score, time, rec.runs, rec.won);
+  std::string ret = std::format("Best score: {} - best time: {} - runs: {}, won: {}", rec.best_score, time, rec.runs, rec.won);
+  static const char* names[4] = {"Normal", "Hard", "VHard", "Ult"};
+  for (const auto& [difficulty, e] : rec.per_difficulty) {
+    if (e.first) {
+      ret += std::format(" - {}: won {}, best {}:{:02}", names[difficulty & 3], e.first, e.second / 60, e.second % 60);
+    }
+  }
+  return ret;
 }
 
 // Handles a record code; returns false if the value is none. Throws if the file cannot be written (the caller logs).
@@ -1427,6 +1453,13 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   if (new_time) {
     rec.best_time = seconds;
   }
+  if (is_won) {
+    auto& e = rec.per_difficulty[static_cast<uint8_t>(l->difficulty) & 3];
+    e.first++;
+    if (!e.second || (seconds < e.second)) {
+      e.second = seconds;
+    }
+  }
   spire_records_save(filename, serial_number, rec);
   spire_run_mark_ended(l, "records: run finished");
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
@@ -1435,7 +1468,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     text += std::format("\nNew best time: {} s!", seconds);
   }
   // v24: unlocks and payout flags for the character (SpireMeta), on the game's difficulty
-  text += spire_meta_on_finish(c, l, serial_number, value, new_time);
+  text += spire_meta_on_finish(c, l, serial_number, quest_number, value, new_time);
   text += "\nRecords saved.";
   // v35: never a window in the run (Marck, pc 2026-10-25: "New best score" had to be pressed away mid-game); the
   // records text waits for the lobby (spire_deliver_lobby_texts)

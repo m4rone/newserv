@@ -16,6 +16,8 @@ struct ExpressionEnvironment {
   const PlayerRecordsChallengeBB* challenge_records;
   const TeamIndex::Team* team;
   uint32_t spire_rooms = 0; // v23: rooms cleared by this character (bit k-1 = room k), SpireFlagBridge checkpoint
+  uint8_t spire_run1 = 0; // ladder: highest difficulty open for Spire Run I for this character (0 Normal ... 3 Ultimate)
+  uint8_t spire_run2 = 0; // the same for Spire Run II (SpireMeta 0x38B/0x38C, spire_meta_ladder_rung)
 
   int64_t evaluate(const ResourceDASM::Expression::Node& expr) const {
     return expr.evaluate(std::bind(&ExpressionEnvironment::env_lookup, this, std::placeholders::_1)).as_int();
@@ -26,6 +28,12 @@ struct ExpressionEnvironment {
       throw std::logic_error("Environment lookup name is empty");
     } else if (name == "P_SID") { // Player section ID
       return static_cast<int64_t>(this->section_id);
+    } else if (name == "V_Difficulty") { // the game's difficulty: 0 Normal, 1 Hard, 2 Very Hard, 3 Ultimate
+      return static_cast<int64_t>(this->difficulty);
+    } else if (name == "SPIRE_RUN1") { // Spire ladder: highest difficulty open for Run I for this character
+      return static_cast<int64_t>(this->spire_run1);
+    } else if (name == "SPIRE_RUN2") { // the same for Run II
+      return static_cast<int64_t>(this->spire_run2);
     } else if (name == "SPIRE_MAX") { // Spire: highest room cleared by this character (0 = none)
       return static_cast<int64_t>(this->spire_rooms ? (32 - __builtin_clz(this->spire_rooms)) : 0);
     } else if (name.starts_with("SPIRE_K")) { // SPIRE_K<k>: Spire room k cleared by this character

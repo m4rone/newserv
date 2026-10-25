@@ -17,6 +17,7 @@
 #include "SendCommands.hh"
 #include "Server.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMeta.hh"
 #include "Version.hh"
 
 const uint64_t CLIENT_CONFIG_MAGIC = 0x8399AC32;
@@ -389,6 +390,8 @@ bool Client::evaluate_quest_availability_expression(
       .challenge_records = &p->challenge_records,
       .team = this->team().get(),
       .spire_rooms = spire_checkpoint_mask_for_client(this->shared_from_this()),
+      .spire_run1 = spire_meta_ladder_rung_for_client(this->shared_from_this(), 1),
+      .spire_run2 = spire_meta_ladder_rung_for_client(this->shared_from_this(), 2),
   };
   // v28: a SpireTestSerials console sees rooms 1-10 as cleared here only; the checkpoint file and the card are untouched
   if ((this->version() == Version::GC_V3) && this->login && this->login->gc_license) {

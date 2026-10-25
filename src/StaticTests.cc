@@ -951,6 +951,82 @@ void run_static_tests() {
     expect(spire_guard_marker_open(d.is_spire_protected_character(3117539659, "BidX"), true, false, false));
   }
 
+  phosg::log_info_f("-- Spire ladder: rung per character and run, win flags per difficulty, refuse with a message");
+  {
+    // q921/q922 on Normal, q981-q983 Run I Hard/VH/Ult, q984-q986 Run II
+    expect_eq(1, spire_meta_ladder_run(921));
+    expect_eq(1, spire_meta_ladder_run(983));
+    expect_eq(2, spire_meta_ladder_run(922));
+    expect_eq(2, spire_meta_ladder_run(984));
+    expect_eq(2, spire_meta_ladder_run(986));
+    expect_eq(0, spire_meta_ladder_run(940)); // a room quest: no ladder (plan §2, the room quests stay on Normal)
+    expect_eq(0, spire_meta_ladder_run(925));
+    expect_eq(0, spire_meta_ladder_run(987));
+
+    // two characters on one card: each its own meta file, so its own rungs
+    SpireMetaFlags bidx, other;
+    expect_eq(0, spire_meta_ladder_rung(bidx, 1)); // nothing won: Normal only
+    bidx[std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN1_WON)] = true; // Run I won on Normal
+    expect_eq(1, spire_meta_ladder_rung(bidx, 1)); // Hard open
+    expect_eq(0, spire_meta_ladder_rung(bidx, 2)); // Run II has its own ladder
+    expect_eq(0, spire_meta_ladder_rung(other, 1));
+    bidx[std::make_pair(uint8_t(1), SPIRE_META_FLAG_RUN1_WON)] = true;
+    expect_eq(2, spire_meta_ladder_rung(bidx, 1)); // Very Hard
+    bidx[std::make_pair(uint8_t(2), SPIRE_META_FLAG_RUN1_WON)] = true;
+    bidx[std::make_pair(uint8_t(3), SPIRE_META_FLAG_RUN1_WON)] = true; // a win on Ultimate opens nothing past it
+    expect_eq(3, spire_meta_ladder_rung(bidx, 1));
+    other[std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN2_WON)] = false; // a cleared entry is not a win
+    expect_eq(0, spire_meta_ladder_rung(other, 2));
+
+    // AvailableIf of the run quests: q921 Normal only, q981 Hard with Run I open to Hard
+    auto available = [&](const char* expr_str, Difficulty difficulty, uint8_t run1, uint8_t run2) -> bool {
+      auto expr = ResourceDASM::Expression::Node::parse(expr_str);
+      ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+          .difficulty = difficulty, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+          .spire_rooms = 0, .spire_run1 = run1, .spire_run2 = run2};
+      return env.evaluate(*expr) != 0;
+    };
+    expect(available("V_Difficulty == 0", Difficulty::NORMAL, 0, 0)); // q921
+    expect(!available("V_Difficulty == 0", Difficulty::HARD, 3, 3));
+    expect(!available("V_Difficulty == 1 && SPIRE_RUN1 >= 1", Difficulty::HARD, 0, 3)); // q981 closed
+    expect(available("V_Difficulty == 1 && SPIRE_RUN1 >= 1", Difficulty::HARD, 1, 0)); // q981 open
+    expect(!available("V_Difficulty == 3 && SPIRE_RUN1 >= 3", Difficulty::ULTIMATE, 2, 0)); // q983 closed
+    expect(available("V_Difficulty == 3 && SPIRE_RUN1 >= 3", Difficulty::ULTIMATE, 3, 0));
+    expect(available("V_Difficulty == 2 && SPIRE_RUN2 >= 2", Difficulty::VERY_HARD, 0, 2)); // q985
+    expect(!available("V_Difficulty == 2 && SPIRE_RUN2 >= 2", Difficulty::VERY_HARD, 2, 1));
+
+    // win flags on the game's difficulty; the payout always on Normal (plan §5), so q925 on Normal pays every rung
+    expect_eq(2, spire_meta_flag_difficulty(SPIRE_META_FLAG_RUN1_WON, 2));
+    expect_eq(1, spire_meta_flag_difficulty(SPIRE_META_FLAG_DEROLLE, 1));
+    expect_eq(0, spire_meta_flag_difficulty(SPIRE_META_FLAG_PAY_WIN, 3));
+    expect_eq(0, spire_meta_flag_difficulty(SPIRE_META_FLAG_PAY_DEATHLESS, 1));
+    expect_eq(0, spire_meta_flag_difficulty(SPIRE_META_FLAG_PAY_RECORD, 2));
+    expect_eq(0, spire_meta_flag_difficulty(SPIRE_META_FLAG_PAY_WIN, 0));
+    expect(SPIRE_META_FLAG_RUN2_WON <= SPIRE_META_SERVER_LAST_FLAG); // server-owned: a client write never sets it
+    expect(spire_meta_flag_name(SPIRE_META_FLAG_RUN1_WON) == nullptr); // named by on_finish with the next rung
+
+    // game creation: Sega's level check passes, or the rung skips it in a Battle game, or a refusal with a message
+    // (Hard min level 19 = Lv20, BidX Lv52 = level 51 against Ultimate Lv80 = 79)
+    expect(spire_meta_ladder_gate(true, true, 0, 1, 51, 19) == SpireLadderGate::LEVEL_OK);
+    expect(spire_meta_ladder_gate(true, true, 3, 3, 51, 79) == SpireLadderGate::RUNG_OPEN);
+    expect(spire_meta_ladder_gate(true, true, 2, 3, 51, 79) == SpireLadderGate::REFUSED); // rung below: refused
+    expect(spire_meta_ladder_gate(false, true, 3, 3, 51, 79) == SpireLadderGate::REFUSED); // Normal mode: Sega's rule
+    expect(spire_meta_ladder_gate(true, false, 3, 3, 51, 79) == SpireLadderGate::REFUSED); // not a Spire character
+    expect(spire_meta_ladder_gate(true, true, 1, 1, 0, 19) == SpireLadderGate::RUNG_OPEN); // a Lv1 test character
+    std::string refuse = spire_meta_ladder_refuse_text(3, 79);
+    expect_eq(std::string("$C7Ultimate needs level 80. Spire: win Spire Run on Very Hard to open it."), refuse);
+    expect(refuse.find('\n') == std::string::npos); // one line
+    expect_eq(std::string("$C7Hard needs level 20. Spire: win Spire Run on Normal to open it."),
+        spire_meta_ladder_refuse_text(1, 19));
+
+    // quest menu on a difficulty whose run quest is hidden: one info line, nothing when both are open or on Normal
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0));
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(1, 1, 1));
+    expect_eq(std::string("Spire Run on Hard opens after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
+    expect_eq(std::string("Spire Run II on Very Hard opens after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
+    expect_eq(std::string("Spire Run I on Ultimate opens after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
+  }
+
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
   {
     DataIndex d;

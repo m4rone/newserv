@@ -247,8 +247,94 @@ const char* spire_meta_flag_name(uint16_t flag_num) {
   }
 }
 
+uint8_t spire_meta_ladder_run(uint32_t quest_number) {
+  if ((quest_number == 920) || (quest_number == 921) || ((quest_number >= 981) && (quest_number <= 983))) {
+    return 1;
+  }
+  if ((quest_number == 922) || ((quest_number >= 984) && (quest_number <= 986))) {
+    return 2;
+  }
+  return 0;
+}
+
+uint16_t spire_meta_ladder_flag(uint8_t run) {
+  return (run == 1) ? SPIRE_META_FLAG_RUN1_WON : (run == 2) ? SPIRE_META_FLAG_RUN2_WON : 0;
+}
+
+uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run) {
+  uint16_t flag_num = spire_meta_ladder_flag(run);
+  uint8_t ret = 0;
+  if (!flag_num) {
+    return ret;
+  }
+  // a rung opens only from the one below it: a won Hard with an unwon Normal (a file edited by hand) still opens VH,
+  // since the win on Hard needed Hard open; the highest won difficulty decides
+  for (uint8_t d = 0; d < 3; d++) {
+    auto it = flags.find(std::make_pair(d, flag_num));
+    if ((it != flags.end()) && it->second) {
+      ret = d + 1;
+    }
+  }
+  return ret;
+}
+
+uint8_t spire_meta_flag_difficulty(uint16_t flag_num, uint8_t game_difficulty) {
+  return ((flag_num >= SPIRE_META_FLAG_PAY_WIN) && (flag_num <= SPIRE_META_FLAG_PAY_RECORD)) ? 0 : game_difficulty;
+}
+
+SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, uint8_t rung, uint8_t difficulty,
+    uint32_t char_level, uint32_t min_level) {
+  if (min_level <= char_level) {
+    return SpireLadderGate::LEVEL_OK;
+  }
+  return (battle_game && spire_character && (difficulty <= rung)) ? SpireLadderGate::RUNG_OPEN : SpireLadderGate::REFUSED;
+}
+
+static const char* spire_ladder_difficulty_name(uint8_t difficulty) {
+  static const char* names[4] = {"Normal", "Hard", "Very Hard", "Ultimate"};
+  return names[difficulty & 3];
+}
+
+std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level) {
+  // one line, Sega's message box words first; the Spire part names the win that opens the difficulty without the level
+  return std::format("$C7{} needs level {}. Spire: win Spire Run on {} to open it.", spire_ladder_difficulty_name(difficulty),
+      static_cast<size_t>(min_level + 1), spire_ladder_difficulty_name(difficulty ? (difficulty - 1) : 0));
+}
+
+std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty) {
+  if (!difficulty) {
+    return "";
+  }
+  const char* below = spire_ladder_difficulty_name(difficulty - 1);
+  const char* here = spire_ladder_difficulty_name(difficulty);
+  bool open1 = difficulty <= rung1, open2 = difficulty <= rung2;
+  if (open1 && open2) {
+    return "";
+  } else if (!open1 && !open2) {
+    return std::format("Spire Run on {} opens after a win on {}.", here, below);
+  } else if (!open1) {
+    return std::format("Spire Run I on {} opens after a win on {}.", here, below);
+  }
+  return std::format("Spire Run II on {} opens after a win on {}.", here, below);
+}
+
+uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run) {
+  try {
+    if (!c || (c->version() != Version::GC_V3) || !c->login || !c->login->gc_license) {
+      return 0;
+    }
+    auto character = c->character_file(false, false);
+    std::string filename = spire_meta_filename_for(c->login->gc_license->serial_number,
+        character ? &character->disp : nullptr);
+    return filename.empty() ? 0 : spire_meta_ladder_rung(spire_meta_load(filename), run);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire meta: ladder rung unreadable: {}; Normal only", e.what());
+    return 0;
+  }
+}
+
 std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
-    uint32_t finish_value, bool new_best_time) {
+    uint32_t quest_number, uint32_t finish_value, bool new_best_time) {
   std::string filename = spire_meta_filename(c, serial_number);
   auto character = c->character_file(false, false);
   if (filename.empty() || !character) {
@@ -263,14 +349,25 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
   std::string unlocked;
   bool payout = false;
   std::string set_str;
-  for (uint16_t flag_num : spire_meta_flags_for_finish(finish, character->disp.visual.sh.char_class, new_best_time)) {
-    auto key = std::make_pair(difficulty, flag_num);
+  auto finish_flags = spire_meta_flags_for_finish(finish, character->disp.visual.sh.char_class, new_best_time);
+  uint8_t ladder_run = spire_meta_ladder_run(quest_number);
+  if (finish.won && ladder_run) {
+    finish_flags.emplace_back(spire_meta_ladder_flag(ladder_run)); // the next rung of this run (plan-unlockables §2)
+  }
+  for (uint16_t flag_num : finish_flags) {
+    auto key = std::make_pair(spire_meta_flag_difficulty(flag_num, difficulty), flag_num);
     auto it = flags.find(key);
     bool was_set = (it != flags.end()) && it->second;
     flags[key] = true;
     set_str += std::format(" {:04X}{}", flag_num, was_set ? "" : "*");
     if (flag_num >= SPIRE_META_FLAG_PAY_WIN) {
       payout = true; // the payout flags are cleared by q925, so each win opens them again
+    } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON)) {
+      if (!was_set && (difficulty < 3)) {
+        std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : "II",
+            spire_ladder_difficulty_name(difficulty + 1));
+        unlocked += unlocked.empty() ? what : std::format(", {}", what);
+      }
     } else if (!was_set) {
       if (const char* name = spire_meta_flag_name(flag_num)) {
         unlocked += unlocked.empty() ? name : std::format(", {}", name);
@@ -288,7 +385,7 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
     text += std::format("\nUnlocked: {}.", unlocked);
   }
   if (payout) {
-    text += "\nReward waiting: see the Quartermaster.";
+    text += difficulty ? "\nReward waiting on Normal: see the Quartermaster." : "\nReward waiting: see the Quartermaster.";
   }
   return text;
 }
