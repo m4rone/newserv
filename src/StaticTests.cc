@@ -642,7 +642,7 @@ void run_static_tests() {
   phosg::log_info_f("-- Spire protected characters: character cheats refused everywhere (regie pso-regie-9)");
   {
     for (const char* cmd : {"$edit", "$item", "$matcount", "$loadchar", "$qset", "$qclear", "$qgwrite", "$bank",
-             "$switchchar", "$patch", "$writemem", "$nativecall"}) {
+             "$switchchar", "$patch", "$writemem", "$nativecall", "$kit", "$lv"}) {
       expect(DataIndex::spire_cheat_refused(cmd, true));    // the protected character: refused
       expect(!DataIndex::spire_cheat_refused(cmd, false));  // any other character: allowed
     }
@@ -654,7 +654,7 @@ void run_static_tests() {
     DataIndex d;
     d.spire_blocked_quest_numbers.emplace(929);
     d.spire_blocked_characters.emplace_back(3117539659, "Wakiru");
-    for (const char* cmd : {"$edit", "$item", "$matcount"}) {
+    for (const char* cmd : {"$edit", "$item", "$matcount", "$kit", "$lv"}) {
       expect(DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "Wakiru")));
       expect(DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "\tEWakiru")));
       expect(!DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539659, "BidX")));
@@ -662,6 +662,78 @@ void run_static_tests() {
       expect(!DataIndex::spire_cheat_refused(cmd, d.is_spire_protected_character(3117539666, "Wakiru")));
     }
     expect(!DataIndex::spire_cheat_refused("$fastkill", d.is_spire_protected_character(3117539659, "Wakiru")));
+  }
+
+  phosg::log_info_f("-- Spire $kit: the start set; only in a normal game, never for Wakiru (regie pso-regie-10)");
+  {
+    auto raw = [](const ItemData& item) -> std::string {
+      return std::format("{:08X}{:08X}{:08X}{:08X}", static_cast<uint32_t>(item.data1db[0]),
+          static_cast<uint32_t>(item.data1db[1]), static_cast<uint32_t>(item.data1db[2]),
+          static_cast<uint32_t>(item.data2db));
+    };
+    const auto& limits = ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4;
+    auto kit = DataIndex::spire_start_kit(limits);
+    // Weapons, frame, shield and units: Marck's codes padded to 16 bytes
+    const std::vector<std::string> fixed = {
+        "008A0200000003320432053200000000",
+        "00040600000003320432053200000000",
+        "00340000000003320432053200000000",
+        "001F0000000003320432053200000000",
+        "00330000000003320432053200000000",
+        "01013000000400000000000000000000",
+        "01022700000000000000000000000000",
+        "01030300000000000000000000000000",
+        "01031300000000000000000000000000",
+        "01030B00000000000000000000000000",
+        "01030F00000000000000000000000000",
+    };
+    expect_eq(fixed.size() + 1 + 72 + 33 + 45 + 125, kit.size()); // GC v3: one material per item
+    for (size_t z = 0; z < fixed.size(); z++) {
+      expect_eq(fixed[z], raw(kit[z]));
+    }
+    // The mag: type 1D, DEF 5 / POW 128 / DEX 67 / MIND 0, level 200, synchro 120 and IQ 200 (data2 78C80000)
+    const auto& mag = kit[fixed.size()];
+    expect_eq("021DC800F40100322C1A000078C80000", raw(mag));
+    expect_eq(5, mag.data1w[2] / 100);
+    expect_eq(128, mag.data1w[3] / 100);
+    expect_eq(67, mag.data1w[4] / 100);
+    expect_eq(0, mag.data1w[5] / 100);
+    expect_eq(200, mag.compute_mag_level());
+    expect_eq(200, mag.data1[2]);
+    // Materials: the totals Marck asked for, no stack above the client's limit (GC v3: 030B is not stackable)
+    auto material_totals = [&](const std::vector<ItemData>& items, const ItemData::StackLimits& lim) {
+      std::map<uint8_t, size_t> totals;
+      for (size_t z = fixed.size() + 1; z < items.size(); z++) {
+        const auto& item = items[z];
+        expect_eq(0x030B, (item.data1[0] << 8) | item.data1[1]);
+        expect(item.stack_size(lim) <= item.max_stack_size(lim));
+        totals[item.data1[2]] += item.stack_size(lim);
+      }
+      return totals;
+    };
+    expect_eq(1, kit.back().max_stack_size(limits));
+    std::map<uint8_t, size_t> expected_totals = {{0x00, 72}, {0x05, 33}, {0x06, 45}, {0x03, 125}};
+    expect(expected_totals == material_totals(kit, limits));
+    // A server with stackable materials (limit 99) gets fewer items with the same totals: HP 125 is 99 + 26
+    auto stacked_limits_vector = ItemData::StackLimits::DEFAULT_TOOL_LIMITS_V3_V4;
+    stacked_limits_vector.at(0x0B) = 99;
+    ItemData::StackLimits stacked_limits(Version::GC_V3, stacked_limits_vector, 999999);
+    auto stacked_kit = DataIndex::spire_start_kit(stacked_limits);
+    expect_eq(fixed.size() + 1 + 1 + 1 + 1 + 2, stacked_kit.size());
+    expect(expected_totals == material_totals(stacked_kit, stacked_limits));
+    expect_eq(26, stacked_kit.back().stack_size(stacked_limits));
+    // Only in a game, never in a Spire run
+    expect(DataIndex::spire_kit_refused(false, false) != nullptr); // lobby
+    expect(DataIndex::spire_kit_refused(false, true) != nullptr);
+    expect(DataIndex::spire_kit_refused(true, true) != nullptr);   // Spire or SpireMeta quest
+    expect(DataIndex::spire_kit_refused(true, false) == nullptr);  // a normal game
+    // Wakiru refused, BidX on the same Wii allowed
+    DataIndex d;
+    d.spire_blocked_characters.emplace_back(3117539659, "Wakiru");
+    expect(DataIndex::spire_cheat_refused("$kit", d.is_spire_protected_character(3117539659, "Wakiru")));
+    expect(!DataIndex::spire_cheat_refused("$kit", d.is_spire_protected_character(3117539659, "BidX")));
+    expect(DataIndex::spire_cheat_refused("$lv", d.is_spire_protected_character(3117539659, "Wakiru")));
+    expect(!DataIndex::spire_cheat_refused("$lv", d.is_spire_protected_character(3117539659, "BidX")));
   }
 
   phosg::log_info_f("-- Spire guard: a marker only for a guarded quest, never for a protected character (regie pso-regie-9)");

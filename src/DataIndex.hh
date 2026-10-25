@@ -206,6 +206,14 @@ struct DataIndex {
   // whole character, or client memory) are refused everywhere for a protected character; command_name is the
   // command's first name ("$item" for "$i"). Other commands ($fastkill, $infhp, $secid, ...) stay allowed.
   static bool spire_cheat_refused(const std::string& command_name, bool protected_character);
+  // Regie pso-regie-10: the fixed start set that $kit drops at the player's feet: five weapons, a frame, a shield,
+  // four units, a level 200 mag (DEF 5 / POW 128 / DEX 67 / MIND 0) and materials (Power 72, Def 33, Luck 45, HP 125),
+  // split into as many items as limits allows per stack (GC v3: one material per item). The item ids are left for the
+  // caller to assign.
+  static std::vector<ItemData> spire_start_kit(const ItemData::StackLimits& limits);
+  // Why $kit is refused, or null if it may run: only in a game (not a lobby) and never in a Spire run (a Spire quest,
+  // spire_game_is_spire, or a SpireMetaQuests quest). The protected-character refusal is spire_cheat_refused.
+  static const char* spire_kit_refused(bool is_game, bool spire_quest);
   // The decision behind Client::is_spire_blocked. name is null if the client has no character to read it from (fail
   // closed: every listed quest and every Challenge quest is blocked). A Challenge quest is blocked for a protected
   // character whatever its number (audit S-3).

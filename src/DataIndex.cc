@@ -2222,7 +2222,9 @@ bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protec
       "$bank", // BB: switches the bank the character uses
       "$edit", // stats, level, exp, materials, name, section ID, class
       "$item", // creates an item (alias $i)
+      "$kit", // regie pso-regie-10: drops a start set of items
       "$loadchar", // replaces the character with a server backup
+      "$lv", // regie pso-regie-10: alias for $edit level
       "$matcount", // regie B-REGIE-9-4 (it only reads the material counts)
       "$nativecall", // runs client code
       "$patch", // writes client memory
@@ -2233,6 +2235,72 @@ bool DataIndex::spire_cheat_refused(const std::string& command_name, bool protec
       "$writemem", // writes client memory
   };
   return protected_character && refused.count(command_name);
+}
+
+std::vector<ItemData> DataIndex::spire_start_kit(const ItemData::StackLimits& limits) {
+  // Codes as Marck gave them, padded with zeros to 16 bytes by the $item hex parser (ItemData::from_data)
+  static const std::vector<const char*> codes = {
+      "008A0200000003320432053200000000", // weapons
+      "00040600000003320432053200000000",
+      "00340000000003320432053200000000",
+      "001F0000000003320432053200000000",
+      "00330000000003320432053200000000",
+      "01013000000400000000000000000000", // frame
+      "01022700000000000000000000000000", // shield
+      "010303", // units
+      "010313",
+      "01030B",
+      "01030F",
+  };
+  std::vector<ItemData> ret;
+  for (const char* code : codes) {
+    ret.emplace_back(ItemData::from_data(phosg::parse_data_string(code)));
+  }
+
+  // Mag type 1D, level 200; synchro 120 and IQ 200 as in Marck's own mag (data2 78C80000), no photon blasts
+  ItemData mag = ItemData::from_data(phosg::parse_data_string("021D"));
+  ItemMagStats stats;
+  stats.def = 500;
+  stats.pow = 12800;
+  stats.dex = 6700;
+  stats.mind = 0;
+  stats.synchro = 120;
+  stats.iq = 200;
+  stats.flags = 0;
+  stats.photon_blasts = 0;
+  stats.color = 0;
+  mag.assign_mag_stats(stats);
+  ret.emplace_back(mag);
+
+  static const std::vector<std::pair<uint8_t, size_t>> materials = {
+      {0x00, 72}, // Power
+      {0x05, 33}, // Def
+      {0x06, 45}, // Luck
+      {0x03, 125}, // HP
+  };
+  for (const auto& [which, total] : materials) {
+    ItemData material = ItemData::from_data(phosg::parse_data_string("030B00"));
+    material.data1[2] = which;
+    size_t max_stack = std::max<size_t>(material.max_stack_size(limits), 1);
+    for (size_t remaining = total; remaining > 0;) {
+      size_t count = std::min(remaining, max_stack);
+      ItemData stack = material;
+      stack.data1[5] = (max_stack > 1) ? count : 0;
+      ret.emplace_back(stack);
+      remaining -= count;
+    }
+  }
+  return ret;
+}
+
+const char* DataIndex::spire_kit_refused(bool is_game, bool spire_quest) {
+  if (!is_game) {
+    return "$C6Alleen in een spel.";
+  }
+  if (spire_quest) {
+    return "$C6Niet in een Spire-run.";
+  }
+  return nullptr;
 }
 
 bool DataIndex::is_spire_protected_character(uint32_t gc_serial, const std::string& name) const {

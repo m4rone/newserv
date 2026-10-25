@@ -1027,6 +1027,16 @@ ChatCommandDefinition cc_edit(
       co_return;
     });
 
+// Regie pso-regie-10: "$lv <n>" is "$edit level <n>" (same gates: lobby only; refused for a protected character)
+ChatCommandDefinition cc_lv(
+    {"$lv"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      if (a.text.empty() || (a.text.find_first_not_of("0123456789") != std::string::npos)) {
+        throw precondition_failed("$C6Gebruik: $lv <level>");
+      }
+      co_await cc_edit.handler(Args{"level " + a.text, a.check_permissions, a.c});
+    });
+
 ChatCommandDefinition cc_event(
     {"$event"},
     +[](const Args& a) -> asio::awaitable<void> {
@@ -1259,6 +1269,39 @@ ChatCommandDefinition cc_item(
       } else {
         send_text_message(a.c, "$C7Item created:\n" + name);
       }
+      co_return;
+    });
+
+// Regie pso-regie-10: "$kit" drops a fixed start set (DataIndex::spire_start_kit) at the player's feet, as $item does
+// for one item. Only in a normal game: refused in a lobby and in a Spire run; refused for a protected character by the
+// dispatcher (spire_cheat_refused).
+ChatCommandDefinition cc_kit(
+    {"$kit"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      a.check_is_proxy(false);
+      auto s = a.c->require_server_state();
+      auto l = a.c->require_lobby();
+      bool spire_quest = spire_game_is_spire(a.c, l) ||
+          (l->quest && s->data->spire_meta_quest_numbers.count(l->quest->meta.quest_number));
+      const char* refused = DataIndex::spire_kit_refused(l->is_game(), spire_quest);
+      if (refused) {
+        throw precondition_failed("{}", refused);
+      }
+      a.check_cheats_enabled_or_allowed(s->data->cheat_flags.create_items);
+
+      auto items = DataIndex::spire_start_kit(*s->data->item_stack_limits(a.c->version()));
+      for (auto& item : items) {
+        item.enforce_stack_size_limits(*s->data->item_stack_limits(a.c->version()));
+        item.id = l->generate_item_id(0xFF);
+        if ((l->drop_mode == ServerDropMode::SERVER_PRIVATE) || (l->drop_mode == ServerDropMode::SERVER_DUPLICATE)) {
+          l->add_item(a.c->floor, item, a.c->pos, nullptr, nullptr, 0x1000 | (1 << a.c->lobby_client_id));
+          send_drop_stacked_item_to_channel(s, a.c->channel, item, a.c->floor, a.c->pos);
+        } else {
+          l->add_item(a.c->floor, item, a.c->pos, nullptr, nullptr, 0x1000 | 0x00F);
+          send_drop_stacked_item_to_lobby(l, item, a.c->floor, a.c->pos);
+        }
+      }
+      send_text_message_fmt(a.c, "$C7Startset neergelegd:\n{} items", items.size());
       co_return;
     });
 
