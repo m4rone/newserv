@@ -2174,5 +2174,97 @@ void run_static_tests() {
     expect_eq(EnemyType::BOOMA, lookup(0x11, EnemyType::BOOMA)->super_ene->type);
   }
 
+  phosg::log_info_f("-- Spire savestate: written from the run copy, replaced by the next, deleted only at a true run end (v44)");
+  {
+    // The run copy: the real mag (kept by forbid_mags 0), a run weapon with grind and special, the Glass weapon, an
+    // empty slot and a stack of Monomates
+    PlayerInventory overlay;
+    overlay.num_items = 5;
+    auto put = [&](size_t z, std::array<uint8_t, 12> d1, uint32_t id) {
+      for (size_t i = 0; i < 12; i++) {
+        overlay.items[z].data.data1[i] = d1[i];
+      }
+      overlay.items[z].data.id = id;
+    };
+    put(0, {0x02, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00010000); // mag
+    put(1, {0x00, 0x01, 0x00, 0x05, 0x8A, 0, 0, 0, 0, 0, 0, 0}, 0x00810001); // Saber +5, special
+    put(2, {0x00, 0x05, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810002); // the Glass weapon, +8
+    put(4, {0x03, 0x00, 0x00, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00810003); // Monomate x4
+    int32_t glass = 99;
+    auto items = spire_savestate_items(overlay, 0x00810002, &glass);
+    expect_eq(3u, items.size()); // no mag, no empty slot
+    expect_eq(0x00, items[0].data1[0]);
+    expect_eq(0x8A, items[0].data1[4]); // the special stays: the quest creates the item with its full data1
+    expect_eq(1, glass);
+    expect_eq(0x04, items[2].data1[5]); // the stack count stays
+    for (const auto& item : items) {
+      expect(item.data1[0] != 0x02);
+    }
+    expect_eq(3u, spire_savestate_items(overlay, 0, &glass).size());
+    expect_eq(-1, glass); // no Glass item
+
+    // 'V' writes only from a run copy, after 'B', before the run end, with all values
+    const size_t n = SPIRE_SAVESTATE_NUM_VALUES;
+    expect(spire_savestate_write_allowed(false, true, true, n, n));
+    expect(!spire_savestate_write_allowed(true, true, true, n, n)); // after the run end: never
+    expect(!spire_savestate_write_allowed(false, false, true, n, n)); // no overlay: never from the real character
+    expect(!spire_savestate_write_allowed(false, true, false, n, n)); // before the client's 'B'
+    expect(!spire_savestate_write_allowed(false, true, true, n - 1, n)); // a value lost on the way
+    expect(!spire_savestate_write_allowed(false, true, true, n, n + 1));
+
+    // The file: written, replaced by the next room start, read back exactly
+    auto make_ss = [&](uint32_t run_id, uint32_t k, uint32_t lives) {
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = run_id;
+      ss.episode = 0;
+      ss.quest_number = 921;
+      ss.start_room = 1;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = k;
+      ss.values[SPIRE_SS_LIVES] = lives;
+      ss.values[SPIRE_SS_MESETA] = 4321;
+      ss.values[SPIRE_SS_ELAPSED] = 1830;
+      ss.items = items;
+      ss.glass_index = 1;
+      return ss;
+    };
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-savestate-{}", getpid());
+    std::filesystem::create_directories(dir);
+    std::string file = (dir / "0000000042.ABCDEF01.savestate.json").string();
+    phosg::save_file(file, spire_savestate_to_json(make_ss(0x1234, 5, 2), 42));
+    auto read = spire_savestate_from_json(phosg::load_file(file));
+    expect(read.exists);
+    expect_eq(0x1234u, read.run_id);
+    expect_eq(5u, read.values[SPIRE_SS_K]);
+    expect_eq(4321u, read.values[SPIRE_SS_MESETA]);
+    expect_eq(3u, read.items.size());
+    expect_eq(1, read.glass_index);
+    for (size_t z = 0; z < items.size(); z++) {
+      expect(!memcmp(&read.items[z], &items[z], sizeof(ItemData)));
+    }
+    phosg::save_file(file, spire_savestate_to_json(make_ss(0x1234, 6, 1), 42)); // room 6 starts: replaces room 5
+    read = spire_savestate_from_json(phosg::load_file(file));
+    expect_eq(6u, read.values[SPIRE_SS_K]);
+    expect_eq(1u, read.values[SPIRE_SS_LIVES]);
+    // a damaged file is refused, never half read
+    expect_raises(std::runtime_error, [&]() { spire_savestate_from_json("{\"RunId\":1,\"Episode\":0,\"Quest\":921,"
+        "\"StartRoom\":1,\"Practice\":false,\"Values\":[1,2],\"Items\":[]}"); });
+
+    // Deleted only at a true end of its own run: dead, time up, Give up, won; never when a player left or is gone
+    expect(spire_savestate_end_deletes(false, false));
+    expect(!spire_savestate_end_deletes(true, false)); // run timer: player left (the partner's Wii froze)
+    expect(!spire_savestate_end_deletes(false, true)); // the partner's own 'X'/'F' after the other one is gone
+    expect(spire_savestate_is_of_run(read, 0x1234));
+    expect(!spire_savestate_is_of_run(read, 0x9999)); // a savestate of another run is not this game's to delete
+    expect(!spire_savestate_is_of_run(read, 0));
+    expect(!spire_savestate_is_of_run(SpireSavestate(), 0x1234));
+    if (spire_savestate_end_deletes(false, false) && spire_savestate_is_of_run(read, 0x1234)) {
+      std::filesystem::remove(file);
+    }
+    expect(!std::filesystem::exists(file));
+    std::filesystem::remove_all(dir);
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }

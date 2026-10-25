@@ -144,6 +144,107 @@ constexpr const char* SPIRE_BRIDGE_DRAW_DIRECTORY = "system/spire-draw";
 // Directory (relative to the server's working directory) where the per-serial JSON files are stored.
 constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
 
+// v44 savestate (plan-checkpoints-savestates 2026-10-25 as changed by critic-savestates; quest B-E01-178 to -183): the
+// state of a run at the start of a room, per character, so a run continues after a logout or a crash.
+// - Run per game: the first 'J' or 'B' in a game sets the game's run: the run of the leader's savestate when the leader
+//   resumes from it (SpireFollowLeader.LeaderClient, else lobby client 0), else a new random run id. A quest start
+//   forgets it. 'B' (records) carries the quest's start room: 'B' << 24 | resumed << 16 | K0 << 8 | start room (low 16
+//   bits 0: a quest from before v44, counted as before).
+// - Write: at every room start after the first room (k > K0) each client writes SPIRE_SAVESTATE_NUM_VALUES values to
+//   SPIRE_BRIDGE_DRAW_DATA_REGISTER (in the SpireSavestateValue order) and then 'V' << 24 | count to register 248. The
+//   server takes the items of the client's run copy (the Battle overlay; never the real character: without an overlay
+//   nothing is written) without its mags (type 2), and replaces <serial>.<character id>.savestate.json with them, the
+//   values, the game's run id, the episode, the quest and the client's run start room and practice bit. Nothing is
+//   written after the run ended in the game or before the client's 'B'.
+// - Never consumed: a savestate stays until the next one replaces it or the run truly ends. Every run end in the game
+//   (the first 'X', 'F' or run timer end) deletes the savestate of each client in the game whose run id is the game's,
+//   unless the end is "player left" (run timer) or the game has fewer clients than its run had: a crash of one player
+//   must not cost the other one his savestate.
+// - Resume: a room quest that starts after K0 writes 'J' << 24 | variant << 8 | k at its kit point and waits for 'DONE'.
+//   The server always answers that client: register SPIRE_RESUME_ANSWER_REGISTER = 0 (fresh) or
+//   SPIRE_RESUME_ANSWER_RESUME | item count, the values in SPIRE_RESUME_HEADER (value index -> register) before it, then
+//   r248 = 'DONE'. It resumes only from a savestate of this episode, room and variant, with the game's run id (the
+//   leader's), and never after the run ended. Then 'J' << 24 | 1 << 16 | i asks for item i: data1 in
+//   SPIRE_RESUME_ITEM_FIRST_REGISTER.. (12 registers), SPIRE_RESUME_ITEM_ACK_REGISTER = i + 1 (| SPIRE_RESUME_ITEM_GLASS
+//   for the run's Glass item), then 'DONE'; ack 0 if there is no item i. The items come from the copy loaded at the
+//   start answer. The quest creates them with item_create2 into its own run copy.
+// - The run timer 'S' of a resumed game starts the saved seconds back, and the draw 'Q' is seeded per (run id, room,
+//   n-th draw of the client in the room, inputs).
+constexpr uint8_t SPIRE_BRIDGE_SAVESTATE_WRITE = 'V';
+constexpr uint8_t SPIRE_BRIDGE_RESUME = 'J';
+enum SpireSavestateValue : size_t {
+  SPIRE_SS_K = 0, // the room starting (r150)
+  SPIRE_SS_VARIANT, // r131 & 3: 0 normal, 1 elite, 2 rest
+  SPIRE_SS_RELICS_LO, // r170
+  SPIRE_SS_RELICS_HI, // r171
+  SPIRE_SS_PACTS, // r204
+  SPIRE_SS_LIVES, // r172
+  SPIRE_SS_ELAPSED, // seconds since the run start
+  SPIRE_SS_DEATHS, // r179
+  SPIRE_SS_SHOP_LIVES, // r144
+  SPIRE_SS_MESETA, // get_slot_meseta
+  SPIRE_SS_STATE, // r182 rewards state
+  SPIRE_SS_BOSS1, // r177
+  SPIRE_SS_BOSS2, // r178
+  SPIRE_SS_TAGS, // r180 tag counters
+  SPIRE_SS_PICK0, // r183-r186 pick counters
+  SPIRE_SS_PICK1,
+  SPIRE_SS_PICK2,
+  SPIRE_SS_PICK3,
+  SPIRE_SS_GLASS, // r138 item id of the Glass run item, 0 = none (stored as an item index)
+  SPIRE_SAVESTATE_NUM_VALUES,
+};
+constexpr uint8_t SPIRE_RESUME_ANSWER_REGISTER = 41;
+constexpr uint32_t SPIRE_RESUME_ANSWER_RESUME = 0x100;
+constexpr uint8_t SPIRE_RESUME_ITEM_FIRST_REGISTER = 20; // r20-r31
+constexpr uint8_t SPIRE_RESUME_ITEM_ACK_REGISTER = 44;
+constexpr uint32_t SPIRE_RESUME_ITEM_GLASS = 0x100;
+// The values the start answer sends, as (value index, register); k, variant and the Glass id are not sent
+constexpr std::pair<size_t, uint8_t> SPIRE_RESUME_HEADER[] = {
+    {SPIRE_SS_ELAPSED, 48}, {SPIRE_SS_MESETA, 49}, {SPIRE_SS_LIVES, 50}, {SPIRE_SS_RELICS_LO, 51},
+    {SPIRE_SS_RELICS_HI, 52}, {SPIRE_SS_PACTS, 53}, {SPIRE_SS_DEATHS, 54}, {SPIRE_SS_SHOP_LIVES, 55},
+    {SPIRE_SS_STATE, 56}, {SPIRE_SS_BOSS1, 57}, {SPIRE_SS_BOSS2, 58}, {SPIRE_SS_TAGS, 32}, {SPIRE_SS_PICK0, 33},
+    {SPIRE_SS_PICK1, 34}, {SPIRE_SS_PICK2, 35}, {SPIRE_SS_PICK3, 36}};
+
+struct SpireSavestate {
+  bool exists = false;
+  uint32_t run_id = 0;
+  uint8_t episode = 0;
+  uint32_t quest_number = 0;
+  uint8_t start_room = 0;
+  bool practice = false;
+  std::vector<uint32_t> values; // SPIRE_SAVESTATE_NUM_VALUES, SpireSavestateValue order
+  std::vector<ItemData> items;
+  int32_t glass_index = -1; // index in items of the Glass run item, -1 = none
+  uint64_t time_usecs = 0;
+};
+// The pure parts, for the static tests:
+// The items a savestate takes from a run copy: every item but empty slots and mags, in inventory order; *glass_index is
+// the position of the item whose id is glass_item_id (0: none) among them, or -1.
+std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id, int32_t* glass_index);
+// Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
+// matches.
+bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
+// Whether a run end deletes the game's savestates: not on "player left", not when a client of the run is gone.
+bool spire_savestate_end_deletes(bool player_left_end, bool client_lost);
+// Whether a run end deletes this savestate: only one of the game's run.
+bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
+// Whether a savestate fits a room quest's start: same episode, room and variant.
+bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant);
+// The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
+// quest and has the game's run id, and the run has not ended.
+bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
+std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_number);
+SpireSavestate spire_savestate_from_json(const std::string& data); // throws on a malformed file
+// 'B': whether the run counts as a practice run (start room not K0, or resumed from a practice savestate), and whether
+// it counts as a new run in the records (neither practice nor resumed). start_k 0 = a 'B' from before v44.
+bool spire_run_is_practice(uint8_t start_k, uint8_t first_k, bool resumed, bool savestate_practice);
+bool spire_run_counts_as_new(uint8_t start_k, bool resumed, bool practice);
+// The seed of the draw 'Q' of a run: run id, room, n-th draw of the client in that room and the input values.
+uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
+// '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
+std::string spire_savestate_continue_text(const SpireSavestate& ss);
+
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
 // a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client
 // has a GC license, and the flag is in the bridged range. Never throws.

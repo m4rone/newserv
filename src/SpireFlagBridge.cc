@@ -440,6 +440,282 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
   }
 }
 
+// ---- v44 savestate (SpireFlagBridge.hh). The pure parts first, then the run per game and per client, then the files.
+
+std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id, int32_t* glass_index) {
+  std::vector<ItemData> ret;
+  *glass_index = -1;
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z].data;
+    // critic-savestates: a mag stays out; forbid_mags 0 keeps the real mag in every run copy, so a mag from the
+    // savestate would come back as a second one
+    if (item.empty() || (item.data1[0] == 0x02)) {
+      continue;
+    }
+    if (glass_item_id && (item.id == glass_item_id)) {
+      *glass_index = ret.size();
+    }
+    ret.emplace_back(item);
+  }
+  return ret;
+}
+
+bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count) {
+  return !run_ended && has_overlay && began_run && (count == SPIRE_SAVESTATE_NUM_VALUES) && (num_values == count);
+}
+
+bool spire_savestate_end_deletes(bool player_left_end, bool client_lost) {
+  return !player_left_end && !client_lost;
+}
+
+bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
+  return ss.exists && run_id && (ss.run_id == run_id);
+}
+
+bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant) {
+  return ss.exists && (ss.values.size() == SPIRE_SAVESTATE_NUM_VALUES) && (ss.episode == episode) &&
+      (ss.values[SPIRE_SS_K] == k) && (ss.values[SPIRE_SS_VARIANT] == variant);
+}
+
+bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id) {
+  return !run_ended && game_resumed && game_run_id && own_matches && (own_run_id == game_run_id);
+}
+
+std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_number) {
+  phosg::JSON values_json = phosg::JSON::list();
+  for (uint32_t v : ss.values) {
+    values_json.emplace_back(v);
+  }
+  phosg::JSON items_json = phosg::JSON::list();
+  for (const auto& item : ss.items) {
+    items_json.emplace_back(spire_guard_hex_encode(&item, sizeof(item)));
+  }
+  auto json = phosg::JSON::dict({
+      {"SerialNumber", serial_number},
+      {"RunId", ss.run_id},
+      {"Episode", ss.episode},
+      {"Quest", ss.quest_number},
+      {"StartRoom", ss.start_room},
+      {"Practice", ss.practice},
+      {"Room", ss.values.empty() ? 0 : ss.values[SPIRE_SS_K]},
+      {"Values", std::move(values_json)},
+      {"Items", std::move(items_json)},
+      {"GlassIndex", ss.glass_index},
+      {"Time", ss.time_usecs},
+  });
+  return json.serialize(phosg::JSON::SerializeOption::FORMAT);
+}
+
+SpireSavestate spire_savestate_from_json(const std::string& data) {
+  auto json = phosg::JSON::parse(data);
+  SpireSavestate ret;
+  ret.run_id = json.get_int("RunId");
+  ret.episode = json.get_int("Episode");
+  ret.quest_number = json.get_int("Quest");
+  ret.start_room = json.get_int("StartRoom");
+  ret.practice = json.get_bool("Practice");
+  for (const auto& v : json.get_list("Values")) {
+    ret.values.emplace_back(v->as_int());
+  }
+  if (ret.values.size() != SPIRE_SAVESTATE_NUM_VALUES) {
+    throw std::runtime_error(std::format("savestate has {} values; expected {}", ret.values.size(), static_cast<size_t>(SPIRE_SAVESTATE_NUM_VALUES)));
+  }
+  for (const auto& h : json.get_list("Items")) {
+    ItemData item;
+    spire_guard_hex_decode(h->as_string(), &item, sizeof(item));
+    ret.items.emplace_back(item);
+  }
+  if (ret.items.size() > 30) {
+    throw std::runtime_error("savestate has more than 30 items");
+  }
+  ret.glass_index = json.get_int("GlassIndex", -1);
+  if ((ret.glass_index < -1) || (ret.glass_index >= static_cast<int32_t>(ret.items.size()))) {
+    ret.glass_index = -1;
+  }
+  ret.time_usecs = json.get_int("Time", 0);
+  ret.exists = true;
+  return ret;
+}
+
+bool spire_run_is_practice(uint8_t start_k, uint8_t first_k, bool resumed, bool savestate_practice) {
+  if (!start_k) {
+    return false; // a 'B' from before v44: counted as before
+  }
+  return resumed ? savestate_practice : (start_k != first_k);
+}
+
+bool spire_run_counts_as_new(uint8_t start_k, bool resumed, bool practice) {
+  return !start_k || (!resumed && !practice);
+}
+
+uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values) {
+  // FNV-1a over the fields, then splitmix64's finalizer
+  uint64_t h = 0xCBF29CE484222325ULL;
+  auto add = [&](uint32_t v) {
+    for (size_t z = 0; z < 4; z++) {
+      h = (h ^ ((v >> (z * 8)) & 0xFF)) * 0x100000001B3ULL;
+    }
+  };
+  add(run_id);
+  add(k);
+  add(nth);
+  for (uint32_t v : values) {
+    add(v);
+  }
+  h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  h = (h ^ (h >> 27)) * 0x94D049BB133111EBULL;
+  return h ^ (h >> 31);
+}
+
+std::string spire_savestate_continue_text(const SpireSavestate& ss) {
+  const auto& v = ss.values;
+  static const char* variants[] = {"", " elite", " rest"};
+  uint32_t variant = v[SPIRE_SS_VARIANT];
+  return std::format("Continue at Spire room {}{}: {} lives, {} min played{}", v[SPIRE_SS_K],
+      (variant < 3) ? variants[variant] : "", v[SPIRE_SS_LIVES], v[SPIRE_SS_ELAPSED] / 60,
+      ss.practice ? " (practice run)" : "");
+}
+
+// The run of a game (lobby id; a game's id is never reused while the server runs): set by the first 'J' or 'B' in the
+// game, forgotten at its next quest start.
+struct SpireGameRun {
+  uint32_t run_id = 0;
+  bool resumed = false; // the leader resumed from its savestate
+  uint32_t elapsed = 0; // the leader's saved seconds (resumed only)
+  size_t max_clients = 0; // the most clients the game had during the run
+};
+static std::unordered_map<uint32_t, SpireGameRun> spire_game_runs;
+
+static SpireGameRun* spire_game_run_for(std::shared_ptr<const Lobby> l) {
+  auto it = spire_game_runs.find(l->lobby_id);
+  if (it == spire_game_runs.end()) {
+    return nullptr;
+  }
+  it->second.max_clients = std::max(it->second.max_clients, l->count_clients());
+  return &it->second;
+}
+
+static uint32_t spire_new_run_id() {
+  uint32_t ret;
+  do {
+    ret = phosg::random_object<uint32_t>();
+  } while (!ret);
+  return ret;
+}
+
+static SpireGameRun& spire_game_run_set(std::shared_ptr<const Lobby> l, const SpireGameRun& run) {
+  if (spire_game_runs.size() > 4096) {
+    spire_game_runs.clear();
+  }
+  auto& ret = spire_game_runs[l->lobby_id] = run;
+  ret.max_clients = std::max(ret.max_clients, l->count_clients());
+  l->log.info_f("Spire savestate: run {:08X} in this game ({})", ret.run_id,
+      ret.resumed ? std::format("resumed from the leader's savestate, {} s played", ret.elapsed) : std::string("new"));
+  return ret;
+}
+
+// The run of one client in its current game: what its 'J' and 'B' decided. The weak_ptr and the lobby id tell a reused
+// Client address or a later game from the one that wrote it.
+struct SpireClientRun {
+  std::weak_ptr<Client> client;
+  uint32_t lobby_id = 0;
+  bool answered_resume = false; // the start answer resumed this client (its items are in savestate)
+  SpireSavestate savestate;
+  bool began = false; // its 'B' came
+  bool resumed = false; // the 'B' confirmed the resume
+  bool practice = false;
+  uint8_t start_room = 0;
+  std::map<uint32_t, uint32_t> draws_per_room; // n-th draw per room (seed)
+};
+static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
+
+static SpireClientRun* spire_client_run_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool create) {
+  auto it = spire_client_runs.find(c.get());
+  if ((it != spire_client_runs.end()) && ((it->second.client.lock() != c) || (it->second.lobby_id != l->lobby_id))) {
+    spire_client_runs.erase(it);
+    it = spire_client_runs.end();
+  }
+  if (it == spire_client_runs.end()) {
+    if (!create) {
+      return nullptr;
+    }
+    if (spire_client_runs.size() > 256) {
+      std::erase_if(spire_client_runs, [](const auto& e) { return e.second.client.expired(); });
+    }
+    it = spire_client_runs.emplace(c.get(), SpireClientRun{}).first;
+    it->second.client = c;
+    it->second.lobby_id = l->lobby_id;
+  }
+  return &it->second;
+}
+
+// The savestate file of the client's character (the server's character data, never the overlay), "" without one
+static std::string spire_savestate_filename(std::shared_ptr<const Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  auto character = c->character_file(false, false);
+  if (!character || !serial_number) {
+    return "";
+  }
+  return std::format("{}/{:010}.{}.savestate.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
+      spire_guard_character_id(character->disp));
+}
+
+static SpireSavestate spire_savestate_load(const std::string& filename) {
+  if (filename.empty() || !std::filesystem::is_regular_file(filename)) {
+    return SpireSavestate();
+  }
+  return spire_savestate_from_json(phosg::load_file(filename));
+}
+
+static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c) {
+  try {
+    return spire_savestate_load(spire_savestate_filename(c));
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
+    return SpireSavestate();
+  }
+}
+
+static std::string spire_savestate_describe(const SpireSavestate& ss) {
+  if (!ss.exists) {
+    return "none";
+  }
+  return std::format("run {:08X} room {} variant {} ({} items, {} lives, {} s, start room {}{})", ss.run_id,
+      ss.values[SPIRE_SS_K], ss.values[SPIRE_SS_VARIANT], ss.items.size(), ss.values[SPIRE_SS_LIVES],
+      ss.values[SPIRE_SS_ELAPSED], ss.start_room, ss.practice ? ", practice" : "");
+}
+
+// A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run, unless a
+// player of it is gone (B-E01-181)
+static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const char* why, bool player_left) {
+  try {
+    auto* run = spire_game_run_for(l);
+    if (!run) {
+      return;
+    }
+    bool client_lost = l->count_clients() < run->max_clients;
+    if (!spire_savestate_end_deletes(player_left, client_lost)) {
+      l->log.info_f("Spire savestate: run over ({}) with {} of {} client(s){}; savestates of run {:08X} kept", why,
+          l->count_clients(), run->max_clients, player_left ? ", a player left" : "", run->run_id);
+      return;
+    }
+    for (const auto& lc : l->clients) {
+      if (!lc) {
+        continue;
+      }
+      std::string filename = spire_savestate_filename(lc);
+      auto ss = spire_savestate_load_logged(lc);
+      if (!spire_savestate_is_of_run(ss, run->run_id)) {
+        continue;
+      }
+      std::filesystem::remove(filename);
+      lc->log.info_f("Spire savestate: run over ({}); deleted {} ({})", why, filename, spire_savestate_describe(ss));
+    }
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire savestate: failed to delete at the run end: {}", e.what());
+  }
+}
+
 // v35: the end of a run, per game (lobby id; a game's id is never reused while the server runs). Set at the first
 // 'F' (records: run finished), 'X' (run over) or run timer end in the game; cleared at a quest start, 'B' and 'S'.
 // Measured on the pc journal 2026-10-25: the run ended at 08:47:58, yet at 08:49:56 the server still sent "Room clear!"
@@ -452,7 +728,8 @@ struct SpireRunEnd {
 };
 static std::unordered_map<uint32_t, SpireRunEnd> spire_run_ends;
 
-static SpireRunEnd& spire_run_mark_ended(std::shared_ptr<const Lobby> l, const char* why) {
+// v44: the first end of the run also deletes the game's savestates, unless a player left (spire_savestate_on_run_end)
+static SpireRunEnd& spire_run_mark_ended(std::shared_ptr<const Lobby> l, const char* why, bool player_left = false) {
   if (spire_run_ends.size() > 4096) {
     spire_run_ends.clear();
   }
@@ -460,6 +737,7 @@ static SpireRunEnd& spire_run_mark_ended(std::shared_ptr<const Lobby> l, const c
   if (added) {
     it->second.why = why;
     l->log.info_f("Spire bridge: run over in this game ({}); no room clear or checkpoint from now on", why);
+    spire_savestate_on_run_end(l, why, player_left);
   }
   return it->second;
 }
@@ -637,7 +915,8 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     l->log.info_f("Spire bridge: run timer end ({}) at {} s with {} of {} client(s); sent r{}={:08X}",
         (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "time up" : "player left", elapsed, clients, t.clients_at_start,
         SPIRE_BRIDGE_TIMER_REGISTER, cmd.value.as_int.load());
-    spire_run_mark_ended(l, (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "run timer: time up" : "run timer: player left");
+    spire_run_mark_ended(l, (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "run timer: time up" : "run timer: player left",
+        cause == SPIRE_BRIDGE_TIMER_PLAYER_LEFT);
     spire_run_timers.erase(it);
     co_return;
   }
@@ -708,6 +987,42 @@ static void spire_draw_answer(std::shared_ptr<Client> c, uint32_t serial_number,
   c->log.info_f("Spire bridge: draw for serial {:010} in q{} (arch {} k {} path {} choice {} relics {:08X}): r{}={:08X}, "
       "r{}=DONE", serial_number, quest_number, in.archetype, in.k, in.path, in.choice, in.relics,
       SPIRE_BRIDGE_DRAW_RESULT_REGISTER, drawn, SPIRE_BRIDGE_REQUEST_REGISTER);
+}
+
+// v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
+static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
+  spire_draw_inputs.erase(c.get());
+  auto* run = spire_game_run_for(l);
+  auto* cr = spire_client_run_for(c, l, false);
+  const SpireRunEnd* end = spire_run_end_for(l);
+  // the overlay is the run copy; the real character is the server's character data and never goes in
+  bool has_overlay = c->has_overlay();
+  if (!run || !spire_savestate_write_allowed(!!end, has_overlay, cr && cr->began, values.size(), value & 0xFFFF)) {
+    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} not stored ({} of {} values, {}, {}, {})", serial_number,
+        quest_number, values.size(), value & 0xFFFF, end ? "run ended" : "run on", has_overlay ? "run copy" : "no run copy",
+        (cr && cr->began) ? "run begun" : "no 'B' yet");
+    return;
+  }
+  std::string filename = spire_savestate_filename(c);
+  auto overlay = c->character_file(false, true);
+  if (filename.empty() || !overlay) {
+    c->log.warning_f("Spire savestate: no character data for serial {:010}; not stored", serial_number);
+    return;
+  }
+  SpireSavestate ss;
+  ss.exists = true;
+  ss.run_id = run->run_id;
+  ss.episode = static_cast<uint8_t>(l->episode);
+  ss.quest_number = quest_number;
+  ss.start_room = cr->start_room;
+  ss.practice = cr->practice;
+  ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index);
+  ss.values = std::move(values);
+  ss.time_usecs = phosg::now();
+  spire_bridge_write_durable(filename, spire_savestate_to_json(ss, serial_number));
+  c->log.info_f("Spire savestate: stored {} in {}", spire_savestate_describe(ss), filename);
 }
 
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
@@ -814,8 +1129,12 @@ static std::unordered_set<const Client*> spire_follow_pending;
 
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
+  spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
   if (auto l = c->lobby.lock()) {
     spire_run_forget_end(l->lobby_id, "quest start", c->log);
+    if (spire_game_runs.erase(l->lobby_id)) {
+      c->log.info_f("Spire savestate: the run of this game forgotten at the quest start");
+    }
   }
   if (spire_checkpoint_lives_forget(c.get())) {
     c->log.info_f("Spire checkpoint: lives of the previous run forgotten at the quest start");
@@ -894,9 +1213,24 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   auto rec = spire_records_load(filename);
   if (kind == SPIRE_BRIDGE_REC_BEGIN) {
     spire_run_forget_end(l->lobby_id, "run started", c->log);
-    rec.runs++;
-    spire_records_save(filename, serial_number, rec);
-    c->log.info_f("Spire records: run started, {} run(s) in {}", rec.runs, filename);
+    // v44: 'B' << 24 | resumed << 16 | K0 << 8 | start room (0: a quest from before v44). The game's run is set here
+    // when no 'J' set it (a run from its first room); the client's run start room and practice bit follow.
+    uint8_t start_k = value & 0xFF, first_k = (value >> 8) & 0xFF;
+    auto* run = spire_game_run_for(l);
+    if (!run) {
+      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id()});
+    }
+    auto* cr = spire_client_run_for(c, l, true);
+    cr->began = true;
+    cr->resumed = start_k && ((value >> 16) & 1) && cr->answered_resume;
+    cr->practice = spire_run_is_practice(start_k, first_k, cr->resumed, cr->savestate.practice);
+    cr->start_room = cr->resumed ? cr->savestate.start_room : start_k;
+    if (spire_run_counts_as_new(start_k, cr->resumed, cr->practice)) {
+      rec.runs++;
+      spire_records_save(filename, serial_number, rec);
+    }
+    c->log.info_f("Spire records: run started (start room {}, first room {}{}{}), run {:08X}, {} run(s) in {}", start_k,
+        first_k, cr->resumed ? ", resumed" : "", cr->practice ? ", practice" : "", run->run_id, rec.runs, filename);
     return true;
   }
   if (kind == SPIRE_BRIDGE_REC_BOARD) {
@@ -975,6 +1309,10 @@ bool spire_bridge_handle_register(
       return true;
     }
     if (is_request) {
+      if ((value >> 24) == SPIRE_BRIDGE_SAVESTATE_WRITE) {
+        spire_savestate_write(c, l, serial_number, quest_number, value);
+        return true;
+      }
       if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
         spire_draw_answer(c, serial_number, quest_number, value);
         return true;
