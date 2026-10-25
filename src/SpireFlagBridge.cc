@@ -2655,15 +2655,55 @@ static void spire_dead_event_watch(
   }
 }
 
-// The boss types whose defeat is the room clear (v25): the last part of a boss Sega's quests never zone-clear.
-static bool spire_bridge_is_server_clear_boss(EnemyType type) {
+// The boss types whose 6x76 defeat is the room clear (v25): the last part of a boss Sega's quests never zone-clear.
+// Not Dark Falz: its Darvants are children of the Falz root, so their 6x76 is redirected to the root and would clear the
+// room on the first Darvant; Dark Falz clears on its final-phase quest flag (spire_bridge_check_dark_falz_flag).
+bool spire_bridge_is_server_clear_boss(EnemyType type) {
   return type == EnemyType::VOL_OPT_2;
 }
 
+EnemyType spire_bridge_dark_falz_final_phase(Difficulty difficulty, uint16_t flag_num) {
+  if (difficulty == Difficulty::NORMAL) {
+    return (flag_num == 0x0035) ? EnemyType::DARK_FALZ_2 : EnemyType::NONE;
+  }
+  return (flag_num == 0x0037) ? EnemyType::DARK_FALZ_3 : EnemyType::NONE;
+}
+
+static void spire_bridge_announce_boss_clear(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type);
+
 void spire_bridge_check_boss_defeated(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type) {
+  if (spire_bridge_is_server_clear_boss(type)) {
+    spire_bridge_announce_boss_clear(c, l, floor, room, type);
+  }
+}
+
+void spire_bridge_check_dark_falz_flag(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, Difficulty difficulty, uint16_t flag_num) {
+  EnemyType type = spire_bridge_dark_falz_final_phase(difficulty, flag_num);
+  if ((type == EnemyType::NONE) || (c->version() != Version::GC_V3) || !l->is_game() || !l->quest || !l->map_state) {
+    return;
+  }
+  uint16_t room = 0;
   try {
-    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest || !spire_bridge_is_server_clear_boss(type)) {
+    auto ene_st = l->map_state->enemy_state_for_floor_type(c->version(), floor, type);
+    if (ene_st->alias_target_ene_st) {
+      ene_st = ene_st->alias_target_ene_st;
+    }
+    if (const auto* set_entry = ene_st->super_ene->version(c->version()).set_entry) {
+      room = set_entry->room;
+    }
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: no Dark Falz on floor {:02X} ({}); room clear for room 0", floor, e.what());
+  }
+  spire_bridge_announce_boss_clear(c, l, floor, room, type);
+}
+
+static void spire_bridge_announce_boss_clear(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type) {
+  try {
+    if ((c->version() != Version::GC_V3) || !l->is_game() || !l->quest) {
       return;
     }
     uint32_t quest_number = l->quest->meta.quest_number;

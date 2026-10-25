@@ -895,7 +895,7 @@ void run_static_tests() {
     expect_eq(4, spire_checkpoint_room_k(rooms, 11, 0));  // Dragon unchanged
     expect_eq(0, spire_checkpoint_room_k(rooms, 6, 49));  // another Mines 1 room: no checkpoint
     expect_eq(0, spire_checkpoint_room_k(rooms, 7, 50));
-    expect_eq(0, spire_checkpoint_room_k(rooms, 8, 0));   // Ruins 1: not in the run yet
+    expect_eq(0, spire_checkpoint_room_k(rooms, 8, 0));   // without the Ruins rooms: no checkpoint
     DataIndex d;
     auto available = [&](const char* expr_str, uint32_t checkpoint_rooms) -> bool {
       auto expr = ResourceDASM::Expression::Node::parse(expr_str);
@@ -911,6 +911,69 @@ void run_static_tests() {
     expect(available("SPIRE_K11", to_k11));
     expect(available("SPIRE_MAX == 11", to_k11) && available("SPIRE_MAX == 10", to_k10) && available("SPIRE_MAX == 9", to_k9));
     expect(available("SPIRE_K10", 1u << 9) && !available("SPIRE_K9", 1u << 9)); // only room 10 stored: bit 9
+  }
+
+  phosg::log_info_f("-- Spire rooms k12-k15: Ruins 1-3 and Dark Falz checkpoints, unlocks, clear and drop (plan-ruins-darkfalz section 7)");
+  {
+    // SpireCheckpointRooms with the Ruins rooms of the plan's room table: (8, 60), (9, 31), (10, 40), floor 14 any room
+    std::map<std::pair<uint8_t, int32_t>, uint8_t> rooms = {{{1, 7}, 2}, {{1, 10}, 2}, {{1, 11}, 1}, {{2, 2}, 3},
+        {{3, 50}, 5}, {{4, 14}, 6}, {{5, 50}, 7}, {{6, 50}, 9}, {{7, 60}, 10}, {{8, 60}, 12}, {{9, 31}, 13},
+        {{10, 40}, 14}, {{11, -1}, 4}, {{12, -1}, 8}, {{13, -1}, 11}, {{14, -1}, 15}};
+    expect_eq(12, spire_checkpoint_room_k(rooms, 8, 60));  // Ruins 1
+    expect_eq(13, spire_checkpoint_room_k(rooms, 9, 31));  // Ruins 2
+    expect_eq(14, spire_checkpoint_room_k(rooms, 10, 40)); // Ruins 3
+    expect_eq(15, spire_checkpoint_room_k(rooms, 14, 0));  // Dark Falz: any room of floor 14
+    expect_eq(15, spire_checkpoint_room_k(rooms, 14, 7));
+    expect_eq(0, spire_checkpoint_room_k(rooms, 8, 0));    // another Ruins room: no checkpoint
+    expect_eq(0, spire_checkpoint_room_k(rooms, 9, 40));
+    expect_eq(0, spire_checkpoint_room_k(rooms, 10, 60));
+    expect_eq(11, spire_checkpoint_room_k(rooms, 13, 0));  // Vol Opt, Mines, De Rol Le, Dragon unchanged
+    expect_eq(10, spire_checkpoint_room_k(rooms, 7, 60));
+    expect_eq(8, spire_checkpoint_room_k(rooms, 12, 0));
+    expect_eq(4, spire_checkpoint_room_k(rooms, 11, 0));
+    DataIndex d;
+    auto available = [&](const char* expr_str, uint32_t checkpoint_rooms) -> bool {
+      auto expr = ResourceDASM::Expression::Node::parse(expr_str);
+      ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+          .difficulty = Difficulty::NORMAL, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+          .spire_rooms = d.spire_availability_rooms(3117539666, checkpoint_rooms)};
+      return env.evaluate(*expr) != 0;
+    };
+    // q956-q959 (k12-k15) open in order: q956 after Vol Opt (SPIRE_K11), q957 after K12, q958 after K13, q959 after K14
+    uint32_t to_k11 = 0x7FF, to_k12 = 0xFFF, to_k13 = 0x1FFF, to_k14 = 0x3FFF, to_k15 = 0x7FFF;
+    expect(available("SPIRE_K11", to_k11) && !available("SPIRE_K12", to_k11)); // q956 open, q957 locked
+    expect(available("SPIRE_K12", to_k12) && !available("SPIRE_K13", to_k12)); // q957 open, q958 locked
+    expect(available("SPIRE_K13", to_k13) && !available("SPIRE_K14", to_k13)); // q958 open, q959 locked
+    expect(available("SPIRE_K14", to_k14) && !available("SPIRE_K15", to_k14)); // q959 open
+    expect(available("SPIRE_K15", to_k15) && available("SPIRE_MAX == 15", to_k15) && available("SPIRE_MAX == 14", to_k14));
+    expect(available("SPIRE_K14", 1u << 13) && !available("SPIRE_K13", 1u << 13)); // only room 14 stored: bit 13
+    expect(!available("SPIRE_K12", 0x3FFu)); // the test serial's rooms 1-10 do not open the Ruins
+
+    // Room clear: no Falz part or Darvant clears through 6x76 (a Darvant's 6x76 is redirected to the Falz root);
+    // only the final-phase flag does, 0x35 on Normal and 0x37 above. Vol Opt keeps its 6x76 clear.
+    expect(spire_bridge_is_server_clear_boss(EnemyType::VOL_OPT_2));
+    for (auto part : {EnemyType::DARK_FALZ_1, EnemyType::DARK_FALZ_2, EnemyType::DARK_FALZ_3, EnemyType::DARVANT}) {
+      expect(!spire_bridge_is_server_clear_boss(part));
+    }
+    expect(spire_bridge_dark_falz_final_phase(Difficulty::NORMAL, 0x0035) == EnemyType::DARK_FALZ_2);
+    expect(spire_bridge_dark_falz_final_phase(Difficulty::NORMAL, 0x0037) == EnemyType::NONE);
+    expect(spire_bridge_dark_falz_final_phase(Difficulty::NORMAL, 0x0036) == EnemyType::NONE);
+    for (auto diff : {Difficulty::HARD, Difficulty::VERY_HARD, Difficulty::ULTIMATE}) {
+      expect(spire_bridge_dark_falz_final_phase(diff, 0x0037) == EnemyType::DARK_FALZ_3);
+      expect(spire_bridge_dark_falz_final_phase(diff, 0x0035) == EnemyType::NONE);
+    }
+    expect(spire_bridge_dark_falz_final_phase(Difficulty::NORMAL, 0x0057) == EnemyType::NONE); // Olga Flow's flag
+
+    // Boss drop: only the final phase; DF1 and the Darvants give no boss weapon; Dragon, De Rol Le, Vol Opt unchanged
+    expect(spire_drops_is_boss_drop(EnemyType::DARK_FALZ_2));
+    expect(spire_drops_is_boss_drop(EnemyType::DARK_FALZ_3));
+    expect(type_definition_for_enemy(EnemyType::DARK_FALZ_1).is_boss()); // Sega's flag: a boss part
+    expect(!spire_drops_is_boss_drop(EnemyType::DARK_FALZ_1));
+    expect(!spire_drops_is_boss_drop(EnemyType::DARVANT));
+    expect(spire_drops_is_boss_drop(EnemyType::DRAGON));
+    expect(spire_drops_is_boss_drop(EnemyType::DE_ROL_LE));
+    expect(spire_drops_is_boss_drop(EnemyType::VOL_OPT_2));
+    expect(!spire_drops_is_boss_drop(EnemyType::VOL_OPT_1));
   }
 
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");

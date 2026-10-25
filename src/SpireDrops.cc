@@ -207,6 +207,7 @@ bool spire_drops_is_boss_drop(EnemyType type) {
     case EnemyType::VOL_OPT_CORE:
     case EnemyType::VOL_OPT_MONITOR:
     case EnemyType::VOL_OPT_PILLAR:
+    case EnemyType::DARK_FALZ_1: // Dark Falz: only the final phase (DF2 on Normal, DF3 above) is the boss drop
       return false;
     default:
       return type_definition_for_enemy(type).is_boss();

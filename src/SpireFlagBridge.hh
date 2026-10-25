@@ -182,6 +182,17 @@ void spire_bridge_check_room_clear(
 // Rol Le) keep their own boss clear; nothing changes there.
 void spire_bridge_check_boss_defeated(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, EnemyType type);
+// The 6x76 route above is for VOL_OPT_2 only (free of state for the tests). Dark Falz (k15, plan-ruins-darkfalz section
+// 7) does not use it: its 0x1FD Darvants are children of the Falz root, a Darvant's 6x76 is redirected to the root, so
+// every Darvant would clear the room early. Its clear is the final-phase quest flag the client sets when Falz is dead,
+// the flag newserv's own final boss drop keys on: 0x35 on Normal (no third phase, DARK_FALZ_2) and 0x37 on Hard and up
+// (DARK_FALZ_3). spire_bridge_dark_falz_final_phase gives that phase or NONE; spire_bridge_check_dark_falz_flag sends
+// the same room clear, replay note and checkpoint as Vol Opt, once per (game, floor, room), for the room of the Falz
+// set entry (on_set_quest_flag calls it for a set flag on area 0x0E).
+bool spire_bridge_is_server_clear_boss(EnemyType type);
+EnemyType spire_bridge_dark_falz_final_phase(Difficulty difficulty, uint16_t flag_num);
+void spire_bridge_check_dark_falz_flag(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, Difficulty difficulty, uint16_t flag_num);
 
 // v23: room state on the server, for room transitions and checkpoints (spoor 9).
 // - Checkpoint per character: every room clear the server sees (the event rule above; a boss wave counts too, without a
@@ -202,7 +213,7 @@ void spire_bridge_check_boss_defeated(
 //   after the last room cleared) and the lives it had at that clear (from its 'L' codes), so after a disconnect the
 //   player picks that room's quest, which its AvailableIf has unlocked. The kit follows from the class.
 // The room index k a clear of this room on this floor stores (SpireCheckpointRooms; Room -1 is any room of the floor, the
-// boss floors 11 Dragon, 12 De Rol Le and 13 Vol Opt), or 0 if the room is not listed. Free of state for the tests.
+// boss floors 11 Dragon, 12 De Rol Le, 13 Vol Opt and 14 Dark Falz), or 0 if the room is not listed. Free of state for the tests.
 uint8_t spire_checkpoint_room_k(
     const std::map<std::pair<uint8_t, int32_t>, uint8_t>& rooms, uint8_t floor, uint16_t room);
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);

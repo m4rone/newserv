@@ -76,7 +76,9 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
 // Item 28 applies to the drop of this enemy: a boss (EnemyType BOSS flag), except the Vol Opt parts before its end.
 // Vol Opt's monitors, pillars, amp, core and phase 1 carry the BOSS flag too, but only VOL_OPT_2 falling ends the fight
 // (k11, plan-mines-volopt-2026-10-25 section 5), so only VOL_OPT_2 gives each player his boss weapon. Dragon, De Rol Le
-// and every other boss are unchanged.
+// and every other boss are unchanged. Dark Falz (k15): DARK_FALZ_1 carries the flag but is not the end, so it gives no
+// boss drop; the final phase (DARK_FALZ_2 on Normal, DARK_FALZ_3 above, the type newserv's flag route drops for) does.
+// Darvants have no BOSS flag.
 bool spire_drops_is_boss_drop(EnemyType type);
 
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity

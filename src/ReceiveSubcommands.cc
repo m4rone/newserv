@@ -3066,7 +3066,8 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
       auto res = generate_item_unfiltered(c);
       spire_drop_filter(c, l, res.item); // v41: no Scape Doll in a Spire run (lives are a counter)
       // Regie pso-regie-9 (B-E01-108): the Spire drop rules per receiving player (SpireDrops.hh); a boss gives each
-      // player one weapon he can equip (of Vol Opt only phase 2, see spire_drops_is_boss_drop)
+      // player one weapon he can equip (of Vol Opt only phase 2, of Dark Falz only the final phase,
+      // see spire_drops_is_boss_drop)
       bool is_boss = rec.target_ene_st && spire_drops_is_boss_drop(rec.effective_enemy_type);
       spire_drops_filter(c, l, res.item, is_boss);
       return res;
@@ -3206,6 +3207,10 @@ static void on_set_quest_flag(std::shared_ptr<Client> c, SubcommandMessage& msg)
   // the client joins a game. This is a no-op for non-GC-V3 clients and for flags outside the range (see
   // SpireFlagBridge.hh).
   spire_bridge_record_flag(c, l, difficulty, flag_num, should_set);
+  // Spire boss clear for Dark Falz (k15): keyed on the final-phase flag, not on 6x76 (a Darvant redirects to the root)
+  if (should_set && (l->area_for_floor(c->version(), c->floor) == 0x0E)) {
+    spire_bridge_check_dark_falz_flag(c, l, c->floor, difficulty, flag_num);
+  }
 
   if (shared) {
     forward_subcommand(c, msg);
