@@ -2503,6 +2503,11 @@ void run_static_tests() {
     for (const auto& line : {spire_run_start_ticker(true, true, &ss), spire_run_start_ticker(false, true, nullptr)}) {
       expect_eq(line, spire_ticker_line(line)); // one line, no window in a run (v35)
     }
+    // the mag line of a resume (regie 2026-10-26): on every resume, one line, no longer than the practice line
+    expect_eq(std::string("A mag found in this run does not come back."), spire_run_resume_mag_ticker(true));
+    expect(spire_run_resume_mag_ticker(false).empty());
+    expect_eq(spire_run_resume_mag_ticker(true), spire_ticker_line(spire_run_resume_mag_ticker(true)));
+    expect(spire_run_resume_mag_ticker(true).size() <= spire_run_start_ticker(false, true, nullptr).size());
 
     // the draw seed: the same run, room, n-th draw and inputs give the same draw; anything else another one
     std::vector<uint32_t> in(16, 3);

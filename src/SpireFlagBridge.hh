@@ -257,6 +257,13 @@ bool spire_practice_blocks_flag(bool practice, uint16_t flag_num);
 // The one ticker line at 'B': "Run resumed at room k: ..." (with the savestate), "Practice run: ...", or "" for a run
 // from its first room
 std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss);
+// The second ticker line of a resumed run (regie 2026-10-26): a mag stays out of the savestate (spire_savestate_items),
+// and the run copy also holds the real mag, so the server cannot tell a mag found in the run from it; the line comes
+// on every resume, "" otherwise. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that
+// line aside (as the room clear text, v36).
+constexpr const char* SPIRE_RESUME_MAG_TEXT = "A mag found in this run does not come back.";
+constexpr auto SPIRE_RESUME_MAG_TEXT_DELAY = std::chrono::milliseconds(4000);
+std::string spire_run_resume_mag_ticker(bool resumed);
 // The seed of the draw 'Q' of a run: run id, room, n-th draw of the client in that room and the input values.
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests

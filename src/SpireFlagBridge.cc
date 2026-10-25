@@ -582,6 +582,10 @@ std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSaves
   return practice ? "Practice run: records and unlocks do not count." : "";
 }
 
+std::string spire_run_resume_mag_ticker(bool resumed) {
+  return resumed ? SPIRE_RESUME_MAG_TEXT : "";
+}
+
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values) {
   // FNV-1a over the fields, then splitmix64's finalizer
   uint64_t h = 0xCBF29CE484222325ULL;
@@ -1414,6 +1418,10 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     std::string ticker = spire_run_start_ticker(cr->resumed, cr->practice, cr->resumed ? &cr->savestate : nullptr);
     if (!ticker.empty()) {
       spire_send_ticker(c, ticker);
+    }
+    std::string mag_ticker = spire_run_resume_mag_ticker(cr->resumed);
+    if (!mag_ticker.empty()) {
+      spire_send_ticker_later(c, l, mag_ticker, SPIRE_RESUME_MAG_TEXT_DELAY);
     }
     c->log.info_f("Spire records: run started (start room {}, first room {}{}{}), run {:08X}, {} run(s) in {}", start_k,
         first_k, cr->resumed ? ", resumed" : "", cr->practice ? ", practice" : "", run->run_id, rec.runs, filename);
