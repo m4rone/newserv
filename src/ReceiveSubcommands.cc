@@ -18,6 +18,7 @@
 #include "Map.hh"
 #include "PSOProtocol.hh"
 #include "SendCommands.hh"
+#include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
@@ -3049,6 +3050,10 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
     auto generate_item_for_client = [&](std::shared_ptr<Client> c) -> ItemCreator::DropResult {
       auto res = generate_item_unfiltered(c);
       spire_drop_filter(c, l, res.item); // v41: no Scape Doll in a Spire run (lives are a counter)
+      // Regie pso-regie-9 (B-E01-108): the Spire drop rules per receiving player (SpireDrops.hh); a boss gives each
+      // player one weapon he can equip
+      bool is_boss = rec.target_ene_st && type_definition_for_enemy(rec.effective_enemy_type).is_boss();
+      spire_drops_filter(c, l, res.item, is_boss);
       return res;
     };
 

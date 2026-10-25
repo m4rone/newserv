@@ -819,6 +819,12 @@ void DataIndex::load_config_early() {
     config_log.info_f("SpireFollowLeader: client {} leads, others follow after {} ms", leader, delay);
   } catch (const std::out_of_range&) {
   }
+  this->spire_drops = SpireDropsConfig();
+  try {
+    this->spire_drops = SpireDropsConfig::from_json(this->config_json->at("SpireDrops"));
+    config_log.info_f("SpireDrops: {}", this->spire_drops.str());
+  } catch (const std::out_of_range&) {
+  }
   this->spire_blocked_quest_numbers.clear();
   this->spire_blocked_characters.clear();
   try {

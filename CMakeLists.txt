@@ -128,6 +128,7 @@ set(SOURCES
     src/ShopRandomSets.cc
     src/SignalWatcher.cc
     src/SpireDraw.cc
+    src/SpireDrops.cc
     src/SpireFlagBridge.cc
     src/SpireMeta.cc
     src/StaticGameData.cc

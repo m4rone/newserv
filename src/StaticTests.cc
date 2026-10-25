@@ -11,6 +11,7 @@
 #include "ClientFunctionIndex.hh"
 #include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
+#include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMeta.hh"
 
@@ -854,6 +855,188 @@ void run_static_tests() {
     expect(!has(spire_meta_flags_for_finish(deathless, 6, false), SPIRE_META_FLAG_PAY_RECORD));
     expect_eq(std::string("Iron man"), std::string(spire_meta_flag_name(SPIRE_META_FLAG_PACT_FIRST)));
     expect(spire_meta_flag_name(SPIRE_META_FLAG_PAY_WIN) == nullptr);
+  }
+
+  phosg::log_info_f("-- Spire drops: class filter, one area ahead, pity, one boss weapon per player (B-E01-108)");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto item = [](uint8_t d0, uint8_t d1, uint8_t d2) {
+      ItemData ret;
+      ret.data1[0] = d0;
+      ret.data1[1] = d1;
+      ret.data1[2] = d2;
+      return ret;
+    };
+    auto same = [](const ItemData& a, const ItemData& b) {
+      return (a.data1[0] == b.data1[0]) && (a.data1[1] == b.data1[1]) && (a.data1[2] == b.data1[2]);
+    };
+    auto player = [&](uint8_t cls, uint16_t atp_now, uint16_t atp_ahead) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = p.now;
+      p.now.atp = atp_now;
+      p.ahead.atp = atp_ahead;
+      return p;
+    };
+    auto lv1 = [&](uint8_t cls, uint32_t ahead) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, ahead);
+      return p;
+    };
+    using F = SpireWeaponFit;
+    const ItemData saber = item(0, 1, 0), brand = item(0, 1, 1), sword = item(0, 2, 0), cane = item(0, 0x0A, 0);
+    const ItemData monomate = item(3, 0, 0), telepipe = item(3, 7, 0), scape_doll = item(3, 9, 0);
+    // Weapon usability bits: HUmar = hunter human male, FOnewearl = force newman female
+    expect_eq(0x49, spire_weapon_usability_bits(0));
+    expect_eq(0xA4, spire_weapon_usability_bits(8));
+    // Item 25: Sega's draagtabel. A Sword is for hunters, a Cane for forces
+    expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, sword, player(0, 999, 999)));
+    expect_eq(F::NO, spire_drops_weapon_fit(*pmt, sword, player(8, 999, 999)));
+    expect_eq(F::NO, spire_drops_weapon_fit(*pmt, cane, player(0, 999, 999)));
+    expect_eq(F::NOT_A_WEAPON, spire_drops_weapon_fit(*pmt, monomate, player(0, 999, 999)));
+    // Item 26: the Brand needs ATP 90: now, one area ahead, or beyond that
+    expect_eq(90, pmt->get_weapon(1, 1).atp_required);
+    expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, brand, player(0, 90, 90)));
+    expect_eq(F::AHEAD, spire_drops_weapon_fit(*pmt, brand, player(0, 50, 95)));
+    expect_eq(F::NO, spire_drops_weapon_fit(*pmt, brand, player(0, 50, 80)));
+    // One area ahead = LevelsAhead levels of Sega's level table; 0 = only now
+    auto humar5 = lv1(0, 5);
+    expect(humar5.ahead.atp > humar5.now.atp);
+    expect_eq(humar5.now.atp, lv1(0, 0).ahead.atp);
+
+    SpireDropsConfig cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    expect(cfg.enabled && cfg.only_run_items && cfg.boss_weapon_per_player);
+    expect_eq(ServerDropMode::SERVER_PRIVATE, cfg.drop_mode);
+    expect_eq(5u, cfg.levels_ahead);
+    expect_eq(8u, cfg.pity_drops);
+    bool threw = false;
+    try {
+      SpireDropsConfig::from_json(phosg::JSON::parse("{\"DropMode\": \"CLIENT\"}"));
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    expect(threw);
+
+    // A level-1 hunter or force gets a common weapon he can equip now. A level-1 ranger (ATA 40) meets no ranged
+    // weapon's ATA (Handgun 68) in Sega's table: he gets the common weapon of his class he lacks the least for, never
+    // one of a group his class cannot use; with ATA 99 one he can equip now
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      bool ranger = char_class_is_ranger(cls);
+      for (uint32_t r = 0; r < 12; r++) {
+        auto w = spire_drops_pick_weapon(*pmt, lv1(cls, 5), r);
+        expect(!w.empty());
+        expect(!pmt->is_item_rare(w));
+        expect_eq(ranger ? F::NO : F::NOW, spire_drops_weapon_fit(*pmt, w, lv1(cls, 0)));
+        uint8_t bits = spire_weapon_usability_bits(cls);
+        expect_eq(bits, pmt->get_weapon(w.data1[1], w.data1[2]).usability_flags & bits);
+      }
+      auto strong = lv1(cls, 0);
+      strong.now.ata = 99;
+      expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, spire_drops_pick_weapon(*pmt, strong, 3), strong));
+    }
+    expect_eq(68, pmt->get_weapon(6, 0).ata_required);
+    expect_eq(40, level_table.base_stats_for_class(3).ata); // RAmar
+    // Item 25 in the filter: a Force gets no Sword but a weapon a Force can equip now
+    {
+      uint32_t pity = 3;
+      ItemData it = sword;
+      expect(spire_drops_filter_item(cfg, *pmt, it, lv1(8, 5), false, pity, 7) != nullptr);
+      expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, it, lv1(8, 0)));
+      expect_eq(0u, pity);
+    }
+    // Item 26 in the filter: a Brand one area ahead stays (it counts as a drop without a usable weapon); two areas
+    // ahead it becomes a weapon for now; with LevelsAhead 0 the one-area-ahead Brand goes too
+    {
+      uint32_t pity = 0;
+      ItemData it = brand;
+      expect(spire_drops_filter_item(cfg, *pmt, it, player(0, 50, 95), false, pity, 0) == nullptr);
+      expect(same(it, brand) && (pity == 1));
+      it = brand;
+      expect(spire_drops_filter_item(cfg, *pmt, it, player(0, 50, 80), false, pity, 0) != nullptr);
+      expect(!same(it, brand) && (spire_drops_weapon_fit(*pmt, it, player(0, 50, 50)) == F::NOW) && (pity == 0));
+      auto now_only = cfg;
+      now_only.levels_ahead = 0;
+      auto p = player(0, 50, 50); // what spire_drops_stats_ahead gives with LevelsAhead 0: ahead = now
+      it = brand;
+      expect(spire_drops_filter_item(now_only, *pmt, it, p, false, pity, 0) != nullptr);
+      expect(!same(it, brand));
+    }
+    // Item 30: only run items drop
+    for (auto [d0, d1, keep] : std::vector<std::tuple<uint8_t, uint8_t, bool>>{{0, 1, true}, {1, 1, true}, {1, 2, true},
+             {1, 3, false}, {2, 0, false}, {3, 0, true}, {3, 1, true}, {3, 2, false}, {3, 3, true}, {3, 4, true},
+             {3, 5, true}, {3, 6, false}, {3, 7, false}, {3, 9, false}, {3, 0x0A, false}, {3, 0x0B, false}, {4, 0, true}}) {
+      expect_eq(keep, spire_drops_is_run_item(item(d0, d1, 0)));
+    }
+    {
+      uint32_t pity = 0;
+      ItemData it = telepipe;
+      expect(spire_drops_filter_item(cfg, *pmt, it, lv1(0, 5), false, pity, 0) != nullptr);
+      expect(it.empty() && (pity == 0));
+      it = scape_doll;
+      spire_drops_filter_item(cfg, *pmt, it, lv1(0, 5), false, pity, 0);
+      expect(it.empty());
+      auto all_items = cfg;
+      all_items.only_run_items = false;
+      it = telepipe;
+      expect(spire_drops_filter_item(all_items, *pmt, it, lv1(0, 5), false, pity, 0) == nullptr);
+      expect(same(it, telepipe));
+    }
+    // Item 27: after PityDrops kept drops in a row without a usable weapon, the next one is a weapon; then it resets
+    {
+      auto pity3 = cfg;
+      pity3.pity_drops = 3;
+      uint32_t pity = 0;
+      for (uint32_t n = 1; n <= 3; n++) {
+        ItemData it = monomate;
+        expect(spire_drops_filter_item(pity3, *pmt, it, lv1(0, 5), false, pity, n) == nullptr);
+        expect(same(it, monomate) && (pity == n));
+      }
+      ItemData it = monomate;
+      expect(spire_drops_filter_item(pity3, *pmt, it, lv1(0, 5), false, pity, 4) != nullptr);
+      expect((spire_drops_weapon_fit(*pmt, it, lv1(0, 0)) == F::NOW) && (pity == 0));
+      it = monomate;
+      spire_drops_filter_item(pity3, *pmt, it, lv1(0, 5), false, pity, 5);
+      expect(same(it, monomate) && (pity == 1));
+      // nothing dropped is no drop; a usable weapon resets the counter too
+      it = ItemData();
+      spire_drops_filter_item(pity3, *pmt, it, lv1(0, 5), false, pity, 0);
+      expect(it.empty() && (pity == 1));
+      it = saber;
+      spire_drops_filter_item(pity3, *pmt, it, player(0, 999, 999), false, pity, 0);
+      expect(same(it, saber) && (pity == 0));
+      // PityDrops 0: never
+      pity3.pity_drops = 0;
+      pity = 50;
+      it = monomate;
+      expect(spire_drops_filter_item(pity3, *pmt, it, lv1(0, 5), false, pity, 0) == nullptr);
+      expect(same(it, monomate));
+    }
+    // Item 28: a boss gives each player exactly one weapon for his own class, also when Sega's table gave nothing
+    {
+      for (uint8_t cls : {0, 8}) { // HUmar and FOnewearl, the two players of one boss kill
+        for (const auto& sega : {ItemData(), monomate, sword, telepipe}) {
+          uint32_t pity = 2;
+          ItemData it = sega;
+          spire_drops_filter_item(cfg, *pmt, it, lv1(cls, 5), true, pity, cls);
+          expect(!it.empty());
+          expect_eq(F::NOW, spire_drops_weapon_fit(*pmt, it, lv1(cls, 0)));
+          expect_eq(0u, pity);
+        }
+      }
+      uint32_t pity = 2;
+      ItemData it = saber; // Sega's own drop already fits: it stays
+      expect(spire_drops_filter_item(cfg, *pmt, it, player(0, 999, 999), true, pity, 0) == nullptr);
+      expect(same(it, saber) && (pity == 0));
+      auto no_boss_rule = cfg;
+      no_boss_rule.boss_weapon_per_player = false;
+      it = ItemData();
+      expect(spire_drops_filter_item(no_boss_rule, *pmt, it, lv1(0, 5), true, pity, 0) == nullptr);
+      expect(it.empty());
+    }
   }
 
   phosg::log_info_f("-- All static tests passed");

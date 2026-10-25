@@ -24,6 +24,7 @@
 #include "ProxyCommands.hh"
 #include "ReceiveSubcommands.hh"
 #include "SendCommands.hh"
+#include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
@@ -2413,6 +2414,9 @@ static void on_quest_loaded(std::shared_ptr<Lobby> l) {
   l->load_maps();
 
   auto s = l->require_server_state();
+
+  // Regie pso-regie-9 (B-E01-108): a Spire game with SpireDrops gets the server's drops; every pity counter restarts
+  spire_drops_quest_loaded(l, leader_c);
 
   // Delete all floor items
   for (auto& m : l->floor_item_managers) {

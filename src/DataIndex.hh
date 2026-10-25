@@ -24,6 +24,7 @@
 #include "ItemParameterTable.hh"
 #include "ItemTranslationTable.hh"
 #include "LevelTable.hh"
+#include "SpireDrops.hh"
 #include "Lobby.hh"
 #include "MagMetadataTable.hh"
 #include "Menu.hh"
@@ -188,6 +189,10 @@ struct DataIndex {
   // v26 follow the leader: SpireFollowLeader {"LeaderClient": n, "DelayMs": m}. When that client of a Spire game loads
   // a floor other than Pioneer 2, every other client not on it is warped there (6x94) after DelayMs; missing = off.
   std::optional<std::pair<uint8_t, uint32_t>> spire_follow_leader;
+  // Regie pso-regie-9 (B-E01-108): SpireDrops {"DropMode": "SERVER_PRIVATE", "OnlyRunItems": true, "LevelsAhead": 5,
+  // "PityDrops": 8, "BossWeaponPerPlayer": true}: in a Spire game the server makes the drops and filters them per player
+  // (see SpireDrops.hh). Without the key: disabled (client drops, as before).
+  SpireDropsConfig spire_drops;
   // v27 blocked characters: SpireBlockedCharacters {"Quests": [n, ...], "Characters": [{"Serial": s, "Name": n}, ...]}.
   // A GC client with that serial and character name (Name empty: every character of that serial) never sees, loads or
   // joins one of those quests. A serial belongs to the console, not the character, so a real character is blocked by
