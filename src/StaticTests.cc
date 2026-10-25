@@ -5,6 +5,7 @@
 #include <format>
 
 #include "DataIndex.hh"
+#include "ExpressionEnvironment.hh"
 #include "QuestScript.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -630,6 +631,32 @@ void run_static_tests() {
     expect(!d.is_spire_blocked_quest(123, nullptr, 930, false));
     DataIndex empty;
     expect(!empty.is_spire_blocked_quest(123, nullptr, 929, true)); // no protected characters: nothing blocked
+  }
+
+  phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
+  {
+    DataIndex d;
+    d.spire_test_serials.emplace(3117539659);
+    auto available = [&](const char* expr_str, uint32_t serial, uint32_t checkpoint_rooms) -> bool {
+      auto expr = ResourceDASM::Expression::Node::parse(expr_str);
+      ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+          .difficulty = Difficulty::NORMAL, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+          .spire_rooms = d.spire_availability_rooms(serial, checkpoint_rooms)};
+      return env.evaluate(*expr) != 0;
+    };
+    expect(available("SPIRE_K3", 3117539659, 0));    // test serial, no rooms cleared: q945 available
+    expect(available("SPIRE_K1", 3117539659, 0));
+    expect(available("SPIRE_K10", 3117539659, 0));   // q955
+    expect(!available("SPIRE_K11", 3117539659, 0));  // only rooms 1-10
+    expect(!available("SPIRE_K3", 3117539666, 0));   // another serial without rooms: locked
+    expect(!available("SPIRE_K1", 0, 0));            // no GC serial
+    expect(available("SPIRE_K3", 3117539666, 0x4));  // another serial with room 3 cleared: available
+    expect(!available("SPIRE_K4", 3117539666, 0x4));
+    expect_eq(0x3FFu, d.spire_availability_rooms(3117539659, 0));
+    expect_eq(0x800003FFu, d.spire_availability_rooms(3117539659, 0x80000004)); // checkpoint rooms kept
+    expect_eq(0x4u, d.spire_availability_rooms(3117539666, 0x4));               // other serial unchanged
+    DataIndex empty;
+    expect_eq(0u, empty.spire_availability_rooms(3117539659, 0));             // key missing: off
   }
 
   phosg::log_info_f("-- Spire meta registers: one file per character (audit S-6)");

@@ -833,6 +833,20 @@ void DataIndex::load_config_early() {
         this->spire_blocked_characters.size(), this->spire_blocked_quest_numbers.size());
   } catch (const std::out_of_range&) {
   }
+  this->spire_test_serials.clear();
+  try {
+    for (const auto& item : this->config_json->get_list("SpireTestSerials")) {
+      int64_t serial = item->as_int();
+      if ((serial <= 0) || (serial > 0xFFFFFFFF)) {
+        throw std::runtime_error("SpireTestSerials: a GC serial is 1-4294967295");
+      }
+      this->spire_test_serials.emplace(static_cast<uint32_t>(serial));
+    }
+    if (!this->spire_test_serials.empty()) {
+      config_log.info_f("SpireTestSerials: {} serial(s) see room quests q941-q955 unlocked", this->spire_test_serials.size());
+    }
+  } catch (const std::out_of_range&) {
+  }
   this->spire_replay_registers.clear();
   try {
     for (const auto& item : this->config_json->get_list("SpireReplayRegisters")) {
@@ -2167,6 +2181,11 @@ void DataIndex::load_all() {
   this->load_quest_opcode_defs();
   this->load_quest_index();
   this->generate_bb_stream_file();
+}
+
+uint32_t DataIndex::spire_availability_rooms(uint32_t gc_serial, uint32_t checkpoint_rooms) const {
+  return (gc_serial && this->spire_test_serials.count(gc_serial)) ? (checkpoint_rooms | SPIRE_TEST_SERIAL_ROOMS)
+                                                                  : checkpoint_rooms;
 }
 
 bool DataIndex::is_spire_blocked(uint32_t gc_serial, const std::string& name, uint32_t quest_number) const {

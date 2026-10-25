@@ -390,6 +390,11 @@ bool Client::evaluate_quest_availability_expression(
       .team = this->team().get(),
       .spire_rooms = spire_checkpoint_mask_for_client(this->shared_from_this()),
   };
+  // v28: a SpireTestSerials console sees rooms 1-10 as cleared here only; the checkpoint file and the card are untouched
+  if ((this->version() == Version::GC_V3) && this->login && this->login->gc_license) {
+    env.spire_rooms = this->require_server_state()->data->spire_availability_rooms(
+        this->login->gc_license->serial_number, env.spire_rooms);
+  }
   int64_t ret = env.evaluate(*expr);
   if (this->log.should_log(phosg::LogLevel::L_INFO)) {
     this->log.info_f("Evaluated integral expression {} => {}", expr->str(), ret ? "TRUE" : "FALSE");

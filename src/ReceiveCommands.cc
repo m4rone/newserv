@@ -349,6 +349,12 @@ static asio::awaitable<void> on_login_complete(std::shared_ptr<Client> c) {
     send_set_guild_card_number(c);
   }
 
+  if ((c->version() == Version::GC_V3) && c->login && c->login->gc_license &&
+      s->data->spire_test_serials.count(c->login->gc_license->serial_number)) {
+    c->log.info_f("Spire test serial: room quests q941-q955 unlocked server-side for serial {}",
+        c->login->gc_license->serial_number);
+  }
+
   if (c->check_flag(Client::Flag::CAN_RECEIVE_ENABLE_B2_QUEST) &&
       (!c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) ||
           !c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE))) {

@@ -197,6 +197,13 @@ struct DataIndex {
   // closed: every listed quest and every Challenge quest is blocked). A Challenge quest is blocked for a protected
   // character whatever its number (audit S-3).
   bool is_spire_blocked_quest(uint32_t gc_serial, const std::string* name, uint32_t quest_number, bool challenge) const;
+  // v28 test serials (regie pso-regie-9): SpireTestSerials [s, ...], GC serials whose quest availability counts the Spire
+  // rooms 1-10 as cleared (SPIRE_K1..SPIRE_K10, SPIRE_MAX 10), so a test console can start any room quest q941-q955
+  // directly. Server-side only: the checkpoint file and the card's quest flags are not written. Empty = off.
+  std::unordered_set<uint32_t> spire_test_serials;
+  static constexpr uint32_t SPIRE_TEST_SERIAL_ROOMS = 0x3FF; // rooms 1-10 (bit k-1 = room k)
+  // The room mask an AvailableIf / EnabledIf sees: the character's checkpoint rooms, plus rooms 1-10 for a test serial
+  uint32_t spire_availability_rooms(uint32_t gc_serial, uint32_t checkpoint_rooms) const;
   bool ep3_infinite_meseta = false;
   std::vector<uint32_t> ep3_defeat_player_meseta_rewards = {400, 500, 600, 700, 800};
   std::vector<uint32_t> ep3_defeat_com_meseta_rewards = {100, 200, 300, 400, 500};
