@@ -14,7 +14,7 @@
 // numbers, F6, invariants 2-8, and the amendments after the mag measurement, which override it).
 //
 // Request in r248: 'Z' << 24 | sub << 16 | k (the room the quest is in).
-//   sub 1 ASK (kit point; room start while a mag is pending), sub 4 EXAM (exam_reward at a boss clear: room k counts as
+//   sub 1 ASK (kit point; a non-boss room clear while a mag is pending), sub 4 EXAM (exam_reward at a boss clear: room k counts as
 //   a beaten boss), sub 2 RESULT (low byte 1: the create succeeded, 0: item_create2 gave FFFFFFFF), sub 3 NO_MAG (the
 //   equip reminder at a boss room start), sub 5 LEAN (low byte 1 Fang/Mind, 2 Shell: stored only; F10 picks the column).
 // Answer to ASK and EXAM: r20-r31 the new mag's data1 (12 registers, one byte each), r41 = SPIRE_RUN_MAG_TAG |
@@ -92,8 +92,11 @@ SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint
 // change per game). Persisted in the savestate file ("RunMag").
 struct SpireRunMagLedger {
   uint32_t run_id = 0;
-  int32_t issued_step = -1; // -1: no mag issued yet; advanced only by a RESULT 1 (protocol: a lost answer stays owed)
+  // -1: no mag issued yet. B-REGIE-14-10: a step counts as issued when the server answers it with result 1; a RESULT 0
+  // gives it back (step_before_offer), a RESULT 1 only confirms, a lost RESULT leaves it issued (the client holds it).
+  int32_t issued_step = -1;
   int32_t offered_step = -1; // the step of the last answer with result 1, until its RESULT
+  int32_t step_before_offer = -1; // issued_step before that answer: what a RESULT 0 restores (in memory only)
   uint32_t start_step = 0;
   std::set<uint8_t> boss_rooms; // the boss rooms k this run counted (EXAM, and the server's own boss clears)
   std::optional<SpireMagBytes> last_mirrored; // the run mag's data1 as last mirrored (overlay) or created
@@ -137,9 +140,9 @@ const char* spire_run_mag_refusal_name(SpireRunMagRefusal r);
 uint32_t spire_run_mag_answer(uint32_t tag, uint8_t old_type, bool result);
 
 // The decision of an ASK or EXAM, with the ledger updated: whether a new mag is answered (then bytes holds it). An
-// EXAM adds k to the ledger's boss rooms. Idempotent: the same EXAM twice, an ASK after a resume, a floor reload never
-// issue a step twice (issued_step moves only at RESULT 1). server_boss_rooms: the boss rooms the server counted in
-// this game for this client.
+// EXAM adds k to the ledger's boss rooms. An answer with result 1 issues its step (issued_step moves here, B-REGIE-14-10),
+// so the same EXAM twice, an ASK after a resume, a floor reload or a lost RESULT never issue a step twice.
+// server_boss_rooms: the boss rooms the server counted in this game for this client.
 struct SpireRunMagDecision {
   bool result = false;
   uint32_t expected_step = 0;
@@ -147,13 +150,15 @@ struct SpireRunMagDecision {
 };
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
     const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus);
-// RESULT: 1 issues the offered mag (issued_step = its step, last_mirrored = it); 0 leaves the step owed (the quest asks
-// again at the next room start). Returns false if nothing was offered.
+// RESULT: 1 confirms the offered mag (last_mirrored = it; the step was issued at the answer); 0 gives the step back
+// (issued_step = step_before_offer: the step is owed again, the quest asks at the next non-boss room clear). Returns
+// false if nothing was offered.
 bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created);
 
 // The run mag in an overlay's items (data1 of every type-02 item): the ledger follows the mirror (feeding) only when
 // exactly one type-02 item is there and the ledger has issued a mag; its level must not be below the ledger's (feeding
-// never lowers it). Returns true if last_mirrored changed.
+// never lowers it). An item equal to the offered mag confirms it as a RESULT 1 would (the RESULT was lost after the
+// create). Returns true if last_mirrored changed.
 bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<SpireMagBytes>& overlay_mags);
 
 // The ledger in the savestate file

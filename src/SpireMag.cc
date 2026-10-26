@@ -259,6 +259,10 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   if (ledger.issued_step < static_cast<int32_t>(ret.expected_step)) {
     ret.result = true;
     ret.bytes = spire_mag_step_bytes(line, ret.expected_step, start_bonus, ledger.last_mirrored);
+    // B-REGIE-14-10: the answer issues the step; a RESULT 0 gives it back. An earlier offer whose RESULT never came
+    // stays issued (the client holds that mag), so it is what a RESULT 0 of this answer returns to.
+    ledger.step_before_offer = ledger.issued_step;
+    ledger.issued_step = ret.expected_step;
     ledger.offered_step = ret.expected_step;
     ledger.offered = ret.bytes;
   }
@@ -270,15 +274,25 @@ bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
     return false;
   }
   if (created) {
-    ledger.issued_step = std::max(ledger.issued_step, ledger.offered_step);
     ledger.last_mirrored = ledger.offered;
+  } else {
+    ledger.issued_step = ledger.step_before_offer;
   }
   ledger.offered.reset();
   ledger.offered_step = -1;
+  ledger.step_before_offer = -1;
   return true;
 }
 
 bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<SpireMagBytes>& overlay_mags) {
+  if ((overlay_mags.size() == 1) && ledger.offered && (overlay_mags[0] == *ledger.offered)) {
+    // the offered mag was created and its RESULT lost: confirmed as by a RESULT 1
+    ledger.last_mirrored = ledger.offered;
+    ledger.offered.reset();
+    ledger.offered_step = -1;
+    ledger.step_before_offer = -1;
+    return true;
+  }
   if ((overlay_mags.size() != 1) || (ledger.issued_step < 0) || !ledger.last_mirrored) {
     return false;
   }

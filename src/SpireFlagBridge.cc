@@ -2264,7 +2264,9 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           issued ? "; reminder sent" : "; no mag issued in this run, no text");
     } else {
       bool created = value & 1;
-      int32_t before = led ? led->issued_step : -1;
+      // B-REGIE-14-10: the answer issued the step already; before = the step issued before that answer
+      int32_t before = led ? led->step_before_offer : -1;
+      int32_t offered_step = led ? led->offered_step : -1;
       auto offered = led ? led->offered : std::nullopt;
       bool known = led && spire_run_mag_result(*led, created);
       if (!known) {
@@ -2272,8 +2274,8 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
             serial_number, quest_number);
       } else if (!created) {
         spire_send_ticker(c, SPIRE_RUN_MAG_PACK_FULL_TEXT);
-        c->log.info_f("Spire run mag: RESULT 0 (pack full) for serial {:010} in q{}; step {} stays owed", serial_number,
-            quest_number, before + 1);
+        c->log.info_f("Spire run mag: RESULT 0 (pack full) for serial {:010} in q{}; step {} given back, owed again (issued step {})",
+            serial_number, quest_number, offered_step, led->issued_step);
       } else {
         std::string name = std::format("Mag {:02X}", (*offered)[1]);
         try {
@@ -2287,7 +2289,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
         } catch (const std::exception&) {
         }
         spire_send_ticker(c, (before < 0) ? SPIRE_RUN_MAG_REMINDER_TEXT : spire_run_mag_evolve_text(name));
-        c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} issued, {} {} (run {:08X})",
+        c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {} {} (run {:08X})",
             serial_number, quest_number, led->issued_step, name, spire_run_mag_bytes_hex(*offered), run->run_id);
       }
     }

@@ -4092,10 +4092,10 @@ void run_static_tests() {
       auto d = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 1, {}, 0); // kit
       expect(d.result);
       expect_eq(0u, d.expected_step);
-      expect_eq(-1, led.issued_step); // only a RESULT 1 issues it
-      // the answer was lost to a floor load: the same ASK gets the same mag again
+      expect_eq(0, led.issued_step); // counted at the answer (B-REGIE-14-10)
+      // the same ASK again (a reloaded floor) never issues the step twice: the known degrade of the protocol
       auto again = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 1, {}, 0);
-      expect(again.result && (again.bytes == d.bytes));
+      expect(!again.result);
       expect(spire_run_mag_result(led, true));
       expect_eq(0, led.issued_step);
       expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 2, {}, 0).result); // the next room: nothing owed
@@ -4148,6 +4148,92 @@ void run_static_tests() {
       expect(a.result);
       expect(a.bytes == e.bytes);
       expect(led.boss_rooms.count(4));
+    });
+
+    // B-REGIE-14-10: a step counts as issued when the server answers it with result 1; a RESULT 0 gives it back, a
+    // RESULT 1 only confirms, and a RESULT that never arrives never yields a second issue of the same step.
+    f6_case("counting: answer, the RESULT lost, then ASK", [&]() {
+      SpireRunMagLedger led;
+      led.run_id = 0x2222;
+      auto kit = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 1, {}, 0);
+      expect(kit.result);
+      expect_eq(0, led.issued_step); // counted at the answer
+      // a floor load killed the thread after the swap, before the RESULT: the client holds the kit mag
+      auto after = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 2, {}, 0);
+      expect(!after.result);
+      expect_eq(0u, after.expected_step);
+      expect_eq(0, led.issued_step);
+      // the mag of the lost RESULT shows in the overlay: the ledger takes it as created, so the savestate keeps it
+      expect(spire_run_mag_follow_mirror(led, {kit.bytes}));
+      expect(led.last_mirrored == kit.bytes);
+      expect(!spire_run_mag_result(led, true)); // a RESULT after that has nothing to confirm
+      expect_eq(0, led.issued_step);
+      // the Dragon's EXAM, its RESULT lost, then the same EXAM again (a reloaded floor): one issue of step 1
+      auto e4 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e4.result);
+      expect_eq(1, led.issued_step);
+      expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0).result);
+      expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 5, {}, 0).result);
+      expect_eq(1, led.issued_step);
+    });
+
+    f6_case("counting: answer, RESULT 0, then ASK gives the same step", [&]() {
+      SpireRunMagLedger led;
+      led.run_id = 0x3333;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto e4 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e4.result);
+      expect_eq(1, led.issued_step); // counted at the answer
+      expect(spire_run_mag_result(led, false)); // pack full: the step is given back
+      expect_eq(0, led.issued_step);
+      expect(led.last_mirrored == spire_mag_step_bytes(hu, 0, 0, std::nullopt)); // the client kept the old mag
+      auto a5 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 5, {}, 0);
+      expect(a5.result);
+      expect_eq(1u, a5.expected_step);
+      expect(a5.bytes == e4.bytes);
+      expect_eq(1, led.issued_step);
+    });
+
+    f6_case("counting: answer, RESULT 1, then the next boss's EXAM gives the next step", [&]() {
+      SpireRunMagLedger led;
+      led.run_id = 0x4444;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto e4 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e4.result);
+      expect_eq(1, led.issued_step); // counted at the answer
+      expect(spire_run_mag_result(led, true)); // only confirms
+      expect_eq(1, led.issued_step);
+      expect(led.last_mirrored == e4.bytes);
+      expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 5, {}, 0).result);
+      auto e8 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0);
+      expect(e8.result);
+      expect_eq(2u, e8.expected_step);
+      expect_eq(2, led.issued_step);
+      expect(!(e8.bytes == e4.bytes));
+    });
+
+    f6_case("counting: a resume with the issued step persisted issues nothing again", [&]() {
+      SpireRunMagLedger led;
+      led.run_id = 0x5555;
+      led.issued_step = 1;
+      led.boss_rooms = {4};
+      led.last_mirrored = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
+      auto e8 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0);
+      expect(e8.result);
+      // the RESULT is lost; the next room start writes the savestate with this ledger
+      SpireSavestate ss;
+      ss.run_id = led.run_id;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.run_mag = led;
+      auto back = spire_savestate_from_json(spire_savestate_to_json(ss, 1));
+      expect(back.run_mag.has_value());
+      expect_eq(2, back.run_mag->issued_step);
+      SpireRunMagLedger resumed = *back.run_mag;
+      expect(!spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_ASK, 9, {}, 0).result);
+      expect(!spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0).result);
+      expect_eq(2, resumed.issued_step);
     });
 
     f6_case("the ledger follows the feed mirror", [&]() {
