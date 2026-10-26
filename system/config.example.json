@@ -1014,6 +1014,13 @@
   // "SpireCheckpointRooms": [{"Floor": 6, "Room": 50, "K": 9}, {"Floor": 7, "Room": 60, "K": 10}, {"Floor": 13, "Room": -1, "K": 11},
   //     {"Episode": 2, "Floor": 1, "Room": 70, "K": 16}, {"Episode": 2, "Floor": 2, "Room": 50, "K": 17}, {"Episode": 2, "Floor": 14, "Room": -1, "K": 18}],
   // "SpireCheckpointArrivals": [{"Floor": 14, "K": 14}, {"Episode": 2, "Floor": 14, "K": 17}],
+  // SpireDrops: the server makes the drops of a Spire game (see src/SpireDrops.hh). Route B (F8): the boss weapon of
+  // room k (the K SpireCheckpointRooms gives the floor) gets grind min(MaxGrind, BossGrindBase + BossGrindPerK * k) and
+  // Hit min(50, BossHitBase + BossHitPerK * k); from room PickFromK on a picked weapon gets grind min(MaxGrind, 1 + k)
+  // and Hit min(25, 5 + 2k). A missing Boss* or PickFromK key is 0: no grind and no Hit. LevelsAhead missing: 5,
+  // PityDrops missing: 8.
+  // "SpireDrops": {"DropMode": "SERVER_PRIVATE", "OnlyRunItems": true, "LevelsAhead": 8, "PityDrops": 6, "BossWeaponPerPlayer": true,
+  //     "BossGrindBase": 2, "BossGrindPerK": 2, "BossHitBase": 10, "BossHitPerK": 4, "PickFromK": 5},
   // Client functions listed here are automatically sent to all clients. If a client connects using a client version
   // that isn't compatible with some of these patches, the incompatible patches are skipped and the client is allowed
   // to connect. This option applies to all PSO versions, not only BB.
