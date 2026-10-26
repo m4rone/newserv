@@ -2351,6 +2351,10 @@ bool spire_guard_awaiting_save_login_apply(
   return false;
 }
 
+bool spire_guard_98_follows(bool awaiting_save, bool normal_or_solo, bool base_game) {
+  return awaiting_save && normal_or_solo && !base_game;
+}
+
 bool spire_guard_follow_real_progress(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
   if (!snapshot.awaiting_save || snapshot.run_in_progress || snapshot.restore_pending || !snapshot.has_character) {
@@ -2810,8 +2814,14 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
     if (!snapshot.run_in_progress) {
       // v39: under AwaitingSave alone the client has had the verified real character in memory since the lobby
       // restore; the 98 of a Normal or Solo game is its real progress, which the snapshot follows (spire_guard_after_98)
-      if (snapshot.awaiting_save && l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO))) {
+      bool base_game = l && l->is_game() && l->quest &&
+          (l->quest->meta.quest_number == c->require_server_state()->data->spire_base_quest_number);
+      if (spire_guard_98_follows(snapshot.awaiting_save,
+              l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO)), base_game)) {
         spire_guard_follow_pending.emplace(c.get());
+      } else if (snapshot.awaiting_save && base_game) {
+        c->log.info_f("Spire guard: 98 of the base game (q{}) for serial {:010}; AwaitingSave stays open until a login 61 equals the snapshot {} (v59)",
+            quest_number, serial_number, spire_guard_describe(snapshot));
       }
       return;
     }
@@ -3009,7 +3019,7 @@ struct SpireGuardRestoreLock {
 // 30 before took time), SetExtendedPlayerInfo with merged, and the 61 asked for right after (on_61_98 puts it into the
 // server's character data, or into the overlay if there is one). Returns that 61's character; *pushed is false (and
 // nothing was sent) if the look refused the push. Throws on a failed or timed-out answer.
-enum class SpireGuardPushFloors { ANY, FIELD, RUN_START };
+enum class SpireGuardPushFloors { ANY, FIELD, RUN_START, BASE }; // BASE (v59): any floor, but in a game, nobody loading
 static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l);
 static asio::awaitable<std::shared_ptr<PSOBBCharacterFile>> spire_guard_push_character(std::shared_ptr<Client> c,
     uint32_t serial_number, std::shared_ptr<PSOBBCharacterFile> merged, SpireGuardPushFloors floors, bool drop,
@@ -3058,7 +3068,8 @@ static asio::awaitable<std::shared_ptr<PSOBBCharacterFile>> spire_guard_push_cha
 // "game" is the return to base: no drop, no push while a client of the game loads, the marker unchanged.
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
-  bool in_game = !strcmp(where, "game");
+  bool base_game = !strcmp(where, "base game"); // v59: the base game's push, like "game" but on any floor
+  bool in_game = !strcmp(where, "game") || base_game;
   bool drop = !in_game;
   c->log.info_f("Spire guard: restore pending for serial {:010} (q{}); restoring {} in the {}",
       serial_number, snapshot.quest_number, spire_guard_describe(snapshot), where);
@@ -3115,7 +3126,8 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
 
     // Only the 61 requested after the push can verify the restore (v8): no earlier 61 and no 98 counts
     bool pushed = false;
-    auto after = co_await spire_guard_push_character(c, serial_number, merged, in_game ? SpireGuardPushFloors::FIELD : SpireGuardPushFloors::ANY,
+    auto after = co_await spire_guard_push_character(c, serial_number, merged,
+        base_game ? SpireGuardPushFloors::BASE : (in_game ? SpireGuardPushFloors::FIELD : SpireGuardPushFloors::ANY),
         drop, "in-game restore", spire_guard_describe(snapshot), level_before, &pushed);
     if (!pushed) {
       co_return false;
@@ -3434,6 +3446,40 @@ static asio::awaitable<void> spire_base_game_start(
       co_return;
     }
   }
+  if (game->mode != GameMode::BATTLE) {
+    // v59: the real character into every save buffer before the base quest can make the client write its card
+    std::vector<std::shared_ptr<Client>> clients;
+    for (const auto& lc : game->clients) {
+      if (lc) {
+        clients.emplace_back(lc);
+      }
+    }
+    for (const auto& lc : clients) {
+      uint32_t serial_number = spire_bridge_serial_for_client(lc);
+      if (!serial_number || lc->is_spire_protected() || !lc->channel->connected()) {
+        continue;
+      }
+      bool verified = false;
+      try {
+        std::string filename = spire_guard_filename_for(lc, serial_number);
+        if (!filename.empty() && std::filesystem::is_regular_file(filename)) {
+          SpireGuardSnapshot snapshot = spire_guard_load(filename);
+          SpireGuardRestoreLock lock(lc.get());
+          if (lock.locked && snapshot.has_character) {
+            verified = co_await spire_guard_run_restore(lc, serial_number, filename, snapshot, "base game");
+          }
+        }
+      } catch (const std::exception& e) {
+        lc->log.warning_f("Spire base game: push for serial {:010} failed: {}", serial_number, e.what());
+      }
+      lc->log.info_f("Spire base game: real character pushed into the save buffer for serial {:010}: {}", serial_number,
+          verified ? "verified by the 61" : "NOT verified (the marker stays; the next login restores)");
+    }
+    game = weak_game.lock();
+    if (!game || game->quest) {
+      co_return;
+    }
+  }
   set_lobby_quest(game, q, true);
   game->log.info_f("Spire base game: q{} started in {} game {:08X} with {} of {} client(s)", quest_number,
       (game->mode == GameMode::BATTLE) ? "the new run's Battle" : "the base", game->lobby_id, game->count_clients(),
@@ -3492,13 +3538,13 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
   }
 }
 
-// v58: "Start a new run" in the base (SpireFlagBridge.hh, SPIRE_BRIDGE_NEW_RUN). Never throws.
+// v58: "Start a new run" in the base (SpireFlagBridge.hh, SPIRE_BASE_NEW_RUN_VALUE). Never throws.
 static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   try {
     auto s = c->require_server_state();
     if (c->lobby_client_id != l->leader_id) {
       spire_send_ticker(c, "Only the party leader can start a new run.");
-      c->log.info_f("Spire base game: 'Z' (new run) from client {}, not the leader; refused", c->lobby_client_id);
+      c->log.info_f("Spire base game: 'O' sub 2 (new run) from client {}, not the leader; refused", c->lobby_client_id);
       return;
     }
     uint32_t run_quest_number = SPIRE_BASE_DEFAULT_RUN_QUEST;
@@ -3508,7 +3554,7 @@ static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby>
     auto q = s->data->quest_index->get(run_quest_number);
     if (!q) {
       spire_send_ticker(c, "No run quest on this server.");
-      c->log.warning_f("Spire base game: 'Z' (new run): run quest q{} not found", run_quest_number);
+      c->log.warning_f("Spire base game: 'O' sub 2 (new run): run quest q{} not found", run_quest_number);
       return;
     }
     size_t expected = std::max<size_t>(1, l->count_clients());
@@ -3533,12 +3579,12 @@ static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby>
     }
     spire_base_game_run_quests.erase(l->lobby_id);
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire base game: 'Z' (new run) failed: {}", e.what());
+    c->log.warning_f("Spire base game: 'O' sub 2 (new run) failed: {}", e.what());
   }
 }
 
 bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
-  if ((register_number != SPIRE_BRIDGE_REQUEST_REGISTER) || ((value >> 24) != SPIRE_BRIDGE_NEW_RUN) || !l->is_game() ||
+  if ((register_number != SPIRE_BRIDGE_REQUEST_REGISTER) || ((value & 0xFFFF0000) != SPIRE_BASE_NEW_RUN_VALUE) || !l->is_game() ||
       !l->quest || (l->mode == GameMode::BATTLE)) {
     return false;
   }

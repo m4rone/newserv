@@ -719,13 +719,20 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
 void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
 
 // v58: a new run from the base. The base quest's quartermaster ("Start a new run", confirmed) writes
-// SPIRE_BRIDGE_NEW_RUN << 24 to r248; the base quest is no bridged quest, so spire_bridge_handle_register takes this
+// SPIRE_BASE_NEW_RUN_VALUE to r248; the base quest is no bridged quest, so spire_bridge_handle_register takes this
 // one code from it (a normal game running SpireBaseQuest) before its bridged-quest check. Only the game leader may: the
 // server sends every client of the base game out with 6x73 and, from the lobby, puts them in one new Battle game with
 // the run quest the base came from (q921 if the base game was made at the counter), where the quest starts as at the
 // counter: the guard takes a fresh snapshot of the real character and the run copy gets its start level (v52).
-constexpr uint8_t SPIRE_BRIDGE_NEW_RUN = 'Z';
+// v59: the code is 'O' sub 2 (r248 = 'O' << 24 | 2 << 16; the run end's own 'O' is sub 0), so 'Z' stays free.
+constexpr uint8_t SPIRE_BASE_NEW_RUN_SUB = 2;
+constexpr uint32_t SPIRE_BASE_NEW_RUN_VALUE = (static_cast<uint32_t>('O') << 24) | (SPIRE_BASE_NEW_RUN_SUB << 16);
 constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;
+// v59: true if the 98 of this game may move the snapshot to the real character and close AwaitingSave (v39/v40):
+// AwaitingSave set, a Normal or Solo game, and not the base game. In the base game the card may hold the run kit
+// (lab 2026-10-26: the client wrote its card right after q925 loaded, with 8 of 23 items in the save buffer), so there
+// AwaitingSave stays open until a login 61 equals the snapshot (spire_guard_awaiting_save_login_apply).
+bool spire_guard_98_follows(bool awaiting_save, bool normal_or_solo, bool base_game);
 
 // v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose
