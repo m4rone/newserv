@@ -105,6 +105,11 @@ bool spire_drops_boost_weapon(const ItemParameterTable& pmt, ItemData& item, Spi
 uint8_t spire_drops_floor_k(const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>& rooms_by_episode,
     Episode episode, uint8_t floor);
 
+// Route B F8 (critic M2): the warning line for a boss drop whose room k is 0 (its floor is not in SpireCheckpointRooms,
+// e.g. the key is missing from the live config), so a boss weapon without grind or Hit is visible in the log; "" for
+// any other drop or a boss drop with a room.
+std::string spire_drops_boss_k_warning(bool is_boss, uint8_t k, Episode episode, uint8_t floor);
+
 // The decision for one item made for one player, free of state for the static tests. Changes item (cleared or
 // replaced) and pity (kept drops in a row without a weapon usable now). k is the room (F8 grind and Hit; 0 = unknown, no
 // grind or Hit). Returns why the item changed, or nullptr if it was kept as it is.
@@ -125,6 +130,8 @@ bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index = 0);
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
 // counter. Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a
 // change. Both no-ops outside a Spire game or without SpireDrops; the filter never throws (a missing table or
-// character keeps the item as it is).
+// character keeps the item as it is). floor: the floor the item drops on (the drop request's), which gives the room
+// k; never the receiver's floor (critic M1: a SERVER_PRIVATE box drop reaches players on other floors, and a client's
+// floor is stale between a follow-warp and its own floor report).
 void spire_drops_quest_loaded(std::shared_ptr<Lobby> l, std::shared_ptr<const Client> leader_c);
-bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, ItemData& item, bool is_boss);
+bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, ItemData& item, bool is_boss, uint8_t floor);

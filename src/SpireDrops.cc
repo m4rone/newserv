@@ -342,7 +342,16 @@ void spire_drops_quest_loaded(std::shared_ptr<Lobby> l, std::shared_ptr<const Cl
   l->log.info_f("Spire drops: q{} uses the server's drops ({})", l->quest->meta.quest_number, cfg->str());
 }
 
-bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, ItemData& item, bool is_boss) {
+std::string spire_drops_boss_k_warning(bool is_boss, uint8_t k, Episode episode, uint8_t floor) {
+  if (!is_boss || k) {
+    return "";
+  }
+  return std::format("Spire drops: boss drop on floor {:02X} (episode {}) has room 0: no grind or Hit; is the floor "
+                     "missing from SpireCheckpointRooms?",
+      floor, static_cast<int>(episode));
+}
+
+bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, ItemData& item, bool is_boss, uint8_t floor) {
   const auto* cfg = spire_drops_config_for(c, l);
   if (!cfg) {
     return false;
@@ -360,7 +369,10 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
     ItemData before = item;
     uint32_t& pity = spire_drops_pity[c.get()];
     uint32_t pity_before = pity;
-    uint8_t k = spire_drops_floor_k(s->data->spire_checkpoint_rooms, l->episode, c->floor);
+    uint8_t k = spire_drops_floor_k(s->data->spire_checkpoint_rooms, l->episode, floor);
+    if (auto warning = spire_drops_boss_k_warning(is_boss, k, l->episode, floor); !warning.empty()) {
+      l->log.warning_f("{} (for {})", warning, c->channel->name);
+    }
     const char* why = spire_drops_filter_item(*cfg, *pmt, item, player, is_boss, pity, l->rand_crypt->next(), k);
     if (why) {
       l->log.info_f("Spire drops: {} for {} (Lv{}, room {}, pity {}->{}): {} -> {}", why, c->channel->name,

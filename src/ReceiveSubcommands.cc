@@ -3088,7 +3088,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
       // see spire_drops_is_boss_drop)
       bool is_boss = rec.target_ene_st && rec.target_ene_st->super_ene &&
           spire_drops_is_boss_drop(rec.effective_enemy_type, rec.target_ene_st->super_ene->child_index);
-      spire_drops_filter(c, l, res.item, is_boss);
+      spire_drops_filter(c, l, res.item, is_boss, cmd.floor); // the drop's floor gives its room (critic M1)
       return res;
     };
 

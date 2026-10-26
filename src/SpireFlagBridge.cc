@@ -1779,8 +1779,12 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     if (refusal == SpireShopRefusal::NONE) {
       auto rec = spire_records_load(records_filename);
       uint8_t open_rung[2] = {spire_meta_open_rung(meta, 1), spire_meta_open_rung(meta, 2)};
+      uint8_t char_class = character->disp.visual.sh.char_class;
+      // route B F3: the archetype's second kit already owned (its Normal flag) makes kit_tier a double buy: refused
+      // with ALREADY_OPEN at BUY, and listed with price 0
+      bool kit2 = spire_meta_kit2_owned(meta, char_class);
       if (sub == SPIRE_SHOP_BUY) {
-        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung);
+        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung, kit2);
         if (refusal == SpireShopRefusal::NONE) {
           uint32_t level_before = spire_shop_level(meta.upgrades, index);
           uint32_t price = spire_shop_apply_buy(cat, index, meta);
@@ -1818,7 +1822,6 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
           upgrades[SPIRE_SHOP_ITEM_NAMES[0]] = run_bonus;
         }
       }
-      uint8_t char_class = character->disp.visual.sh.char_class;
       uint32_t strength = spire_shop_strength(cat, upgrades);
       uint32_t heat = spire_shop_heat(cat, char_class, strength, spire_meta_ladder_quest_rung(quest_number)); // v54
       std::string heat_str = std::format("H {}", heat);
@@ -1833,7 +1836,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
         uint32_t level = spire_shop_level(upgrades, z);
-        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung);
+        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung, kit2);
         spire_send_register(c, SPIRE_SHOP_LEVEL_FIRST_REGISTER + z, level);
         spire_send_register(c, SPIRE_SHOP_PRICE_FIRST_REGISTER + z, price);
         levels_str += std::format(" {}={}/{}", SPIRE_SHOP_ITEM_NAMES[z], level, price);

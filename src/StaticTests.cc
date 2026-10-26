@@ -2720,6 +2720,24 @@ void run_static_tests() {
       expect_eq(0, spire_drops_floor_k(rooms, Episode::EP1, 0)); // Pioneer 2
       expect_eq(0, spire_drops_floor_k(rooms, Episode::EP1, 2)); // not listed
       expect_eq(0, spire_drops_floor_k(rooms, Episode::EP4, 1));
+      // Critic M1: k comes from the floor the item drops on. A box on Caves 1 (floor 3) is room 5 for every receiver,
+      // also for a partner whose own floor is still Pioneer 2 (0, which would give room 0)
+      expect_eq(5, spire_drops_floor_k(rooms, Episode::EP1, 3));
+      expect(spire_drops_boss_k_warning(true, spire_drops_floor_k(rooms, Episode::EP1, 14), Episode::EP1, 14).empty());
+    }
+
+    // Critic M2: a boss drop with room 0 (a live config without SpireCheckpointRooms) gives one warning line naming the
+    // floor; a boss drop with a room and any other drop give none
+    {
+      std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>> none;
+      uint8_t k = spire_drops_floor_k(none, Episode::EP1, 14);
+      expect_eq(0, k);
+      auto warning = spire_drops_boss_k_warning(true, k, Episode::EP1, 14);
+      expect(warning.find("floor 0E") != std::string::npos);
+      expect(warning.find("SpireCheckpointRooms") != std::string::npos);
+      expect(warning.find('\n') == std::string::npos); // one line
+      expect(spire_drops_boss_k_warning(false, 0, Episode::EP1, 14).empty()); // not a boss: k 0 is normal (Pioneer 2)
+      expect(spire_drops_boss_k_warning(true, 15, Episode::EP1, 14).empty());
     }
 
     // In the filter: each player's boss weapon (Sega's drop or picked) carries the boss grind and Hit of room k, a
