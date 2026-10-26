@@ -3545,11 +3545,15 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
         spire_base_game_run_quests[game->lobby_id] = mark.run_quest_number;
       }
     }
+    // v60: what the server holds for this client when it joins (the game join command carries it to the client)
+    auto joined_with = c->character_file(false, false);
     s->change_client_lobby(c, game);
     c->set_flag(Client::Flag::LOADING);
-    c->log.info_f("Spire base game: serial {:010} {} {} game {:08X} for q{} (from game {:08X}, {} expected)", serial_number,
-        created ? "created" : "joined", (mark.mode == GameMode::BATTLE) ? "the new run's Battle" : "the base",
-        game->lobby_id, mark.quest_number, mark.group, mark.expected);
+    c->log.info_f("Spire base game: serial {:010} {} {} game {:08X} for q{} (from game {:08X}, {} expected; server data Lv{} {} items{})",
+        serial_number, created ? "created" : "joined", (mark.mode == GameMode::BATTLE) ? "the new run's Battle" : "the base",
+        game->lobby_id, mark.quest_number, mark.group, mark.expected,
+        joined_with ? joined_with->disp.stats.level + 1 : 0, joined_with ? joined_with->inventory.num_items : 0,
+        c->has_overlay() ? ", overlay" : "");
     if (created) {
       asio::co_spawn(*s->io_context, spire_base_game_start(game, mark.group, mark.expected, mark.quest_number),
           asio::detached);
