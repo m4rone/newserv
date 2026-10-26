@@ -212,6 +212,71 @@ void run_static_tests() {
     expect(spire_guard_refresh_self_commands().empty());
   }
 
+  phosg::log_info_f("-- Spire base return: the push in a game only at the run end, on a field floor, never during a load (v47)");
+  {
+    using R = SpireBaseReturnRefusal;
+    SpireBaseReturnState ok;
+    ok.has_character = true;
+    ok.spire_run = true;
+    ok.run_over = true;
+    ok.on_field_floor = true;
+    ok.can_run_functions = true;
+    ok.has_snapshot = true;
+    ok.run_in_progress = true;
+    expect_eq(R::NONE, spire_base_return_refusal(ok));
+    auto with = [&](auto change) {
+      SpireBaseReturnState st = ok;
+      change(st);
+      return spire_base_return_refusal(st);
+    };
+    expect_eq(R::NO_CHARACTER, with([](auto& st) { st.has_character = false; }));
+    expect_eq(R::NOT_A_SPIRE_RUN, with([](auto& st) { st.spire_run = false; }));
+    expect_eq(R::RUN_NOT_OVER, with([](auto& st) { st.run_over = false; }));          // mid-run: never
+    expect_eq(R::NOT_ON_FIELD, with([](auto& st) { st.on_field_floor = false; }));    // already on Pioneer 2
+    expect_eq(R::LOADING, with([](auto& st) { st.any_client_loading = true; }));      // the B2 + load hang (v33)
+    expect_eq(R::NO_FUNCTIONS, with([](auto& st) { st.can_run_functions = false; }));
+    expect_eq(R::PROTECTED, with([](auto& st) { st.protected_character = true; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.has_snapshot = false; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.run_in_progress = false; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.restore_pending = true; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.awaiting_save = true; }));
+    expect_eq(R::RESTORE_RUNNING, with([](auto& st) { st.restore_running = true; }));
+    expect_eq(R::ALREADY_SENT_BACK, with([](auto& st) { st.already_sent_back = true; }));
+    // the answer: 'O' tag, refusal in bits 8-15, OK only without a refusal
+    expect_eq(0x4F000001u, spire_base_return_answer(R::NONE));
+    expect_eq(0x4F000500u, spire_base_return_answer(R::LOADING));
+    expect_eq(0x4F000B00u, spire_base_return_answer(R::PUSH_NOT_VERIFIED));
+    for (uint8_t z = 1; z <= static_cast<uint8_t>(R::PUSH_NOT_VERIFIED); z++) {
+      expect_eq(SPIRE_BASE_RETURN_FAIL, spire_base_return_answer(static_cast<R>(z)) & 0xFF);
+    }
+    // the code letter is free: no other r248 code or 4CC starts with 'O'
+    for (uint8_t letter : {SPIRE_BRIDGE_MSG_WAVE, SPIRE_BRIDGE_MSG_LIFE, SPIRE_BRIDGE_MSG_TIME, SPIRE_BRIDGE_MSG_PARTNER,
+             SPIRE_BRIDGE_MSG_RUN_OVER, SPIRE_BRIDGE_MSG_PAUSE_B, SPIRE_BRIDGE_MSG_DOWN, SPIRE_BRIDGE_MSG_HINT,
+             SPIRE_BRIDGE_MSG_APPROACH, SPIRE_BRIDGE_MSG_PROMPT, SPIRE_BRIDGE_REC_BEGIN, SPIRE_BRIDGE_REC_SCORE,
+             SPIRE_BRIDGE_REC_FINISH, SPIRE_BRIDGE_REC_BOARD, SPIRE_BRIDGE_TIMER_START, SPIRE_BRIDGE_DRAW_REQUEST,
+             SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_BRIDGE_RESUME, static_cast<uint8_t>('N'),
+             static_cast<uint8_t>(SPIRE_BRIDGE_REQUEST_VALUE >> 24), static_cast<uint8_t>(SPIRE_BRIDGE_DONE_VALUE >> 24),
+             static_cast<uint8_t>(SPIRE_BRIDGE_BATTLE_END_VALUE >> 24),
+             static_cast<uint8_t>(SPIRE_BRIDGE_ROOM_CLEAR_VALUE >> 24)}) {
+      expect(letter != SPIRE_BRIDGE_BASE_RETURN);
+    }
+    // the answer is tagged apart from the 'J' resume answer on the same register
+    expect_eq(SPIRE_RESUME_ANSWER_REGISTER, SPIRE_BASE_RETURN_ANSWER_REGISTER);
+    expect(SPIRE_BASE_RETURN_TAG != SPIRE_RESUME_ANSWER_TAG);
+  }
+
+  phosg::log_info_f("-- Spire records: photon splinters (rooms + 5 per boss) * (1 + 0.1 per heat), rounded down (v47)");
+  {
+    expect_eq(0u, spire_splinters_for_run(0, 0, 0));
+    expect_eq(1u, spire_splinters_for_run(1, 0, 0));     // died in room 2
+    expect_eq(18u, spire_splinters_for_run(8, 2, 0));    // room 1 through De Rol Le: 8 + 5 * 2
+    expect_eq(19u, spire_splinters_for_run(8, 2, 1));    // heat 1: 18 * 1.1 = 19.8
+    expect_eq(27u, spire_splinters_for_run(8, 2, 5));    // heat 5: 18 * 1.5
+    expect_eq(36u, spire_splinters_for_run(8, 2, 10));   // heat 10: double
+    expect_eq(5u, spire_splinters_for_run(0, 1, 0));
+    expect_eq(0xFFFFFFFFu, spire_splinters_for_run(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)); // never wraps
+  }
+
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)
