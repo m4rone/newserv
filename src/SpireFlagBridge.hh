@@ -718,6 +718,15 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
 // From on_84 after the lobby join of a client that left a game: if it is marked, put it in its base game.
 void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
 
+// v58: a new run from the base. The base quest's quartermaster ("Start a new run", confirmed) writes
+// SPIRE_BRIDGE_NEW_RUN << 24 to r248; the base quest is no bridged quest, so spire_bridge_handle_register takes this
+// one code from it (a normal game running SpireBaseQuest) before its bridged-quest check. Only the game leader may: the
+// server sends every client of the base game out with 6x73 and, from the lobby, puts them in one new Battle game with
+// the run quest the base came from (q921 if the base game was made at the counter), where the quest starts as at the
+// counter: the guard takes a fresh snapshot of the real character and the run copy gets its start level (v52).
+constexpr uint8_t SPIRE_BRIDGE_NEW_RUN = 'Z';
+constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;
+
 // v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose
 // arrival writes the card (B-E01-41): with the real character in memory that write is harmless. The 6x73 run end (v35)

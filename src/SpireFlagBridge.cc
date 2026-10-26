@@ -1863,10 +1863,15 @@ static asio::awaitable<void> spire_base_return(
 static asio::awaitable<void> spire_run_again(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
 
+bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
     return false;
+  }
+  if (spire_base_game_handle_new_run(c, l, register_number, value)) { // v58: the base quest is no bridged quest
+    return true;
   }
   uint32_t quest_number = l->quest->meta.quest_number;
   if (!spire_bridge_quest_is_bridged(c, quest_number)) {
@@ -3329,7 +3334,12 @@ struct SpireBaseGameMark {
   Episode episode = Episode::EP1;
   Difficulty difficulty = Difficulty::NORMAL;
   size_t expected = 1;
+  GameMode mode = GameMode::NORMAL; // v58: BATTLE for a new run from the base
+  uint32_t quest_number = 0; // the quest the new game starts: SpireBaseQuest, or the run quest (v58)
+  uint32_t run_quest_number = 0; // the run quest the base came from (v58: its "Start a new run" starts this one)
 };
+// v58: base game id -> the run quest it came from
+static std::unordered_map<uint32_t, uint32_t> spire_base_game_run_quests;
 struct SpireBaseGameGroup {
   std::weak_ptr<Lobby> game;
 };
@@ -3352,6 +3362,8 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
   mark.episode = l->episode;
   mark.difficulty = l->difficulty;
   mark.expected = std::max<size_t>(1, l->count_clients());
+  mark.quest_number = quest_number;
+  mark.run_quest_number = l->quest->meta.quest_number;
   spire_base_game_marks[serial_number] = mark;
   if (auto it = spire_run_ends.find(l->lobby_id); it != spire_run_ends.end()) {
     it->second.exit_sent.emplace(c->lobby_client_id); // the server's own run-over 6x73 must not follow
@@ -3365,7 +3377,8 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
 
 // Starts the base quest once every client of the run is in the base game and none loads, or after SPIRE_BASE_GAME_WAIT
 // with the ones that came. A game that empties meanwhile is dropped.
-static asio::awaitable<void> spire_base_game_start(std::weak_ptr<Lobby> weak_game, uint32_t group, size_t expected) {
+static asio::awaitable<void> spire_base_game_start(
+    std::weak_ptr<Lobby> weak_game, uint32_t group, size_t expected, uint32_t quest_number) {
   auto started = std::chrono::steady_clock::now();
   for (;;) {
     co_await async_sleep(std::chrono::seconds(1));
@@ -3393,21 +3406,22 @@ static asio::awaitable<void> spire_base_game_start(std::weak_ptr<Lobby> weak_gam
     co_return;
   }
   auto s = game->require_server_state();
-  auto q = s->data->quest_index->get(s->data->spire_base_quest_number);
+  auto q = s->data->quest_index->get(quest_number);
   if (!q) {
-    game->log.warning_f("Spire base game: base quest q{} not found", s->data->spire_base_quest_number);
+    game->log.warning_f("Spire base game: quest q{} not found", quest_number);
     co_return;
   }
   for (const auto& lc : game->clients) {
     if (lc && !q->version(lc->version(), lc->language())) {
-      game->log.warning_f("Spire base game: base quest q{} has no version for client {}; not started",
-          s->data->spire_base_quest_number, lc->lobby_client_id);
+      game->log.warning_f("Spire base game: quest q{} has no version for client {}; not started", quest_number,
+          lc->lobby_client_id);
       co_return;
     }
   }
   set_lobby_quest(game, q, true);
-  game->log.info_f("Spire base game: q{} started in base game {:08X} with {} of {} client(s)",
-      s->data->spire_base_quest_number, game->lobby_id, game->count_clients(), expected);
+  game->log.info_f("Spire base game: q{} started in {} game {:08X} with {} of {} client(s)", quest_number,
+      (game->mode == GameMode::BATTLE) ? "the new run's Battle" : "the base", game->lobby_id, game->count_clients(),
+      expected);
 }
 
 static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, uint32_t serial_number, SpireBaseGameMark mark) {
@@ -3423,10 +3437,10 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
   }
   try {
     auto s = c->require_server_state();
-    auto q = s->data->quest_index->get(s->data->spire_base_quest_number);
+    auto q = s->data->quest_index->get(mark.quest_number);
     if (!q || !q->version(c->version(), c->language())) {
-      c->log.warning_f("Spire base game: base quest q{} missing for this client; serial {:010} stays in the lobby",
-          s->data->spire_base_quest_number, serial_number);
+      c->log.warning_f("Spire base game: quest q{} missing for this client; serial {:010} stays in the lobby",
+          mark.quest_number, serial_number);
       co_return;
     }
     auto& group = spire_base_game_groups[mark.group];
@@ -3436,24 +3450,91 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
       game = nullptr;
     }
     if (!game) {
-      game = create_game_generic(s, c, "Spire base", "", mark.episode, GameMode::NORMAL, mark.difficulty, false);
+      bool battle = (mark.mode == GameMode::BATTLE);
+      game = create_game_generic(s, c, battle ? "Spire run" : "Spire base", "", mark.episode, mark.mode, mark.difficulty, false);
       if (!game) {
         c->log.warning_f("Spire base game: creating the base game failed for serial {:010}; stays in the lobby", serial_number);
         co_return;
       }
       group.game = game;
       created = true;
+      if (mark.mode != GameMode::BATTLE) {
+        spire_base_game_run_quests[game->lobby_id] = mark.run_quest_number;
+      }
     }
     s->change_client_lobby(c, game);
     c->set_flag(Client::Flag::LOADING);
-    c->log.info_f("Spire base game: serial {:010} {} base game {:08X} (run game {:08X}, {} expected)", serial_number,
-        created ? "created" : "joined", game->lobby_id, mark.group, mark.expected);
+    c->log.info_f("Spire base game: serial {:010} {} {} game {:08X} for q{} (from game {:08X}, {} expected)", serial_number,
+        created ? "created" : "joined", (mark.mode == GameMode::BATTLE) ? "the new run's Battle" : "the base",
+        game->lobby_id, mark.quest_number, mark.group, mark.expected);
     if (created) {
-      asio::co_spawn(*s->io_context, spire_base_game_start(game, mark.group, mark.expected), asio::detached);
+      asio::co_spawn(*s->io_context, spire_base_game_start(game, mark.group, mark.expected, mark.quest_number),
+          asio::detached);
     }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire base game: failed for serial {:010}: {}", serial_number, e.what());
   }
+}
+
+// v58: "Start a new run" in the base (SpireFlagBridge.hh, SPIRE_BRIDGE_NEW_RUN). Never throws.
+static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  try {
+    auto s = c->require_server_state();
+    if (c->lobby_client_id != l->leader_id) {
+      spire_send_ticker(c, "Only the party leader can start a new run.");
+      c->log.info_f("Spire base game: 'Z' (new run) from client {}, not the leader; refused", c->lobby_client_id);
+      return;
+    }
+    uint32_t run_quest_number = SPIRE_BASE_DEFAULT_RUN_QUEST;
+    if (auto it = spire_base_game_run_quests.find(l->lobby_id); (it != spire_base_game_run_quests.end()) && it->second) {
+      run_quest_number = it->second;
+    }
+    auto q = s->data->quest_index->get(run_quest_number);
+    if (!q) {
+      spire_send_ticker(c, "No run quest on this server.");
+      c->log.warning_f("Spire base game: 'Z' (new run): run quest q{} not found", run_quest_number);
+      return;
+    }
+    size_t expected = std::max<size_t>(1, l->count_clients());
+    for (const auto& lc : l->clients) {
+      uint32_t serial_number = lc ? spire_bridge_serial_for_client(lc) : 0;
+      if (!serial_number) {
+        continue;
+      }
+      SpireBaseGameMark mark;
+      mark.group = l->lobby_id;
+      mark.episode = q->meta.episode;
+      mark.difficulty = l->difficulty;
+      mark.expected = expected;
+      mark.mode = GameMode::BATTLE;
+      mark.quest_number = run_quest_number;
+      mark.run_quest_number = run_quest_number;
+      spire_base_game_marks[serial_number] = mark;
+      G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
+      lc->channel->send(0x60, 0x00, cmd);
+      lc->log.info_f("Spire base game: serial {:010} leaves base game {:08X} for a new run in q{} (6x73, {} client(s))",
+          serial_number, l->lobby_id, run_quest_number, expected);
+    }
+    spire_base_game_run_quests.erase(l->lobby_id);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire base game: 'Z' (new run) failed: {}", e.what());
+  }
+}
+
+bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
+  if ((register_number != SPIRE_BRIDGE_REQUEST_REGISTER) || ((value >> 24) != SPIRE_BRIDGE_NEW_RUN) || !l->is_game() ||
+      !l->quest || (l->mode == GameMode::BATTLE)) {
+    return false;
+  }
+  try {
+    if (l->quest->meta.quest_number != c->require_server_state()->data->spire_base_quest_number) {
+      return false;
+    }
+  } catch (const std::exception&) {
+    return false;
+  }
+  spire_base_new_run(c, std::const_pointer_cast<Lobby>(l));
+  return true;
 }
 
 void spire_base_game_after_lobby_join(std::shared_ptr<Client> c) {
