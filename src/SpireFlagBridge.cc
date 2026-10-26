@@ -2079,7 +2079,8 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     text += std::format("\nNew best time: {} s!", seconds);
   }
   // v24: unlocks and payout flags for the character (SpireMeta), on the game's difficulty
-  text += spire_meta_on_finish(c, l, serial_number, quest_number, value, new_time);
+  // Fix round 2: only the first won 'F' of a run opens the payout flags (stats.won_counted; run id 0 counts every time)
+  text += spire_meta_on_finish(c, l, serial_number, quest_number, value, new_time, stats.won_counted);
   text += "\nRecords saved.";
   // v35: never a window in the run (Marck, pc 2026-10-25: "New best score" had to be pressed away mid-game); the
   // records text waits for the lobby (spire_deliver_lobby_texts)

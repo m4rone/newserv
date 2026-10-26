@@ -161,8 +161,9 @@ uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8
 // Called from the 'F' record code after the records are saved. Sets the run's unlock and payout flags for the
 // character on the game's difficulty, delivers them and returns the text lines to add to the record text (empty if
 // nothing is new). Throws on a file error.
+// open_payout: whether this 'F' may open the payout flags (0x3A0-0x3A2); see spire_meta_apply_finish.
 std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
-    uint32_t quest_number, uint32_t finish_value, bool new_best_time);
+    uint32_t quest_number, uint32_t finish_value, bool new_best_time, bool open_payout);
 
 // Pure part of spire_meta_on_finish, for the offline test: the flags a finished run sets, for a class (0-11).
 struct SpireMetaFinish {
@@ -172,6 +173,17 @@ struct SpireMetaFinish {
   uint8_t pacts = 0; // route B F2: 0-SPIRE_META_FINISH_PACTS_MAX
 };
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
+// Fix round 2: the flags of a finish (spire_meta_flags_for_finish, plus the ladder flag) set in a character's flags on
+// the game's difficulty (pure part of spire_meta_on_finish). A payout flag (0x3A0-0x3A2) is set only when open_payout is
+// true: the first won 'F' of a run (spire_records_finish_stats won_counted), so a repeated 'F' of the same run never
+// reopens a payout q925 cleared. Every other flag is set again (a no-op when it is set; nothing is named twice).
+struct SpireMetaFinishApplied {
+  std::string unlocked; // the newly set unlocks, ", "-separated
+  bool payout = false; // a payout flag was opened by this 'F'
+  std::string set_str; // " 0380* 0381 ..." for the log (* = new)
+};
+SpireMetaFinishApplied spire_meta_apply_finish(SpireMetaFlags& flags, const std::vector<uint16_t>& finish_flags,
+    uint8_t difficulty, uint8_t ladder_run, bool open_payout);
 
 // v50 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2/-3/-13): the base shop. The quartermaster on Pioneer 2 sells
 // upgrades for photon splinters (records.json Splinters); the server checks the balance, debits it and keeps the levels

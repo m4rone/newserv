@@ -1104,7 +1104,7 @@ void run_static_tests() {
     expect(failures.empty());
   }
 
-  phosg::log_info_f("-- Spire records route B fix round 2: a repeated 'F' of one run pays nothing twice");
+  phosg::log_info_f("-- Spire records route B fix round 2: a repeated 'F' of one run pays and unlocks nothing twice");
   {
     // Every check is logged before any is asserted, so one run shows each that fails.
     std::vector<std::string> failures;
@@ -1138,6 +1138,46 @@ void run_static_tests() {
       check("legacy: another run's 'F' pays its V", other.legacy && (other.added == 2));
       auto none = spire_records_finish_splinters(rec, nullptr, 0, 0, {1}, {}, 1, 0);
       check("legacy: an 'F' without a run id pays the V as before", none.legacy && (none.added == 1));
+    }
+
+    // Item 2: a won 'F' opens the payout flags once per run; q925 clears them; the same won 'F' again opens nothing
+    {
+      SpireRecords rec;
+      SpireMetaFlags flags;
+      SpireMetaFinish won;
+      won.won = true;
+      won.exams = 2;
+      won.deathless = true;
+      auto fl = spire_meta_flags_for_finish(won, 0, true);
+      fl.emplace_back(spire_meta_ladder_flag(1));
+      auto s1 = spire_records_finish_stats(rec, 0x63636363, 0, 500, 900, true);
+      auto a1 = spire_meta_apply_finish(flags, fl, 0, 1, s1.won_counted);
+      bool all_pay = flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)] &&
+          flags[std::make_pair(0, SPIRE_META_FLAG_PAY_DEATHLESS)] && flags[std::make_pair(0, SPIRE_META_FLAG_PAY_RECORD)];
+      check("meta: the first won 'F' opens the payout and names its unlocks", a1.payout && all_pay && !a1.unlocked.empty());
+      for (uint16_t f = SPIRE_META_FLAG_PAY_WIN; f <= SPIRE_META_FLAG_PAY_RECORD; f++) {
+        flags[std::make_pair(0, f)] = false; // q925 paid and cleared them
+      }
+      auto s2 = spire_records_finish_stats(rec, 0x63636363, 0, 500, 900, true);
+      auto a2 = spire_meta_apply_finish(flags, fl, 0, 1, s2.won_counted);
+      bool none_pay = !flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)] &&
+          !flags[std::make_pair(0, SPIRE_META_FLAG_PAY_DEATHLESS)] && !flags[std::make_pair(0, SPIRE_META_FLAG_PAY_RECORD)];
+      check("meta: the same won 'F' again reopens no payout flag", !a2.payout && none_pay);
+      check("meta: the same won 'F' again names no unlock", a2.unlocked.empty());
+      // partner left: a not-won 'F' of run Y opens nothing, its later won 'F' opens the payout once
+      auto s3 = spire_records_finish_stats(rec, 0x64646464, 0, 100, 300, false);
+      SpireMetaFinish lost;
+      lost.exams = 1;
+      auto a3 = spire_meta_apply_finish(flags, spire_meta_flags_for_finish(lost, 0, false), 0, 1, s3.won_counted);
+      auto s4 = spire_records_finish_stats(rec, 0x64646464, 0, 600, 1000, true);
+      auto a4 = spire_meta_apply_finish(flags, fl, 0, 1, s4.won_counted);
+      check("meta: a partner-left run's later win opens the payout", !a3.payout && a4.payout &&
+          flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)]);
+      // a won 'F' of another run opens it again (each win pays once)
+      flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)] = false;
+      auto s5 = spire_records_finish_stats(rec, 0x65656565, 0, 600, 1000, true);
+      auto a5 = spire_meta_apply_finish(flags, fl, 0, 1, s5.won_counted);
+      check("meta: another run's win opens the payout", a5.payout && flags[std::make_pair(0, SPIRE_META_FLAG_PAY_WIN)]);
     }
 
     std::filesystem::remove_all(dir);

@@ -388,8 +388,38 @@ uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8
   }
 }
 
+SpireMetaFinishApplied spire_meta_apply_finish(SpireMetaFlags& flags, const std::vector<uint16_t>& finish_flags,
+    uint8_t difficulty, uint8_t ladder_run, bool open_payout) {
+  SpireMetaFinishApplied ret;
+  for (uint16_t flag_num : finish_flags) {
+    auto key = std::make_pair(spire_meta_flag_difficulty(flag_num, difficulty), flag_num);
+    auto it = flags.find(key);
+    bool was_set = (it != flags.end()) && it->second;
+    if ((flag_num >= SPIRE_META_FLAG_PAY_WIN) && !open_payout) {
+      ret.set_str += std::format(" {:04X}(repeat: not set)", flag_num);
+      continue;
+    }
+    flags[key] = true;
+    ret.set_str += std::format(" {:04X}{}", flag_num, was_set ? "" : "*");
+    if (flag_num >= SPIRE_META_FLAG_PAY_WIN) {
+      ret.payout = true; // the payout flags are cleared by q925, so each won run opens them again at its first won 'F'
+    } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON)) {
+      if (!was_set && (difficulty < 3)) {
+        std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : "II",
+            spire_ladder_difficulty_name(difficulty + 1));
+        ret.unlocked += ret.unlocked.empty() ? what : std::format(", {}", what);
+      }
+    } else if (!was_set) {
+      if (const char* name = spire_meta_flag_name(flag_num)) {
+        ret.unlocked += ret.unlocked.empty() ? name : std::format(", {}", name);
+      }
+    }
+  }
+  return ret;
+}
+
 std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
-    uint32_t quest_number, uint32_t finish_value, bool new_best_time) {
+    uint32_t quest_number, uint32_t finish_value, bool new_best_time, bool open_payout) {
   std::string filename = spire_meta_filename(c, serial_number);
   auto character = c->character_file(false, false);
   if (filename.empty() || !character) {
@@ -400,35 +430,15 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
   uint8_t difficulty = static_cast<uint8_t>(l->difficulty);
   bool adopted;
   auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
-  auto& flags = file.flags;
-  std::string unlocked;
-  bool payout = false;
-  std::string set_str;
   auto finish_flags = spire_meta_flags_for_finish(finish, character->disp.visual.sh.char_class, new_best_time);
   uint8_t ladder_run = spire_meta_ladder_run(quest_number);
   if (finish.won && ladder_run) {
     finish_flags.emplace_back(spire_meta_ladder_flag(ladder_run)); // the next rung of this run (plan-unlockables §2)
   }
-  for (uint16_t flag_num : finish_flags) {
-    auto key = std::make_pair(spire_meta_flag_difficulty(flag_num, difficulty), flag_num);
-    auto it = flags.find(key);
-    bool was_set = (it != flags.end()) && it->second;
-    flags[key] = true;
-    set_str += std::format(" {:04X}{}", flag_num, was_set ? "" : "*");
-    if (flag_num >= SPIRE_META_FLAG_PAY_WIN) {
-      payout = true; // the payout flags are cleared by q925, so each win opens them again
-    } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON)) {
-      if (!was_set && (difficulty < 3)) {
-        std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : "II",
-            spire_ladder_difficulty_name(difficulty + 1));
-        unlocked += unlocked.empty() ? what : std::format(", {}", what);
-      }
-    } else if (!was_set) {
-      if (const char* name = spire_meta_flag_name(flag_num)) {
-        unlocked += unlocked.empty() ? name : std::format(", {}", name);
-      }
-    }
-  }
+  auto applied = spire_meta_apply_finish(file.flags, finish_flags, difficulty, ladder_run, open_payout);
+  const auto& unlocked = applied.unlocked;
+  bool payout = applied.payout;
+  const auto& set_str = applied.set_str;
   spire_meta_save(filename, serial_number, file);
   spire_meta_deliver_flags(c, l, serial_number);
   c->log.info_f("Spire meta: finish {:08X} (exams {}, {}, {}) on {}: flags{} (* = new) in {}", finish_value,
