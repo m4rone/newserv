@@ -1,5 +1,6 @@
 #include "SpireMeta.hh"
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <map>
@@ -615,4 +616,34 @@ SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t ser
 
 void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file) {
   spire_meta_save(filename, serial_number, file);
+}
+
+// v52: the start_level upgrade (SpireMeta.hh)
+uint32_t spire_start_level_bonus(const SpireShopCatalogue* cat, const std::map<std::string, uint32_t>& upgrades) {
+  uint32_t owned = spire_shop_level(upgrades, 0); // SPIRE_SHOP_ITEM_NAMES[0] = start_level
+  uint32_t max = (cat && !cat->items.empty()) ? cat->items[0].max : SPIRE_START_LEVEL_FALLBACK_MAX;
+  return std::min(owned, max);
+}
+
+uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus) {
+  return std::min<uint64_t>(static_cast<uint64_t>(base_char_level) + bonus, SPIRE_START_LEVEL_LEVEL_CAP);
+}
+
+size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_char_level, uint32_t new_char_level) {
+  auto le32 = [](uint32_t v) -> std::string {
+    return std::string{static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF),
+        static_cast<char>((v >> 16) & 0xFF), static_cast<char>((v >> 24) & 0xFF)};
+  };
+  std::string pattern = "\x49" + le32(base_char_level) + "\xF8\x71";
+  size_t count = 0;
+  size_t found = std::string::npos;
+  for (size_t pos = decompressed_bin.find(pattern); pos != std::string::npos;
+       pos = decompressed_bin.find(pattern, pos + 1)) {
+    count++;
+    found = pos;
+  }
+  if (count == 1) {
+    decompressed_bin.replace(found + 1, 4, le32(new_char_level));
+  }
+  return count;
 }

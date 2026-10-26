@@ -227,3 +227,21 @@ SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t ser
 void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file);
 std::vector<uint16_t> spire_meta_flags_for_finish(const SpireMetaFinish& f, uint8_t char_class, bool new_best_time);
 const char* spire_meta_flag_name(uint16_t flag_num); // nullptr for a flag that is not announced
+
+// v52 (B-BASIS-2, gap of B-BASIS-32): the start_level upgrade raises the run copy's level by one per owned level. The
+// run copy comes from the quest's rule block: the GC client applies its ba_set_char_level (F871) itself at ba_start
+// on Pioneer 2 (research battle-mode-gc.md §1, make_spire.py battle_rules), and newserv mirrors it in the battle
+// overlay (Client::create_battle_overlay, level and stats from the class's level table). So the server raises both:
+// at the quest load it sends each client its own quest .bin with the rule block's level raised (the client builds the
+// run copy from it, as from any Sega Battle quest; no push), and it builds that client's overlay with the same level.
+// The run again ('I') pushes the overlay, so there the raised overlay is the run copy. A bin whose rule block it cannot
+// find exactly once is sent as it is, and that client's overlay then keeps the quest's level (never a mismatch).
+// The bonus: the owned level, at most the catalogue's start_level Max (SPIRE_START_LEVEL_FALLBACK_MAX without a
+// readable catalogue); the level at most SPIRE_START_LEVEL_LEVEL_CAP (create_battle_overlay's clamp, 0-based).
+constexpr uint32_t SPIRE_START_LEVEL_FALLBACK_MAX = 5;
+constexpr uint32_t SPIRE_START_LEVEL_LEVEL_CAP = 199;
+uint32_t spire_start_level_bonus(const SpireShopCatalogue* cat, const std::map<std::string, uint32_t>& upgrades);
+uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus); // 0-based, as ba_set_char_level
+// In a decompressed GC/v3 quest .bin: the rule block's "arg_pushl base_char_level; ba_set_char_level" (49 <u32 LE>
+// F8 71). Returns how many there are and replaces the level with new_char_level only if there is exactly one.
+size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_char_level, uint32_t new_char_level);

@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <format>
 #include <map>
+#include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
@@ -14,6 +16,7 @@
 #include <unistd.h>
 
 #include "AsyncUtils.hh"
+#include "Compression.hh"
 #include "InventoryBackup.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
@@ -1713,6 +1716,19 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   return true;
 }
 
+// v52: the start_level bonus each client's quest .bin carried at the quest load (spire_start_level_quest_bin), for its
+// overlay in on_quest_loaded; and the bonus its current overlay (the run copy) has, for the shop's START, so P and H
+// count only the levels the run really has (a level bought on Pioneer 2 after the quest load applies from the next
+// quest load or run again). Keyed by the Client's address and never dereferenced; the overlay takes the first entry
+// and sets the second, and a 98 (spire_guard_end_run) drops both.
+struct SpireStartLevelSent {
+  uint32_t lobby_id = 0;
+  uint32_t quest_number = 0;
+  uint32_t bonus = 0;
+};
+static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_sent;
+static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_run;
+
 uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
   return SPIRE_SHOP_TAG | (static_cast<uint32_t>(sub) << 16) | (static_cast<uint32_t>(r) << 8) |
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
@@ -1775,12 +1791,27 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
           detail = std::format(" {}", SPIRE_SHOP_ITEM_NAMES[index]);
         }
       }
+      // v52: at the run start, start_level counts as the run copy has it (spire_start_level_run), not as owned
+      auto upgrades = meta.upgrades;
+      if ((sub == SPIRE_SHOP_START) && spire_shop_level(upgrades, 0)) {
+        uint32_t run_bonus = 0;
+        auto it = spire_start_level_run.find(c.get());
+        auto cl = c->lobby.lock();
+        if ((it != spire_start_level_run.end()) && cl && (it->second.lobby_id == cl->lobby_id) &&
+            (it->second.quest_number == quest_number)) {
+          run_bonus = it->second.bonus;
+        }
+        if (run_bonus < spire_shop_level(upgrades, 0)) {
+          detail += std::format(" (start_level {} owned, {} in this run copy)", spire_shop_level(upgrades, 0), run_bonus);
+          upgrades[SPIRE_SHOP_ITEM_NAMES[0]] = run_bonus;
+        }
+      }
       uint8_t char_class = character->disp.visual.sh.char_class;
-      uint32_t strength = spire_shop_strength(cat, meta.upgrades);
+      uint32_t strength = spire_shop_strength(cat, upgrades);
       uint32_t heat = spire_shop_heat(cat, char_class, strength);
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
-        uint32_t level = spire_shop_level(meta.upgrades, z);
+        uint32_t level = spire_shop_level(upgrades, z);
         uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung);
         spire_send_register(c, SPIRE_SHOP_LEVEL_FIRST_REGISTER + z, level);
         spire_send_register(c, SPIRE_SHOP_PRICE_FIRST_REGISTER + z, price);
@@ -2378,17 +2409,105 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
   }
 }
 
-// v49: the overlay creation of on_quest_loaded, shared with the run again ('I')
-bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+
+// v52: the owned start_level bonus of a client in a guarded Spire Battle quest with replace_char (0 otherwise, for a
+// protected character, or on any error). Never throws.
+static uint32_t spire_start_level_bonus_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
+        !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
+        (c->version() != Version::GC_V3) || !c->login || !c->login->gc_license) {
+      return 0;
+    }
+    auto character = c->character_file(true, false);
+    std::string filename = spire_meta_filename_for(c->login->gc_license->serial_number,
+        character ? &character->disp : nullptr);
+    if (filename.empty()) {
+      return 0;
+    }
+    auto meta = spire_meta_load_file(filename);
+    std::unique_ptr<SpireShopCatalogue> cat;
+    try {
+      cat = std::make_unique<SpireShopCatalogue>(spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE)));
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire start level: no shop catalogue ({}); start_level capped at {}", e.what(),
+          SPIRE_START_LEVEL_FALLBACK_MAX);
+    }
+    return spire_start_level_bonus(cat.get(), meta.upgrades);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire start level: upgrades unreadable: {}; no start level bonus", e.what());
+    return 0;
+  }
+}
+
+std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
+    std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
+  spire_start_level_sent.erase(c.get());
+  uint32_t bonus = spire_start_level_bonus_for_client(c, l);
+  if (!bonus || !bin_contents) {
+    return bin_contents;
+  }
+  uint32_t quest_number = l->quest->meta.quest_number;
+  try {
+    uint32_t base = l->quest->meta.battle_rules->char_level;
+    uint32_t level = spire_start_level_char_level(base, bonus);
+    std::string bin = prs_decompress(*bin_contents);
+    size_t count = spire_start_level_patch_bin(bin, base, level);
+    if (count != 1) {
+      c->log.warning_f("Spire start level: q{} has {} rule blocks with level {} in its .bin (needs exactly 1); quest and overlay keep Lv{}",
+          quest_number, count, base + 1, base + 1);
+      return bin_contents;
+    }
+    auto ret = std::make_shared<const std::string>(prs_compress(bin));
+    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base};
+    c->log.info_f("Spire start level: q{} sent with the rule block's level Lv{} -> Lv{} (start_level +{})",
+        quest_number, base + 1, level + 1, level - base);
+    return ret;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire start level: q{} .bin not changed: {}; quest and overlay keep the quest's level",
+        quest_number, e.what());
+    return bin_contents;
+  }
+}
+
+// v49: the overlay creation of on_quest_loaded, shared with the run again ('I'). v52: with the start_level bonus
+bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool run_again) {
   if (is_v4(c->version())) {
     c->change_bank(c->bb_character_index);
   }
   // Spire guard (v6): store the real character before the overlay replaces it (see SpireFlagBridge.hh)
   if (!spire_guard_begin_run(c, l)) {
+    spire_start_level_sent.erase(c.get());
     return false; // v12: no snapshot stored, so no overlay that the client could save over the real character
   }
-  c->create_battle_overlay(l->quest->meta.battle_rules, c->require_server_state()->data->level_table(c->version()));
+  // v52: at the quest load the level its .bin carried (the client applies that one); at the run again the owned level
+  // now (the push carries the overlay to the client)
+  uint32_t bonus = 0;
+  if (run_again) {
+    bonus = spire_start_level_bonus_for_client(c, l);
+  } else {
+    auto it = spire_start_level_sent.find(c.get());
+    if ((it != spire_start_level_sent.end()) && l->quest && (it->second.lobby_id == l->lobby_id) &&
+        (it->second.quest_number == l->quest->meta.quest_number)) {
+      bonus = it->second.bonus;
+    }
+    spire_start_level_sent.erase(c.get());
+  }
+  auto rules = l->quest->meta.battle_rules;
+  if (bonus && rules) {
+    auto raised = std::make_shared<BattleRules>(*rules);
+    raised->char_level = spire_start_level_char_level(rules->char_level, bonus);
+    c->log.info_f("Spire start level: overlay Lv{} -> Lv{} (start_level +{}{})", rules->char_level + 1,
+        raised->char_level + 1, raised->char_level - rules->char_level, run_again ? ", run again" : "");
+    rules = raised;
+  }
+  c->create_battle_overlay(rules, c->require_server_state()->data->level_table(c->version()));
   c->log.info_f("Created battle overlay");
+  if (l->quest) {
+    spire_start_level_run[c.get()] = SpireStartLevelSent{
+        l->lobby_id, l->quest->meta.quest_number, rules ? (rules->char_level - l->quest->meta.battle_rules->char_level) : 0};
+  }
   return true;
 }
 
@@ -2524,6 +2643,8 @@ static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
+  spire_start_level_sent.erase(c.get()); // v52
+  spire_start_level_run.erase(c.get());
   // v51: an 'O' OK belongs to the game the client leaves now; it never carries over to the next one
   bool base_returned = l && spire_base_returned_has(c, l->lobby_id);
   spire_base_returned.erase(c.get());
@@ -3048,7 +3169,7 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     // The run copy, made as on_quest_loaded makes it
     on_error = R::NO_OVERLAY;
     c->delete_overlay();
-    if (!spire_create_battle_overlay(c, l)) {
+    if (!spire_create_battle_overlay(c, l, true)) {
       c->log.warning_f("Spire run again: no battle overlay for serial {:010}; nothing pushed", serial_number);
       co_return R::NO_OVERLAY;
     }

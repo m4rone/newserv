@@ -660,6 +660,69 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire start level: overlay level = quest level + owned start_level, rule block raised once (v52)");
+  {
+    // the bonus: the owned level, at most the catalogue's Max (5 without a catalogue)
+    auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+    expect_eq(0u, spire_start_level_bonus(&repo, {}));
+    expect_eq(0u, spire_start_level_bonus(&repo, {{"hp_mat", 3}}));
+    for (uint32_t tier = 1; tier <= 5; tier++) {
+      expect_eq(tier, spire_start_level_bonus(&repo, {{"start_level", tier}}));
+      expect_eq(tier, spire_start_level_bonus(nullptr, {{"start_level", tier}}));
+    }
+    expect_eq(repo.items[0].max, spire_start_level_bonus(&repo, {{"start_level", 99}}));
+    expect_eq(SPIRE_START_LEVEL_FALLBACK_MAX, spire_start_level_bonus(nullptr, {{"start_level", 99}}));
+    // the catalogue sells start_level now (B-BASIS-32 closed by v52)
+    expect(repo.items[0].on_sale >= 1);
+    uint8_t none_open[2] = {0, 0};
+    expect(SpireShopRefusal::NONE == spire_shop_buy_refusal(repo, 0, {}, 9999, none_open));
+    // the level: quest level + bonus, at most the overlay's clamp
+    expect_eq(3u, spire_start_level_char_level(0, 3)); // q921: Lv1 + 3 = Lv4
+    expect_eq(32u, spire_start_level_char_level(27, 5)); // a room quest at Lv28 + 5
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_start_level_char_level(198, 5));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_start_level_char_level(0xFFFFFFFF, 5)); // never wraps
+    // the overlay at that level (create_battle_overlay's replace_char path: reset_to_base + advance_to_level on the
+    // class's level table): level = base + tier, EXP and stats the class's own at that level
+    auto level_table = std::make_shared<JSONLevelTable>(
+        phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    for (uint8_t cls : {uint8_t(0), uint8_t(4), uint8_t(8), uint8_t(11)}) {
+      for (uint32_t tier = 0; tier <= 5; tier++) {
+        BattleRules rules;
+        rules.replace_char = true;
+        rules.char_level = 0;
+        BattleRules raised = rules;
+        raised.char_level = spire_start_level_char_level(rules.char_level, tier);
+        PlayerStats stats;
+        level_table->reset_to_base(stats, cls);
+        level_table->advance_to_level(stats, std::clamp<uint32_t>(raised.char_level, 0, 199), cls);
+        expect_eq(rules.char_level + tier, static_cast<uint32_t>(stats.level));
+        uint32_t hp = level_table->base_stats_for_class(cls).hp;
+        for (uint32_t lv = 1; lv <= tier; lv++) {
+          hp += level_table->stats_delta_for_level(cls, lv).hp;
+        }
+        expect_eq(hp, static_cast<uint32_t>(stats.char_stats.hp));
+        uint32_t exp = tier ? static_cast<uint32_t>(level_table->stats_delta_for_level(cls, tier).exp) : 0u;
+        expect_eq(exp, static_cast<uint32_t>(stats.exp));
+      }
+    }
+    // the rule block in the .bin: "arg_pushl level; ba_set_char_level" (49 <u32 LE> F8 71), raised only if it is there once
+    std::string rule_block = std::string("\x49\x00\x00\x00\x00\xF8\x71", 7);
+    std::string other = std::string("\x49\x00\x00\x00\x00\xF8\x70", 7); // ba_set_max_tech_level 0: untouched
+    std::string bin = "head" + other + rule_block + "tail";
+    expect_eq(1u, spire_start_level_patch_bin(bin, 0, 3));
+    expect_eq("head" + other + std::string("\x49\x03\x00\x00\x00\xF8\x71", 7) + "tail", bin);
+    std::string twice = rule_block + rule_block;
+    std::string twice_before = twice;
+    expect_eq(2u, spire_start_level_patch_bin(twice, 0, 3));
+    expect_eq(twice_before, twice);
+    std::string none = "head" + other;
+    expect_eq(0u, spire_start_level_patch_bin(none, 0, 3));
+    std::string room = std::string("\x49\x1B\x00\x00\x00\xF8\x71", 7); // a room quest at char_level 27
+    expect_eq(0u, spire_start_level_patch_bin(room, 0, 3));
+    expect_eq(1u, spire_start_level_patch_bin(room, 27, 32));
+    expect_eq(std::string("\x49\x20\x00\x00\x00\xF8\x71", 7), room);
+  }
+
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)

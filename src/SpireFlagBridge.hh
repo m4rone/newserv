@@ -490,6 +490,8 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // - v51: no stale push at the game exit after a verified 'O': the 98 of the game exit, when the client's 'O' was
 //   answered OK in that game and no 'I' used it, updates the snapshot (spire_guard_base_exit_follow) before the v47
 //   restore pushes it. After a failed 'O' or after an 'I' the snapshot stays (the run start's or the 'I's).
+// - v52: the start_level upgrade (SpireMeta.hh): a guarded Spire quest .bin goes to each client with the rule block's
+//   level raised by its owned start_level, and its overlay (quest load and 'I') is built at that level.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -866,7 +868,16 @@ bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_return
 // (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then
 // Client::create_battle_overlay with the quest's battle rules. Returns false if the client must not get the overlay
 // (the guard could not store the snapshot or the character is protected); at a quest load the caller then drops it.
-bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// v52: with the start_level bonus (SpireMeta.hh): at a quest load (run_again false) the bonus that client's quest .bin
+// carried (spire_start_level_quest_bin), at the run again ('I', run_again true) the owned bonus now.
+bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool run_again = false);
+
+// v52: the quest .bin set_lobby_quest sends this client: the quest's own, or for a guarded Spire Battle quest with
+// replace_char and an owned start_level bonus a copy with the rule block's ba_set_char_level raised by the bonus
+// (spire_start_level_patch_bin), which the client applies at ba_start. Remembers the bonus for the client's overlay.
+// Never throws; on any doubt the quest's own .bin (and no bonus for the overlay).
+std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
+    std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
 
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
