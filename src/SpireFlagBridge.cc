@@ -1894,6 +1894,17 @@ SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const Spi
   }
   ret.legacy = true;
   ret.added = spire_records_add_splinters(rec, spire_splinters_for_run(legacy_rooms, legacy_bosses, 0));
+  if (run_id) {
+    // Fix round 2: the run's entry, so a repeated 'F' of it pays the V once (came_before above). Its rooms count as
+    // paid and its bonus as paid in full, so a Payout block that shows up before a later 'F' pays neither twice.
+    e = spire_records_credit_for(rec, run_id, true);
+    e->rooms.insert(rooms.begin(), rooms.end());
+    e->bosses.insert(boss_rooms.begin(), boss_rooms.end());
+    e->rooms.insert(boss_rooms.begin(), boss_rooms.end());
+    e->base = ret.added;
+    e->bonus_paid = 0xFFFFFFFF;
+    e->finished = true;
+  }
   ret.warning = payout
       ? std::string("no run id at 'F' (no 'B' in this game): paid the old rooms + 5 per boss")
       : std::format("no Payout block in {}: paid the old rooms + 5 per boss at 'F'", SPIRE_SHOP_CATALOGUE_FILE);

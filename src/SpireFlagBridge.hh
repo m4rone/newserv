@@ -177,7 +177,8 @@ struct SpireFinishSplinters {
 };
 // 'F' of run run_id. With payout: pays rooms/boss_rooms not paid yet, then what floor(base * pacts * PactTenths / 10)
 // exceeds the bonus paid at earlier 'F's of the run by (F2 fix M1). Without payout (or run_id 0): the old spire_splinters_for_run(legacy_rooms, legacy_bosses, 0) plus a warning,
-// unless the run's rooms were paid already (then nothing, plus a warning).
+// unless the run's rooms were paid already (then nothing, plus a warning). Fix round 2: with a run id the old V creates
+// the run's entry (Finished, its rooms paid, the bonus paid in full), so a repeated 'F' of the run pays nothing.
 // F2 fix (L4): the record stats of an 'F'. Best score and best time are a maximum and a minimum, so a repeat changes
 // nothing; Won and the difficulty's Won count a run id once (SpireRunCredit::won; run_id 0 always counts). Runs is
 // counted at 'B', never here. Call it after spire_records_finish_splinters: it may create the run's credit entry.

@@ -1104,6 +1104,49 @@ void run_static_tests() {
     expect(failures.empty());
   }
 
+  phosg::log_info_f("-- Spire records route B fix round 2: a repeated 'F' of one run pays nothing twice");
+  {
+    // Every check is logged before any is asserted, so one run shows each that fails.
+    std::vector<std::string> failures;
+    auto check = [&](const std::string& what, bool ok) {
+      phosg::log_info_f("   R2 check {}: {}", what, ok ? "ok" : "FAILS");
+      if (!ok) {
+        failures.emplace_back(what);
+      }
+    };
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-r2-{}", getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    // Item 3: no Payout block (the legacy V). A not-won 'F' of run X, then the same 'F' again (after a reload)
+    {
+      auto name = (dir / "0000000042.legacy.records.json").string();
+      SpireRecords rec;
+      auto fin1 = spire_records_finish_splinters(rec, nullptr, 0x61616161, 0, {1, 2, 3}, {}, 3, 0);
+      spire_records_save(name, 42, rec);
+      check("legacy: the first not-won 'F' pays the old V (3 rooms)", fin1.legacy && (fin1.added == 3) && (rec.splinters == 3));
+      spire_records_finish_stats(rec, 0x61616161, 0, 10, 100, false);
+      rec = spire_records_load(name);
+      auto fin2 = spire_records_finish_splinters(rec, nullptr, 0x61616161, 0, {1, 2, 3}, {}, 3, 0);
+      check("legacy: the same not-won 'F' again pays nothing", (fin2.added == 0) && (rec.splinters == 3));
+      // a Payout block that shows up before a third 'F' of the run pays no room of it twice and no pact bonus
+      const SpireShopPayout payout{.per_room = 3, .per_boss = 10, .pact_tenths = 1};
+      auto fin3 = spire_records_finish_splinters(rec, &payout, 0x61616161, 2, {1, 2, 3}, {}, 3, 0);
+      check("legacy: a later 'F' with a Payout block pays no room twice", (fin3.added == 0) && (rec.splinters == 3));
+      // another run still pays its own V; run id 0 (no 'B') pays as before
+      auto other = spire_records_finish_splinters(rec, nullptr, 0x62626262, 0, {1, 2}, {}, 2, 0);
+      check("legacy: another run's 'F' pays its V", other.legacy && (other.added == 2));
+      auto none = spire_records_finish_splinters(rec, nullptr, 0, 0, {1}, {}, 1, 0);
+      check("legacy: an 'F' without a run id pays the V as before", none.legacy && (none.added == 1));
+    }
+
+    std::filesystem::remove_all(dir);
+    for (const auto& what : failures) {
+      phosg::log_error_f("   R2 check failed: {}", what);
+    }
+    expect(failures.empty());
+  }
+
   phosg::log_info_f("-- Spire shop route B F2: the Payout block (PerRoom 3, PerBoss 10, PactTenths 1), parsed strictly");
   {
     std::string shipped = phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE);
