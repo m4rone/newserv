@@ -85,7 +85,7 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
 //   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
-// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q') and the lab probe ('N').
+// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N') and the base return ('O', v46).
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
 constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
@@ -105,6 +105,15 @@ constexpr uint8_t SPIRE_BRIDGE_REC_BEGIN = 'B';
 constexpr uint8_t SPIRE_BRIDGE_REC_SCORE = 'K';
 constexpr uint8_t SPIRE_BRIDGE_REC_FINISH = 'F';
 constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
+// v46 (plan-basis-metawinkel 2026-10-26, B-BASIS-2): photon splinters, the meta currency, credited at 'F' in
+// records.json as Splinters (the balance a shop spends) and SplintersTotal (all ever earned):
+//   V = (rooms + SPIRE_SPLINTERS_PER_BOSS * bosses) * (10 + heat choice) / 10   (rounded down)
+// rooms = the rooms k this client's run stored as a checkpoint in this game (clears and rest-room arrivals), plus for a
+// resumed run the rooms from its start room up to the room it resumed at; bosses = the larger of the exams passed in
+// the 'F' code (bits 16-17) and the boss rooms cleared in this game. The heat choice is not known on the server yet (no
+// code carries it), so it counts 0 until the quest sends it. A practice run and a run without 'F' earn nothing.
+constexpr uint32_t SPIRE_SPLINTERS_PER_BOSS = 5;
+uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_choice);
 
 // v19: the run timer on the server, instead of the quest's t_timer clock. The leader writes, at its run start,
 //   'S' << 24 | warning minutes before the end << 16 | time limit in seconds (r95, after Haste)
@@ -462,6 +471,9 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   18 s later (2026-10-26 11:44:33, BidX alone in the lobby after q921); the $loadchar order (69, C5, 67 for the
 //   restored client) ran 11 times on the pc on 2026-10-25 without a crash, 6 of them alone in the lobby. The other
 //   players keep the v43 order (69, the gap, 68).
+// - v46: the one push in a game: the quest's return to base ('O', see SPIRE_BRIDGE_BASE_RETURN) runs the same restore
+//   push in the Battle game at the run end, on a field floor and never during a load, and leaves the marker unchanged
+//   (RunInProgress); every other path still refuses a push in a game.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -684,6 +696,62 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
 // in a lobby then. Never throws.
 constexpr auto SPIRE_LOBBY_TEXT_DELAY = std::chrono::seconds(3);
 void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
+
+// v46 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
+// to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose
+// arrival writes the card (B-E01-41): with the real character in memory that write is harmless. The 6x73 run end (v35)
+// stays the default. The quest writes 'O' << 24 to register 248 after its 'F' or 'X', on a field floor, and waits. The
+// server answers that client, always, like 'J': register SPIRE_BASE_RETURN_ANSWER_REGISTER =
+// SPIRE_BASE_RETURN_TAG | refusal << 8 | result, then r248 = 'DONE'. Result SPIRE_BASE_RETURN_OK: the real character is
+// back and verified, the quest may warp to floor 0. SPIRE_BASE_RETURN_FAIL: no warp; the quest leaves with 6x73 (qexit)
+// as before. OK only if (spire_base_return_refusal) the client has character data, is in a Battle game running a
+// guarded replace_char quest with its overlay, the run has ended in the game, the client stands on a field floor (not
+// 0), no client of the game is loading (a B2 during a load hung the lobby join, v33; checked again right before the
+// push), it runs functions, its character is not protected, its snapshot has RunInProgress alone, no other restore runs
+// for it, it was not sent back with 6x73 yet, and the guard's restore push (30, SetExtendedPlayerInfo with the
+// snapshot's inventory and disp, verifying 61) is verified. The marker is never changed: RunInProgress stays, so the 98
+// at the game end and the lobby restore remain the safety net; a timeout never drops the connection. With OK the
+// server's own 6x73 after an 'X' is not sent to that client; with FAIL it follows SPIRE_RUN_OVER_LOBBY_DELAY later if the
+// client is still in the game.
+constexpr uint8_t SPIRE_BRIDGE_BASE_RETURN = 'O';
+constexpr uint8_t SPIRE_BASE_RETURN_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_REGISTER; // r41, as 'J' (another tag)
+constexpr uint32_t SPIRE_BASE_RETURN_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_BASE_RETURN) << 24;
+constexpr uint32_t SPIRE_BASE_RETURN_OK = 1;
+constexpr uint32_t SPIRE_BASE_RETURN_FAIL = 0;
+enum class SpireBaseReturnRefusal : uint8_t {
+  NONE = 0, // the push may run
+  NO_CHARACTER, // no serial, not GC V3 or no character data
+  NOT_A_SPIRE_RUN, // not a Battle game with a guarded replace_char quest, or no overlay
+  RUN_NOT_OVER, // no 'F', 'X' or run timer end in this game yet
+  NOT_ON_FIELD, // on Pioneer 2 (floor 0)
+  LOADING, // this client or another client of the game is loading
+  NO_FUNCTIONS, // the client cannot run functions (B2)
+  PROTECTED, // SpireBlockedCharacters
+  MARKER, // no snapshot with a character, or a marker other than RunInProgress alone
+  RESTORE_RUNNING, // a restore or $kitlobby already runs for this client
+  ALREADY_SENT_BACK, // the server's 6x73 already went to this client
+  PUSH_NOT_VERIFIED, // the push failed, timed out or its 61 does not equal the snapshot
+};
+struct SpireBaseReturnState {
+  bool has_character = false;
+  bool spire_run = false;
+  bool run_over = false;
+  bool on_field_floor = false;
+  bool any_client_loading = false;
+  bool can_run_functions = false;
+  bool protected_character = false;
+  bool has_snapshot = false;
+  bool run_in_progress = false;
+  bool restore_pending = false;
+  bool awaiting_save = false;
+  bool restore_running = false;
+  bool already_sent_back = false;
+};
+// The decision before the push, free of state for the static tests (first refusal in the order above).
+SpireBaseReturnRefusal spire_base_return_refusal(const SpireBaseReturnState& st);
+const char* spire_base_return_refusal_name(SpireBaseReturnRefusal r);
+// The r41 answer value for a refusal (NONE = OK).
+uint32_t spire_base_return_answer(SpireBaseReturnRefusal r);
 
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);

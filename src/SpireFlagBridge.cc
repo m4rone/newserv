@@ -818,6 +818,77 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
   return can_run_functions ? SpireRunOverExit::EXIT_ANYWHERE : SpireRunOverExit::TELL;
 }
 
+// v46: the return to base ('O', SpireFlagBridge.hh)
+SpireBaseReturnRefusal spire_base_return_refusal(const SpireBaseReturnState& st) {
+  using R = SpireBaseReturnRefusal;
+  if (!st.has_character) {
+    return R::NO_CHARACTER;
+  }
+  if (!st.spire_run) {
+    return R::NOT_A_SPIRE_RUN;
+  }
+  if (!st.run_over) {
+    return R::RUN_NOT_OVER;
+  }
+  if (!st.on_field_floor) {
+    return R::NOT_ON_FIELD;
+  }
+  if (st.any_client_loading) {
+    return R::LOADING;
+  }
+  if (!st.can_run_functions) {
+    return R::NO_FUNCTIONS;
+  }
+  if (st.protected_character) {
+    return R::PROTECTED;
+  }
+  if (!st.has_snapshot || !st.run_in_progress || st.restore_pending || st.awaiting_save) {
+    return R::MARKER;
+  }
+  if (st.restore_running) {
+    return R::RESTORE_RUNNING;
+  }
+  if (st.already_sent_back) {
+    return R::ALREADY_SENT_BACK;
+  }
+  return R::NONE;
+}
+
+const char* spire_base_return_refusal_name(SpireBaseReturnRefusal r) {
+  switch (r) {
+    case SpireBaseReturnRefusal::NONE:
+      return "none";
+    case SpireBaseReturnRefusal::NO_CHARACTER:
+      return "no character data";
+    case SpireBaseReturnRefusal::NOT_A_SPIRE_RUN:
+      return "not in a guarded Spire run with its overlay";
+    case SpireBaseReturnRefusal::RUN_NOT_OVER:
+      return "the run has not ended in this game";
+    case SpireBaseReturnRefusal::NOT_ON_FIELD:
+      return "on Pioneer 2, not on a field floor";
+    case SpireBaseReturnRefusal::LOADING:
+      return "a client of the game is loading";
+    case SpireBaseReturnRefusal::NO_FUNCTIONS:
+      return "the client cannot run functions";
+    case SpireBaseReturnRefusal::PROTECTED:
+      return "protected character";
+    case SpireBaseReturnRefusal::MARKER:
+      return "no snapshot with RunInProgress alone";
+    case SpireBaseReturnRefusal::RESTORE_RUNNING:
+      return "a restore already runs for the client";
+    case SpireBaseReturnRefusal::ALREADY_SENT_BACK:
+      return "already sent back to the lobby";
+    case SpireBaseReturnRefusal::PUSH_NOT_VERIFIED:
+      return "the push was not verified";
+  }
+  return "unknown";
+}
+
+uint32_t spire_base_return_answer(SpireBaseReturnRefusal r) {
+  return SPIRE_BASE_RETURN_TAG | (static_cast<uint32_t>(r) << 8) |
+      ((r == SpireBaseReturnRefusal::NONE) ? SPIRE_BASE_RETURN_OK : SPIRE_BASE_RETURN_FAIL);
+}
+
 static asio::awaitable<void> spire_run_over_exit(
     std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l, std::chrono::seconds delay) {
   co_await async_sleep(delay);
@@ -1287,9 +1358,44 @@ uint32_t spire_checkpoint_lives_for(const Client* key) {
 // address and never dereferenced; an entry is removed at that client's next loaded floor or quest start.
 static std::unordered_set<const Client*> spire_follow_pending;
 
+// v46: the rooms k this client's run stored as a checkpoint in its current game (spire_checkpoint_store), and which of
+// them were boss rooms, for the splinters at 'F'. Forgotten at every quest start and at the client's 'B'; the weak_ptr
+// and the lobby id tell a reused Client address or a later game from the one that wrote it.
+struct SpireRunRooms {
+  std::weak_ptr<const Client> client;
+  uint32_t lobby_id = 0;
+  std::set<uint8_t> rooms;
+  std::set<uint8_t> boss_rooms;
+};
+static std::unordered_map<const Client*, SpireRunRooms> spire_run_rooms;
+
+static SpireRunRooms& spire_run_rooms_for(const std::shared_ptr<Client>& c, uint32_t lobby_id) {
+  auto it = spire_run_rooms.find(c.get());
+  if ((it != spire_run_rooms.end()) && ((it->second.client.lock() != c) || (it->second.lobby_id != lobby_id))) {
+    spire_run_rooms.erase(it);
+    it = spire_run_rooms.end();
+  }
+  if (it == spire_run_rooms.end()) {
+    if (spire_run_rooms.size() > 256) {
+      std::erase_if(spire_run_rooms, [](const auto& e) { return e.second.client.expired(); });
+    }
+    it = spire_run_rooms.emplace(c.get(), SpireRunRooms{}).first;
+    it->second.client = c;
+    it->second.lobby_id = lobby_id;
+  }
+  return it->second;
+}
+
+uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_choice) {
+  uint64_t base = static_cast<uint64_t>(rooms) + static_cast<uint64_t>(SPIRE_SPLINTERS_PER_BOSS) * bosses;
+  uint64_t ret = (base * (10 + static_cast<uint64_t>(heat_choice))) / 10;
+  return static_cast<uint32_t>(std::min<uint64_t>(ret, 0xFFFFFFFF));
+}
+
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
   spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
+  spire_run_rooms.erase(c.get()); // v46
   if (auto l = c->lobby.lock()) {
     spire_run_forget_end(l->lobby_id, "quest start", c->log);
     if (spire_game_runs.erase(l->lobby_id)) {
@@ -1309,6 +1415,8 @@ struct SpireRecords {
   uint32_t best_time = 0; // seconds; 0 = no won run yet
   uint32_t runs = 0;
   uint32_t won = 0;
+  uint32_t splinters = 0; // v46: photon splinters to spend
+  uint32_t splinters_total = 0; // v46: photon splinters ever earned
   // ladder (plan-unlockables §2): won runs and best won time per difficulty (0 Normal ... 3 Ultimate), for the board
   std::map<uint8_t, std::pair<uint32_t, uint32_t>> per_difficulty;
 };
@@ -1333,6 +1441,8 @@ static SpireRecords spire_records_load(const std::string& filename) {
     ret.best_time = json.get_int("BestTime");
     ret.runs = json.get_int("Runs");
     ret.won = json.get_int("Won");
+    ret.splinters = json.get_int("Splinters", 0);
+    ret.splinters_total = json.get_int("SplintersTotal", 0);
     if (json.contains("Difficulties")) {
       const auto& d = json.at("Difficulties");
       for (uint8_t z = 0; z < 4; z++) {
@@ -1353,6 +1463,8 @@ static void spire_records_save(const std::string& filename, uint32_t serial_numb
       {"BestTime", rec.best_time},
       {"Runs", rec.runs},
       {"Won", rec.won},
+      {"Splinters", rec.splinters},
+      {"SplintersTotal", rec.splinters_total},
   });
   if (!rec.per_difficulty.empty()) {
     auto d = phosg::JSON::dict();
@@ -1399,6 +1511,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   auto rec = spire_records_load(filename);
   if (kind == SPIRE_BRIDGE_REC_BEGIN) {
     spire_run_forget_end(l->lobby_id, "run started", c->log);
+    spire_run_rooms.erase(c.get()); // v46: the splinters count the rooms of this run only
     // v44: 'B' << 24 | resumed << 16 | K0 << 8 | start room (0: a quest from before v44). The game's run is set here
     // when no 'J' set it (a run from its first room); the client's run start room and practice bit follow.
     uint8_t start_k = value & 0xFF, first_k = (value >> 8) & 0xFF;
@@ -1468,7 +1581,22 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       e.second = seconds;
     }
   }
+  // v46: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
+  const auto& run_rooms = spire_run_rooms_for(c, l->lobby_id);
+  uint32_t rooms = run_rooms.rooms.size();
+  uint32_t rooms_before_resume = 0;
+  if (auto* cr = spire_client_run_for(c, l, false); cr && cr->began && cr->resumed &&
+      (cr->savestate.values.size() > SPIRE_SS_K) && (cr->savestate.values[SPIRE_SS_K] > cr->start_room)) {
+    rooms_before_resume = cr->savestate.values[SPIRE_SS_K] - cr->start_room; // cleared before the resume
+  }
+  uint32_t bosses = std::max<uint32_t>(spire_meta_decode_finish(value).exams, run_rooms.boss_rooms.size());
+  uint32_t splinters = spire_splinters_for_run(rooms + rooms_before_resume, bosses, 0);
+  rec.splinters = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(rec.splinters) + splinters, 0xFFFFFFFF));
+  rec.splinters_total = static_cast<uint32_t>(
+      std::min<uint64_t>(static_cast<uint64_t>(rec.splinters_total) + splinters, 0xFFFFFFFF));
   spire_records_save(filename, serial_number, rec);
+  c->log.info_f("Spire records: {} photon splinter(s) for serial {:010} in q{} ({} room(s) in this game + {} before the resume, {} boss(es), heat choice 0); balance {}, total {}",
+      splinters, serial_number, quest_number, rooms, rooms_before_resume, bosses, rec.splinters, rec.splinters_total);
   spire_run_mark_ended(l, "records: run finished");
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
                                : std::format("Best score: {}.", rec.best_score);
@@ -1486,6 +1614,10 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       rec.best_time, rec.runs, rec.won);
   return true;
 }
+
+// v46: the return to base ('O'), below with the guard's restore
+static asio::awaitable<void> spire_base_return(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
 
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
@@ -1525,6 +1657,11 @@ bool spire_bridge_handle_register(
       }
       if ((value >> 24) == SPIRE_BRIDGE_RESUME) {
         spire_resume_answer(c, l, serial_number, quest_number, value);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_BASE_RETURN) {
+        asio::co_spawn(*c->require_server_state()->io_context,
+            spire_base_return(c, std::const_pointer_cast<Lobby>(l), serial_number, quest_number), asio::detached);
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
@@ -2261,9 +2398,11 @@ struct SpireGuardWatchdog {
 
 // Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot, and (v32) the
 // items and meseta too. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
-// but becomes AwaitingSave: the card may still hold the overlay until the client saves.
+// but becomes AwaitingSave: the card may still hold the overlay until the client saves. v46: keep_marker (the push in a
+// game, the return to base) checks the same and changes no marker and no file.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
-    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool in_lobby) {
+    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool in_lobby,
+    bool keep_marker = false) {
   if (!character) {
     c->log.warning_f("Spire guard: restore not verified for serial {:010}: no character in the 61; marker kept", serial_number);
     return false;
@@ -2294,6 +2433,11 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
         !same_stats ? "level or EXP differ" : (same_inventory ? "the material counters differ" : "the items or meseta differ"));
     return false;
   }
+  if (keep_marker) {
+    c->log.info_f("Spire guard: in-game restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; marker unchanged",
+        serial_number, level + 1, exp, items_str);
+    return true;
+  }
   snapshot.restore_pending = false;
   snapshot.awaiting_save = in_lobby;
   snapshot.has_overlay = in_lobby && snapshot.has_overlay;
@@ -2323,10 +2467,13 @@ struct SpireGuardRestoreLock {
 
 // The restore itself, shared by the login path and the lobby path: fetch the full character (30), put the snapshot's
 // inventory and disp in, send it with SetExtendedPlayerInfo, and verify the 61 requested right after. Returns true
-// only if the restore was verified (RestorePending is then cleared). where is "login" or "lobby" (for the log).
+// only if the restore was verified (RestorePending is then cleared). where is "login" or "lobby" (for the log); v46:
+// "game" is the return to base: no drop, no push while a client of the game loads, the marker unchanged.
+static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l);
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
-  bool drop = (std::string(where) != "lobby");
+  bool drop = !strcmp(where, "login");
+  bool in_game = !strcmp(where, "game");
   c->log.info_f("Spire guard: restore pending for serial {:010} (q{}); restoring {} in the {}",
       serial_number, snapshot.quest_number, spire_guard_describe(snapshot), where);
   if (!snapshot.has_character) {
@@ -2387,6 +2534,19 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
       co_await prepare_client_for_patches(c);
     }
     auto s = c->require_server_state();
+    if (in_game) {
+      // v46: a B2 during a floor load hung the client (v33); the 30 above took time, so look again right before the push
+      auto l = c->lobby.lock();
+      const char* why = !c->channel->connected() ? "the client disconnected"
+          : (!l || !l->is_game())                 ? "the client left the game"
+          : !c->floor                             ? "the client is on Pioneer 2"
+          : spire_game_any_client_loading(l)      ? "a client of the game is loading"
+                                                  : nullptr;
+      if (why) {
+        c->log.warning_f("Spire guard: in-game restore for serial {:010} not pushed: {}; nothing changed", serial_number, why);
+        co_return false;
+      }
+    }
     auto fn = s->data->client_functions->get("SetExtendedPlayerInfo", c->specific_version);
     PSOGCCharacterFile::Character gc_char = *merged;
     {
@@ -2403,7 +2563,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
       SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61", drop);
       after = co_await send_get_player_info(c, false);
     }
-    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "lobby"))) {
+    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "lobby"), in_game)) {
       co_return false;
     }
     co_return true;
@@ -2411,6 +2571,105 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to restore character for serial {:010}: {}; marker kept", serial_number, e.what());
     co_return false;
+  }
+}
+
+// v46: true if this game has a client that is loading (a floor, the quest, a joinable quest or a tournament)
+static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l) {
+  for (const auto& lc : l->clients) {
+    if (lc && (lc->check_flag(Client::Flag::LOADING) || lc->check_flag(Client::Flag::LOADING_QUEST) ||
+                  lc->check_flag(Client::Flag::LOADING_RUNNING_JOINABLE_QUEST) ||
+                  lc->check_flag(Client::Flag::LOADING_TOURNAMENT))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// v46: the return to base ('O', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
+static asio::awaitable<void> spire_base_return(
+    std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number) {
+  using R = SpireBaseReturnRefusal;
+  R refusal = R::NONE;
+  std::string filename;
+  SpireGuardSnapshot snapshot;
+  try {
+    SpireBaseReturnState st;
+    auto character = c->character_file(false, false);
+    st.has_character = serial_number && character && (c->version() == Version::GC_V3);
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    st.spire_run = (c->lobby.lock() == l) && l->is_game() && (l->mode == GameMode::BATTLE) && l->quest && rules &&
+        rules->replace_char && spire_guard_quest_is_guarded(c, quest_number) && c->has_overlay();
+    auto end_it = spire_run_ends.find(l->lobby_id);
+    st.run_over = (end_it != spire_run_ends.end());
+    st.on_field_floor = (c->floor != 0);
+    st.any_client_loading = spire_game_any_client_loading(l);
+    st.can_run_functions = c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) &&
+        c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE);
+    st.protected_character = c->is_spire_protected();
+    if (st.has_character) {
+      filename = spire_guard_filename_for(c, serial_number);
+      if (!filename.empty() && std::filesystem::is_regular_file(filename)) {
+        snapshot = spire_guard_load(filename);
+        st.has_snapshot = snapshot.has_character;
+        st.run_in_progress = snapshot.run_in_progress;
+        st.restore_pending = snapshot.restore_pending;
+        st.awaiting_save = snapshot.awaiting_save;
+      }
+    }
+    st.restore_running = spire_guard_restoring_clients.count(c.get());
+    st.already_sent_back = st.run_over && end_it->second.exit_sent.count(c->lobby_client_id);
+    refusal = spire_base_return_refusal(st);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire base return: cannot read the state for serial {:010}: {}", serial_number, e.what());
+    refusal = R::MARKER;
+  }
+
+  if (refusal == R::NONE) {
+    // The server's own 6x73 after an 'X' must not land during the push or the warp: claim it for this client
+    uint8_t slot = c->lobby_client_id;
+    if (auto it = spire_run_ends.find(l->lobby_id); it != spire_run_ends.end()) {
+      it->second.exit_sent.emplace(slot);
+    }
+    bool verified = false;
+    {
+      SpireGuardRestoreLock lock(c.get());
+      if (!lock.locked) {
+        refusal = R::RESTORE_RUNNING;
+      } else {
+        c->log.info_f("Spire base return: pushing the real character for serial {:010} in q{} on floor {:02X}",
+            serial_number, quest_number, c->floor);
+        verified = co_await spire_guard_run_restore(c, serial_number, filename, snapshot, "game");
+        if (!verified) {
+          refusal = R::PUSH_NOT_VERIFIED;
+        }
+      }
+    }
+    if (!verified) {
+      // Back to the default: the quest leaves with 6x73; after an 'X' the server's 6x73 follows as before
+      auto it = spire_run_ends.find(l->lobby_id);
+      if (it != spire_run_ends.end() && it->second.exit_sent.erase(slot) && it->second.over_announced) {
+        asio::co_spawn(*c->require_server_state()->io_context, spire_run_over_exit(c, l, SPIRE_RUN_OVER_LOBBY_DELAY),
+            asio::detached);
+      }
+    }
+  }
+
+  uint32_t answer = spire_base_return_answer(refusal);
+  try {
+    if (c->channel->connected()) {
+      spire_send_register(c, SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
+      spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire base return: failed to answer serial {:010}: {}", serial_number, e.what());
+  }
+  if (refusal == R::NONE) {
+    c->log.info_f("Spire base return: OK for serial {:010} in q{}: the real character is back, the quest may warp to Pioneer 2 (r{}={:08X}); marker unchanged",
+        serial_number, quest_number, SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
+  } else {
+    c->log.info_f("Spire base return: FAIL for serial {:010} in q{}: {}; the quest leaves with 6x73 (r{}={:08X})",
+        serial_number, quest_number, spire_base_return_refusal_name(refusal), SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
   }
 }
 
@@ -2902,8 +3161,8 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // v19: rooms already announced, per game (lobby id) as floor << 16 | room. A game's id is never reused while the server
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
-static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room);
-static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k);
+static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, bool boss = false);
+static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss = false);
 static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
 
 std::string spire_room_actions_hold(const void* action_stream, size_t action_stream_size, uint16_t room,
@@ -3022,7 +3281,7 @@ void spire_bridge_check_room_clear(
         l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} has a boss; no room clear", wave_number, room,
             floor);
         // v23: a boss wave done still counts as the room's clear for the checkpoint (no text, no r251)
-        spire_checkpoint_record_room(l, floor, room);
+        spire_checkpoint_record_room(l, floor, room, true);
         return;
       }
     }
@@ -3391,7 +3650,7 @@ static void spire_bridge_announce_boss_clear(
         phosg::name_for_enum(type), room, floor, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT,
         SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, cmd.value.as_int.load(), sent);
     spire_replay_note_room_cleared(l, floor, cmd.value.as_int);
-    spire_checkpoint_record_room(l, floor, room);
+    spire_checkpoint_record_room(l, floor, room, true);
   } catch (const std::exception& e) {
     l->log.warning_f("Spire bridge: boss clear check failed: {}", e.what());
   }
@@ -3452,22 +3711,28 @@ uint8_t spire_checkpoint_arrival_k(
   return (it == ep_it->second.end()) ? 0 : it->second;
 }
 
-static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room) {
+static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, bool boss) {
   uint8_t k = spire_checkpoint_room_k(l->require_server_state()->data->spire_checkpoint_rooms, l->episode, floor, room);
   if (!k) {
     l->log.info_f("Spire checkpoint: room {} on floor {:02X} (episode {}) is not in SpireCheckpointRooms", room, floor,
         static_cast<int>(l->episode));
     return;
   }
-  spire_checkpoint_store(l, l->clients, k);
+  spire_checkpoint_store(l, l->clients, k, boss);
 }
 
-static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k) {
+static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss) {
   for (const auto& lc : clients) {
     if (!lc || (lc->version() != Version::GC_V3)) {
       continue;
     }
     try {
+      // v46: the rooms of this run in this game, for the splinters at 'F' (before the file, which keeps every run)
+      auto& run_rooms = spire_run_rooms_for(lc, l->lobby_id);
+      run_rooms.rooms.emplace(k);
+      if (boss) {
+        run_rooms.boss_rooms.emplace(k);
+      }
       uint32_t serial_number = spire_bridge_serial_for_client(lc);
       std::string filename = spire_checkpoint_filename(lc, serial_number);
       if (filename.empty()) {
