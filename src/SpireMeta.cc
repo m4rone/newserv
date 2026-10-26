@@ -71,7 +71,7 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       ret.flags[std::make_pair(difficulty, flag_num)] = entry_json->get_bool("Set");
     }
   }
-  if (json.contains("BaseRung")) { // v48 (B-BASIS-13)
+  if (json.contains("BaseRung")) { // v49 (B-BASIS-13)
     for (uint8_t run = 1; run <= 2; run++) {
       int64_t rung = json.at("BaseRung").get_int(std::to_string(run), 0);
       if (rung > 0) {
@@ -79,7 +79,7 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       }
     }
   }
-  if (json.contains("Upgrades")) { // v49 (B-BASIS-2)
+  if (json.contains("Upgrades")) { // v50 (B-BASIS-2)
     for (const auto& [name, level_json] : json.get_dict("Upgrades")) {
       int64_t level = level_json->as_int();
       if (level > 0) {
@@ -118,14 +118,14 @@ static void spire_meta_save(const std::string& filename, uint32_t serial_number,
     flags_json.emplace_back(phosg::JSON::dict({{"Difficulty", key.first}, {"Flag", key.second}, {"Set", is_set}}));
   }
   auto json = phosg::JSON::dict({{"SerialNumber", serial_number}, {"Flags", std::move(flags_json)}});
-  if (!file.base_rung.empty()) { // v48 (B-BASIS-13): kept through every flag write, since each one loads the file first
+  if (!file.base_rung.empty()) { // v49 (B-BASIS-13): kept through every flag write, since each one loads the file first
     auto base_rung_json = phosg::JSON::dict();
     for (const auto& [run, rung] : file.base_rung) {
       base_rung_json.emplace(std::to_string(run), rung);
     }
     json.emplace("BaseRung", std::move(base_rung_json));
   }
-  if (!file.upgrades.empty()) { // v49 (B-BASIS-2): kept through every flag write, as BaseRung
+  if (!file.upgrades.empty()) { // v50 (B-BASIS-2): kept through every flag write, as BaseRung
     auto upgrades_json = phosg::JSON::dict();
     for (const auto& [name, level] : file.upgrades) {
       upgrades_json.emplace(name, level);
@@ -372,7 +372,7 @@ uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8
     auto character = c->character_file(false, false);
     std::string filename = spire_meta_filename_for(c->login->gc_license->serial_number,
         character ? &character->disp : nullptr);
-    return filename.empty() ? 0 : spire_meta_open_rung(spire_meta_load_file(filename), run); // v48: won or BaseRung
+    return filename.empty() ? 0 : spire_meta_open_rung(spire_meta_load_file(filename), run); // v49: won or BaseRung
   } catch (const std::exception& e) {
     c->log.warning_f("Spire meta: ladder rung unreadable: {}; Normal only", e.what());
     return 0;
@@ -436,7 +436,7 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
   return text;
 }
 
-// v49: the base shop (SpireMeta.hh)
+// v50: the base shop (SpireMeta.hh)
 
 SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
   auto json = phosg::JSON::parse(json_text);

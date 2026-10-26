@@ -190,7 +190,7 @@ void run_static_tests() {
     expect(spire_guard_same_inventory(make(0, 0), 5, make(0, 0), 5));
   }
 
-  phosg::log_info_f("-- Spire base return: the push in a game only at the run end, on a field floor, never during a load (v47)");
+  phosg::log_info_f("-- Spire base return: the push in a game only at the run end, on a field floor, never during a load (v48)");
   {
     using R = SpireBaseReturnRefusal;
     SpireBaseReturnState ok;
@@ -243,7 +243,7 @@ void run_static_tests() {
     expect(SPIRE_BASE_RETURN_TAG != SPIRE_RESUME_ANSWER_TAG);
   }
 
-  phosg::log_info_f("-- Spire run again: a second run in the same quest only after a verified return to base, on floor 0 or 1 (v48)");
+  phosg::log_info_f("-- Spire run again: a second run in the same quest only after a verified return to base, on floor 0 or 1 (v49)");
   {
     using R = SpireRunAgainRefusal;
     SpireRunAgainState ok;
@@ -306,7 +306,7 @@ void run_static_tests() {
     expect(SPIRE_RUN_AGAIN_TAG != SPIRE_BASE_RETURN_TAG);
   }
 
-  phosg::log_info_f("-- Spire run again: the snapshot is taken again only after a verified return to base (v48)");
+  phosg::log_info_f("-- Spire run again: the snapshot is taken again only after a verified return to base (v49)");
   {
     auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t meseta, const char* name, uint8_t section) {
       std::pair<PlayerInventory, PlayerDispDataV4> ret;
@@ -365,7 +365,7 @@ void run_static_tests() {
     expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
   }
 
-  phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v48, B-BASIS-13)");
+  phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v49, B-BASIS-13)");
   {
     expect_eq(0, spire_meta_open_rung(0, 0));
     expect_eq(2, spire_meta_open_rung(0, 2)); // opened by the base, nothing won
@@ -404,7 +404,7 @@ void run_static_tests() {
     std::filesystem::remove_all(dir);
   }
 
-  phosg::log_info_f("-- Spire records: photon splinters (rooms + 5 per boss) * (1 + 0.1 per heat), rounded down (v47)");
+  phosg::log_info_f("-- Spire records: photon splinters (rooms + 5 per boss) * (1 + 0.1 per heat), rounded down (v48)");
   {
     expect_eq(0u, spire_splinters_for_run(0, 0, 0));
     expect_eq(1u, spire_splinters_for_run(1, 0, 0));     // died in room 2
@@ -416,7 +416,7 @@ void run_static_tests() {
     expect_eq(0xFFFFFFFFu, spire_splinters_for_run(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)); // never wraps
   }
 
-  phosg::log_info_f("-- Spire shop: debit, balance, cap, sale, rung threshold and the heat table (v49, B-BASIS-2/-3/-13)");
+  phosg::log_info_f("-- Spire shop: debit, balance, cap, sale, rung threshold and the heat table (v50, B-BASIS-2/-3/-13)");
   {
     using R = SpireShopRefusal;
     // a small catalogue: start_level not on sale, kit_tier cap 2 with 1 on sale, Hard at P 3
@@ -889,7 +889,7 @@ void run_static_tests() {
       expect(text.find('\n') == std::string::npos);
     }
     expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000));
-    expect_eq(std::string("Run over. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3)); // v48: both outcomes
+    expect_eq(std::string("Run over. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3)); // v49: both outcomes
     expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
     // v36: the quest's codes from spike/stadstart b29f310 (kind << 24 | a << 8 | b)
     expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Continue = leave room."), spire_bridge_message_text(0x47000000));

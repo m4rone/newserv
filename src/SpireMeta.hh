@@ -64,10 +64,10 @@ struct SpireMetaFile {
   bool exists = false;
   SpireMetaAdopted adopted = SpireMetaAdopted::NO_MARKER;
   SpireMetaFlags flags;
-  // v48 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II; 0-3, see spire_meta_open_rung), in
+  // v49 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II; 0-3, see spire_meta_open_rung), in
   // the file as "BaseRung": {"1": n, "2": n}; written only if a run has one, so older files stay as they are
   std::map<uint8_t, uint8_t> base_rung;
-  // v49 (B-BASIS-2): the base shop's upgrades, name -> level (SPIRE_SHOP_ITEM_NAMES), in the file as
+  // v50 (B-BASIS-2): the base shop's upgrades, name -> level (SPIRE_SHOP_ITEM_NAMES), in the file as
   // "Upgrades": {"hp_mat": 2, ...}. One block for every difficulty (a flag is per difficulty, an upgrade is not);
   // written only if there is one, kept through every flag write like BaseRung
   std::map<std::string, uint32_t> upgrades;
@@ -120,7 +120,7 @@ uint8_t spire_meta_ladder_run(uint32_t quest_number);
 uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
 // The highest difficulty won open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
 uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
-// v48 (B-BASIS-13, Marck via the regie): a rung is open if it was won (spire_meta_ladder_rung) or the base opened it
+// v49 (B-BASIS-13, Marck via the regie): a rung is open if it was won (spire_meta_ladder_rung) or the base opened it
 // (BaseRung in meta.json, per run). The open rung is the larger of the two, at most 3 (Ultimate). BaseRung never counts
 // as a win: records "Won", the ladder flags 0x38B/0x38C and the "Unlocked" text come from wins only. Every open rung
 // the server computes (SPIRE_RUN1/2 in AvailableIf, the difficulty gate, the quest menu note) goes through
@@ -144,7 +144,7 @@ std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level
 // The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
 // runs are open there), so a hidden run quest is never a silent nothing.
 std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty);
-// The open rung of a run for a client's real character (its meta file, v48 won or BaseRung; 0 without one or on a read
+// The open rung of a run for a client's real character (its meta file, v49 won or BaseRung; 0 without one or on a read
 // error). Never throws.
 uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run);
 
@@ -162,7 +162,7 @@ struct SpireMetaFinish {
 };
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
 
-// v49 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2/-3/-13): the base shop. The quartermaster on Pioneer 2 sells
+// v50 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2/-3/-13): the base shop. The quartermaster on Pioneer 2 sells
 // upgrades for photon splinters (records.json Splinters); the server checks the balance, debits it and keeps the levels
 // in meta.json (Upgrades). The catalogue (prices, caps, the strength P per level, the rung thresholds and the heat table)
 // is data: SPIRE_SHOP_CATALOGUE_FILE, read at every request (a missing or broken file closes the shop). The item order

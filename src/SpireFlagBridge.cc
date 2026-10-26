@@ -819,7 +819,7 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
   return can_run_functions ? SpireRunOverExit::EXIT_ANYWHERE : SpireRunOverExit::TELL;
 }
 
-// v46: the return to base ('O', SpireFlagBridge.hh)
+// v48: the return to base ('O', SpireFlagBridge.hh)
 SpireBaseReturnRefusal spire_base_return_refusal(const SpireBaseReturnState& st) {
   using R = SpireBaseReturnRefusal;
   if (!st.has_character) {
@@ -890,7 +890,7 @@ uint32_t spire_base_return_answer(SpireBaseReturnRefusal r) {
       ((r == SpireBaseReturnRefusal::NONE) ? SPIRE_BASE_RETURN_OK : SPIRE_BASE_RETURN_FAIL);
 }
 
-// v48: the run again ('I', SpireFlagBridge.hh)
+// v49: the run again ('I', SpireFlagBridge.hh)
 SpireRunAgainRefusal spire_run_again_refusal(const SpireRunAgainState& st) {
   using R = SpireRunAgainRefusal;
   if (!st.has_character) {
@@ -964,7 +964,7 @@ bool spire_run_again_floor_ok(uint32_t floor) {
   return (floor == 0) || (floor == 1);
 }
 
-// v48: the clients whose 'O' was answered OK in their current game and that have not used it for an 'I' yet. Keyed by
+// v49: the clients whose 'O' was answered OK in their current game and that have not used it for an 'I' yet. Keyed by
 // the Client's address; the weak_ptr and the lobby id tell a reused address or a later game from the one it was for.
 // Forgotten at every quest start.
 struct SpireBaseReturned {
@@ -1354,7 +1354,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
 
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
 // texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code. v35: one line each, the form of
-// "Waiting for your partner..." (no window during a run, see spire_ticker_line); v48: the run-over text names no
+// "Waiting for your partner..." (no window during a run, see spire_ticker_line); v49: the run-over text names no
 // place, since the player may go back to base ('O') or to the lobby (spire_run_over).
 std::string spire_bridge_message_text(uint32_t value) {
   uint8_t kind = value >> 24;
@@ -1370,7 +1370,7 @@ std::string spire_bridge_message_text(uint32_t value) {
     case SPIRE_BRIDGE_MSG_PARTNER:
       return b ? "$C4Your partner is waiting.$C7 Open the quest board and make your choice." : "Waiting for your partner...";
     case SPIRE_BRIDGE_MSG_RUN_OVER:
-      // v48 (B-BASIS-12): true for both outcomes, the return to base ('O' OK) and the 6x73 to the lobby
+      // v49 (B-BASIS-12): true for both outcomes, the return to base ('O' OK) and the 6x73 to the lobby
       return std::format("Run over. Rooms cleared: {}, {} s.", (value >> 16) & 0xFF, value & 0xFFFF);
     case SPIRE_BRIDGE_MSG_PAUSE_B:
       return b ? "Reward taken. Quest Board: Shop (optional) or Ready = leave room."
@@ -1455,7 +1455,7 @@ uint32_t spire_checkpoint_lives_for(const Client* key) {
 // address and never dereferenced; an entry is removed at that client's next loaded floor or quest start.
 static std::unordered_set<const Client*> spire_follow_pending;
 
-// v46: the rooms k this client's run stored as a checkpoint in its current game (spire_checkpoint_store), and which of
+// v48: the rooms k this client's run stored as a checkpoint in its current game (spire_checkpoint_store), and which of
 // them were boss rooms, for the splinters at 'F'. Forgotten at every quest start and at the client's 'B'; the weak_ptr
 // and the lobby id tell a reused Client address or a later game from the one that wrote it.
 struct SpireRunRooms {
@@ -1491,9 +1491,9 @@ uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_
 
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
-  spire_base_returned.erase(c.get()); // v48: an 'O' OK of an earlier quest never allows an 'I'
+  spire_base_returned.erase(c.get()); // v49: an 'O' OK of an earlier quest never allows an 'I'
   spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
-  spire_run_rooms.erase(c.get()); // v46
+  spire_run_rooms.erase(c.get()); // v48
   if (auto l = c->lobby.lock()) {
     spire_run_forget_end(l->lobby_id, "quest start", c->log);
     if (spire_game_runs.erase(l->lobby_id)) {
@@ -1513,8 +1513,8 @@ struct SpireRecords {
   uint32_t best_time = 0; // seconds; 0 = no won run yet
   uint32_t runs = 0;
   uint32_t won = 0;
-  uint32_t splinters = 0; // v46: photon splinters to spend
-  uint32_t splinters_total = 0; // v46: photon splinters ever earned
+  uint32_t splinters = 0; // v48: photon splinters to spend
+  uint32_t splinters_total = 0; // v48: photon splinters ever earned
   // ladder (plan-unlockables §2): won runs and best won time per difficulty (0 Normal ... 3 Ultimate), for the board
   std::map<uint8_t, std::pair<uint32_t, uint32_t>> per_difficulty;
 };
@@ -1609,7 +1609,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   auto rec = spire_records_load(filename);
   if (kind == SPIRE_BRIDGE_REC_BEGIN) {
     spire_run_forget_end(l->lobby_id, "run started", c->log);
-    spire_run_rooms.erase(c.get()); // v46: the splinters count the rooms of this run only
+    spire_run_rooms.erase(c.get()); // v48: the splinters count the rooms of this run only
     // v44: 'B' << 24 | resumed << 16 | K0 << 8 | start room (0: a quest from before v44). The game's run is set here
     // when no 'J' set it (a run from its first room); the client's run start room and practice bit follow.
     uint8_t start_k = value & 0xFF, first_k = (value >> 8) & 0xFF;
@@ -1679,7 +1679,7 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       e.second = seconds;
     }
   }
-  // v46: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
+  // v48: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
   const auto& run_rooms = spire_run_rooms_for(c, l->lobby_id);
   uint32_t rooms = run_rooms.rooms.size();
   uint32_t rooms_before_resume = 0;
@@ -1718,7 +1718,7 @@ uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
 }
 
-// v49: the base shop ('M', SpireFlagBridge.hh and SpireMeta.hh). Always answers the client (state registers when it
+// v50: the base shop ('M', SpireFlagBridge.hh and SpireMeta.hh). Always answers the client (state registers when it
 // has a character and the catalogue, r41, then 'DONE'). Throws nothing.
 static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -1804,10 +1804,10 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       SPIRE_SHOP_ANSWER_REGISTER, answer);
 }
 
-// v46: the return to base ('O'), below with the guard's restore
+// v48: the return to base ('O'), below with the guard's restore
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
-// v48: the run again ('I'), below with the guard's restore
+// v49: the run again ('I'), below with the guard's restore
 static asio::awaitable<void> spire_run_again(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
 
@@ -1856,11 +1856,11 @@ bool spire_bridge_handle_register(
             spire_base_return(c, std::const_pointer_cast<Lobby>(l), serial_number, quest_number), asio::detached);
         return true;
       }
-      if ((value >> 24) == SPIRE_BRIDGE_SHOP) { // v49
+      if ((value >> 24) == SPIRE_BRIDGE_SHOP) { // v50
         spire_shop_handle(c, serial_number, quest_number, value);
         return true;
       }
-      if ((value >> 24) == SPIRE_BRIDGE_RUN_AGAIN) { // v48
+      if ((value >> 24) == SPIRE_BRIDGE_RUN_AGAIN) { // v49
         asio::co_spawn(*c->require_server_state()->io_context,
             spire_run_again(c, std::const_pointer_cast<Lobby>(l), serial_number, quest_number), asio::detached);
         return true;
@@ -2299,7 +2299,7 @@ bool spire_guard_follow_real_progress(
   return true;
 }
 
-// v48: the snapshot step of the run again ('I', SpireFlagBridge.hh)
+// v49: the snapshot step of the run again ('I', SpireFlagBridge.hh)
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
   if (!base_returned || !snapshot.has_character || !snapshot.run_in_progress || snapshot.restore_pending ||
@@ -2365,7 +2365,7 @@ bool spire_guard_begin_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
   }
 }
 
-// v48: the overlay creation of on_quest_loaded, shared with the run again ('I')
+// v49: the overlay creation of on_quest_loaded, shared with the run again ('I')
 bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   if (is_v4(c->version())) {
     c->change_bank(c->bb_character_index);
@@ -2623,7 +2623,7 @@ struct SpireGuardWatchdog {
 
 // Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot, and (v32) the
 // items and meseta too. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
-// but becomes AwaitingSave: the card may still hold the overlay until the client saves. v46: keep_marker (the push in a
+// but becomes AwaitingSave: the card may still hold the overlay until the client saves. v48: keep_marker (the push in a
 // game, the return to base) checks the same and changes no marker and no file.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
     SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool after_game,
@@ -2690,7 +2690,7 @@ struct SpireGuardRestoreLock {
   }
 };
 
-// v48: the push itself, shared by the restore and the run again ('I'): the patch preparation (the same function call
+// v49: the push itself, shared by the restore and the run again ('I'): the patch preparation (the same function call
 // as $loadchar), in a game one more look right before the push (a B2 during a floor load hung the client, v33, and the
 // 30 before took time), SetExtendedPlayerInfo with merged, and the 61 asked for right after (on_61_98 puts it into the
 // server's character data, or into the overlay if there is one). Returns that 61's character; *pushed is false (and
@@ -2740,7 +2740,7 @@ static asio::awaitable<std::shared_ptr<PSOBBCharacterFile>> spire_guard_push_cha
 
 // The restore itself, shared by the login path and the lobby path: fetch the full character (30), put the snapshot's
 // inventory and disp in, send it with SetExtendedPlayerInfo, and verify the 61 requested right after. Returns true
-// only if the restore was verified (RestorePending is then cleared). where is "login" or "game exit" (for the log); v46:
+// only if the restore was verified (RestorePending is then cleared). where is "login" or "game exit" (for the log); v48:
 // "game" is the return to base: no drop, no push while a client of the game loads, the marker unchanged.
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
@@ -2817,7 +2817,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
   }
 }
 
-// v46: true if this game has a client that is loading (a floor, the quest, a joinable quest or a tournament)
+// v48: true if this game has a client that is loading (a floor, the quest, a joinable quest or a tournament)
 static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l) {
   for (const auto& lc : l->clients) {
     if (lc && (lc->check_flag(Client::Flag::LOADING) || lc->check_flag(Client::Flag::LOADING_QUEST) ||
@@ -2829,7 +2829,7 @@ static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l) {
   return false;
 }
 
-// v46: the return to base ('O', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
+// v48: the return to base ('O', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number) {
   using R = SpireBaseReturnRefusal;
@@ -2886,7 +2886,7 @@ static asio::awaitable<void> spire_base_return(
         if (!verified) {
           refusal = R::PUSH_NOT_VERIFIED;
         } else {
-          spire_base_returned_note(c, l->lobby_id); // v48: the one 'I' this allows
+          spire_base_returned_note(c, l->lobby_id); // v49: the one 'I' this allows
         }
       }
     }
@@ -2918,7 +2918,7 @@ static asio::awaitable<void> spire_base_return(
   }
 }
 
-// v48: the run again ('I', SpireFlagBridge.hh). The per-game state of a run lives further down
+// v49: the run again ('I', SpireFlagBridge.hh). The per-game state of a run lives further down
 static void spire_bridge_forget_room_clears(uint32_t lobby_id);
 static void spire_replay_forget(std::shared_ptr<const Lobby> l);
 
@@ -3042,7 +3042,7 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
   }
 }
 
-// v48: the run again ('I', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
+// v49: the run again ('I', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
 static asio::awaitable<void> spire_run_again(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number) {
   using R = SpireRunAgainRefusal;
@@ -3427,7 +3427,7 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // v19: rooms already announced, per game (lobby id) as floor << 16 | room. A game's id is never reused while the server
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
-// v48: the run again ('I') makes every room of the game clear again for the new run
+// v49: the run again ('I') makes every room of the game clear again for the new run
 static void spire_bridge_forget_room_clears(uint32_t lobby_id) {
   std::erase_if(spire_bridge_cleared_rooms, [lobby_id](uint64_t key) { return (key >> 32) == lobby_id; });
 }
@@ -3997,7 +3997,7 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       continue;
     }
     try {
-      // v46: the rooms of this run in this game, for the splinters at 'F' (before the file, which keeps every run)
+      // v48: the rooms of this run in this game, for the splinters at 'F' (before the file, which keeps every run)
       auto& run_rooms = spire_run_rooms_for(lc, l->lobby_id);
       run_rooms.rooms.emplace(k);
       if (boss) {
@@ -4075,7 +4075,7 @@ static SpireReplayState* spire_replay_state_for(std::shared_ptr<const Lobby> l, 
   return &it->second;
 }
 
-// v48: the run again ('I'): no register or room clear of the earlier run is replayed in the new one
+// v49: the run again ('I'): no register or room clear of the earlier run is replayed in the new one
 static void spire_replay_forget(std::shared_ptr<const Lobby> l) {
   spire_replay_states.erase(l.get());
 }

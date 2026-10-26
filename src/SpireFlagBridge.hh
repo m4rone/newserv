@@ -86,8 +86,8 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
 //   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
-// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v46), the
-// run again ('I', v48) and the base shop ('M', v49).
+// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v48), the
+// run again ('I', v49) and the base shop ('M', v50).
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
 constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
@@ -107,7 +107,7 @@ constexpr uint8_t SPIRE_BRIDGE_REC_BEGIN = 'B';
 constexpr uint8_t SPIRE_BRIDGE_REC_SCORE = 'K';
 constexpr uint8_t SPIRE_BRIDGE_REC_FINISH = 'F';
 constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
-// v46 (plan-basis-metawinkel 2026-10-26, B-BASIS-2): photon splinters, the meta currency, credited at 'F' in
+// v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-2): photon splinters, the meta currency, credited at 'F' in
 // records.json as Splinters (the balance a shop spends) and SplintersTotal (all ever earned):
 //   V = (rooms + SPIRE_SPLINTERS_PER_BOSS * bosses) * (10 + heat choice) / 10   (rounded down)
 // rooms = the rooms k this client's run stored as a checkpoint in this game (clears and rest-room arrivals), plus for a
@@ -480,10 +480,10 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   (2026-10-26 13:31:20, lab, Kamako and BidX). The restore now runs at the 84 after a game, before the client is
 //   added to a lobby; the lobby join that follows sends the restored character like any join, so there is no refresh.
 //   A game join refused under RestorePending tells the player to log in again instead of restoring in the lobby.
-// - v47: the one push in a game: the quest's return to base ('O', see SPIRE_BRIDGE_BASE_RETURN) runs the same restore
+// - v48: the one push in a game: the quest's return to base ('O', see SPIRE_BRIDGE_BASE_RETURN) runs the same restore
 //   push in the Battle game at the run end, on a field floor and never during a load, and leaves the marker unchanged
 //   (RunInProgress); every other path still refuses a push in a game.
-// - v48: the second push in a game: after 'O' OK the quest's run again ('I', see SPIRE_BRIDGE_RUN_AGAIN) takes the
+// - v49: the second push in a game: after 'O' OK the quest's run again ('I', see SPIRE_BRIDGE_RUN_AGAIN) takes the
 //   snapshot again from the verified real character and pushes a fresh run copy, on Pioneer 2 or Forest 1 and never
 //   during a load; the marker stays RunInProgress.
 
@@ -696,7 +696,7 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
 constexpr auto SPIRE_LOBBY_TEXT_DELAY = std::chrono::seconds(3);
 void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 
-// v46 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
+// v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose
 // arrival writes the card (B-E01-41): with the real character in memory that write is harmless. The 6x73 run end (v35)
 // stays the default. The quest writes 'O' << 24 to register 248 after its 'F' or 'X', on a field floor, and waits. The
@@ -752,7 +752,7 @@ const char* spire_base_return_refusal_name(SpireBaseReturnRefusal r);
 // The r41 answer value for a refusal (NONE = OK).
 uint32_t spire_base_return_answer(SpireBaseReturnRefusal r);
 
-// v48 (B-BASIS-11, route (a)): a second run in the same quest. After 'O' OK the client stands on Pioneer 2 with its real
+// v49 (B-BASIS-11, route (a)): a second run in the same quest. After 'O' OK the client stands on Pioneer 2 with its real
 // character in memory, verified by the 61, and the marker is still RunInProgress. Before the quest starts the next
 // run (before it opens the Ragol warp, gives the kit and lives, or sends 'B'), it writes 'I' << 24 to register 248 on
 // floor 0 or Forest 1 (floor 1) and waits; it starts nothing until the answer. The server answers that client, always,
@@ -813,7 +813,7 @@ SpireRunAgainRefusal spire_run_again_refusal(const SpireRunAgainState& st);
 const char* spire_run_again_refusal_name(SpireRunAgainRefusal r);
 // The r41 answer value for a refusal (NONE = OK).
 uint32_t spire_run_again_answer(SpireRunAgainRefusal r);
-// v49 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2): the base shop, catalogue and rules in SpireMeta.hh. The
+// v50 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2): the base shop, catalogue and rules in SpireMeta.hh. The
 // quest writes 'M' << 24 | sub << 16 | argument to register 248, from each client for its own character (no leader):
 //   sub SPIRE_SHOP_LIST: the balance and the levels, for the quartermaster's page
 //   sub SPIRE_SHOP_BUY, argument = item index (SPIRE_SHOP_ITEM_NAMES): the server checks the item and the balance in
@@ -848,7 +848,7 @@ bool spire_run_again_floor_ok(uint32_t floor);
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
 
-// v48: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
+// v49: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
 // (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then
 // Client::create_battle_overlay with the quest's battle rules. Returns false if the client must not get the overlay
 // (the guard could not store the snapshot or the character is protected); at a quest load the caller then drops it.

@@ -1,5 +1,5 @@
 {
-  "_comment": "Spire base shop catalogue (newserv guard v49, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price, P and PNeeded is a placeholder until the balance is tuned (one full Normal run room 1 through De Rol Le earns 18 splinters).",
+  "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price, P and PNeeded is a placeholder until the balance is tuned (one full Normal run room 1 through De Rol Le earns 18 splinters).",
   "Items": {
     "start_level": {
       "_what": "+1 start level per level (1 level equivalent each). OnSale 0: the quest has no way yet to raise the run copy's level (the client builds it from the rule block's ba_set_char_level), so nothing is sold until that exists.",
