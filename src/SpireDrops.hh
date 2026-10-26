@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <map>
 #include <memory>
 #include <phosg/JSON.hh>
 #include <string>
@@ -27,6 +28,12 @@ class Lobby;
 //   already is one, else a picked one), also when Sega's table gave nothing.
 // A picked weapon is the best common (not rare) weapon of a random weapon group 01-0C (Saber ... Wand) whose
 // requirements the player meets now, without grind, special or percentages (see spire_drops_pick_weapon).
+// Route B F8 (plan-route-b-2026-10-26 section 6): the boss weapon of room k gets grind min(MaxGrind, BossGrindBase +
+// BossGrindPerK * k) and Hit min(50, BossHitBase + BossHitPerK * k), also when it is Sega's own drop; from room PickFromK
+// on, a picked weapon (items 25-27) gets grind min(MaxGrind, 1 + k) and Hit min(25, 5 + 2k). The Hit sits in the
+// attribute slot of type 5 (spire_drops_boost_weapon); no special is added (special byte 0 on a picked weapon). Room k is
+// the k SpireCheckpointRooms gives the player's floor (spire_drops_floor_k). Missing keys: no grind and no Hit (as
+// before F8).
 // Without the SpireDrops key nothing changes (the client makes the drops, the quest's rule block still forbids Scape
 // Dolls). In the client drop mode (or when the client never sends 6x60/6xA2) the server never sees a drop, so none of
 // this applies and the run plays with Sega's client drops: it degrades to the old behaviour, never to a lost item.
@@ -37,6 +44,11 @@ struct SpireDropsConfig {
   uint32_t levels_ahead = 5; // LevelsAhead (item 26: "hooguit een gebied vooruit"; 0 = only usable now)
   uint32_t pity_drops = 8; // PityDrops (item 27; 0 = off)
   bool boss_weapon_per_player = true; // BossWeaponPerPlayer (item 28)
+  uint32_t boss_grind_base = 0; // BossGrindBase (F8; boss weapon grind = base + per_k * k, 0 and 0 = none)
+  uint32_t boss_grind_per_k = 0; // BossGrindPerK
+  uint32_t boss_hit_base = 0; // BossHitBase (F8; boss weapon Hit = base + per_k * k, 0 and 0 = none)
+  uint32_t boss_hit_per_k = 0; // BossHitPerK
+  uint32_t pick_from_k = 0; // PickFromK (F8; picked weapons get grind and Hit from this room on; 0 = never)
 
   static SpireDropsConfig from_json(const phosg::JSON& json);
   std::string str() const;
@@ -67,11 +79,37 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
 // rangers), the common weapons of his class he lacks the least for. Empty only if his class can equip none.
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random);
 
+// F8: the grind and Hit a weapon gets (0 = none)
+struct SpireWeaponBoost {
+  uint8_t grind = 0;
+  uint8_t hit = 0;
+};
+constexpr uint8_t SPIRE_WEAPON_ATTRIBUTE_HIT = 5; // attribute type of Hit in data1[6], [8], [10]
+constexpr uint32_t SPIRE_DROPS_BOSS_HIT_MAX = 50;
+constexpr uint32_t SPIRE_DROPS_PICK_HIT_MAX = 25;
+constexpr uint32_t SPIRE_DROPS_PICK_GRIND_BASE = 1, SPIRE_DROPS_PICK_GRIND_PER_K = 1;
+constexpr uint32_t SPIRE_DROPS_PICK_HIT_BASE = 5, SPIRE_DROPS_PICK_HIT_PER_K = 2;
+// The boss weapon of room k: grind BossGrindBase + BossGrindPerK * k (capped at 255; MaxGrind is applied by
+// spire_drops_boost_weapon), Hit min(50, BossHitBase + BossHitPerK * k). Nothing for k 0 (room unknown).
+SpireWeaponBoost spire_drops_boss_boost(const SpireDropsConfig& cfg, uint32_t k);
+// A picked weapon in room k: grind 1 + k, Hit min(25, 5 + 2k) from PickFromK on; nothing before it, nothing with
+// PickFromK 0 or k 0.
+SpireWeaponBoost spire_drops_pick_boost(const SpireDropsConfig& cfg, uint32_t k);
+// Gives a weapon at least this grind (capped at its MaxGrind in Sega's table) and at least this Hit, in its attribute
+// slot of type 5, else in its first empty slot (never a second slot of one type; no empty slot: no Hit). Never lowers
+// a grind or Hit it has, never touches its special byte. Returns true if the item changed. Not a weapon, or not in
+// Sega's table: unchanged.
+bool spire_drops_boost_weapon(const ItemParameterTable& pmt, ItemData& item, SpireWeaponBoost boost);
+// The room k of a floor in a game of this episode: the highest K SpireCheckpointRooms gives any room of that floor
+// (a boss floor's Room -1 entry; a floor with two listed rooms, Forest 1, its later one), or 0 if none.
+uint8_t spire_drops_floor_k(const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>& rooms_by_episode,
+    Episode episode, uint8_t floor);
+
 // The decision for one item made for one player, free of state for the static tests. Changes item (cleared or
-// replaced) and pity (kept drops in a row without a weapon usable now). Returns why the item changed, or nullptr if it
-// was kept as it is.
+// replaced) and pity (kept drops in a row without a weapon usable now). k is the room (F8 grind and Hit; 0 = unknown, no
+// grind or Hit). Returns why the item changed, or nullptr if it was kept as it is.
 const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParameterTable& pmt, ItemData& item,
-    const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random);
+    const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random, uint32_t k = 0);
 
 // Item 28 applies to the drop of this enemy: a boss (EnemyType BOSS flag), except the Vol Opt parts before its end.
 // Vol Opt's monitors, pillars, amp, core and phase 1 carry the BOSS flag too, but only VOL_OPT_2 falling ends the fight

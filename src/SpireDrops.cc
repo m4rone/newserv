@@ -148,8 +148,25 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
   return best.empty() ? ItemData() : best[random % best.size()];
 }
 
+SpireWeaponBoost spire_drops_boss_boost(const SpireDropsConfig&, uint32_t) {
+  return SpireWeaponBoost(); // F8 stub (red tests first)
+}
+
+SpireWeaponBoost spire_drops_pick_boost(const SpireDropsConfig&, uint32_t) {
+  return SpireWeaponBoost(); // F8 stub (red tests first)
+}
+
+bool spire_drops_boost_weapon(const ItemParameterTable&, ItemData&, SpireWeaponBoost) {
+  return false; // F8 stub (red tests first)
+}
+
+uint8_t spire_drops_floor_k(
+    const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>&, Episode, uint8_t) {
+  return 0; // F8 stub (red tests first)
+}
+
 const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParameterTable& pmt, ItemData& item,
-    const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random) {
+    const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random, uint32_t) {
   auto fit = spire_drops_weapon_fit(pmt, item, p);
   auto give_weapon = [&](const char* why, const char* why_none) -> const char* {
     ItemData w = spire_drops_pick_weapon(pmt, p, random);

@@ -2440,6 +2440,262 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire drops F8: boss and picked weapons carry grind and Hit (route B, plan section 6)");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto lv1 = [&](uint8_t cls, uint32_t ahead) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, ahead);
+      return p;
+    };
+    auto weapon = [](uint8_t group, uint8_t index) {
+      ItemData ret;
+      ret.data1[0] = 0x00;
+      ret.data1[1] = group;
+      ret.data1[2] = index;
+      return ret;
+    };
+    // The Hit of a weapon (its attribute slot of type 5), or -1 if it has none; fails on a second slot of one type
+    auto hit_of = [](const ItemData& w) -> int {
+      int ret = -1;
+      std::set<uint8_t> types;
+      for (size_t z = 6; z <= 10; z += 2) {
+        uint8_t type = w.data1[z];
+        if (type == 0) {
+          continue;
+        }
+        expect(types.emplace(type).second); // no duplicate attribute type
+        if (type == SPIRE_WEAPON_ATTRIBUTE_HIT) {
+          ret = static_cast<int8_t>(w.data1[z + 1]);
+        }
+      }
+      return ret;
+    };
+    auto never_forbidden = [](const ItemData& it) {
+      expect(it.data1[0] != 0x02); // never a mag
+      expect(!spire_drop_is_forbidden(it)); // never a Scape Doll
+    };
+
+    // Config: missing keys keep the drops as before F8 (no grind, no Hit, LevelsAhead 5, PityDrops 8)
+    auto old_cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    expect_eq(0u, old_cfg.boss_grind_base);
+    expect_eq(0u, old_cfg.boss_grind_per_k);
+    expect_eq(0u, old_cfg.boss_hit_base);
+    expect_eq(0u, old_cfg.boss_hit_per_k);
+    expect_eq(0u, old_cfg.pick_from_k);
+    expect_eq(5u, old_cfg.levels_ahead);
+    expect_eq(8u, old_cfg.pity_drops);
+    for (uint32_t k = 0; k <= 15; k++) {
+      expect_eq(0, spire_drops_boss_boost(old_cfg, k).grind);
+      expect_eq(0, spire_drops_boss_boost(old_cfg, k).hit);
+      expect_eq(0, spire_drops_pick_boost(old_cfg, k).grind);
+      expect_eq(0, spire_drops_pick_boost(old_cfg, k).hit);
+    }
+    // The route B values (config.example.json SpireDrops)
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse(
+        "{\"DropMode\": \"SERVER_PRIVATE\", \"OnlyRunItems\": true, \"LevelsAhead\": 8, \"PityDrops\": 6, "
+        "\"BossWeaponPerPlayer\": true, \"BossGrindBase\": 2, \"BossGrindPerK\": 2, \"BossHitBase\": 10, "
+        "\"BossHitPerK\": 4, \"PickFromK\": 5}"));
+    expect_eq(2u, cfg.boss_grind_base);
+    expect_eq(2u, cfg.boss_grind_per_k);
+    expect_eq(10u, cfg.boss_hit_base);
+    expect_eq(4u, cfg.boss_hit_per_k);
+    expect_eq(5u, cfg.pick_from_k);
+    expect_eq(8u, cfg.levels_ahead);
+    expect_eq(6u, cfg.pity_drops);
+    for (const char* bad : {"{\"BossGrindBase\": -1}", "{\"BossHitPerK\": 1000}", "{\"PickFromK\": -2}"}) {
+      bool threw = false;
+      try {
+        SpireDropsConfig::from_json(phosg::JSON::parse(bad));
+      } catch (const std::runtime_error&) {
+        threw = true;
+      }
+      expect(threw);
+    }
+    // The plan's boss table: Dragon k4 +10 26%, De Rol Le k8 +18 42%, Vol Opt k11 +24 50%, Dark Falz k15 +32 50%
+    expect_eq(10, spire_drops_boss_boost(cfg, 4).grind);
+    expect_eq(26, spire_drops_boss_boost(cfg, 4).hit);
+    expect_eq(18, spire_drops_boss_boost(cfg, 8).grind);
+    expect_eq(42, spire_drops_boss_boost(cfg, 8).hit);
+    expect_eq(24, spire_drops_boss_boost(cfg, 11).grind);
+    expect_eq(50, spire_drops_boss_boost(cfg, 11).hit);
+    expect_eq(32, spire_drops_boss_boost(cfg, 15).grind);
+    expect_eq(50, spire_drops_boss_boost(cfg, 15).hit);
+    expect_eq(0, spire_drops_boss_boost(cfg, 0).grind); // room unknown: nothing
+    expect_eq(0, spire_drops_boss_boost(cfg, 0).hit);
+    // Picked weapons: nothing before k5, then grind 1 + k and Hit min(25, 5 + 2k)
+    expect_eq(0, spire_drops_pick_boost(cfg, 4).grind);
+    expect_eq(0, spire_drops_pick_boost(cfg, 4).hit);
+    expect_eq(6, spire_drops_pick_boost(cfg, 5).grind);
+    expect_eq(15, spire_drops_pick_boost(cfg, 5).hit);
+    expect_eq(11, spire_drops_pick_boost(cfg, 10).grind);
+    expect_eq(25, spire_drops_pick_boost(cfg, 10).hit);
+    expect_eq(16, spire_drops_pick_boost(cfg, 15).grind);
+    expect_eq(25, spire_drops_pick_boost(cfg, 15).hit);
+
+    // Every common weapon of groups 01-0C, every index, k1-k15, boss and picked: grind = min(MaxGrind, formula), Hit =
+    // the formula (at most 50, picked at most 25) in a slot of type 5, special byte 0, no duplicate attribute type
+    size_t checked = 0;
+    for (uint8_t group = 0x01; group <= 0x0C; group++) {
+      size_t count = pmt->num_weapons_in_class(group);
+      expect(count > 0);
+      for (size_t index = 0; index < count; index++) {
+        ItemData plain = weapon(group, index);
+        if (pmt->is_item_rare(plain)) {
+          continue;
+        }
+        uint8_t max_grind = pmt->get_weapon(group, index).max_grind;
+        for (uint32_t k = 1; k <= 15; k++) {
+          for (bool boss : {true, false}) {
+            auto boost = boss ? spire_drops_boss_boost(cfg, k) : spire_drops_pick_boost(cfg, k);
+            ItemData w = plain;
+            bool changed = spire_drops_boost_weapon(*pmt, w, boost);
+            expect_eq(0x00, w.data1[0]);
+            expect_eq(group, w.data1[1]);
+            expect_eq(static_cast<uint8_t>(index), w.data1[2]);
+            expect_eq(std::min<uint32_t>(max_grind, boost.grind), w.data1[3]);
+            expect(w.data1[3] <= max_grind);
+            expect_eq(0x00, w.data1[4]); // special byte
+            int hit = hit_of(w);
+            expect(hit <= static_cast<int>(boss ? SPIRE_DROPS_BOSS_HIT_MAX : SPIRE_DROPS_PICK_HIT_MAX));
+            expect_eq(boost.hit ? static_cast<int>(boost.hit) : -1, hit);
+            expect_eq(changed, (w.data1[3] != 0) || (hit >= 0));
+            if (boss) {
+              expect(hit > 0); // every boss weapon from k1 on carries Hit
+            }
+            never_forbidden(w);
+            checked++;
+          }
+        }
+      }
+    }
+    expect(checked > 1000);
+
+    // The boost never lowers what a weapon has, keeps its other attributes and fills its type-5 slot
+    {
+      ItemData w = weapon(0x01, 0x00); // Saber
+      w.data1[3] = 30;
+      w.data1[6] = 0x01; // Native 20%
+      w.data1[7] = 20;
+      w.data1[8] = SPIRE_WEAPON_ATTRIBUTE_HIT;
+      w.data1[9] = 45;
+      spire_drops_boost_weapon(*pmt, w, {10, 26});
+      expect_eq(30, w.data1[3]);
+      expect_eq(0x01, w.data1[6]);
+      expect_eq(20, w.data1[7]);
+      expect_eq(45, hit_of(w));
+      w.data1[9] = 5;
+      expect(spire_drops_boost_weapon(*pmt, w, {10, 26}));
+      expect_eq(26, hit_of(w));
+      expect_eq(SPIRE_WEAPON_ATTRIBUTE_HIT, w.data1[8]); // in its own slot, not a second one
+      expect_eq(0x00, w.data1[10]);
+      // Three attributes and none is Hit: no Hit, grind still
+      ItemData full = weapon(0x01, 0x00);
+      full.data1[6] = 1;
+      full.data1[8] = 2;
+      full.data1[10] = 3;
+      full.data1[7] = full.data1[9] = full.data1[11] = 10;
+      expect(spire_drops_boost_weapon(*pmt, full, {10, 26}));
+      expect_eq(10, full.data1[3]);
+      expect_eq(-1, hit_of(full));
+      // Not a weapon: unchanged
+      ItemData mate;
+      mate.data1[0] = 0x03;
+      expect(!spire_drops_boost_weapon(*pmt, mate, {10, 26}));
+      expect_eq(0x00, mate.data1[3]);
+    }
+
+    // Room k of a floor (the lab's SpireCheckpointRooms): the highest K of the floor
+    {
+      std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>> rooms;
+      rooms[1] = {{{1, 7}, 2}, {{1, 10}, 2}, {{1, 11}, 1}, {{3, 50}, 5}, {{11, -1}, 4}, {{12, -1}, 8}, {{13, -1}, 11},
+          {{14, -1}, 15}};
+      rooms[2] = {{{14, -1}, 18}};
+      expect_eq(2, spire_drops_floor_k(rooms, Episode::EP1, 1));
+      expect_eq(5, spire_drops_floor_k(rooms, Episode::EP1, 3));
+      expect_eq(4, spire_drops_floor_k(rooms, Episode::EP1, 11));
+      expect_eq(8, spire_drops_floor_k(rooms, Episode::EP1, 12));
+      expect_eq(11, spire_drops_floor_k(rooms, Episode::EP1, 13));
+      expect_eq(15, spire_drops_floor_k(rooms, Episode::EP1, 14));
+      expect_eq(18, spire_drops_floor_k(rooms, Episode::EP2, 14));
+      expect_eq(0, spire_drops_floor_k(rooms, Episode::EP1, 0)); // Pioneer 2
+      expect_eq(0, spire_drops_floor_k(rooms, Episode::EP1, 2)); // not listed
+      expect_eq(0, spire_drops_floor_k(rooms, Episode::EP4, 1));
+    }
+
+    // In the filter: each player's boss weapon (Sega's drop or picked) carries the boss grind and Hit of room k, a
+    // picked weapon the pick grind and Hit; never a mag, never a Scape Doll
+    {
+      ItemData monomate, mag, scape_doll, saber = weapon(0x01, 0x00), sword = weapon(0x02, 0x00);
+      monomate.data1[0] = 0x03;
+      mag.data1[0] = 0x02;
+      scape_doll.data1[0] = 0x03;
+      scape_doll.data1[1] = 0x09;
+      for (uint8_t cls = 0; cls < 12; cls++) {
+        for (uint32_t k = 1; k <= 15; k++) {
+          for (const auto& sega : {ItemData(), monomate, mag, scape_doll, sword}) {
+            uint32_t pity = 0;
+            ItemData it = sega;
+            expect(spire_drops_filter_item(cfg, *pmt, it, lv1(cls, 8), true, pity, k * 7 + cls, k) != nullptr);
+            never_forbidden(it);
+            expect(!it.empty());
+            auto boost = spire_drops_boss_boost(cfg, k);
+            expect_eq(std::min(pmt->get_weapon(it.data1[1], it.data1[2]).max_grind, boost.grind), it.data1[3]);
+            expect_eq(static_cast<int>(boost.hit), hit_of(it));
+            expect_eq(0x00, it.data1[4]);
+          }
+          // A replaced weapon (a class that cannot equip it) and a pity weapon: the pick grind and Hit from k5 on
+          auto pick = spire_drops_pick_boost(cfg, k);
+          uint32_t pity = 0;
+          ItemData it = char_class_is_force(cls) ? sword : weapon(0x0A, 0x00); // Cane: for forces only
+          expect(spire_drops_filter_item(cfg, *pmt, it, lv1(cls, 8), false, pity, k, k) != nullptr);
+          never_forbidden(it);
+          expect_eq(std::min(pmt->get_weapon(it.data1[1], it.data1[2]).max_grind, pick.grind), it.data1[3]);
+          expect_eq(pick.hit ? static_cast<int>(pick.hit) : -1, hit_of(it));
+          expect_eq(0x00, it.data1[4]);
+          pity = cfg.pity_drops;
+          it = monomate;
+          expect(spire_drops_filter_item(cfg, *pmt, it, lv1(cls, 8), false, pity, k, k) != nullptr);
+          expect_eq(pick.hit ? static_cast<int>(pick.hit) : -1, hit_of(it));
+          // Not a boss and not picked: a mag or a Scape Doll is removed, never boosted into something
+          for (const auto& bad : {mag, scape_doll}) {
+            pity = 0;
+            it = bad;
+            spire_drops_filter_item(cfg, *pmt, it, lv1(cls, 8), false, pity, k, k);
+            expect(it.empty());
+          }
+        }
+      }
+      // Sega's own boss drop that the player can equip: kept, now with the boss grind and Hit (Dragon, k4)
+      uint32_t pity = 0;
+      ItemData it = saber;
+      SpireDropPlayer strong = lv1(0, 8);
+      strong.now.atp = strong.ahead.atp = 999;
+      expect(spire_drops_filter_item(cfg, *pmt, it, strong, true, pity, 0, 4) != nullptr);
+      expect_eq(0x01, it.data1[1]);
+      expect_eq(0x00, it.data1[2]);
+      expect_eq(10, it.data1[3]);
+      expect_eq(26, hit_of(it));
+      // Missing keys: the boss weapon has no grind and no Hit, Sega's fitting drop stays as it is (before F8)
+      it = saber;
+      expect(spire_drops_filter_item(old_cfg, *pmt, it, strong, true, pity, 0, 8) == nullptr);
+      expect_eq(0, it.data1[3]);
+      expect_eq(-1, hit_of(it));
+      it = ItemData();
+      expect(spire_drops_filter_item(old_cfg, *pmt, it, lv1(0, 5), true, pity, 0, 8) != nullptr);
+      expect_eq(0, it.data1[3]);
+      expect_eq(-1, hit_of(it));
+      // Room unknown (k 0): nothing added
+      it = ItemData();
+      spire_drops_filter_item(cfg, *pmt, it, lv1(0, 8), true, pity, 0, 0);
+      expect_eq(0, it.data1[3]);
+      expect_eq(-1, hit_of(it));
+    }
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();
