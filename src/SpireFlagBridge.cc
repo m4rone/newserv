@@ -3433,6 +3433,8 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
 // v39: clients whose 98 from a Normal or Solo game under AwaitingSave is still to be taken into the snapshot. Keyed by
 // the Client's address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_follow_pending;
+// v61: the clients that left the base game under AwaitingSave (spire_guard_end_run); the next 84 sends them a 97
+static std::unordered_set<const Client*> spire_guard_base_game_left;
 
 // v51: clients whose 98 leaves a Spire game after a verified 'O' (spire_guard_base_exit_follow). Keyed by the Client's
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
@@ -3476,6 +3478,7 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
               l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO)), base_game)) {
         spire_guard_follow_pending.emplace(c.get());
       } else if (snapshot.awaiting_save && base_game) {
+        spire_guard_base_game_left.emplace(c.get());
         c->log.info_f("Spire guard: 98 of the base game (q{}) for serial {:010}; AwaitingSave stays open until a login 61 equals the snapshot {} (v59)",
             quest_number, serial_number, spire_guard_describe(snapshot));
       }
@@ -4037,7 +4040,13 @@ struct SpireBaseGameMark {
   GameMode mode = GameMode::NORMAL; // v58: BATTLE for a new run from the base
   uint32_t quest_number = 0; // the quest the new game starts: SpireBaseQuest, or the run quest (v58)
   uint32_t run_quest_number = 0; // the run quest the base came from (v58: its "Start a new run" starts this one)
+  uint32_t leader_serial = 0; // v60: the leader of the game they leave; only this client creates the next game
 };
+// v60: the serial of the game's leader, or 0
+static uint32_t spire_base_leader_serial(std::shared_ptr<const Lobby> l) {
+  auto lc = (l->leader_id < l->max_clients) ? l->clients[l->leader_id] : nullptr;
+  return lc ? spire_bridge_serial_for_client(lc) : 0;
+}
 // v58: base game id -> the run quest it came from
 static std::unordered_map<uint32_t, uint32_t> spire_base_game_run_quests;
 struct SpireBaseGameGroup {
@@ -4064,6 +4073,7 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
   mark.expected = std::max<size_t>(1, l->count_clients());
   mark.quest_number = quest_number;
   mark.run_quest_number = l->quest->meta.quest_number;
+  mark.leader_serial = spire_base_leader_serial(l);
   // v58: the whole party goes: every client of the run's game is marked and sent out once (one that the server already
   // sent back to the lobby after the run end is only marked)
   auto end_it = spire_run_ends.find(l->lobby_id);
@@ -4189,6 +4199,20 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
           mark.quest_number, serial_number);
       co_return;
     }
+    // v60: the previous leader creates the next game, so he leads it again; another client waits for that game up to
+    // SPIRE_BASE_GAME_LEADER_WAIT (the leader may be slower out of the lobby) and only then creates one itself
+    if (mark.leader_serial && (mark.leader_serial != serial_number)) {
+      for (size_t z = 0; z < SPIRE_BASE_GAME_LEADER_WAIT_POLLS; z++) {
+        auto it = spire_base_game_groups.find(mark.group);
+        if ((it != spire_base_game_groups.end()) && !it->second.game.expired()) {
+          break;
+        }
+        co_await async_sleep(std::chrono::milliseconds(500));
+        if (!c->channel->connected() || !c->lobby.lock() || c->lobby.lock()->is_game()) {
+          co_return;
+        }
+      }
+    }
     auto& group = spire_base_game_groups[mark.group];
     auto game = group.game.lock();
     bool created = false;
@@ -4208,11 +4232,15 @@ static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, 
         spire_base_game_run_quests[game->lobby_id] = mark.run_quest_number;
       }
     }
+    // v60: what the server holds for this client when it joins (the game join command carries it to the client)
+    auto joined_with = c->character_file(false, false);
     s->change_client_lobby(c, game);
     c->set_flag(Client::Flag::LOADING);
-    c->log.info_f("Spire base game: serial {:010} {} {} game {:08X} for q{} (from game {:08X}, {} expected)", serial_number,
-        created ? "created" : "joined", (mark.mode == GameMode::BATTLE) ? "the new run's Battle" : "the base",
-        game->lobby_id, mark.quest_number, mark.group, mark.expected);
+    c->log.info_f("Spire base game: serial {:010} {} {} game {:08X} for q{} (from game {:08X}, {} expected; server data Lv{} {} items{})",
+        serial_number, created ? "created" : "joined", (mark.mode == GameMode::BATTLE) ? "the new run's Battle" : "the base",
+        game->lobby_id, mark.quest_number, mark.group, mark.expected,
+        joined_with ? joined_with->disp.stats.level + 1 : 0, joined_with ? joined_with->inventory.num_items : 0,
+        c->has_overlay() ? ", overlay" : "");
     if (created) {
       asio::co_spawn(*s->io_context, spire_base_game_start(game, mark.group, mark.expected, mark.quest_number),
           asio::detached);
@@ -4255,6 +4283,7 @@ static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby>
       mark.mode = GameMode::BATTLE;
       mark.quest_number = run_quest_number;
       mark.run_quest_number = run_quest_number;
+      mark.leader_serial = spire_bridge_serial_for_client(c); // the leader asked (checked above)
       spire_base_game_marks[serial_number] = mark;
       G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
       lc->channel->send(0x60, 0x00, cmd);
@@ -4741,6 +4770,20 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
 }
 
 // v47: the restore runs when the client leaves the game, before the lobby join (see SpireFlagBridge.hh)
+
+// v61: 97 with flag 1 makes the client save its character to the memory card (CommandFormats.hh). Measured 2026-10-26
+// (lab, cardwatch): the client writes its card at every game join with only the equipped items (Sega's protection
+// against a game that is not left properly) and wrote nothing at a server-sent 6x73 exit, so after a Spire run and the
+// base the card kept 8 of 23 items until the next login restore. Sent only when the save buffer holds the verified real
+// character: after a verified game exit restore and after the base game (pushed and verified before q925).
+static void spire_guard_save_to_card(std::shared_ptr<Client> c, uint32_t serial_number, const char* why) {
+  if (!c->channel->connected() || c->lobby.lock()) {
+    return; // only between the game and the lobby, like the restore itself
+  }
+  send_command(c, 0x97, 0x01);
+  c->log.info_f("Spire guard: 97 (save to memory card) sent for serial {:010} after {} (v61)", serial_number, why);
+}
+
 asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
@@ -4761,6 +4804,9 @@ asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c
     co_return false;
   }
   if (!spire_guard_marker_open(c->is_spire_protected(), false, snapshot.restore_pending, false)) {
+    if (spire_guard_base_game_left.erase(c.get()) && snapshot.awaiting_save && !c->is_spire_protected()) {
+      spire_guard_save_to_card(c, serial_number, "the base game");
+    }
     co_return true;
   }
 
@@ -4777,6 +4823,7 @@ asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c
   }
   c->log.info_f("Spire guard: restored {} for serial {:010} at the game exit; the lobby join follows; marker stays until the next login confirms it",
       spire_guard_describe(snapshot), serial_number);
+  spire_guard_save_to_card(c, serial_number, "the game exit restore");
   co_return true;
 }
 

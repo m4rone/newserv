@@ -812,6 +812,8 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 // SPIRE_BASE_GAME_WAIT). A client that left meanwhile, or a base game that is gone or already started, is left alone.
 constexpr auto SPIRE_BASE_GAME_LOBBY_SETTLE = std::chrono::seconds(4);
 constexpr auto SPIRE_BASE_GAME_WAIT = std::chrono::seconds(40);
+// v60: a client that was not the leader waits this many 500 ms polls for the leader's game before it makes one
+constexpr size_t SPIRE_BASE_GAME_LEADER_WAIT_POLLS = 40;
 // Marks c (of game l) for the base game and sends it out of l with 6x73. Returns false (nothing marked or sent) if
 // there is no base quest, the client has no serial, or l is not a game with a quest.
 bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, const char* why);
