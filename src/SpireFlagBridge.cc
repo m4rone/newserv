@@ -2286,6 +2286,14 @@ std::string spire_guard_materials_str(const PlayerInventory& inv) {
       inv.items[12].extension_data2, inv.hp_from_materials >> 1, inv.tp_from_materials >> 1);
 }
 
+// v56 (live 2026-10-26 20:47:39, 'I' took the run copy M4ia Lv17 3 items for the real Lv162 27 items): see
+// SpireFlagBridge.hh
+bool spire_guard_snapshot_not_worse(
+    const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot) {
+  return spire_guard_same_character(disp, snapshot.disp) && (disp.stats.level >= snapshot.disp.stats.level) &&
+      (disp.stats.exp >= snapshot.disp.stats.exp) && (inventory.num_items >= snapshot.inventory.num_items);
+}
+
 // v32: level, EXP, meseta and items equal (spire_guard_same_inventory); v38: and the material counters
 bool spire_guard_same_state(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
     const PlayerInventory& snapshot_inventory, const PlayerDispDataV4& snapshot_disp) {
@@ -2340,6 +2348,11 @@ bool spire_guard_follow_real_progress(
   if (!snapshot.awaiting_save || snapshot.run_in_progress || snapshot.restore_pending || !snapshot.has_character) {
     return false;
   }
+  // v56: a real character never loses level or EXP, so data below the snapshot's is a run copy; the snapshot stays
+  // (items may go: outside a run the player can sell or hand them over)
+  if ((disp.stats.level < snapshot.disp.stats.level) || (disp.stats.exp < snapshot.disp.stats.exp)) {
+    return false;
+  }
   snapshot.inventory = inventory;
   snapshot.disp = disp;
   // v40: the client writes its card when it leaves the game, so the card holds the real character from now on
@@ -2352,7 +2365,7 @@ bool spire_guard_follow_real_progress(
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
   if (!base_returned || !snapshot.has_character || !snapshot.run_in_progress || snapshot.restore_pending ||
-      snapshot.awaiting_save || !spire_guard_same_character(disp, snapshot.disp)) {
+      snapshot.awaiting_save || !spire_guard_snapshot_not_worse(inventory, disp, snapshot)) {
     return false;
   }
   snapshot.inventory = inventory;
@@ -2366,7 +2379,7 @@ bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_return
 bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp) {
   if (!base_returned || !snapshot.has_character || snapshot.run_in_progress || !snapshot.restore_pending ||
-      snapshot.awaiting_save || !spire_guard_same_character(disp, snapshot.disp) ||
+      snapshot.awaiting_save || !spire_guard_snapshot_not_worse(inventory, disp, snapshot) ||
       (disp.stats.level != snapshot.disp.stats.level) || (disp.stats.exp != snapshot.disp.stats.exp)) {
     return false;
   }
@@ -3122,6 +3135,84 @@ static bool spire_game_any_client_loading(std::shared_ptr<const Lobby> l) {
   return false;
 }
 
+// v56: the proof of a return to base ('O', SpireFlagBridge.hh). The push reaches only the client's save buffer, and
+// the client copies its live player (still the run copy) back into it at the next floor change (live 2026-10-26
+// 20:43-20:47: after 'O' OK and the warp to Pioneer 2 the 61 showed the run copy, and the 'I' stored it as the real
+// character). So the return to base counts (one 'I' allowed, spire_base_returned_note) only when a 61 asked on
+// Pioneer 2, after the warp, equals the snapshot; otherwise the client leaves with 6x73 as before 'O' existed, marker
+// unchanged, and the restore at the game exit pushes the snapshot. A client that leaves meanwhile is left to that exit.
+static asio::awaitable<void> spire_base_return_prove(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l,
+    uint32_t serial_number, uint32_t quest_number, std::string filename) {
+  const char* why = nullptr;
+  std::string seen;
+  for (size_t z = 0;; z++) {
+    co_await async_sleep(SPIRE_BASE_PROOF_POLL);
+    auto c = weak_c.lock();
+    auto l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l) || !c->channel->connected()) {
+      co_return;
+    }
+    if ((c->floor == 0) && !spire_game_any_client_loading(l)) {
+      break;
+    }
+    if (z >= SPIRE_BASE_PROOF_POLLS) {
+      why = "the client did not reach Pioneer 2 in time";
+      break;
+    }
+  }
+  if (!why) {
+    co_await async_sleep(SPIRE_BASE_PROOF_SETTLE);
+  }
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l) || !c->channel->connected()) {
+    co_return;
+  }
+  if (!why) {
+    try {
+      auto executor = co_await asio::this_coro::executor;
+      SpireGuardSnapshot snapshot = spire_guard_load(filename);
+      GetPlayerInfoResult now;
+      {
+        SpireGuardWatchdog watchdog(executor, c, serial_number, "61 for the base proof", false);
+        now = co_await send_get_player_info(c, false);
+      }
+      if (!now.character) {
+        why = "no 61";
+      } else {
+        seen = std::format(" (61 shows Lv{} EXP {}, {} items; snapshot {}, {} items)", now.character->disp.stats.level + 1,
+            now.character->disp.stats.exp.load(), now.character->inventory.num_items, spire_guard_describe(snapshot),
+            snapshot.inventory.num_items);
+        if (!snapshot.has_character || !snapshot.run_in_progress ||
+            !spire_guard_same_character(now.character->disp, snapshot.disp) ||
+            !spire_guard_same_state(now.character->inventory, now.character->disp, snapshot.inventory, snapshot.disp)) {
+          why = "the live player on Pioneer 2 is not the real character";
+        }
+      }
+    } catch (const std::exception& e) {
+      seen = std::format(" ({})", e.what());
+      why = "the 61 failed";
+    }
+    c = weak_c.lock();
+    l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l) || !c->channel->connected()) {
+      co_return;
+    }
+  }
+  if (!why) {
+    spire_base_returned_note(c, l->lobby_id); // v49: the one 'I' this allows
+    c->log.info_f("Spire base return: proven on Pioneer 2 for serial {:010} in q{}{}; one 'I' allowed",
+        serial_number, quest_number, seen);
+    co_return;
+  }
+  c->log.warning_f("Spire base return: not proven for serial {:010} in q{}: {}{}; leaving with 6x73, marker unchanged (the game exit restores the snapshot)",
+      serial_number, quest_number, why, seen);
+  if (l->check_flag(Lobby::Flag::QUEST_IN_PROGRESS) || l->check_flag(Lobby::Flag::JOINABLE_QUEST_IN_PROGRESS)) {
+    G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
+    c->channel->send(0x60, 0x00, cmd);
+  }
+}
+
 // v48: the return to base ('O', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number) {
@@ -3179,7 +3270,9 @@ static asio::awaitable<void> spire_base_return(
         if (!verified) {
           refusal = R::PUSH_NOT_VERIFIED;
         } else {
-          spire_base_returned_note(c, l->lobby_id); // v49: the one 'I' this allows
+          // v56: the 'I' this allows comes only with the proof on Pioneer 2 (spire_base_return_prove)
+          asio::co_spawn(*c->require_server_state()->io_context,
+              spire_base_return_prove(c, l, serial_number, quest_number, filename), asio::detached);
         }
       }
     }
@@ -3266,8 +3359,11 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     SpireGuardSnapshot before = snapshot;
     if (!now.character ||
         !spire_guard_run_again_retake(snapshot, true, now.character->inventory, now.character->disp, quest_number, phosg::now())) {
-      c->log.warning_f("Spire run again: the 61 for serial {:010} is not the snapshot's character ({}); nothing changed",
-          serial_number, spire_guard_describe(before));
+      c->log.warning_f("Spire run again: the 61 for serial {:010} is not the snapshot's character or below it ({}{}); kept the stored snapshot, nothing changed",
+          serial_number, spire_guard_describe(before),
+          now.character ? std::format("; 61 shows Lv{} EXP {}, {} items, snapshot {} items", now.character->disp.stats.level + 1,
+                              now.character->disp.stats.exp.load(), now.character->inventory.num_items, before.inventory.num_items)
+                        : std::string());
       co_return R::NOT_REAL;
     }
     auto real = c->character_file(false, false);

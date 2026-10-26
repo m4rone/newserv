@@ -783,6 +783,11 @@ uint32_t spire_base_return_answer(SpireBaseReturnRefusal r);
 //   no 6x73 of the earlier run can reach the new one.
 constexpr uint8_t SPIRE_BRIDGE_RUN_AGAIN = 'I';
 constexpr uint8_t SPIRE_RUN_AGAIN_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_REGISTER; // r41, as 'J' and 'O' (another tag)
+// v56: the proof of an 'O' OK on Pioneer 2 (spire_base_return_prove): poll the floor every SPIRE_BASE_PROOF_POLL for
+// at most SPIRE_BASE_PROOF_POLLS times (the warp after the answer), then SPIRE_BASE_PROOF_SETTLE before the 61
+constexpr auto SPIRE_BASE_PROOF_POLL = std::chrono::milliseconds(500);
+constexpr size_t SPIRE_BASE_PROOF_POLLS = 120;
+constexpr auto SPIRE_BASE_PROOF_SETTLE = std::chrono::seconds(3);
 constexpr uint32_t SPIRE_RUN_AGAIN_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_RUN_AGAIN) << 24;
 constexpr uint32_t SPIRE_RUN_AGAIN_OK = 1;
 constexpr uint32_t SPIRE_RUN_AGAIN_FAIL = 0;
@@ -851,9 +856,16 @@ uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r);
 
 // The floors an 'I' may come from: Pioneer 2 and Forest 1 (floor 1 is also the first field floor of Episode 2).
 bool spire_run_again_floor_ok(uint32_t floor);
+// v56: true if character data may replace the snapshot of an open run (the 'I' re-take, the 98 after 'O'): the same
+// character (name, class, section ID) with at least the snapshot's level, EXP and number of items. A run copy is
+// lower in at least one of them; on doubt the stored snapshot stays (live 2026-10-26 20:47:39: after 'O' the live
+// player was still the run copy, and the 'I' re-take stored it as the real character).
+bool spire_guard_snapshot_not_worse(
+    const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot);
 // The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
-// RunInProgress alone and a character, and the data is the same character (name, class, section ID); then the snapshot
-// takes the data, the quest and the time, and RunInProgress stays.
+// RunInProgress alone and a character, and the data is the same character (name, class, section ID) and (v56) not
+// worse than the snapshot (spire_guard_snapshot_not_worse); then the snapshot takes the data, the quest and the time,
+// and RunInProgress stays.
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
 // v51: the 98 of a client that leaves the game after a verified return to base ('O' OK, no 'I' since): its memory has

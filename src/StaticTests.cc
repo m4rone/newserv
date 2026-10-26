@@ -336,15 +336,36 @@ void run_static_tests() {
       return snap;
     };
     // after 'O' OK: the 61 of the base is the real character, the snapshot takes it and RunInProgress stays
+    auto spent = make(20, 0x00, 51, 700, "BidX", 3); // spent meseta in the base
     auto snap = fresh();
-    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
-    expect_eq(19u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect(spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save && snap.has_character);
     expect_eq(2u, snap.snapshot_time_usecs);
+    // v56 (live 2026-10-26 20:47:39): never fewer items, a lower level or less EXP than the stored snapshot; the
+    // stored one stays. One item fewer, the run copy (Lv6, 3 items), the same level with less EXP:
+    snap = fresh();
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(1u, snap.snapshot_time_usecs);
+    auto run_copy = make(3, 0x00, 5, 0, "BidX", 3);
+    expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
+    expect_eq(51u, snap.disp.stats.level.load());
+    snap.disp.stats.exp = 90000;
+    auto less_exp = make(20, 0x00, 51, 1000, "BidX", 3);
+    less_exp.second.stats.exp = 89999;
+    expect(!spire_guard_snapshot_not_worse(less_exp.first, less_exp.second, snap));
+    expect(!spire_guard_run_again_retake(snap, true, less_exp.first, less_exp.second, 921, 2));
+    expect_eq(90000u, snap.disp.stats.exp.load());
+    // more items and a higher level are not worse
+    auto gained = make(21, 0x00, 52, 0, "BidX", 3);
+    gained.second.stats.exp = 95000;
+    expect(spire_guard_snapshot_not_worse(gained.first, gained.second, snap));
+    expect(!spire_guard_snapshot_not_worse(other.first, other.second, fresh()));
     // no verified return to base (or used up): nothing changes
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, false, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, false, spent.first, spent.second, 921, 2));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1u, snap.snapshot_time_usecs);
     // another character on the card, or another marker: nothing changes
@@ -353,16 +374,16 @@ void run_static_tests() {
     expect_eq(1000u, snap.disp.stats.meseta.load());
     snap = fresh();
     snap.restore_pending = true;
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.awaiting_save = true;
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.run_in_progress = false;
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.has_character = false;
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
   }
 
   phosg::log_info_f("-- Spire guard: the game exit after 'O' and 'I' restores, never a stale snapshot (v51)");
@@ -427,6 +448,10 @@ void run_static_tests() {
     auto other = make(21, 51, 90000, 700, "M4ia");
     expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second));
     expect_eq(1000u, snap.disp.stats.meseta.load());
+    // v56: the real level and EXP but fewer items than the snapshot: kept
+    auto fewer = make(19, 51, 90000, 700, "BidX");
+    expect(!spire_guard_base_exit_follow(snap, true, fewer.first, fewer.second));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     // (a) only after end_run: never while RunInProgress, AwaitingSave or without a character
     snap = at_run_start();
     expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
@@ -953,6 +978,17 @@ void run_static_tests() {
       expect(!snap.awaiting_save && !snap.has_overlay && !snap.run_in_progress && !snap.restore_pending);
       expect(spire_guard_same_state(snap.inventory, snap.disp, progress.first, progress.second));
       expect_eq(52u, snap.disp.stats.level.load());
+      // v56: a 98 below the snapshot's level or EXP under AwaitingSave alone is a run copy: the snapshot stays
+      {
+        auto low = stored(false, false, true);
+        auto before = low;
+        auto low_copy = make(3, 0x00, 5, 100, 0, 0);
+        expect(!spire_guard_follow_real_progress(low, low_copy.first, low_copy.second));
+        expect(low.awaiting_save && spire_guard_same_state(low.inventory, low.disp, before.inventory, before.disp));
+        auto less_exp = make(21, 0x00, 51, 370757, 1500, 125);
+        expect(!spire_guard_follow_real_progress(low, less_exp.first, less_exp.second));
+        expect(low.awaiting_save);
+      }
       // the login 61 that follows shows that data and finds no open marker: no push (the login path's early return)
       expect(!snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
       expect(spire_guard_same_state(progress.first, progress.second, snap.inventory, snap.disp));
