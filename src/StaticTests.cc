@@ -2601,6 +2601,15 @@ void run_static_tests() {
       expect(spire_drops_boost_weapon(*pmt, full, {10, 26}));
       expect_eq(10, full.data1[3]);
       expect_eq(-1, hit_of(full));
+      // An S-rank weapon's attribute bytes are its name: never a Hit there
+      ItemData s_rank = weapon(0x70, 0x00);
+      expect(s_rank.is_s_rank_weapon());
+      s_rank.data1[6] = 0x00;
+      s_rank.data1[8] = 0x12;
+      spire_drops_boost_weapon(*pmt, s_rank, {10, 26});
+      expect_eq(0x00, s_rank.data1[6]);
+      expect_eq(0x00, s_rank.data1[7]);
+      expect_eq(0x12, s_rank.data1[8]);
       // Not a weapon: unchanged
       ItemData mate;
       mate.data1[0] = 0x03;

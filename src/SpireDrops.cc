@@ -199,10 +199,11 @@ bool spire_drops_boost_weapon(const ItemParameterTable& pmt, ItemData& item, Spi
     item.data1[3] = grind;
     changed = true;
   }
-  if (boost.hit) {
-    // Weapon attributes: (type, percent) in data1[6..7], [8..9], [10..11]; type 5 is Hit
+  // Weapon attributes: (type, percent) in data1[6..7], [8..9], [10..11]; type 5 is Hit. An S-rank weapon keeps its name
+  // there and a weapon with a kill count keeps it in [10..11]: those bytes are never touched
+  if (boost.hit && !item.is_s_rank_weapon()) {
     size_t slot = 0;
-    for (size_t z = 6; z <= 10; z += 2) {
+    for (size_t z = 6; z <= (item.has_kill_count() ? 8 : 10); z += 2) {
       if (item.data1[z] == SPIRE_WEAPON_ATTRIBUTE_HIT) {
         slot = z;
         break;
