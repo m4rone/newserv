@@ -1,5 +1,5 @@
 {
-  "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price, P and PNeeded is a placeholder until the balance is tuned (one full Normal run room 1 through De Rol Le earns 18 splinters).",
+  "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price and P is a placeholder until the balance is tuned; PNeeded comes from the sim (curve_spire.py pneeded) (one full Normal run room 1 through De Rol Le earns 18 splinters).",
   "Items": {
     "start_level": {
       "_what": "+1 start level per level (1 level equivalent each). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by its level and builds its overlay at that level (quest load and run again 'I'). OnSale 1: one level until a lab run shows the raised level on the client.",
@@ -36,20 +36,21 @@
       "PNeeded": 8
     },
     "open_vh": {
-      "_what": "BaseRung 2 (Very Hard). PNeeded: placeholder, 4 level equivalents past Hard; the sim has no Hard table yet (slice 5).",
+      "_what": "BaseRung 2 (Very Hard). PNeeded: the rule of open_hard on Hard's table (pso-roguelike sim/curve_spire.py pneeded): Hard's top is H 8 (its hardest row k3/k6 HU f 0.60 + 0.05 H reaches 1.0), and P 29 is the first P at which half the classes have H_auto >= 8 (on Normal the same rule gives open_hard's P 8). Above the catalogue's highest strength (P 16): the shop cannot open Very Hard until the strength items grow; a win on Hard still opens it.",
       "Max": 1,
       "Price": [120],
-      "PNeeded": 12
+      "PNeeded": 29
     },
     "open_ult": {
-      "_what": "BaseRung 3 (Ultimate). PNeeded: placeholder, 4 past Very Hard.",
+      "_what": "BaseRung 3 (Ultimate). PNeeded: the same rule on Very Hard's table: top H 5 (k3 HU f 0.75), half the classes at H_auto >= 5 from P 38. Above P 16 as open_vh; a win on Very Hard still opens it.",
       "Max": 1,
       "Price": [240],
-      "PNeeded": 16
+      "PNeeded": 38
     }
   },
   "MetaHeat": {
     "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column. The quest builds one override row set per H 0..7 (pso-roguelike spike/basis-quest economy.json meta_heat.H_max = the highest H here, slice 5) and plays H = r108 clamped to 0..7: a cell above 7 needs a new quest build, or it plays the H 7 rows.",
+    "_comment": "v54: one table per ladder rung. HAuto is Normal (q920-q922 and every quest outside the ladder); HAutoHard, HAutoVHard and HAutoUltimate are the tables of q981/q984, q982/q985 and q983/q986 (newserv spire_meta_ladder_quest_rung), from pso-roguelike spike/basis-ladder-heat quests/spire/data/economy-<rung>.json meta_heat (the same meta_heat_for on sim/plan-spire-<rung>.json, with the rung's DFP rows and HTD band), P 0-16, the catalogue's highest strength. The rung's Run I quest (q981-q983) carries heat rows H 0..H_max of its rung (Hard 4, Very Hard 3, Ultimate 3) as its heat patch; Run II (q984-q986) has no override room and plays H 0. A rung without its table plays H 0.",
     "HAuto": {
       "HUmar": [0, 0, 0, 1, 3, 3, 2, 5, 5],
       "HUnewearl": [0, 0, 1, 1, 2, 3, 4, 4, 5],
@@ -63,6 +64,48 @@
       "FOmarl": [0, 0, 3, 3, 3, 3, 4, 4, 5],
       "FOnewm": [0, 0, 0, 0, 1, 1, 2, 2, 4],
       "FOnewearl": [0, 1, 2, 2, 2, 3, 4, 4, 4]
+    },
+    "HAutoHard": {
+      "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
+      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
+      "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 4],
+      "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
+      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, null, 4, 4],
+      "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
+      "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 4, 4],
+      "RAcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 3, 3, 3, 4, 4, 4, 4],
+      "FOmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+      "FOnewm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    "HAutoVHard": {
+      "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3],
+      "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOnewm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    "HAutoUltimate": {
+      "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+      "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "RAcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+      "FOnewm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "FOnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     }
   }
 }

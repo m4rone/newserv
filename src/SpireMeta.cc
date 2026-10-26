@@ -288,6 +288,13 @@ uint8_t spire_meta_ladder_run(uint32_t quest_number) {
   return 0;
 }
 
+uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number) {
+  if ((quest_number >= 981) && (quest_number <= 986)) {
+    return (quest_number - 981) % 3 + 1;
+  }
+  return 0;
+}
+
 uint16_t spire_meta_ladder_flag(uint8_t run) {
   return (run == 1) ? SPIRE_META_FLAG_RUN1_WON : (run == 2) ? SPIRE_META_FLAG_RUN2_WON : 0;
 }
@@ -476,10 +483,16 @@ SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
     }
     ret.items.emplace_back(std::move(item));
   }
-  for (const auto& [cls, row_json] : json.at("MetaHeat").get_dict("HAuto")) {
-    auto& row = ret.heat[cls];
-    for (const auto& v : row_json->as_list()) {
-      row.emplace_back(v->is_null() ? -1 : static_cast<int32_t>(v->as_int()));
+  const auto& heat_json = json.at("MetaHeat");
+  for (size_t rung = 0; rung < ret.heat.size(); rung++) {
+    if ((rung > 0) && !heat_json.contains(SPIRE_SHOP_HEAT_KEYS[rung])) {
+      continue; // v54: a rung without its table plays H 0
+    }
+    for (const auto& [cls, row_json] : heat_json.get_dict(SPIRE_SHOP_HEAT_KEYS[rung])) {
+      auto& row = ret.heat[rung][cls];
+      for (const auto& v : row_json->as_list()) {
+        row.emplace_back(v->is_null() ? -1 : static_cast<int32_t>(v->as_int()));
+      }
     }
   }
   return ret;
@@ -504,9 +517,13 @@ uint32_t spire_shop_strength(const SpireShopCatalogue& cat, const std::map<std::
   return ret;
 }
 
-uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength) {
-  auto it = cat.heat.find(name_for_char_class(char_class));
-  if ((it == cat.heat.end()) || it->second.empty()) {
+uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength, uint8_t rung) {
+  if (rung >= cat.heat.size()) {
+    return 0;
+  }
+  const auto& table = cat.heat[rung];
+  auto it = table.find(name_for_char_class(char_class));
+  if ((it == table.end()) || it->second.empty()) {
     return 0;
   }
   // P past the table: its last column; a cell without a heat (no H keeps the band): the last heat at a lower P

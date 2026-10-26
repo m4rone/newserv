@@ -591,6 +591,40 @@ void run_static_tests() {
     expect_eq(4u, spire_shop_heat(cat, 0, 50));
     expect_eq(0u, spire_shop_heat(cat, 3, 2)); // RAmar: nulls after P 0
     expect_eq(0u, spire_shop_heat(cat, 2, 5)); // HUcast is not in this table
+    // v54: one table per ladder rung, picked by the quest's rung; a rung without a table plays H 0, never Normal's
+    expect_eq(0, spire_meta_ladder_quest_rung(921));
+    expect_eq(0, spire_meta_ladder_quest_rung(922));
+    expect_eq(0, spire_meta_ladder_quest_rung(980));
+    expect_eq(1, spire_meta_ladder_quest_rung(981));
+    expect_eq(2, spire_meta_ladder_quest_rung(982));
+    expect_eq(3, spire_meta_ladder_quest_rung(983));
+    expect_eq(1, spire_meta_ladder_quest_rung(984));
+    expect_eq(2, spire_meta_ladder_quest_rung(985));
+    expect_eq(3, spire_meta_ladder_quest_rung(986));
+    expect_eq(0, spire_meta_ladder_quest_rung(987));
+    auto rung_cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 1, "Price": [15], "P": [0, 1]},
+        "kit_tier": {"Max": 1, "Price": [30], "P": [0, 2]},
+        "hp_mat": {"Max": 1, "Price": [8], "P": [0, 0]},
+        "atp_grind": {"Max": 1, "Price": [10], "P": [0, 1]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 8},
+        "open_vh": {"Max": 1, "Price": [120], "PNeeded": 29},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 38}},
+      "MetaHeat": {"HAuto": {"HUmar": [0, 0, 1, 5]}, "HAutoHard": {"HUmar": [0, 0, 0, 3, null]},
+                   "HAutoUltimate": {"RAmar": [0, 1]}}})");
+    expect_eq(29u, rung_cat.items[5].p_needed);
+    expect_eq(38u, rung_cat.items[6].p_needed);
+    expect_eq(5u, spire_shop_heat(rung_cat, 0, 3)); // Normal: HUmar P 3
+    expect_eq(5u, spire_shop_heat(rung_cat, 0, 3, 0));
+    expect_eq(3u, spire_shop_heat(rung_cat, 0, 3, 1)); // Hard: its own table
+    expect_eq(3u, spire_shop_heat(rung_cat, 0, 4, 1)); // null: the last heat at a lower P
+    expect_eq(0u, spire_shop_heat(rung_cat, 0, 2, 1));
+    expect_eq(0u, spire_shop_heat(rung_cat, 0, 3, 2)); // Very Hard: no table, H 0
+    expect_eq(0u, spire_shop_heat(rung_cat, 0, 3, 3)); // Ultimate: HUmar not in its table
+    expect_eq(1u, spire_shop_heat(rung_cat, 3, 9, 3)); // Ultimate RAmar, P past the table
+    expect_eq(0u, spire_shop_heat(rung_cat, 0, 3, 4)); // no rung 4
+    expect_eq(5u, spire_shop_heat(rung_cat, 0, 3, spire_meta_ladder_quest_rung(921)));
+    expect_eq(3u, spire_shop_heat(rung_cat, 0, 3, spire_meta_ladder_quest_rung(981)));
     // the answer: 'M' tag, sub-request in bits 16-23, refusal in bits 8-15, OK only without a refusal
     expect_eq(0x4D030001u, spire_shop_answer(SPIRE_SHOP_START, R::NONE));
     expect_eq(0x4D020900u, spire_shop_answer(SPIRE_SHOP_BUY, R::BALANCE));
@@ -648,15 +682,18 @@ void run_static_tests() {
     phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[]}");
     expect(spire_meta_load_file(name).upgrades.empty()); // an older file has none
     std::filesystem::remove_all(dir);
-    // the catalogue in the repository parses, sells Hard within reach and has a heat row for every class
+    // the catalogue in the repository parses, sells Hard within reach and has a heat row for every class on every
+    // ladder rung (v54)
     auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
     std::map<std::string, uint32_t> all_on_sale;
     for (size_t z = 0; z < 4; z++) {
       all_on_sale[SPIRE_SHOP_ITEM_NAMES[z]] = repo.items[z].on_sale;
     }
     expect(spire_shop_strength(repo, all_on_sale) >= repo.items[4].p_needed);
-    for (uint8_t cls = 0; cls < 12; cls++) {
-      expect(repo.heat.count(name_for_char_class(cls)));
+    for (const auto& table : repo.heat) {
+      for (uint8_t cls = 0; cls < 12; cls++) {
+        expect(table.count(name_for_char_class(cls)));
+      }
     }
   }
 

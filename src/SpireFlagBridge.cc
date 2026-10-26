@@ -1808,7 +1808,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       }
       uint8_t char_class = character->disp.visual.sh.char_class;
       uint32_t strength = spire_shop_strength(cat, upgrades);
-      uint32_t heat = spire_shop_heat(cat, char_class, strength);
+      uint32_t heat = spire_shop_heat(cat, char_class, strength, spire_meta_ladder_quest_rung(quest_number)); // v54
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
         uint32_t level = spire_shop_level(upgrades, z);
@@ -2503,9 +2503,10 @@ static SpireHeatLeader spire_heat_for_leader(std::shared_ptr<const Lobby> l) {
   }
   uint8_t char_class = character->disp.visual.sh.char_class;
   uint32_t strength = spire_shop_strength(cat, upgrades);
-  ret.heat = spire_shop_heat(cat, char_class, strength);
-  ret.detail = std::format("leader {:010} {}, P {}, H_auto {}, H_keuze 0", leader->login->gc_license->serial_number,
-      name_for_char_class(char_class), strength, ret.heat);
+  uint8_t rung = l->quest ? spire_meta_ladder_quest_rung(l->quest->meta.quest_number) : 0; // v54: the rung's table
+  ret.heat = spire_shop_heat(cat, char_class, strength, rung);
+  ret.detail = std::format("leader {:010} {}, P {}, rung {}, H_auto {}, H_keuze 0", leader->login->gc_license->serial_number,
+      name_for_char_class(char_class), strength, rung, ret.heat);
   return ret;
 }
 

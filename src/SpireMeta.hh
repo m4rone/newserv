@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -117,6 +118,9 @@ bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t fla
 // next one. Run I is q921 (and the retired q920) on Normal plus q981-q983 (Hard, Very Hard, Ultimate); Run II is q922
 // plus q984-q986. 0 = a quest of neither run (no ladder flag).
 uint8_t spire_meta_ladder_run(uint32_t quest_number);
+// v54: the rung a ladder quest plays (1 Hard q981/q984, 2 Very Hard q982/q985, 3 Ultimate q983/q986); 0 for q920-q922
+// and every other quest. The heat table of that rung applies (SpireShopCatalogue::heat).
+uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number);
 uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
 // The highest difficulty won open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
 uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
@@ -174,7 +178,8 @@ SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
 //   runs have the rung open already. They count 0 toward P. BaseRung is never a win.
 // - H = H_auto(P, class) (curve_spire.economy() meta_heat): the heat the run gets from its strength; P past the table
 //   takes the last column, a cell without a heat (null) the last heat of the class at a lower P. The chosen heat
-//   (H_keuze) is not known on the server yet and is not added.
+//   (H_keuze) is not known on the server yet and is not added. v54: the table of the quest's ladder rung
+//   (spire_meta_ladder_quest_rung; Normal for every quest outside q981-q986).
 constexpr const char* SPIRE_SHOP_CATALOGUE_FILE = "system/spire-shop.json";
 constexpr size_t SPIRE_SHOP_NUM_ITEMS = 7;
 constexpr const char* SPIRE_SHOP_ITEM_NAMES[SPIRE_SHOP_NUM_ITEMS] = {
@@ -187,16 +192,22 @@ struct SpireShopItem {
   uint8_t rung = 0; // 1-3 for open_hard/open_vh/open_ult, 0 otherwise
   uint32_t p_needed = 0; // a rung item: the P the character needs to buy it
 };
+// v54: MetaHeat has one H_auto table per ladder rung, HAuto (Normal) and HAutoHard, HAutoVHard, HAutoUltimate (each
+// rung's quests carry their own heat rows, q981-q986, curve_spire.economy() on sim/plan-spire-<rung>.json). HAuto is
+// required; a rung without its table plays H 0 there.
+constexpr const char* SPIRE_SHOP_HEAT_KEYS[4] = {"HAuto", "HAutoHard", "HAutoVHard", "HAutoUltimate"};
 struct SpireShopCatalogue {
   std::vector<SpireShopItem> items; // SPIRE_SHOP_NUM_ITEMS, in SPIRE_SHOP_ITEM_NAMES order
-  std::map<std::string, std::vector<int32_t>> heat; // class name (name_for_char_class) -> H_auto by P, -1 = null
+  // per rung (0 Normal ... 3 Ultimate, SPIRE_SHOP_HEAT_KEYS): class name (name_for_char_class) -> H_auto by P, -1 = null
+  std::array<std::map<std::string, std::vector<int32_t>>, 4> heat;
 };
 // Throws on a malformed catalogue (a missing item, a price list shorter than on_sale, on_sale above max).
 SpireShopCatalogue spire_shop_parse(const std::string& json_text);
 // The level of item i (0 if none).
 uint32_t spire_shop_level(const std::map<std::string, uint32_t>& upgrades, size_t index);
 uint32_t spire_shop_strength(const SpireShopCatalogue& cat, const std::map<std::string, uint32_t>& upgrades);
-uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength);
+// rung: the ladder rung of the quest the heat is for (spire_meta_ladder_quest_rung), 0 = Normal's table
+uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength, uint8_t rung = 0);
 enum class SpireShopRefusal : uint8_t {
   NONE = 0,
   NO_CHARACTER, // no serial, not GC V3 or no character data
