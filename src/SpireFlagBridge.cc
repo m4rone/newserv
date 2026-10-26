@@ -2313,6 +2313,19 @@ bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_return
   return true;
 }
 
+// v51: the 98 after a verified return to base ('O', SpireFlagBridge.hh)
+bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
+    const PlayerDispDataV4& disp) {
+  if (!base_returned || !snapshot.has_character || snapshot.run_in_progress || !snapshot.restore_pending ||
+      snapshot.awaiting_save || !spire_guard_same_character(disp, snapshot.disp) ||
+      (disp.stats.level != snapshot.disp.stats.level) || (disp.stats.exp != snapshot.disp.stats.exp)) {
+    return false;
+  }
+  snapshot.inventory = inventory;
+  snapshot.disp = disp;
+  return true;
+}
+
 // v32: the 61 after a push verifies the restore only if it shows the snapshot's level and EXP and its items and
 // meseta; a 61 with the same level and EXP but other items leaves the marker.
 bool spire_guard_push_verified(bool same_stats, bool same_items) {
@@ -2504,8 +2517,16 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
 // the Client's address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_follow_pending;
 
+// v51: clients whose 98 leaves a Spire game after a verified 'O' (spire_guard_base_exit_follow). Keyed by the Client's
+// address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
+static std::unordered_set<const Client*> spire_guard_base_exit_pending;
+
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
+  spire_guard_base_exit_pending.erase(c.get());
+  // v51: an 'O' OK belongs to the game the client leaves now; it never carries over to the next one
+  bool base_returned = l && spire_base_returned_has(c, l->lobby_id);
+  spire_base_returned.erase(c.get());
   try {
     // v8: a 98 is never proof that the card holds the real character. Measured on the Wii: a normal end of a Spire run
     // (end, warp, Quit, "Wrote to Memory Card A") also saves the overlay character. So a 98 with RunInProgress set,
@@ -2539,6 +2560,9 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
     spire_guard_save(filename, serial_number, snapshot);
     c->log.info_f("Spire guard: run ended for serial {:010} (98 in q{}); restore pending for the next login, snapshot {} kept",
         serial_number, quest_number, spire_guard_describe(snapshot));
+    if (base_returned) {
+      spire_guard_base_exit_pending.emplace(c.get());
+    }
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to end run: {}", e.what());
@@ -2546,6 +2570,36 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 }
 
 void spire_guard_after_98(std::shared_ptr<Client> c) {
+  if (spire_guard_base_exit_pending.erase(c.get())) {
+    // v51: the game exit after a verified 'O'; the 98 is the real character with what the base changed
+    try {
+      uint32_t serial_number = spire_bridge_serial_for_client(c);
+      auto character = c->character_file(false, false);
+      if (!serial_number || !character || c->is_spire_protected()) {
+        return;
+      }
+      std::string filename = spire_guard_filename_for(c, serial_number);
+      if (filename.empty()) {
+        return;
+      }
+      auto snapshot = spire_guard_load(filename);
+      SpireGuardSnapshot before = snapshot;
+      if (!spire_guard_base_exit_follow(snapshot, true, character->inventory, character->disp)) {
+        c->log.warning_f("Spire guard: 98 after a verified return to base for serial {:010} does not match the snapshot's character, level or EXP; the run start's snapshot {} stays",
+            serial_number, spire_guard_describe(before));
+        return;
+      }
+      spire_guard_save(filename, serial_number, snapshot);
+      bool same = spire_guard_same_state(snapshot.inventory, snapshot.disp, before.inventory, before.disp);
+      c->log.info_f("Spire guard: 98 after a verified return to base for serial {:010}: snapshot follows the real character{} ({} items, meseta {}); RestorePending",
+          serial_number, same ? ", equal to the one before" : std::format(", changed in the base (was {} items, meseta {})",
+              before.inventory.num_items, before.disp.stats.meseta.load()),
+          snapshot.inventory.num_items, snapshot.disp.stats.meseta.load());
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire guard: failed to follow the real character after a return to base: {}", e.what());
+    }
+    return;
+  }
   if (!spire_guard_follow_pending.erase(c.get())) {
     return;
   }

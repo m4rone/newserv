@@ -486,6 +486,10 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // - v49: the second push in a game: after 'O' OK the quest's run again ('I', see SPIRE_BRIDGE_RUN_AGAIN) takes the
 //   snapshot again from the verified real character and pushes a fresh run copy, on Pioneer 2 or Forest 1 and never
 //   during a load; the marker stays RunInProgress.
+// - v50: the base shop ('M', see SPIRE_BRIDGE_SHOP) spends photon splinters in records.json; no character data.
+// - v51: no stale push at the game exit after a verified 'O': the 98 of the game exit, when the client's 'O' was
+//   answered OK in that game and no 'I' used it, updates the snapshot (spire_guard_base_exit_follow) before the v47
+//   restore pushes it. After a failed 'O' or after an 'I' the snapshot stays (the run start's or the 'I's).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -571,7 +575,8 @@ bool spire_guard_follow_real_progress(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
 // Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
 // spire_guard_follow_real_progress if spire_guard_end_run saw the client leave a Normal or Solo game under
-// AwaitingSave. Never throws.
+// AwaitingSave, and (v51) spire_guard_base_exit_follow if it saw the client leave a Spire game after a verified 'O'.
+// Never throws.
 void spire_guard_after_98(std::shared_ptr<Client> c);
 
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
@@ -847,6 +852,15 @@ bool spire_run_again_floor_ok(uint32_t floor);
 // takes the data, the quest and the time, and RunInProgress stays.
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
+// v51: the 98 of a client that leaves the game after a verified return to base ('O' OK, no 'I' since): its memory has
+// held the real character since the verified push, so the snapshot takes what the base changed (items, meseta),
+// and the restore at the game exit pushes that instead of the run start's data (a bank withdrawal in the base
+// would otherwise be pushed away). False (snapshot unchanged) unless base_returned, the snapshot has a character
+// and RestorePending alone (spire_guard_end_run just turned RunInProgress into it), and the data is the same character
+// with the snapshot's level and EXP (the base gives no EXP; anything else keeps the run start's data). RestorePending
+// stays: the restore at the game exit still runs.
+bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
+    const PlayerDispDataV4& disp);
 
 // v49: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
 // (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then

@@ -365,6 +365,98 @@ void run_static_tests() {
     expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
   }
 
+  phosg::log_info_f("-- Spire guard: the game exit after 'O' and 'I' restores, never a stale snapshot (v51)");
+  {
+    auto make = [](size_t n, uint32_t level, uint32_t exp, uint32_t meseta, const char* name) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      ret.second.visual.name.encode(name, Language::ENGLISH);
+      ret.second.visual.sh.section_id = 3;
+      return ret;
+    };
+    auto real = make(20, 51, 90000, 1000, "BidX");
+    auto base_changed = make(21, 51, 90000, 700, "BidX"); // took an item from the bank, bought one, in the base
+    auto run_copy = make(4, 0, 0, 0, "BidX");              // the overlay of a run (the run copy's level and EXP)
+    auto at_run_start = [&]() {
+      SpireGuardSnapshot snap;
+      snap.has_character = true;
+      snap.run_in_progress = true;
+      snap.inventory = real.first;
+      snap.disp = real.second;
+      return snap;
+    };
+    // the game exit: spire_guard_end_run turns RunInProgress into RestorePending (SpireFlagBridge.cc, the 98)
+    auto end_run = [](SpireGuardSnapshot& snap) {
+      expect(snap.run_in_progress && !snap.restore_pending);
+      snap.run_in_progress = false;
+      snap.restore_pending = true;
+    };
+    // the v47 restore at the 84 runs exactly when this gate is open
+    auto exit_restore_runs = [](const SpireGuardSnapshot& snap) {
+      return spire_guard_marker_open(false, false, snap.restore_pending, false);
+    };
+
+    // (a) 'O' OK, changes in the base, leave: the snapshot follows the 98, so the exit push is the real character
+    // as it is now (the run start's 20 items would push the bank item away)
+    auto snap = at_run_start();
+    end_run(snap);
+    expect(spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+    expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(700u, snap.disp.stats.meseta.load());
+    expect(snap.restore_pending && !snap.run_in_progress && !snap.awaiting_save);
+    expect(exit_restore_runs(snap)); // pushes what the client already holds: verified, AwaitingSave, no overlay
+    // (a) 'O' OK, nothing changed in the base: the snapshot stays equal, the exit push changes nothing
+    snap = at_run_start();
+    end_run(snap);
+    expect(spire_guard_base_exit_follow(snap, true, real.first, real.second));
+    expect(spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second));
+    // (a) a 98 that is not the real character (the run copy's level or EXP, another character): the run start stays
+    snap = at_run_start();
+    end_run(snap);
+    expect(!spire_guard_base_exit_follow(snap, true, run_copy.first, run_copy.second));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
+    auto higher = make(21, 52, 95000, 700, "BidX");
+    expect(!spire_guard_base_exit_follow(snap, true, higher.first, higher.second));
+    auto other = make(21, 51, 90000, 700, "M4ia");
+    expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second));
+    expect_eq(1000u, snap.disp.stats.meseta.load());
+    // (a) only after end_run: never while RunInProgress, AwaitingSave or without a character
+    snap = at_run_start();
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+    snap.run_in_progress = false;
+    snap.awaiting_save = true;
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+
+    // (b) 'O' failed (or never asked): no base_returned, the 98 (the run copy) is ignored, the run start's snapshot
+    // is pushed at the exit
+    snap = at_run_start();
+    end_run(snap);
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
+    expect(!spire_guard_base_exit_follow(snap, false, base_changed.first, base_changed.second));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(1000u, snap.disp.stats.meseta.load());
+    expect(exit_restore_runs(snap));
+
+    // (c) 'O' OK, 'I' (the snapshot taken again in the base, the run copy pushed, the 'O' OK used up), then leave: the
+    // 98 holds the run copy and is ignored, the exit pushes the snapshot taken at the 'I'
+    snap = at_run_start();
+    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    end_run(snap);
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
+    expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(700u, snap.disp.stats.meseta.load());
+    expect(exit_restore_runs(snap));
+    // a protected character never gets the exit restore
+    expect(!spire_guard_marker_open(true, false, snap.restore_pending, false));
+  }
+
   phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v49, B-BASIS-13)");
   {
     expect_eq(0, spire_meta_open_rung(0, 0));
