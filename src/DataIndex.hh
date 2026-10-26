@@ -198,8 +198,11 @@ struct DataIndex {
   // a floor other than Pioneer 2, every other client not on it is warped there (6x94) after DelayMs; missing = off.
   std::optional<std::pair<uint8_t, uint32_t>> spire_follow_leader;
   // Regie pso-regie-9 (B-E01-108): SpireDrops {"DropMode": "SERVER_PRIVATE", "OnlyRunItems": true, "LevelsAhead": 5,
-  // "PityDrops": 8, "BossWeaponPerPlayer": true}: in a Spire game the server makes the drops and filters them per player
-  // (see SpireDrops.hh). Without the key: disabled (client drops, as before).
+  // "PityDrops": 8, "BossWeaponPerPlayer": true, "BossGrindBase": g, "BossGrindPerK": gk, "BossHitBase": h,
+  // "BossHitPerK": hk, "PickFromK": p}: in a Spire game the server makes the drops and filters them per player (see
+  // SpireDrops.hh). Route B F8: the boss weapon of room k gets grind g + gk * k and Hit h + hk * k (all 0: none), and a
+  // picked weapon gets the SpireDrops.hh pick grind and Hit from room p on (0: never); a missing F8 key is 0. Without
+  // the SpireDrops key: disabled (client drops, as before).
   SpireDropsConfig spire_drops;
   // v27 blocked characters: SpireBlockedCharacters {"Quests": [n, ...], "Characters": [{"Serial": s, "Name": n}, ...]}.
   // A GC client with that serial and character name (Name empty: every character of that serial) never sees, loads or

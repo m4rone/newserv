@@ -2,11 +2,12 @@
   "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price and P is a placeholder until the balance is tuned; PNeeded comes from the sim (curve_spire.py pneeded) (one full Normal run room 1 through De Rol Le earns 18 splinters).",
   "Items": {
     "start_level": {
-      "_what": "+1 start level per level (1 level equivalent each). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by its level and builds its overlay at that level (quest load and run again 'I'). OnSale 1: one level until a lab run shows the raised level on the client.",
-      "Max": 5,
-      "OnSale": 1,
-      "Price": [15, 30, 45, 60, 75],
-      "P": [0, 1, 2, 3, 4, 5]
+      "_what": "Route B F3: Levels[n] start levels at level n (+5 for 50, +10 for 110 in total, +14 for 185 in total). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by that many levels and builds its overlay at that level (quest load and run again 'I'). P 0 at every level (B-BASIS-67, route B invariant 7): bought start levels add no heat.",
+      "Levels": [0, 5, 10, 14],
+      "Max": 3,
+      "OnSale": 3,
+      "Price": [50, 60, 75],
+      "P": [0, 0, 0, 0]
     },
     "kit_tier": {
       "_what": "level 1: the second kit of the class archetype (the quest's existing second-kit branch, Dagger/Rifle/Barta) from the first run. OnSale 1: level 2 has no kit yet.",
@@ -50,20 +51,21 @@
   },
   "MetaHeat": {
     "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column. The quest builds one override row set per H 0..7 (pso-roguelike spike/basis-quest economy.json meta_heat.H_max = the highest H here, slice 5) and plays H = r108 clamped to 0..7: a cell above 7 needs a new quest build, or it plays the H 7 rows.",
+    "_cap": "Route B F3 (B-BASIS-67): every HAuto (Normal) value is capped at 2, so HP stays at baseline (max(0, H - 2)) whatever the strength; nulls and the row layout are unchanged. The uncapped sim values are in git history (newserv f93e223).",
     "_comment": "v54: one table per ladder rung. HAuto is Normal (q920-q922 and every quest outside the ladder); HAutoHard, HAutoVHard and HAutoUltimate are the tables of q981/q984, q982/q985 and q983/q986 (newserv spire_meta_ladder_quest_rung), from pso-roguelike spike/basis-ladder-heat quests/spire/data/economy-<rung>.json meta_heat (the same meta_heat_for on sim/plan-spire-<rung>.json, with the rung's DFP rows and HTD band), P 0-16, the catalogue's highest strength. The rung's Run I quest (q981-q983) carries heat rows H 0..H_max of its rung (Hard 4, Very Hard 3, Ultimate 3) as its heat patch; Run II (q984-q986) has no override room and plays H 0. A rung without its table plays H 0.",
     "HAuto": {
-      "HUmar": [0, 0, 0, 1, 3, 3, 2, 5, 5],
-      "HUnewearl": [0, 0, 1, 1, 2, 3, 4, 4, 5],
-      "HUcast": [0, 0, 1, 2, 3, 3, 4, 5, 6],
-      "HUcaseal": [0, 1, 1, 2, 3, 3, 4, 5, null],
-      "RAmar": [0, 0, 0, 0, 0, 1, 3, 4, 4],
-      "RAmarl": [0, 0, 1, 1, 2, 2, 3, 4, 4],
-      "RAcast": [0, 0, 0, 1, 1, 3, 3, 4, 4],
-      "RAcaseal": [0, 1, 1, 2, 3, 3, 5, 6, 7],
-      "FOmar": [0, 0, 3, 3, 3, 3, 3, 3, 4],
-      "FOmarl": [0, 0, 3, 3, 3, 3, 4, 4, 5],
-      "FOnewm": [0, 0, 0, 0, 1, 1, 2, 2, 4],
-      "FOnewearl": [0, 1, 2, 2, 2, 3, 4, 4, 4]
+      "HUmar": [0, 0, 0, 1, 2, 2, 2, 2, 2],
+      "HUnewearl": [0, 0, 1, 1, 2, 2, 2, 2, 2],
+      "HUcast": [0, 0, 1, 2, 2, 2, 2, 2, 2],
+      "HUcaseal": [0, 1, 1, 2, 2, 2, 2, 2, null],
+      "RAmar": [0, 0, 0, 0, 0, 1, 2, 2, 2],
+      "RAmarl": [0, 0, 1, 1, 2, 2, 2, 2, 2],
+      "RAcast": [0, 0, 0, 1, 1, 2, 2, 2, 2],
+      "RAcaseal": [0, 1, 1, 2, 2, 2, 2, 2, 2],
+      "FOmar": [0, 0, 2, 2, 2, 2, 2, 2, 2],
+      "FOmarl": [0, 0, 2, 2, 2, 2, 2, 2, 2],
+      "FOnewm": [0, 0, 0, 0, 1, 1, 2, 2, 2],
+      "FOnewearl": [0, 1, 2, 2, 2, 2, 2, 2, 2]
     },
     "HAutoHard": {
       "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],

@@ -736,16 +736,17 @@ void run_static_tests() {
 
   phosg::log_info_f("-- Spire start level: overlay level = quest level + owned start_level, rule block raised once (v52)");
   {
-    // the bonus: the owned level, at most the catalogue's Max (5 without a catalogue)
+    // the bonus (route B F3): Levels[min(owned, Max)] of the catalogue (the shipped table without a catalogue)
     auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
     expect_eq(0u, spire_start_level_bonus(&repo, {}));
     expect_eq(0u, spire_start_level_bonus(&repo, {{"hp_mat", 3}}));
-    for (uint32_t tier = 1; tier <= 5; tier++) {
-      expect_eq(tier, spire_start_level_bonus(&repo, {{"start_level", tier}}));
-      expect_eq(tier, spire_start_level_bonus(nullptr, {{"start_level", tier}}));
+    const uint32_t shipped_bonus[6] = {0, 5, 10, 14, 14, 14}; // owned 0-5
+    for (uint32_t owned = 0; owned <= 5; owned++) {
+      expect_eq(shipped_bonus[owned], spire_start_level_bonus(&repo, {{"start_level", owned}}));
+      expect_eq(shipped_bonus[owned], spire_start_level_bonus(nullptr, {{"start_level", owned}}));
     }
-    expect_eq(repo.items[0].max, spire_start_level_bonus(&repo, {{"start_level", 99}}));
-    expect_eq(SPIRE_START_LEVEL_FALLBACK_MAX, spire_start_level_bonus(nullptr, {{"start_level", 99}}));
+    expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 99}}));
+    expect_eq(14u, spire_start_level_bonus(nullptr, {{"start_level", 99}}));
     // the catalogue sells start_level now (B-BASIS-32 closed by v52)
     expect(repo.items[0].on_sale >= 1);
     uint8_t none_open[2] = {0, 0};
@@ -795,6 +796,92 @@ void run_static_tests() {
     expect_eq(0u, spire_start_level_patch_bin(room, 0, 3));
     expect_eq(1u, spire_start_level_patch_bin(room, 27, 32));
     expect_eq(std::string("\x49\x20\x00\x00\x00\xF8\x71", 7), room);
+    // route B F3: the largest bonus still patches the rule block exactly once (q921 Lv1 + 14 = Lv15)
+    std::string q921_rules = "head" + other + rule_block + "tail";
+    expect_eq(1u, spire_start_level_patch_bin(q921_rules, 0, spire_start_level_char_level(0, 14)));
+    expect_eq("head" + other + std::string("\x49\x0E\x00\x00\x00\xF8\x71", 7) + "tail", q921_rules);
+  }
+
+  phosg::log_info_f("-- Spire shop route B F3: +5 start levels per purchase, bought levels add no heat, kit_tier once");
+  {
+    using R = SpireShopRefusal;
+    // the shipped catalogue parses, with start_level Levels [0, 5, 10, 14], Max 3, OnSale 3, Price [50, 60, 75], P 0
+    auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+    const auto& start_level = repo.items[0];
+    expect_eq(3u, start_level.max);
+    expect_eq(3u, start_level.on_sale);
+    expect_eq((std::vector<uint32_t>{0, 5, 10, 14}), start_level.levels);
+    expect_eq((std::vector<uint32_t>{50, 60, 75}), start_level.price);
+    expect_eq((std::vector<uint32_t>{0, 0, 0, 0}), start_level.strength);
+    expect_eq(5u, spire_start_level_bonus(&repo, {{"start_level", 1}}));
+    expect_eq(10u, spire_start_level_bonus(&repo, {{"start_level", 2}}));
+    expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 3}}));
+    expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 5}}));
+    // bought start levels count 0 toward P (invariant 7, B-BASIS-67); hp_mat, atp_grind and kit_tier keep their P
+    for (uint32_t owned = 0; owned <= 5; owned++) {
+      expect_eq(0u, spire_shop_strength(repo, {{"start_level", owned}}));
+    }
+    expect_eq((std::vector<uint32_t>{0, 2, 4}), repo.items[1].strength);
+    expect_eq((std::vector<uint32_t>{0, 0, 1, 1, 2, 2}), repo.items[2].strength);
+    expect_eq((std::vector<uint32_t>{0, 1, 2, 3, 4, 5}), repo.items[3].strength);
+    // HAuto on Normal is at most 2 for every class at every P the catalogue reaches (0-16); the row layout stays
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      expect_eq(9u, repo.heat[0].at(name_for_char_class(cls)).size());
+      for (uint32_t p = 0; p <= 16; p++) {
+        expect(spire_shop_heat(repo, cls, p) <= 2);
+        expect(spire_shop_heat(repo, cls, p, 0) <= 2);
+      }
+    }
+    // a catalogue without Levels gives one start level per owned level (an older catalogue keeps its own meaning)
+    auto old_cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 5, "OnSale": 1, "Price": [15, 30, 45, 60, 75], "P": [0, 1, 2, 3, 4, 5]},
+        "kit_tier": {"Max": 2, "OnSale": 1, "Price": [30, 60], "P": [0, 2, 4]},
+        "hp_mat": {"Max": 2, "Price": [8, 16], "P": [0, 0, 1]},
+        "atp_grind": {"Max": 3, "Price": [10, 20, 30], "P": [0, 1, 2, 3]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 3},
+        "open_vh": {"Max": 1, "Price": [120], "PNeeded": 5},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 9}},
+      "MetaHeat": {"HAuto": {}}})");
+    expect_eq(2u, spire_start_level_bonus(&old_cat, {{"start_level", 2}}));
+    expect_eq(5u, spire_start_level_bonus(&old_cat, {{"start_level", 9}}));
+    // a Levels list that does not cover levels 0-Max is refused
+    bool short_levels_throws = false;
+    try {
+      spire_shop_parse(R"({"Items": {"start_level": {"Max": 3, "Price": [50, 60, 75], "P": [0, 0, 0, 0],
+          "Levels": [0, 5, 10]}}})");
+    } catch (const std::exception&) {
+      short_levels_throws = true;
+    }
+    expect(short_levels_throws);
+    // kit_tier: refused with 8 (already_open) while the class's second-kit flag is set, and no price on the list
+    uint8_t none_open[2] = {0, 0};
+    expect_eq(8, static_cast<int>(R::ALREADY_OPEN));
+    expect(R::NONE == spire_shop_buy_refusal(repo, 1, {}, 9999, none_open, false));
+    expect(R::ALREADY_OPEN == spire_shop_buy_refusal(repo, 1, {}, 9999, none_open, true));
+    expect(R::ALREADY_OPEN == spire_shop_buy_refusal(repo, 1, {}, 0, none_open, true)); // before the balance
+    expect_eq(0u, spire_shop_next_price(repo, 1, {}, none_open, true));
+    expect_eq(repo.items[1].price[0], spire_shop_next_price(repo, 1, {}, none_open, false));
+    // the flag concerns kit_tier only
+    expect(R::NONE == spire_shop_buy_refusal(repo, 0, {}, 9999, none_open, true));
+    expect(R::NONE == spire_shop_buy_refusal(repo, 2, {}, 9999, none_open, true));
+    // the flag of the character's own archetype on Normal (0x388 HU, 0x389 RA, 0x38A FO)
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      uint16_t own = SPIRE_META_FLAG_KIT2_FIRST +
+          (char_class_is_hunter(cls) ? 0 : char_class_is_ranger(cls) ? 1 : 2);
+      SpireMetaFile file;
+      expect(!spire_meta_kit2_owned(file, cls));
+      for (uint16_t flag = SPIRE_META_FLAG_KIT2_FIRST; flag < SPIRE_META_FLAG_KIT2_FIRST + 3; flag++) {
+        file.flags.clear();
+        file.flags[std::make_pair(uint8_t(0), flag)] = true;
+        expect_eq(flag == own, spire_meta_kit2_owned(file, cls));
+      }
+      file.flags.clear();
+      file.flags[std::make_pair(uint8_t(0), own)] = false; // a cleared entry is not set
+      expect(!spire_meta_kit2_owned(file, cls));
+      file.flags.clear();
+      file.flags[std::make_pair(uint8_t(1), own)] = true; // earned on Hard only: a Normal run still lacks it
+      expect(!spire_meta_kit2_owned(file, cls));
+    }
   }
 
   phosg::log_info_f("-- Spire heat: the sidecar writes one step's bytes into the H 0 .bin, or nothing on any doubt (v53)");

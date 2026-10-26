@@ -190,6 +190,9 @@ struct SpireShopItem {
   uint32_t on_sale = 0; // the highest level the shop sells now (<= max); a level without its mechanism is not sold
   std::vector<uint32_t> price; // price[n - 1]: splinters for level n
   std::vector<uint32_t> strength; // strength[n]: P at level n (strength[0] = 0); empty for a rung item
+  // route B F3: levels[n]: what level n gives (start_level: the start levels, "Levels" in the catalogue); empty for a
+  // rung item. Without "Levels" level n gives n (one start level per owned level, the meaning before route B).
+  std::vector<uint32_t> levels;
   uint8_t rung = 0; // 1-3 for open_hard/open_vh/open_ult, 0 otherwise
   uint32_t p_needed = 0; // a rung item: the P the character needs to buy it
 };
@@ -202,7 +205,8 @@ struct SpireShopCatalogue {
   // per rung (0 Normal ... 3 Ultimate, SPIRE_SHOP_HEAT_KEYS): class name (name_for_char_class) -> H_auto by P, -1 = null
   std::array<std::map<std::string, std::vector<int32_t>>, 4> heat;
 };
-// Throws on a malformed catalogue (a missing item, a price list shorter than on_sale, on_sale above max).
+// Throws on a malformed catalogue (a missing item, a price list shorter than on_sale, on_sale above max, a P or Levels
+// list that does not have max + 1 entries).
 SpireShopCatalogue spire_shop_parse(const std::string& json_text);
 // The level of item i (0 if none).
 uint32_t spire_shop_level(const std::map<std::string, uint32_t>& upgrades, size_t index);
@@ -224,12 +228,18 @@ enum class SpireShopRefusal : uint8_t {
 };
 const char* spire_shop_refusal_name(SpireShopRefusal r);
 // The decision of a BUY of item index, free of state for the static tests. open_rung[r - 1] = the open rung of run r
-// (spire_meta_open_rung).
+// (spire_meta_open_rung). Route B F3: kit2_owned = the character already has its archetype's second kit
+// (spire_meta_kit2_owned); then kit_tier is refused with ALREADY_OPEN (code 8), so it never takes splinters twice.
 SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2]);
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2],
+    bool kit2_owned = false);
 // The price of the next level of item index, or 0 if it cannot be bought now for any reason but the balance.
 uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]);
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned = false);
+// Route B F3: whether the character has the second-kit flag of its class's archetype (0x388 HU, 0x389 RA, 0x38A FO,
+// spire_meta_flags_for_finish) set on Normal. The flag is per difficulty and kit_tier is not: Normal is where every run
+// of a character starts, so a flag earned on a higher difficulty only does not make kit_tier a double buy.
+bool spire_meta_kit2_owned(const SpireMetaFile& file, uint8_t char_class);
 // A BUY without a refusal on the meta file: the item one level up, and for a rung item BaseRung of both runs at least
 // the rung. Returns the price to debit.
 uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, SpireMetaFile& file);
@@ -248,9 +258,12 @@ const char* spire_meta_flag_name(uint16_t flag_num); // nullptr for a flag that 
 // run copy from it, as from any Sega Battle quest; no push), and it builds that client's overlay with the same level.
 // The run again ('I') pushes the overlay, so there the raised overlay is the run copy. A bin whose rule block it cannot
 // find exactly once is sent as it is, and that client's overlay then keeps the quest's level (never a mismatch).
-// The bonus: the owned level, at most the catalogue's start_level Max (SPIRE_START_LEVEL_FALLBACK_MAX without a
-// readable catalogue); the level at most SPIRE_START_LEVEL_LEVEL_CAP (create_battle_overlay's clamp, 0-based).
-constexpr uint32_t SPIRE_START_LEVEL_FALLBACK_MAX = 5;
+// The bonus (route B F3): the catalogue's start_level Levels[min(owned, Max)] (SPIRE_START_LEVEL_FALLBACK_LEVELS without
+// a readable catalogue, the shipped table, so a broken catalogue never takes bought levels away); the level at most
+// SPIRE_START_LEVEL_LEVEL_CAP (create_battle_overlay's clamp, 0-based). Bought start levels count 0 toward P
+// (B-BASIS-67): the catalogue's start_level P is all 0, so they add no heat.
+constexpr std::array<uint32_t, 4> SPIRE_START_LEVEL_FALLBACK_LEVELS = {0, 5, 10, 14};
+constexpr uint32_t SPIRE_START_LEVEL_FALLBACK_MAX = SPIRE_START_LEVEL_FALLBACK_LEVELS.size() - 1; // owned level cap
 constexpr uint32_t SPIRE_START_LEVEL_LEVEL_CAP = 199;
 uint32_t spire_start_level_bonus(const SpireShopCatalogue* cat, const std::map<std::string, uint32_t>& upgrades);
 uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus); // 0-based, as ba_set_char_level

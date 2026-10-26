@@ -480,6 +480,20 @@ SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
         throw std::runtime_error(std::format("item {}: P has {} entries for levels 0-{}", name, item.strength.size(),
             item.max));
       }
+      // route B F3: what each level gives; without "Levels" level n gives n
+      if (item_json.contains("Levels")) {
+        for (const auto& v : item_json.get_list("Levels")) {
+          item.levels.emplace_back(v->as_int());
+        }
+        if (item.levels.size() != item.max + 1) {
+          throw std::runtime_error(std::format("item {}: Levels has {} entries for levels 0-{}", name,
+              item.levels.size(), item.max));
+        }
+      } else {
+        for (uint32_t level = 0; level <= item.max; level++) {
+          item.levels.emplace_back(level);
+        }
+      }
     }
     ret.items.emplace_back(std::move(item));
   }
@@ -565,7 +579,7 @@ const char* spire_shop_refusal_name(SpireShopRefusal r) {
 
 // Every refusal but the balance
 static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]) {
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned) {
   if (index >= cat.items.size()) {
     return SpireShopRefusal::UNKNOWN_ITEM;
   }
@@ -576,6 +590,9 @@ static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, s
   }
   if (level >= item.on_sale) {
     return SpireShopRefusal::NOT_ON_SALE;
+  }
+  if ((index == 1) && kit2_owned) { // SPIRE_SHOP_ITEM_NAMES[1] = kit_tier
+    return SpireShopRefusal::ALREADY_OPEN; // route B F3: the second kit is the character's already
   }
   if (item.rung) {
     if (std::min(open_rung[0], open_rung[1]) >= item.rung) {
@@ -592,8 +609,8 @@ static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, s
 }
 
 SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2]) {
-  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung);
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2], bool kit2_owned) {
+  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned);
   if (r != SpireShopRefusal::NONE) {
     return r;
   }
@@ -602,8 +619,8 @@ SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t in
 }
 
 uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]) {
-  if (spire_shop_item_refusal(cat, index, upgrades, open_rung) != SpireShopRefusal::NONE) {
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned) {
+  if (spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned) != SpireShopRefusal::NONE) {
     return 0;
   }
   return cat.items[index].price[spire_shop_level(upgrades, index)];
@@ -622,6 +639,21 @@ uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, Spire
   return price;
 }
 
+bool spire_meta_kit2_owned(const SpireMetaFile& file, uint8_t char_class) {
+  uint16_t flag;
+  if (char_class_is_hunter(char_class)) {
+    flag = SPIRE_META_FLAG_KIT2_FIRST;
+  } else if (char_class_is_ranger(char_class)) {
+    flag = SPIRE_META_FLAG_KIT2_FIRST + 1;
+  } else if (char_class_is_force(char_class)) {
+    flag = SPIRE_META_FLAG_KIT2_FIRST + 2;
+  } else {
+    return false;
+  }
+  auto it = file.flags.find(std::make_pair(uint8_t(0), flag)); // Normal
+  return (it != file.flags.end()) && it->second;
+}
+
 SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename) {
   *filename = spire_meta_filename(c, serial_number);
   if (filename->empty()) {
@@ -635,11 +667,14 @@ void spire_meta_save_file(const std::string& filename, uint32_t serial_number, c
   spire_meta_save(filename, serial_number, file);
 }
 
-// v52: the start_level upgrade (SpireMeta.hh)
+// v52: the start_level upgrade (SpireMeta.hh); route B F3: Levels[min(owned, Max)]
 uint32_t spire_start_level_bonus(const SpireShopCatalogue* cat, const std::map<std::string, uint32_t>& upgrades) {
   uint32_t owned = spire_shop_level(upgrades, 0); // SPIRE_SHOP_ITEM_NAMES[0] = start_level
-  uint32_t max = (cat && !cat->items.empty()) ? cat->items[0].max : SPIRE_START_LEVEL_FALLBACK_MAX;
-  return std::min(owned, max);
+  if (cat && !cat->items.empty() && !cat->items[0].levels.empty()) {
+    const auto& levels = cat->items[0].levels; // max + 1 entries (spire_shop_parse)
+    return levels[std::min<size_t>(owned, levels.size() - 1)];
+  }
+  return SPIRE_START_LEVEL_FALLBACK_LEVELS[std::min<size_t>(owned, SPIRE_START_LEVEL_FALLBACK_LEVELS.size() - 1)];
 }
 
 uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus) {
