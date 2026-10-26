@@ -190,28 +190,6 @@ void run_static_tests() {
     expect(spire_guard_same_inventory(make(0, 0), 5, make(0, 0), 5));
   }
 
-  phosg::log_info_f("-- Spire guard: the lobby refresh after a lobby restore: the 69 to the others first, their 68 after the gap (v43)");
-  {
-    using V = std::vector<uint64_t>;
-    // 2026-10-25 20:46:49: BidX (C-3) restored with M4ia (C-4) in the lobby: only M4ia gets the 69, BidX gets the 67
-    expect_eq((V{4}), (spire_guard_refresh_leave_targets(V{4, 3}, 3)));
-    expect_eq((V{}), (spire_guard_refresh_leave_targets(V{3}, 3)));  // alone in the lobby: no other player gets a 69
-    // after the gap: the 68 goes to M4ia, still there
-    expect_eq((V{4}), (spire_guard_refresh_join_targets(V{4}, V{4, 3}, 3)));
-    // a player who left during the gap gets no 68; one who joined during the gap has BidX in its own 67 already
-    expect_eq((V{}), (spire_guard_refresh_join_targets(V{4}, V{3, 5}, 3)));
-    expect_eq((V{4, 6}), (spire_guard_refresh_join_targets(V{4, 6}, V{6, 3, 5, 4}, 3)));
-    // the restored client never gets a 68 for itself
-    expect_eq((V{}), (spire_guard_refresh_join_targets(V{3}, V{3}, 3)));
-    expect(SPIRE_GUARD_LOBBY_REFRESH_GAP >= std::chrono::milliseconds(100)); // several frames apart at 30 fps
-  }
-
-  phosg::log_info_f("-- Spire guard: the restored client gets no 69 and no 67 for its own slot in the refresh (v46)");
-  {
-    // v43 (67 alone) crashed 2026-10-26 11:44:33 on the pc; v45 (69, 67) froze the client 12:39:05 in the lab
-    expect(spire_guard_refresh_self_commands().empty());
-  }
-
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)
@@ -440,30 +418,6 @@ void run_static_tests() {
     used.items[9].extension_data2 = 3;
     expect(!spire_guard_same_state(used, disp, real, disp)); // same items, level, EXP and meseta: not the same state
     expect_eq(std::string("pow 125 mind 0 evade 0 def 0 luck 0 hp 37 tp 0"), spire_guard_materials_str(real));
-  }
-
-  phosg::log_info_f("-- Spire guard: the lobby restore waits for the 99 after the 67 and the B1 (v33)");
-  {
-    using E = SpireGuardLobbyGate::Event;
-    SpireGuardLobbyGate gate;
-    expect(!gate.on_lobby_loaded());  // a 99 before the 67 went out does not count
-    expect(!gate.on_timeout());
-    gate.arm();                       // the 67 and the B1 went out
-    expect_eq(E::NONE, gate.fired);   // the restore does not start with the 67 itself (the v28 order)
-    expect(gate.on_lobby_loaded());   // the 99 starts the restore
-    expect_eq(E::LOBBY_LOADED, gate.fired);
-    expect(!gate.on_lobby_loaded());  // only once
-    expect(!gate.on_timeout());       // the timer that fires later starts nothing
-
-    SpireGuardLobbyGate slow;
-    slow.arm();
-    expect(slow.on_timeout());        // no 99 within the timeout: the restore starts anyway
-    expect_eq(E::TIMEOUT, slow.fired);
-    expect(!slow.on_lobby_loaded());  // a 99 that arrives later starts nothing
-
-    slow.arm();                       // the next lobby join arms it again
-    expect_eq(E::NONE, slow.fired);
-    expect(slow.on_lobby_loaded());
   }
 
   phosg::log_info_f("-- Spire BBA TX guard: version gate, encoding and the compiled client function");

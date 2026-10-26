@@ -2214,15 +2214,11 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
 // verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
 // room for a slow Wii without letting a stuck login sit forever.
 static constexpr auto SPIRE_GUARD_ANSWER_TIMEOUT = std::chrono::seconds(15);
-// v28: a lobby restore asks this often before it leaves the restore to the next lobby join or login
-static constexpr size_t SPIRE_GUARD_LOBBY_ATTEMPTS = 3;
-static constexpr auto SPIRE_GUARD_LOBBY_RETRY_DELAY = std::chrono::seconds(5);
 
 // If *done is still false when the timeout expires, cancels the pending promises (Client::cancel_pending_promises),
 // so the waiting restore throws and the caller never sends 97. At login (drop) the client is also dropped: without a 97
-// the login cannot go on. In the lobby (v28) the connection stays: the lobby restore asks again, and the marker keeps
-// the restore pending for the next lobby join or login (measured 2026-10-24 15:56: a drop left Kamako in a dimmed
-// lobby that could not log in again).
+// the login cannot go on. At the game exit (v47) the client is dropped too, before it is in a lobby, and the marker
+// keeps the restore pending for the next login.
 static asio::awaitable<void> spire_guard_watchdog(
     std::weak_ptr<Client> weak_c, std::shared_ptr<bool> done, uint32_t serial_number, std::string what, bool drop) {
   co_await async_sleep(SPIRE_GUARD_ANSWER_TIMEOUT);
@@ -2263,7 +2259,7 @@ struct SpireGuardWatchdog {
 // items and meseta too. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
 // but becomes AwaitingSave: the card may still hold the overlay until the client saves.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
-    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool in_lobby) {
+    SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool after_game) {
   if (!character) {
     c->log.warning_f("Spire guard: restore not verified for serial {:010}: no character in the 61; marker kept", serial_number);
     return false;
@@ -2295,12 +2291,12 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
     return false;
   }
   snapshot.restore_pending = false;
-  snapshot.awaiting_save = in_lobby;
-  snapshot.has_overlay = in_lobby && snapshot.has_overlay;
+  snapshot.awaiting_save = after_game;
+  snapshot.has_overlay = after_game && snapshot.has_overlay;
   spire_guard_save(filename, serial_number, snapshot);
   c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}",
       serial_number, level + 1, exp, items_str,
-      in_lobby ? "marker kept until a login 61 shows the same" : "marker cleared");
+      after_game ? "marker kept until a login 61 shows the same" : "marker cleared");
   return true;
 }
 
@@ -2323,10 +2319,10 @@ struct SpireGuardRestoreLock {
 
 // The restore itself, shared by the login path and the lobby path: fetch the full character (30), put the snapshot's
 // inventory and disp in, send it with SetExtendedPlayerInfo, and verify the 61 requested right after. Returns true
-// only if the restore was verified (RestorePending is then cleared). where is "login" or "lobby" (for the log).
+// only if the restore was verified (RestorePending is then cleared). where is "login" or "game exit" (for the log).
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
-  bool drop = (std::string(where) != "lobby");
+  bool drop = true;
   c->log.info_f("Spire guard: restore pending for serial {:010} (q{}); restoring {} in the {}",
       serial_number, snapshot.quest_number, spire_guard_describe(snapshot), where);
   if (!snapshot.has_character) {
@@ -2403,7 +2399,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
       SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61", drop);
       after = co_await send_get_player_info(c, false);
     }
-    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "lobby"))) {
+    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after.character, !strcmp(where, "game exit"))) {
       co_return false;
     }
     co_return true;
@@ -2650,147 +2646,11 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
   co_return true;
 }
 
-void spire_guard_lobby_loaded(std::shared_ptr<Client> c) {
-  if (c->spire_lobby_gate.on_lobby_loaded() && c->spire_lobby_settle_promise && !c->spire_lobby_settle_promise->done()) {
-    c->spire_lobby_settle_promise->set_value();
-  }
-}
-
-static asio::awaitable<void> spire_guard_lobby_settle_timer(std::weak_ptr<Client> weak_c, std::shared_ptr<AsyncPromise<void>> promise) {
-  co_await async_sleep(std::chrono::milliseconds(SPIRE_GUARD_LOBBY_SETTLE_MS));
-  auto c = weak_c.lock();
-  if (!c || promise->done()) {
-    co_return;
-  }
-  if (c->spire_lobby_gate.on_timeout()) {
-    promise->set_value();
-  }
-}
-
-// v33: waits until the client has loaded the lobby: a B1 goes out now, the client answers it with a 99 only once the
-// lobby is loaded (see SpireLobbyGate.hh); fallback SPIRE_GUARD_LOBBY_SETTLE_MS. Returns false if the client
-// disconnected or left the lobby meanwhile (the marker stays; the restore follows at the next lobby join or login).
-// Measured 2026-10-24 15:56 (lab) and 18:39 (pc): a B2 in the same second as the 67 hung the lobby join.
-static asio::awaitable<bool> spire_guard_wait_for_lobby_settle(std::shared_ptr<Client> c, uint32_t serial_number) {
-  auto promise = std::make_shared<AsyncPromise<void>>();
-  c->spire_lobby_settle_promise = promise;
-  c->spire_lobby_gate.arm();
-  uint64_t start_usecs = phosg::now();
-  asio::co_spawn(co_await asio::this_coro::executor, spire_guard_lobby_settle_timer(c, promise), asio::detached);
-  try {
-    send_server_time(c);
-    co_await promise->get();
-  } catch (const std::exception& e) {
-    c->log.info_f("Spire guard: lobby restore for serial {:010} not started: {} while waiting for the 99 (marker kept)",
-        serial_number, e.what());
-    co_return false;
-  }
-  if (c->spire_lobby_settle_promise == promise) {
-    c->spire_lobby_settle_promise.reset();
-  }
-  uint64_t waited_ms = (phosg::now() - start_usecs) / 1000;
-  const char* why = (c->spire_lobby_gate.fired == SpireGuardLobbyGate::Event::LOBBY_LOADED)
-      ? "the 99 after the lobby join"
-      : "no 99 within the timeout";
-  auto l = c->lobby.lock();
-  if (!c->channel->connected() || !l || l->is_game()) {
-    c->log.info_f("Spire guard: lobby restore for serial {:010} not started: client {} after {} ms ({}); marker kept",
-        serial_number, !c->channel->connected() ? "disconnected" : "left the lobby", waited_ms, why);
-    co_return false;
-  }
-  c->log.info_f("Spire guard: lobby restore for serial {:010} starts {} ms after the lobby join ({})", serial_number,
-      waited_ms, why);
-  co_return true;
-}
-
-std::vector<uint64_t> spire_guard_refresh_leave_targets(const std::vector<uint64_t>& in_lobby, uint64_t self_id) {
-  std::vector<uint64_t> ret;
-  for (uint64_t id : in_lobby) {
-    if (id != self_id) {
-      ret.emplace_back(id);
-    }
-  }
-  return ret;
-}
-
-std::vector<uint64_t> spire_guard_refresh_join_targets(
-    const std::vector<uint64_t>& told_leave, const std::vector<uint64_t>& in_lobby_now, uint64_t self_id) {
-  std::vector<uint64_t> ret;
-  for (uint64_t id : told_leave) {
-    if ((id != self_id) && (std::find(in_lobby_now.begin(), in_lobby_now.end(), id) != in_lobby_now.end())) {
-      ret.emplace_back(id);
-    }
-  }
-  return ret;
-}
-
-std::vector<uint8_t> spire_guard_refresh_self_commands() {
-  return {};
-}
-
-static std::vector<uint64_t> spire_guard_lobby_client_ids(std::shared_ptr<const Lobby> l) {
-  std::vector<uint64_t> ret;
-  for (const auto& lc : l->clients) {
-    if (lc) {
-      ret.emplace_back(lc->id);
-    }
-  }
-  return ret;
-}
-
-// v43: lets the other players see the restored character the way a normal lobby join does (see SpireFlagBridge.hh).
-// Measured 2026-10-25 20:46:49 (pc): the $loadchar refresh sent the partner the 69 and the 68 for BidX's slot in the
-// same millisecond, and BidX was invisible in the lobby afterwards. Never throws.
-static asio::awaitable<void> spire_guard_refresh_lobby(std::shared_ptr<Client> c, uint32_t serial_number) {
-  try {
-    auto l = c->lobby.lock();
-    if (!l || l->is_game()) {
-      co_return;
-    }
-    uint8_t slot = c->lobby_client_id;
-    auto told_leave = spire_guard_refresh_leave_targets(spire_guard_lobby_client_ids(l), c->id);
-    S_LeaveLobby_66_69_Ep3_E9 leave_cmd = {slot, l->leader_id, l->client_extension_flags(), 0};
-    for (const auto& lc : l->clients) {
-      if (lc && (std::find(told_leave.begin(), told_leave.end(), lc->id) != told_leave.end())) {
-        send_command_t(lc, 0x69, slot, leave_cmd);
-      }
-    }
-    if (!told_leave.empty()) {
-      co_await async_sleep(SPIRE_GUARD_LOBBY_REFRESH_GAP);
-    }
-    if (!c->channel->connected() || (c->lobby.lock() != l) || (c->lobby_client_id != slot)) {
-      c->log.info_f("Spire guard: lobby refresh for serial {:010} stopped: the client {} during the gap",
-          serial_number, !c->channel->connected() ? "disconnected" : "left the lobby");
-      co_return;
-    }
-    // v46: the restored client gets nothing; the function call (B2) already set its character in memory. Both forms
-    // of a refresh for its own slot failed once: v43's 67 alone was followed by a crash 18 s later (2026-10-26
-    // 11:44:33, pc), v45's 69 and 67 left the client frozen and invisible (2026-10-26 12:39:05, lab, Kamako alone).
-    for (uint8_t command : spire_guard_refresh_self_commands()) {
-      if (command == 0x69) {
-        send_command_t(c, 0x69, slot, leave_cmd);
-      } else {
-        send_join_lobby(c, l);
-      }
-    }
-    auto join_targets = spire_guard_refresh_join_targets(told_leave, spire_guard_lobby_client_ids(l), c->id);
-    for (const auto& lc : l->clients) {
-      if (lc && (std::find(join_targets.begin(), join_targets.end(), lc->id) != join_targets.end())) {
-        send_player_join_notification(lc, l, c);
-      }
-    }
-    c->log.info_f("Spire guard: lobby refreshed for serial {:010}: nothing to the client, 69 to {} and 68 to {} other player(s) {} ms apart",
-        serial_number, told_leave.size(), join_targets.size(),
-        told_leave.empty() ? 0 : std::chrono::duration_cast<std::chrono::milliseconds>(SPIRE_GUARD_LOBBY_REFRESH_GAP).count());
-  } catch (const std::exception& e) {
-    c->log.warning_f("Spire guard: failed to refresh the lobby after the restore: {}", e.what());
-  }
-}
-
-asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
+// v47: the restore runs when the client leaves the game, before the lobby join (see SpireFlagBridge.hh)
+asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
-    co_return;
+    co_return true;
   }
 
   std::string filename;
@@ -2798,65 +2658,32 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
   try {
     filename = spire_guard_filename_for(c, serial_number);
     if (filename.empty()) {
-      co_return;
+      co_return true;
     }
     snapshot = spire_guard_load(filename);
   } catch (const std::exception& e) {
-    // The login restore stays the safety net; dropping here would not tell more than the next login does
-    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} after a game: {}", serial_number, e.what());
-    co_return;
+    c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} after a game: {}; dropping the client (marker kept)",
+        serial_number, e.what());
+    co_return false;
   }
   if (!spire_guard_marker_open(c->is_spire_protected(), false, snapshot.restore_pending, false)) {
-    co_return;
-  }
-  // v33: not while the client is still loading the lobby
-  if (!co_await spire_guard_wait_for_lobby_settle(c, serial_number)) {
-    co_return;
+    co_return true;
   }
 
   SpireGuardRestoreLock lock(c.get());
   if (!lock.locked) {
-    c->log.info_f("Spire guard: a restore is already running for serial {:010}; lobby restore skipped", serial_number);
-    co_return;
+    c->log.warning_f("Spire guard: a restore is already running for serial {:010}; dropping the client (marker kept)", serial_number);
+    co_return false;
   }
-  // v28: ask again instead of dropping; only while the client is still connected and in a lobby (in a game the
-  // join guard has refused it anyway, and the marker stays)
-  bool restored = false;
-  for (size_t attempt = 1; attempt <= SPIRE_GUARD_LOBBY_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      co_await async_sleep(SPIRE_GUARD_LOBBY_RETRY_DELAY);
-      auto l = c->lobby.lock();
-      if (!c->channel->connected() || !l || l->is_game()) {
-        break;
-      }
-      c->log.info_f("Spire guard: asking again for the lobby restore of serial {:010} (attempt {} of {})",
-          serial_number, attempt, SPIRE_GUARD_LOBBY_ATTEMPTS);
-      try {
-        snapshot = spire_guard_load(filename);
-      } catch (const std::exception& e) {
-        c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} before attempt {}: {}", serial_number, attempt, e.what());
-        break;
-      }
-      if (!snapshot.restore_pending) {
-        restored = true;
-        break;
-      }
-    }
-    if (co_await spire_guard_run_restore(c, serial_number, filename, snapshot, "lobby")) {
-      restored = true;
-      break;
-    }
-  }
-  if (!restored) {
-    c->log.warning_f("Spire guard: lobby restore for serial {:010} not verified; connection kept, marker kept, the restore follows at the next lobby join or login",
+  c->log.info_f("Spire guard: game exit restore for serial {:010} starts before the lobby join", serial_number);
+  if (!co_await spire_guard_run_restore(c, serial_number, filename, snapshot, "game exit")) {
+    c->log.warning_f("Spire guard: game exit restore for serial {:010} not verified; dropping the client, the restore follows at the next login (marker kept)",
         serial_number);
-    co_return;
+    co_return false;
   }
-
-  // v43: let the other players in the lobby see the restored character (v45: the client itself as $loadchar sends it)
-  co_await spire_guard_refresh_lobby(c, serial_number);
-  c->log.info_f("Spire guard: restored {} for serial {:010} in the lobby; marker stays until the next login confirms it",
+  c->log.info_f("Spire guard: restored {} for serial {:010} at the game exit; the lobby join follows; marker stays until the next login confirms it",
       spire_guard_describe(snapshot), serial_number);
+  co_return true;
 }
 
 bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) {
@@ -2866,7 +2693,6 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   }
   bool restoring = spire_guard_restoring_clients.count(c.get());
   bool pending = false;
-  bool can_restore_now = false;
   try {
     std::string filename = spire_guard_filename_for(c, serial_number);
     if (filename.empty()) {
@@ -2876,7 +2702,6 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
       auto snapshot = spire_guard_load(filename);
       bool protected_character = c->is_spire_protected();
       pending = spire_guard_marker_open(protected_character, snapshot.run_in_progress, snapshot.restore_pending, false);
-      can_restore_now = pending && snapshot.restore_pending;
     }
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to read snapshot for serial {:010} at a game join: {}", serial_number, e.what());
@@ -2887,15 +2712,8 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
   }
   c->log.info_f("Spire guard: game join refused for serial {:010}: {}", serial_number,
       restoring ? "a restore is running" : "the restore is not verified");
-  // v13 (critic K10): if no restore runs but one is pending and the client is in a lobby (the lobby restore did not
-  // run, e.g. after $exit), start it now, so "try again" can succeed
-  auto l = c->lobby.lock();
-  if (tell_client && !restoring && can_restore_now && l && !l->is_game()) {
-    c->log.info_f("Spire guard: starting the pending restore for serial {:010} after a refused game join", serial_number);
-    asio::co_spawn(*c->require_server_state()->io_context, spire_guard_restore_in_lobby(c), asio::detached);
-  }
   if (tell_client) {
-    send_lobby_message_box(c, "$C7Your character is\nstill being restored.\nTry again in a\nmoment.");
+    send_lobby_message_box(c, restoring ? "$C7Your character is\nstill being restored.\nTry again in a\nmoment." : "$C7Your character is\nrestored at the next\nlogin. Log out and\nin again.");
   }
   return false;
 }

@@ -7,7 +7,6 @@
 #include "Account.hh"
 #include "InventoryBackup.hh"
 #include "AsyncUtils.hh"
-#include "SpireLobbyGate.hh"
 #include "Channel.hh"
 #include "ClientFunctionIndex.hh"
 #include "CommandFormats.hh"
@@ -216,9 +215,6 @@ public:
   std::deque<std::shared_ptr<AsyncPromise<C_ExecuteCodeResult_B3>>> function_call_response_queue;
   std::shared_ptr<AsyncPromise<GetPlayerInfoResult>> character_data_ready_promise;
   std::shared_ptr<AsyncPromise<void>> enable_save_promise;
-  // Spire guard (v33): the lobby restore waits for the 99 that answers the B1 sent after the 67 (see SpireLobbyGate.hh)
-  SpireGuardLobbyGate spire_lobby_gate;
-  std::shared_ptr<AsyncPromise<void>> spire_lobby_settle_promise;
   // Security (regie pso-regie-10): one bit per CrashValueFilter rule already logged for this client
   uint64_t crash_value_rules_logged = 0;
   // Inventory backups (regie pso-regie-10): the backup file written when this client joined its current game, and what
