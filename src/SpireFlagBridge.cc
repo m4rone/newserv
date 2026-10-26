@@ -2724,6 +2724,10 @@ std::vector<uint64_t> spire_guard_refresh_join_targets(
   return ret;
 }
 
+std::vector<uint8_t> spire_guard_refresh_self_commands() {
+  return {0x69, 0x67};
+}
+
 static std::vector<uint64_t> spire_guard_lobby_client_ids(std::shared_ptr<const Lobby> l) {
   std::vector<uint64_t> ret;
   for (const auto& lc : l->clients) {
@@ -2759,15 +2763,22 @@ static asio::awaitable<void> spire_guard_refresh_lobby(std::shared_ptr<Client> c
           serial_number, !c->channel->connected() ? "disconnected" : "left the lobby");
       co_return;
     }
-    // Like any lobby join (and like $ln): the client reloads the lobby from the 67, without a 69 for its own slot
-    send_join_lobby(c, l);
+    // v45: like $loadchar, the 69 for its own slot first, then the 67. Measured 2026-10-26 11:44:33 (pc): the v43 67
+    // without that 69 was followed by a crash in the lobby 18 s later; the $loadchar order ran 11 times without one.
+    for (uint8_t command : spire_guard_refresh_self_commands()) {
+      if (command == 0x69) {
+        send_command_t(c, 0x69, slot, leave_cmd);
+      } else {
+        send_join_lobby(c, l);
+      }
+    }
     auto join_targets = spire_guard_refresh_join_targets(told_leave, spire_guard_lobby_client_ids(l), c->id);
     for (const auto& lc : l->clients) {
       if (lc && (std::find(join_targets.begin(), join_targets.end(), lc->id) != join_targets.end())) {
         send_player_join_notification(lc, l, c);
       }
     }
-    c->log.info_f("Spire guard: lobby refreshed for serial {:010}: 67 to the client, 69 to {} and 68 to {} other player(s) {} ms apart",
+    c->log.info_f("Spire guard: lobby refreshed for serial {:010}: 69 and 67 to the client, 69 to {} and 68 to {} other player(s) {} ms apart",
         serial_number, told_leave.size(), join_targets.size(),
         told_leave.empty() ? 0 : std::chrono::duration_cast<std::chrono::milliseconds>(SPIRE_GUARD_LOBBY_REFRESH_GAP).count());
   } catch (const std::exception& e) {
@@ -2841,7 +2852,7 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c) {
     co_return;
   }
 
-  // v43: let the other players in the lobby see the restored character, like a normal lobby join (not like $loadchar)
+  // v43: let the other players in the lobby see the restored character (v45: the client itself as $loadchar sends it)
   co_await spire_guard_refresh_lobby(c, serial_number);
   c->log.info_f("Spire guard: restored {} for serial {:010} in the lobby; marker stays until the next login confirms it",
       spire_guard_describe(snapshot), serial_number);

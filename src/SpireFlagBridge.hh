@@ -454,9 +454,14 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   from then on and the next login needs no push. Under RunInProgress or RestorePending nothing follows, and the 98 of
 //   a Spire (Battle) game never closes AwaitingSave.
 // - v43: after a verified lobby restore the lobby is refreshed like a normal lobby join: the restored client gets only
-//   a 67 (never a 69 for its own slot), the other players get the 69 first and the 68 SPIRE_GUARD_LOBBY_REFRESH_GAP
-//   later, never in the same frame. The $loadchar refresh (69 to all, then 67 and 68 at once) left the restored
+//   a 67 (no 69 for its own slot; undone in v45), the other players get the 69 first and the 68
+//   SPIRE_GUARD_LOBBY_REFRESH_GAP later, never in the same frame. The $loadchar refresh (69 to all, then 67 and 68 at once) left the restored
 //   player invisible on the partner's screen (2026-10-25 20:46:49, BidX after a run in q921 with M4ia in the lobby).
+// - v45: the restored client itself gets the 69 for its own slot again, directly before its 67, as $loadchar sends it
+//   (spire_guard_refresh_self_commands). The v43 67 without that 69 was followed by a client crash in the lobby
+//   18 s later (2026-10-26 11:44:33, BidX alone in the lobby after q921); the $loadchar order (69, C5, 67 for the
+//   restored client) ran 11 times on the pc on 2026-10-25 without a crash, 6 of them alone in the lobby. The other
+//   players keep the v43 order (69, the gap, 68).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -577,13 +582,16 @@ asio::awaitable<void> spire_guard_restore_in_lobby(std::shared_ptr<Client> c);
 // v33: called at every 99 (the client's answer to a B1, sent only once the lobby is loaded); starts a lobby restore
 // that waits for it. Cheap no-op for every other client.
 void spire_guard_lobby_loaded(std::shared_ptr<Client> c);
-// v43: the lobby refresh after a lobby restore. The 69 goes to every other client in the lobby (never to the restored
-// client itself); after the gap the 68 goes only to those that got the 69 and are still in that lobby (a client that
-// joined in between already has the restored character in its 67). Ids are Client::id.
+// v43: the lobby refresh after a lobby restore. The 69 goes to every other client in the lobby (the restored client's
+// own 69 follows after the gap, v45); after the gap the 68 goes only to those that got the 69 and are still in that
+// lobby (a client that joined in between already has the restored character in its 67). Ids are Client::id.
 constexpr auto SPIRE_GUARD_LOBBY_REFRESH_GAP = std::chrono::milliseconds(300);
 std::vector<uint64_t> spire_guard_refresh_leave_targets(const std::vector<uint64_t>& in_lobby, uint64_t self_id);
 std::vector<uint64_t> spire_guard_refresh_join_targets(
     const std::vector<uint64_t>& told_leave, const std::vector<uint64_t>& in_lobby_now, uint64_t self_id);
+// v45: the commands the restored client gets in the refresh, in this order: 0x69 (its own slot leaves) and 0x67 (the
+// lobby with the restored character); both after the gap, in the same frame, as $loadchar sends them.
+std::vector<uint8_t> spire_guard_refresh_self_commands();
 
 // Called before a client joins or creates a game (v10). Returns false, after sending the client a short message, if a
 // restore is running for the client or RestorePending is set; the caller must then not let the client into a game.

@@ -190,12 +190,12 @@ void run_static_tests() {
     expect(spire_guard_same_inventory(make(0, 0), 5, make(0, 0), 5));
   }
 
-  phosg::log_info_f("-- Spire guard: the lobby refresh after a lobby restore never sends the client a 69 for itself (v43)");
+  phosg::log_info_f("-- Spire guard: the lobby refresh after a lobby restore: the 69 to the others first, their 68 after the gap (v43)");
   {
     using V = std::vector<uint64_t>;
     // 2026-10-25 20:46:49: BidX (C-3) restored with M4ia (C-4) in the lobby: only M4ia gets the 69, BidX gets the 67
     expect_eq((V{4}), (spire_guard_refresh_leave_targets(V{4, 3}, 3)));
-    expect_eq((V{}), (spire_guard_refresh_leave_targets(V{3}, 3)));  // alone in the lobby: no 69 at all, only the 67
+    expect_eq((V{}), (spire_guard_refresh_leave_targets(V{3}, 3)));  // alone in the lobby: no other player gets a 69
     // after the gap: the 68 goes to M4ia, still there
     expect_eq((V{4}), (spire_guard_refresh_join_targets(V{4}, V{4, 3}, 3)));
     // a player who left during the gap gets no 68; one who joined during the gap has BidX in its own 67 already
@@ -204,6 +204,12 @@ void run_static_tests() {
     // the restored client never gets a 68 for itself
     expect_eq((V{}), (spire_guard_refresh_join_targets(V{3}, V{3}, 3)));
     expect(SPIRE_GUARD_LOBBY_REFRESH_GAP >= std::chrono::milliseconds(100)); // several frames apart at 30 fps
+  }
+
+  phosg::log_info_f("-- Spire guard: the restored client gets the 69 for its own slot right before its 67, as $loadchar sends it (v45)");
+  {
+    // 2026-10-26 11:44:33: a 67 without that 69 (v43) was followed by a crash in the lobby; 69, C5, 67 ran 11 times
+    expect_eq((std::vector<uint8_t>{0x69, 0x67}), (spire_guard_refresh_self_commands()));
   }
 
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
