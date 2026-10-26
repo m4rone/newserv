@@ -1,5 +1,6 @@
 {
   "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price, P and PNeeded is a placeholder until the balance is tuned (one full Normal run room 1 through De Rol Le earns 18 splinters).",
+  "_cap": "2026-10-26 B-BASIS-53: quest size limit (bin+dat <= ~249 KB raw for the follower) keeps heat rows H 0..1 only, so the shop sells at most P 2 (start_level 1 + atp_grind 1) until the per-area quest split brings the full heat range back.",
   "Items": {
     "start_level": {
       "_what": "+1 start level per level (1 level equivalent each). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by its level and builds its overlay at that level (quest load and run again 'I'). OnSale 1: one level until a lab run shows the raised level on the client.",
@@ -11,21 +12,21 @@
     "kit_tier": {
       "_what": "level 1: the second kit of the class archetype (the quest's existing second-kit branch, Dagger/Rifle/Barta) from the first run. OnSale 1: level 2 has no kit yet.",
       "Max": 2,
-      "OnSale": 1,
+      "OnSale": 0,
       "Price": [30, 60],
       "P": [0, 2, 4]
     },
     "hp_mat": {
       "_what": "2 HP Materials per level in the start kit (each +2 max HP when used); 2 levels count 1 level equivalent.",
       "Max": 5,
-      "OnSale": 5,
+      "OnSale": 0,
       "Price": [8, 16, 24, 32, 40],
       "P": [0, 0, 1, 1, 2, 2]
     },
     "atp_grind": {
       "_what": "2 Monogrinders per level in the start kit (each +1 grind on the weapon when used); 1 level equivalent per level.",
       "Max": 5,
-      "OnSale": 5,
+      "OnSale": 1,
       "Price": [10, 20, 30, 40, 50],
       "P": [0, 1, 2, 3, 4, 5]
     },
