@@ -2880,17 +2880,6 @@ bool spire_guard_snapshot_not_worse(
       (disp.stats.exp >= snapshot.disp.stats.exp) && (inventory.num_items >= snapshot.inventory.num_items);
 }
 
-// F1 (route B): the run mag's 12 bytes as the ledger last mirrored them for this client's latest run (F6); std::nullopt
-// without a ledger or before a mag was issued, and then spire_guard_holds_run_mag is false and the other F1 terms decide.
-static SpireRunMagBytes spire_guard_ledger_run_mag(std::shared_ptr<const Client> c) {
-  auto it = spire_run_mag_store.find(spire_run_mag_key(c));
-  if (it == spire_run_mag_store.end()) {
-    return std::nullopt;
-  }
-  auto run_it = it->second.runs.find(it->second.latest_run_id);
-  return (run_it == it->second.runs.end()) ? std::nullopt : run_it->second.last_mirrored;
-}
-
 // F1 (route B): see SpireFlagBridge.hh
 SpireRunCopyPrint spire_guard_run_copy_print(const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
   SpireRunCopyPrint ret;
@@ -2921,18 +2910,6 @@ bool spire_guard_matches_print(
   return spire_guard_run_copy_print(inventory, disp).hash == print.hash;
 }
 
-bool spire_guard_holds_run_mag(const PlayerInventory& inventory, const SpireRunMagBytes& run_mag) {
-  if (!run_mag) {
-    return false;
-  }
-  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
-    if (!memcmp(inventory.items[z].data.data1.data(), run_mag->data(), 12)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool spire_guard_store_print(const std::string& filename, uint32_t serial_number, SpireGuardSnapshot& snapshot,
     const PlayerInventory* inventory, const PlayerDispDataV4* disp) {
   try {
@@ -2950,12 +2927,13 @@ bool spire_guard_store_print(const std::string& filename, uint32_t serial_number
   }
 }
 
-bool spire_guard_retake_ok(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
-    const SpireGuardSnapshot& snapshot, const SpireRunMagBytes& run_mag) {
-  // F1 fix (B-REGIE-14-9): the snapshot's exact level and EXP, since the base gives neither
+bool spire_guard_retake_ok(
+    const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot) {
+  // F1 fix (B-REGIE-14-9): the snapshot's exact level and EXP, since the base gives neither. No run mag term
+  // (routeb-f6-critic C1): the bonus-0 step-0 run mag is byte for byte Sega's unfed Mag LV5, which real characters hold.
   return spire_guard_snapshot_not_worse(inventory, disp, snapshot) && (disp.stats.level == snapshot.disp.stats.level) &&
       (disp.stats.exp == snapshot.disp.stats.exp) && snapshot.run_copy_print.exists &&
-      !spire_guard_matches_print(inventory, disp, snapshot.run_copy_print) && !spire_guard_holds_run_mag(inventory, run_mag);
+      !spire_guard_matches_print(inventory, disp, snapshot.run_copy_print);
 }
 
 // v32: level, EXP, meseta and items equal (spire_guard_same_inventory); v38: and the material counters
@@ -3032,9 +3010,9 @@ bool spire_guard_follow_real_progress(
 
 // v49: the snapshot step of the run again ('I', SpireFlagBridge.hh)
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs, const SpireRunMagBytes& run_mag) {
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
   if (!base_returned || !snapshot.has_character || !snapshot.run_in_progress || snapshot.restore_pending ||
-      snapshot.awaiting_save || !spire_guard_retake_ok(inventory, disp, snapshot, run_mag)) {
+      snapshot.awaiting_save || !spire_guard_retake_ok(inventory, disp, snapshot)) {
     return false;
   }
   snapshot.inventory = inventory;
@@ -3045,10 +3023,10 @@ bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_return
 }
 
 // v51: the 98 after a verified return to base ('O', SpireFlagBridge.hh)
-bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp, const SpireRunMagBytes& run_mag) {
+bool spire_guard_base_exit_follow(
+    SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
   if (!base_returned || !snapshot.has_character || snapshot.run_in_progress || !snapshot.restore_pending ||
-      snapshot.awaiting_save || !spire_guard_retake_ok(inventory, disp, snapshot, run_mag)) {
+      snapshot.awaiting_save || !spire_guard_retake_ok(inventory, disp, snapshot)) {
     return false;
   }
   snapshot.inventory = inventory;
@@ -3513,7 +3491,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
       }
       auto snapshot = spire_guard_load(filename);
       SpireGuardSnapshot before = snapshot;
-      if (!spire_guard_base_exit_follow(snapshot, true, character->inventory, character->disp, spire_guard_ledger_run_mag(c))) {
+      if (!spire_guard_base_exit_follow(snapshot, true, character->inventory, character->disp)) {
         c->log.warning_f("Spire guard: 98 after a verified return to base for serial {:010} does not match the snapshot's character, level or EXP, or is the run copy (F1: print {}); the run start's snapshot {} stays",
             serial_number, !before.run_copy_print.exists ? "none stored"
                 : spire_guard_matches_print(character->inventory, character->disp, before.run_copy_print) ? "matches" : "differs",
@@ -4378,8 +4356,8 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     }
     SpireGuardSnapshot before = snapshot;
     if (!now.character ||
-        !spire_guard_run_again_retake(snapshot, true, now.character->inventory, now.character->disp, quest_number, phosg::now(),
-            spire_guard_ledger_run_mag(c))) {
+        !spire_guard_run_again_retake(
+            snapshot, true, now.character->inventory, now.character->disp, quest_number, phosg::now())) {
       c->log.warning_f("Spire run again: the 61 for serial {:010} is not the snapshot's character, below it or the run copy ({}{}); kept the stored snapshot, nothing changed",
           serial_number, spire_guard_describe(before),
           now.character ? std::format("; 61 shows Lv{} EXP {}, {} items, snapshot {} items; F1: print {}",

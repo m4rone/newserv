@@ -58,8 +58,8 @@
 //   SPIRE_RUN_OVER_PARTNER_DELAY after the first. Never to Pioneer 2 (B-E01-41); the 98 and the lobby join run the
 //   guard's restore as for a Quit.
 
-// F1: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (F6, SpireMag.hh);
-// std::nullopt while no ledger exists, and then spire_guard_holds_run_mag is false.
+// F6: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (SpireMag.hh); std::nullopt
+// while no ledger exists.
 using SpireRunMagBytes = std::optional<SpireMagBytes>;
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
@@ -1016,22 +1016,21 @@ bool spire_guard_store_print(const std::string& filename, uint32_t serial_number
 // equality of spire_guard_retake_ok decides.
 bool spire_guard_matches_print(
     const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireRunCopyPrint& print);
-// F1: true if the inventory holds an item whose 12 data1 bytes equal the ledger's run mag
-bool spire_guard_holds_run_mag(const PlayerInventory& inventory, const SpireRunMagBytes& run_mag);
 // F1: whether data may replace the snapshot of an open run, at both re-take callers (spire_guard_run_again_retake,
 // spire_guard_base_exit_follow): not worse (spire_guard_snapshot_not_worse), the snapshot's exact level and EXP (the
-// base gives neither; F1 fix, B-REGIE-14-9), a print stored at 'O' that the data does not match, and not holding the
-// ledger's run mag. When in doubt (no print), the snapshot stays. The mag signature of amendment 6 is gone
-// (B-REGIE-14-9): a bank mag swap in the base is the real character, and refusing it lost the withdrawn mag at the
-// exit restore (routeb-f1-critic.md C3).
-bool spire_guard_retake_ok(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
-    const SpireGuardSnapshot& snapshot, const SpireRunMagBytes& run_mag);
+// base gives neither; F1 fix, B-REGIE-14-9), and a print stored at 'O' that the data does not match. When in doubt (no
+// print), the snapshot stays. The mag signature of amendment 6 is gone (B-REGIE-14-9): a bank mag swap in the base is
+// the real character, and refusing it lost the withdrawn mag at the exit restore (routeb-f1-critic.md C3). The run mag
+// term is gone too (routeb-f6-critic.md C1): the run mag of a run without bought levels before its first evolve is
+// byte for byte Sega's unfed Mag LV5, which real characters hold, so it refused the real character.
+bool spire_guard_retake_ok(
+    const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot);
 // The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
 // RunInProgress alone and a character, and the data is the same character (name, class, section ID) and (F1) passes
-// spire_guard_retake_ok (not worse, the exact level and EXP, not the run copy's print, no run mag); then the snapshot
-// takes the data, the quest and the time, and RunInProgress stays. run_mag: the ledger's run mag (F6), or std::nullopt.
+// spire_guard_retake_ok (not worse, the exact level and EXP, not the run copy's print); then the snapshot takes the
+// data, the quest and the time, and RunInProgress stays.
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs, const SpireRunMagBytes& run_mag);
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
 // v51: the 98 of a client that leaves the game after a verified return to base ('O' OK, no 'I' since): its memory has
 // held the real character since the verified push, so the snapshot takes what the base changed (items, meseta),
 // and the restore at the game exit pushes that instead of the run start's data (a bank withdrawal in the base
@@ -1039,8 +1038,8 @@ bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_return
 // and RestorePending alone (spire_guard_end_run just turned RunInProgress into it), and the data (F1) passes
 // spire_guard_retake_ok (the same character with the snapshot's level and EXP; the base gives no EXP, anything else
 // keeps the run start's data). RestorePending stays: the restore at the game exit still runs.
-bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp, const SpireRunMagBytes& run_mag);
+bool spire_guard_base_exit_follow(
+    SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
 
 // v49: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
 // (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then

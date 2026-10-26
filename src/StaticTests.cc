@@ -353,7 +353,7 @@ void run_static_tests() {
     // after 'O' OK: the 61 of the base is the real character, the snapshot takes it and RunInProgress stays
     auto spent = make(20, 0x00, 51, 700, "BidX", 3); // spent meseta in the base
     auto snap = fresh();
-    expect(spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save && snap.has_character);
@@ -361,17 +361,17 @@ void run_static_tests() {
     // v56 (live 2026-10-26 20:47:39): never fewer items, a lower level or less EXP than the stored snapshot; the
     // stored one stays. One item fewer, the run copy (Lv6, 3 items), the same level with less EXP:
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1u, snap.snapshot_time_usecs);
     auto run_copy = make(3, 0x00, 5, 0, "BidX", 3);
-    expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
     expect_eq(51u, snap.disp.stats.level.load());
     snap.disp.stats.exp = 90000;
     auto less_exp = make(20, 0x00, 51, 1000, "BidX", 3);
     less_exp.second.stats.exp = 89999;
     expect(!spire_guard_snapshot_not_worse(less_exp.first, less_exp.second, snap));
-    expect(!spire_guard_run_again_retake(snap, true, less_exp.first, less_exp.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, less_exp.first, less_exp.second, 921, 2));
     expect_eq(90000u, snap.disp.stats.exp.load());
     // more items and a higher level are not worse
     auto gained = make(21, 0x00, 52, 0, "BidX", 3);
@@ -380,25 +380,25 @@ void run_static_tests() {
     expect(!spire_guard_snapshot_not_worse(other.first, other.second, fresh()));
     // no verified return to base (or used up): nothing changes
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, false, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, false, spent.first, spent.second, 921, 2));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1u, snap.snapshot_time_usecs);
     // another character on the card, or another marker: nothing changes
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, true, other.first, other.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, other.first, other.second, 921, 2));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     snap = fresh();
     snap.restore_pending = true;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.awaiting_save = true;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.run_in_progress = false;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
     snap = fresh();
     snap.has_character = false;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
   }
 
   phosg::log_info_f("-- Spire guard: the game exit after 'O' and 'I' restores, never a stale snapshot (v51)");
@@ -444,7 +444,7 @@ void run_static_tests() {
     // as it is now (the run start's 20 items would push the bank item away)
     auto snap = at_run_start();
     end_run(snap);
-    expect(spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
+    expect(spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
     expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(snap.restore_pending && !snap.run_in_progress && !snap.awaiting_save);
@@ -452,35 +452,35 @@ void run_static_tests() {
     // (a) 'O' OK, nothing changed in the base: the snapshot stays equal, the exit push changes nothing
     snap = at_run_start();
     end_run(snap);
-    expect(spire_guard_base_exit_follow(snap, true, real.first, real.second, std::nullopt));
+    expect(spire_guard_base_exit_follow(snap, true, real.first, real.second));
     expect(spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second));
     // (a) a 98 that is not the real character (the run copy's level or EXP, another character): the run start stays
     snap = at_run_start();
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, true, run_copy.first, run_copy.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, run_copy.first, run_copy.second));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     auto higher = make(21, 52, 95000, 700, "BidX");
-    expect(!spire_guard_base_exit_follow(snap, true, higher.first, higher.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, higher.first, higher.second));
     auto other = make(21, 51, 90000, 700, "M4ia");
-    expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     // v56: the real level and EXP but fewer items than the snapshot: kept
     auto fewer = make(19, 51, 90000, 700, "BidX");
-    expect(!spire_guard_base_exit_follow(snap, true, fewer.first, fewer.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, fewer.first, fewer.second));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     // (a) only after end_run: never while RunInProgress, AwaitingSave or without a character
     snap = at_run_start();
-    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
     snap.run_in_progress = false;
     snap.awaiting_save = true;
-    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
 
     // (b) 'O' failed (or never asked): no base_returned, the 98 (the run copy) is ignored, the run start's snapshot
     // is pushed at the exit
     snap = at_run_start();
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second, std::nullopt));
-    expect(!spire_guard_base_exit_follow(snap, false, base_changed.first, base_changed.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
+    expect(!spire_guard_base_exit_follow(snap, false, base_changed.first, base_changed.second));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     expect(exit_restore_runs(snap));
@@ -488,9 +488,9 @@ void run_static_tests() {
     // (c) 'O' OK, 'I' (the snapshot taken again in the base, the run copy pushed, the 'O' OK used up), then leave: the
     // 98 holds the run copy and is ignored, the exit pushes the snapshot taken at the 'I'
     snap = at_run_start();
-    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2, std::nullopt));
+    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
     expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(exit_restore_runs(snap));
@@ -555,45 +555,40 @@ void run_static_tests() {
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print_of(run_copy);
       expect(spire_guard_snapshot_not_worse(run_copy.first, run_copy.second, snap)); // the v56 rule alone lets it in
-      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, std::nullopt));
-      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
+      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap));
+      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
       expect(unchanged(snap, real));
       // the in-game 61 is the save form (equipped items only): the print's level and EXP still match
       auto save_form = make("Testa", 19, 9000, 400, 4, 0x20, {});
-      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2));
       // the same items and meseta at another level (hash only) match too
       auto same_items = make("Testa", 20, 9100, 400, 12, 0x20, {});
       expect(spire_guard_matches_print(same_items.first, same_items.second, snap.run_copy_print));
-      expect(!spire_guard_run_again_retake(snap, true, same_items.first, same_items.second, 921, 2, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, same_items.first, same_items.second, 921, 2));
       expect(unchanged(snap, real));
       // the 98 after 'O' at the snapshot's level and EXP: the hash finds the run copy's items
       auto equal_stats = make("Testa", 5, 300, 400, 12, 0x20, {});
       auto exit_snap = snapshot_of(real, false);
       exit_snap.run_copy_print = print_of(equal_stats);
-      expect(!spire_guard_base_exit_follow(exit_snap, true, equal_stats.first, equal_stats.second, std::nullopt));
+      expect(!spire_guard_base_exit_follow(exit_snap, true, equal_stats.first, equal_stats.second));
       expect(unchanged(exit_snap, real));
     });
 
-    f1_case("b: a different print, but holding the ledger's run mag", [&]() {
+    f1_case("b: a run copy holding the run mag, with a different print: level and EXP decide (no run mag term, f6 C1)", [&]() {
       auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
       auto run_copy = make("Testa", 19, 9000, 400, 11, 0x20, {run_mag});
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print_of(make("Testa", 18, 8000, 300, 10, 0x40, {}));
       expect(!spire_guard_matches_print(run_copy.first, run_copy.second, snap.run_copy_print));
-      expect(spire_guard_holds_run_mag(run_copy.first, run_mag));
-      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, run_mag));
-      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, run_mag));
+      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap));
+      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
       expect(unchanged(snap, real));
+      // the 98 after 'O' with the snapshot's level and EXP but the printed run copy's items: the print refuses it
       auto exit_copy = make("Testa", 5, 300, 400, 11, 0x20, {run_mag});
       auto exit_snap = snapshot_of(real, false);
-      exit_snap.run_copy_print = snap.run_copy_print;
-      expect(!spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, run_mag));
+      exit_snap.run_copy_print = print_of(exit_copy);
+      expect(!spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second));
       expect(unchanged(exit_snap, real));
-      // the exact 12 bytes: the same mag kind with other stats is not the ledger's mag; no ledger (before F6): false
-      Bytes other_stats = run_mag;
-      other_stats[4] = 0x50;
-      expect(!spire_guard_holds_run_mag(make("Testa", 5, 300, 0, 0, 0, {other_stats}).first, run_mag));
-      expect(!spire_guard_holds_run_mag(run_copy.first, std::nullopt));
     });
 
     f1_case("c: the real character after a verified restore plus one bank item", [&]() {
@@ -601,18 +596,18 @@ void run_static_tests() {
       auto with_bank_item = make("BidX", 52, 90000, 1000, 20, 0x01, {kama});
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print_of(make("BidX", 19, 9000, 400, 12, 0x20, {}));
-      expect(spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap, run_mag));
-      expect(spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2, run_mag));
+      expect(spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap));
+      expect(spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2));
       expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
       expect(snap.run_in_progress && (snap.snapshot_time_usecs == 2));
       auto exit_snap = snapshot_of(real, false);
       exit_snap.run_copy_print = snap.run_copy_print;
-      expect(spire_guard_base_exit_follow(exit_snap, true, with_bank_item.first, with_bank_item.second, run_mag));
+      expect(spire_guard_base_exit_follow(exit_snap, true, with_bank_item.first, with_bank_item.second));
       expect_eq(21u, static_cast<uint32_t>(exit_snap.inventory.num_items));
       // when in doubt the snapshot stays: no print stored at 'O'
       snap = snapshot_of(real, true);
-      expect(!spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap, std::nullopt));
-      expect(!spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2, std::nullopt));
+      expect(!spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap));
+      expect(!spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2));
       expect(unchanged(snap, real));
     });
 
@@ -623,8 +618,8 @@ void run_static_tests() {
       auto snap = snapshot_of(real, true);
       for (bool printed : {false, true}) {
         snap.run_copy_print = printed ? print_of(make("M4ia", 17, 4200, 0, 18, 0x60, {})) : SpireRunCopyPrint();
-        expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, std::nullopt));
-        expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
+        expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap));
+        expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
         expect(unchanged(snap, real));
       }
     });
@@ -637,30 +632,30 @@ void run_static_tests() {
       auto stronger = make("BidX", 60, 120000, 2000, 24, 0x01, {});
       expect(!spire_guard_matches_print(stronger.first, stronger.second, snap.run_copy_print));
       expect(spire_guard_snapshot_not_worse(stronger.first, stronger.second, snap)); // the v56 rule alone lets it in
-      expect(!spire_guard_retake_ok(stronger.first, stronger.second, snap, std::nullopt));
-      expect(!spire_guard_run_again_retake(snap, true, stronger.first, stronger.second, 921, 2, std::nullopt));
+      expect(!spire_guard_retake_ok(stronger.first, stronger.second, snap));
+      expect(!spire_guard_run_again_retake(snap, true, stronger.first, stronger.second, 921, 2));
       expect(unchanged(snap, real));
-      // holding a run mag of another kind instead (unequipped, invisible to holds_run_mag without a ledger): still a run copy
+      // holding a run mag instead: still a run copy, refused by its level and EXP
       auto with_run_mag = make("BidX", 60, 120000, 2000, 23, 0x01, {run_mag});
-      expect(!spire_guard_run_again_retake(snap, true, with_run_mag.first, with_run_mag.second, 921, 2, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, with_run_mag.first, with_run_mag.second, 921, 2));
       // B-REGIE-14-9 (C3): the real level and EXP without the mag (deposited in the base) is the real character; before
       // the fix the signature refused it, and the exit restore then pushed the deposited mag back next to the bank copy
       auto exit_copy = make("BidX", 52, 90000, 2000, 24, 0x01, {});
       auto exit_snap = snapshot_of(real, false);
       exit_snap.run_copy_print = snap.run_copy_print;
-      expect(spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, std::nullopt));
+      expect(spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second));
       expect(spire_guard_same_state(exit_snap.inventory, exit_snap.disp, exit_copy.first, exit_copy.second));
       // the real mag back (fed in the base: other stat bytes), the re-take goes on
       Bytes fed = kama;
       fed[3] = 0x52;
       auto real_fed = make("BidX", 52, 90000, 1000, 19, 0x01, {fed});
-      expect(spire_guard_run_again_retake(snap, true, real_fed.first, real_fed.second, 921, 2, std::nullopt));
+      expect(spire_guard_run_again_retake(snap, true, real_fed.first, real_fed.second, 921, 2));
       // a snapshot without a mag
       auto no_mag = make("Testa", 5, 300, 50, 3, 0x01, {});
       auto grown = make("Testa", 5, 300, 50, 4, 0x01, {});
       auto plain = snapshot_of(no_mag, true);
       plain.run_copy_print = print_of(make("Testa", 19, 9000, 400, 12, 0x20, {}));
-      expect(spire_guard_run_again_retake(plain, true, grown.first, grown.second, 921, 2, std::nullopt));
+      expect(spire_guard_run_again_retake(plain, true, grown.first, grown.second, 921, 2));
     });
 
     f1_case("print: kept in the run, cleared by the next run start", [&]() {
@@ -720,7 +715,37 @@ void run_static_tests() {
       expect(verified(restored));
       // and the save form never becomes the snapshot by a re-take either
       snap.run_copy_print = print_of(make("M4ia", 17, 4200, 0, 18, 0x60, {same_kind_run_mag}));
-      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2));
+    });
+
+    f1_case("g: the real character holds Sega's unfed Mag LV5, the bytes of a bonus-0 step-0 run mag (routeb-f6-critic C1)", [&]() {
+      // Sega's starting mag (kind 0, LV5, DEF 5.00, no photon blast) is byte for byte the run mag of a run without bought
+      // levels before its first evolve (spire_mag_step_bytes(line, 0, 0, std::nullopt), F6 test "HU start floor L22").
+      // Real characters hold one (routeb-mag-vraag.md: M4ia, Nyra, Wakiru), so these bytes never identify a run copy.
+      const Bytes mag_lv5 = {0x02, 0x00, 0x05, 0x00, 0xF4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+      // A short bonus-0 run that ended before the first evolve; the real character (spare Mag LV5 next to Pitri) is back
+      // at the snapshot's exact level and EXP; the base changed its items (one bank withdrawal)
+      auto real = make("Nyra", 30, 52000, 3000, 14, 0x01, {pitri, mag_lv5});
+      auto after_base = make("Nyra", 30, 52000, 3000, 15, 0x01, {pitri, mag_lv5});
+      auto run_copy = make("Nyra", 1, 0, 0, 3, 0x60, {mag_lv5}); // the run copy as 'O' printed it
+      // the 'I' re-take (run again)
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(run_copy);
+      expect(!spire_guard_matches_print(after_base.first, after_base.second, snap.run_copy_print));
+      expect(spire_guard_retake_ok(after_base.first, after_base.second, snap));
+      expect(spire_guard_run_again_retake(snap, true, after_base.first, after_base.second, 921, 2));
+      expect_eq(17u, static_cast<uint32_t>(snap.inventory.num_items));
+      expect(spire_guard_same_state(snap.inventory, snap.disp, after_base.first, after_base.second));
+      // the 98 after 'O': the base's changes follow into the snapshot, so the exit restore pushes them, not the run start
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = print_of(run_copy);
+      expect(spire_guard_base_exit_follow(exit_snap, true, after_base.first, after_base.second));
+      expect(spire_guard_same_state(exit_snap.inventory, exit_snap.disp, after_base.first, after_base.second));
+      // the run copy itself is still refused: its level and EXP differ from the snapshot's, and its 98 matches the print
+      auto again = snapshot_of(real, true);
+      again.run_copy_print = print_of(run_copy);
+      expect(!spire_guard_run_again_retake(again, true, run_copy.first, run_copy.second, 921, 2));
+      expect(unchanged(again, real));
     });
 
     // Fix round 1 (routeb-f1-critic.md C1-C5, B-REGIE-14-9). Every check is logged before any is asserted, so one run
@@ -742,28 +767,28 @@ void run_static_tests() {
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print_of(make("Testa", 19, 0, 400, 12, 0x20, {}));
       auto save_form = make("Testa", 19, 9000, 400, 3, 0x20, {plain_mag});
-      check("C1 retake_ok refuses the save form", !spire_guard_retake_ok(save_form.first, save_form.second, snap, std::nullopt));
+      check("C1 retake_ok refuses the save form", !spire_guard_retake_ok(save_form.first, save_form.second, snap));
       check("C1 'I' refuses the save form",
-          !spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+          !spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2));
       check("C1 the snapshot stays", unchanged(snap, real));
       // the same with a snapshot that holds the same plain mag kind
       auto real_mag = make("Testa", 5, 300, 50, 3, 0x01, {plain_mag});
       auto snap_mag = snapshot_of(real_mag, true);
       snap_mag.run_copy_print = snap.run_copy_print;
       check("C1 'I' refuses the save form (snapshot with a plain mag)",
-          !spire_guard_run_again_retake(snap_mag, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+          !spire_guard_run_again_retake(snap_mag, true, save_form.first, save_form.second, 921, 2));
       // C2: the old rule (not worse) against the new one (exact): the snapshot's level, one EXP point more
       auto fresh = snapshot_of(real, true);
       fresh.run_copy_print = snap_mag.run_copy_print;
       auto one_more = make("Testa", 5, 301, 50, 4, 0x01, {});
       check("C2 'I' refuses the snapshot's level with one EXP point more",
-          !spire_guard_run_again_retake(fresh, true, one_more.first, one_more.second, 921, 2, std::nullopt));
+          !spire_guard_run_again_retake(fresh, true, one_more.first, one_more.second, 921, 2));
       // and the real character (exact level and EXP, more items from the bank) still passes
       fresh = snapshot_of(real, true);
       fresh.run_copy_print = snap_mag.run_copy_print;
       auto real_plus = make("Testa", 5, 300, 50, 4, 0x01, {});
       check("C2 'I' takes the real character with a bank item",
-          spire_guard_run_again_retake(fresh, true, real_plus.first, real_plus.second, 921, 2, std::nullopt));
+          spire_guard_run_again_retake(fresh, true, real_plus.first, real_plus.second, 921, 2));
     });
 
     f1_case("C3: a bank mag swap in the base (deposit Kama, withdraw Sato)", [&]() {
@@ -772,12 +797,12 @@ void run_static_tests() {
       auto print = print_of(make("BidX", 19, 0, 400, 12, 0x20, {}));
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print;
-      check("C3 'I' takes the swapped mag", spire_guard_run_again_retake(snap, true, swapped.first, swapped.second, 921, 2, std::nullopt));
+      check("C3 'I' takes the swapped mag", spire_guard_run_again_retake(snap, true, swapped.first, swapped.second, 921, 2));
       check("C3 the snapshot holds Sato, not Kama", spire_guard_same_state(snap.inventory, snap.disp, swapped.first, swapped.second));
       auto exit_snap = snapshot_of(real, false);
       exit_snap.run_copy_print = print;
       check("C3 the 98 after 'O' takes the swapped mag",
-          spire_guard_base_exit_follow(exit_snap, true, swapped.first, swapped.second, std::nullopt));
+          spire_guard_base_exit_follow(exit_snap, true, swapped.first, swapped.second));
       check("C3 the exit restore pushes Sato, not Kama",
           spire_guard_same_state(exit_snap.inventory, exit_snap.disp, swapped.first, swapped.second));
     });
