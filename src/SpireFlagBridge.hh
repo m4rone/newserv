@@ -85,7 +85,8 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
 //   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
-// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N') and the base return ('O', v46).
+// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v46) and the
+// run again ('I', v48).
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
 constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
@@ -481,6 +482,9 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 // - v47: the one push in a game: the quest's return to base ('O', see SPIRE_BRIDGE_BASE_RETURN) runs the same restore
 //   push in the Battle game at the run end, on a field floor and never during a load, and leaves the marker unchanged
 //   (RunInProgress); every other path still refuses a push in a game.
+// - v48: the second push in a game: after 'O' OK the quest's run again ('I', see SPIRE_BRIDGE_RUN_AGAIN) takes the
+//   snapshot again from the verified real character and pushes a fresh run copy, on Pioneer 2 or Forest 1 and never
+//   during a load; the marker stays RunInProgress.
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -746,6 +750,81 @@ SpireBaseReturnRefusal spire_base_return_refusal(const SpireBaseReturnState& st)
 const char* spire_base_return_refusal_name(SpireBaseReturnRefusal r);
 // The r41 answer value for a refusal (NONE = OK).
 uint32_t spire_base_return_answer(SpireBaseReturnRefusal r);
+
+// v48 (B-BASIS-11, route (a)): a second run in the same quest. After 'O' OK the client stands on Pioneer 2 with its real
+// character in memory, verified by the 61, and the marker is still RunInProgress. Before the quest starts the next
+// run (before it opens the Ragol warp, gives the kit and lives, or sends 'B'), it writes 'I' << 24 to register 248 on
+// floor 0 or Forest 1 (floor 1) and waits; it starts nothing until the answer. The server answers that client, always,
+// as for 'O': r41 = SPIRE_RUN_AGAIN_TAG | refusal << 8 | result, then r248 = 'DONE'. The quest sets r41 to 0 first and
+// waits for r41 >> 24 == 'I'. Result SPIRE_RUN_AGAIN_OK: the client holds a fresh run copy (the battle overlay, made as
+// at a quest load) and the quest starts the run as at its first one ('B' and the rest). SPIRE_RUN_AGAIN_FAIL: nothing
+// starts; the quest keeps "leave this game and start the quest again". OK only if (spire_run_again_refusal) the client
+// has character data, is in a Battle game running a guarded replace_char quest, got 'O' OK in this game and has not
+// used it for an 'I' yet, stands on floor 0 or 1, no client of the game loads (checked again right before the push),
+// it runs functions, is not protected, its snapshot has RunInProgress alone and no other restore runs for it. Then:
+// - the 'O' OK is used up (a failed 'I' never allows a second one: the client's memory is no longer known to be real);
+// - the snapshot is taken again from a 61 asked for now, which is the real character (it has been in memory since the
+//   verified 'O'; the base may have changed it), if the 61 shows the snapshot's character; the server's character data
+//   takes it too, so the overlay is made from it. The marker stays RunInProgress;
+// - the battle overlay is made as on_quest_loaded makes it (spire_create_battle_overlay) and pushed with the guard's
+//   push (30, SetExtendedPlayerInfo, verifying 61 that must equal the overlay);
+// - per client: the run state of the earlier run is forgotten as at a quest start (lives, savestate run, splinter
+//   rooms, pending score, draw inputs); per game, at the first 'I' after the run end: the game's run id, the room
+//   clears announced, the replayed registers, the map state (as the BB battle start 6xCF resets it) and the drop pity.
+//   The run end itself, with this client's claimed 6x73, is cleared by the 'B' that follows (as for every run), so
+//   no 6x73 of the earlier run can reach the new one.
+constexpr uint8_t SPIRE_BRIDGE_RUN_AGAIN = 'I';
+constexpr uint8_t SPIRE_RUN_AGAIN_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_REGISTER; // r41, as 'J' and 'O' (another tag)
+constexpr uint32_t SPIRE_RUN_AGAIN_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_RUN_AGAIN) << 24;
+constexpr uint32_t SPIRE_RUN_AGAIN_OK = 1;
+constexpr uint32_t SPIRE_RUN_AGAIN_FAIL = 0;
+enum class SpireRunAgainRefusal : uint8_t {
+  NONE = 0, // the run copy may be made and pushed
+  NO_CHARACTER, // no serial, not GC V3 or no character data
+  NOT_A_SPIRE_RUN, // not a Battle game with a guarded replace_char quest
+  NOT_RETURNED, // no unused 'O' OK of this client in this game
+  NOT_AT_START, // not on Pioneer 2 (floor 0) or Forest 1 (floor 1)
+  LOADING, // this client or another client of the game is loading
+  NO_FUNCTIONS, // the client cannot run functions (B2)
+  PROTECTED, // SpireBlockedCharacters
+  MARKER, // no snapshot with a character, or a marker other than RunInProgress alone
+  RESTORE_RUNNING, // a restore or $kitlobby already runs for this client
+  NOT_REAL, // the 61 asked for at the 'I' shows another character than the snapshot, or the snapshot was not written
+  NO_OVERLAY, // the battle overlay was not made (spire_guard_begin_run refused)
+  PUSH_NOT_VERIFIED, // the push failed, timed out or its 61 does not equal the overlay
+};
+struct SpireRunAgainState {
+  bool has_character = false;
+  bool spire_run = false;
+  bool base_returned = false;
+  bool at_start_floor = false;
+  bool any_client_loading = false;
+  bool can_run_functions = false;
+  bool protected_character = false;
+  bool has_snapshot = false;
+  bool run_in_progress = false;
+  bool restore_pending = false;
+  bool awaiting_save = false;
+  bool restore_running = false;
+};
+// The decision before the 61, free of state for the static tests (first refusal in the order above).
+SpireRunAgainRefusal spire_run_again_refusal(const SpireRunAgainState& st);
+const char* spire_run_again_refusal_name(SpireRunAgainRefusal r);
+// The r41 answer value for a refusal (NONE = OK).
+uint32_t spire_run_again_answer(SpireRunAgainRefusal r);
+// The floors an 'I' may come from: Pioneer 2 and Forest 1 (floor 1 is also the first field floor of Episode 2).
+bool spire_run_again_floor_ok(uint32_t floor);
+// The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
+// RunInProgress alone and a character, and the data is the same character (name, class, section ID); then the snapshot
+// takes the data, the quest and the time, and RunInProgress stays.
+bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
+
+// v48: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
+// (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then
+// Client::create_battle_overlay with the quest's battle rules. Returns false if the client must not get the overlay
+// (the guard could not store the snapshot or the character is protected); at a quest load the caller then drops it.
+bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);

@@ -243,6 +243,167 @@ void run_static_tests() {
     expect(SPIRE_BASE_RETURN_TAG != SPIRE_RESUME_ANSWER_TAG);
   }
 
+  phosg::log_info_f("-- Spire run again: a second run in the same quest only after a verified return to base, on floor 0 or 1 (v48)");
+  {
+    using R = SpireRunAgainRefusal;
+    SpireRunAgainState ok;
+    ok.has_character = true;
+    ok.spire_run = true;
+    ok.base_returned = true;
+    ok.at_start_floor = true;
+    ok.can_run_functions = true;
+    ok.has_snapshot = true;
+    ok.run_in_progress = true;
+    expect_eq(R::NONE, spire_run_again_refusal(ok));
+    auto with = [&](auto change) {
+      SpireRunAgainState st = ok;
+      change(st);
+      return spire_run_again_refusal(st);
+    };
+    expect_eq(R::NO_CHARACTER, with([](auto& st) { st.has_character = false; }));
+    expect_eq(R::NOT_A_SPIRE_RUN, with([](auto& st) { st.spire_run = false; }));
+    expect_eq(R::NOT_RETURNED, with([](auto& st) { st.base_returned = false; }));   // no 'O' OK, or used up by an 'I'
+    expect_eq(R::NOT_AT_START, with([](auto& st) { st.at_start_floor = false; }));
+    expect_eq(R::LOADING, with([](auto& st) { st.any_client_loading = true; }));     // never push during a load
+    expect_eq(R::NO_FUNCTIONS, with([](auto& st) { st.can_run_functions = false; }));
+    expect_eq(R::PROTECTED, with([](auto& st) { st.protected_character = true; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.has_snapshot = false; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.run_in_progress = false; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.restore_pending = true; }));
+    expect_eq(R::MARKER, with([](auto& st) { st.awaiting_save = true; }));
+    expect_eq(R::RESTORE_RUNNING, with([](auto& st) { st.restore_running = true; }));
+    // the first refusal wins: without a return to base the floor does not matter
+    expect_eq(R::NOT_RETURNED, with([](auto& st) { st.base_returned = false; st.at_start_floor = false; }));
+    // Pioneer 2 and Forest 1 only
+    expect(spire_run_again_floor_ok(0));
+    expect(spire_run_again_floor_ok(1));
+    expect(!spire_run_again_floor_ok(2));
+    expect(!spire_run_again_floor_ok(0x0B));
+    expect(!spire_run_again_floor_ok(0x0F)); // Client::floor's start value: no floor known yet
+    // the answer: 'I' tag, refusal in bits 8-15, OK only without a refusal
+    expect_eq(0x49000001u, spire_run_again_answer(R::NONE));
+    expect_eq(0x49000300u, spire_run_again_answer(R::NOT_RETURNED));
+    expect_eq(0x49000C00u, spire_run_again_answer(R::PUSH_NOT_VERIFIED));
+    for (uint8_t z = 1; z <= static_cast<uint8_t>(R::PUSH_NOT_VERIFIED); z++) {
+      expect_eq(SPIRE_RUN_AGAIN_FAIL, spire_run_again_answer(static_cast<R>(z)) & 0xFF);
+      expect(std::string(spire_run_again_refusal_name(static_cast<R>(z))) != "unknown");
+    }
+    // the code letter is free: no other r248 code or 4CC starts with 'I'
+    for (uint8_t letter : {SPIRE_BRIDGE_MSG_WAVE, SPIRE_BRIDGE_MSG_LIFE, SPIRE_BRIDGE_MSG_TIME, SPIRE_BRIDGE_MSG_PARTNER,
+             SPIRE_BRIDGE_MSG_RUN_OVER, SPIRE_BRIDGE_MSG_PAUSE_B, SPIRE_BRIDGE_MSG_DOWN, SPIRE_BRIDGE_MSG_HINT,
+             SPIRE_BRIDGE_MSG_APPROACH, SPIRE_BRIDGE_MSG_PROMPT, SPIRE_BRIDGE_REC_BEGIN, SPIRE_BRIDGE_REC_SCORE,
+             SPIRE_BRIDGE_REC_FINISH, SPIRE_BRIDGE_REC_BOARD, SPIRE_BRIDGE_TIMER_START, SPIRE_BRIDGE_TIMER_END,
+             SPIRE_BRIDGE_DRAW_REQUEST, SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_BRIDGE_RESUME, SPIRE_BRIDGE_BASE_RETURN,
+             static_cast<uint8_t>('N'), static_cast<uint8_t>('M'),
+             static_cast<uint8_t>(SPIRE_BRIDGE_REQUEST_VALUE >> 24), static_cast<uint8_t>(SPIRE_BRIDGE_DONE_VALUE >> 24),
+             static_cast<uint8_t>(SPIRE_BRIDGE_BATTLE_END_VALUE >> 24),
+             static_cast<uint8_t>(SPIRE_BRIDGE_ROOM_CLEAR_VALUE >> 24)}) {
+      expect(letter != SPIRE_BRIDGE_RUN_AGAIN);
+    }
+    // the same answer register as 'J' and 'O', each with its own tag
+    expect_eq(SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RUN_AGAIN_ANSWER_REGISTER);
+    expect(SPIRE_RUN_AGAIN_TAG != SPIRE_RESUME_ANSWER_TAG);
+    expect(SPIRE_RUN_AGAIN_TAG != SPIRE_BASE_RETURN_TAG);
+  }
+
+  phosg::log_info_f("-- Spire run again: the snapshot is taken again only after a verified return to base (v48)");
+  {
+    auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t meseta, const char* name, uint8_t section) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[0] = kind;
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.meseta = meseta;
+      ret.second.visual.name.encode(name, Language::ENGLISH);
+      ret.second.visual.sh.section_id = section;
+      return ret;
+    };
+    auto real = make(20, 0x00, 51, 1000, "BidX", 3);
+    auto base_changed = make(19, 0x00, 51, 700, "BidX", 3); // dropped one item and spent meseta in the base
+    auto other = make(20, 0x00, 51, 1000, "M4ia", 3);
+    auto fresh = [&]() {
+      SpireGuardSnapshot snap;
+      snap.has_character = true;
+      snap.run_in_progress = true;
+      snap.quest_number = 921;
+      snap.snapshot_time_usecs = 1;
+      snap.inventory = real.first;
+      snap.disp = real.second;
+      return snap;
+    };
+    // after 'O' OK: the 61 of the base is the real character, the snapshot takes it and RunInProgress stays
+    auto snap = fresh();
+    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect_eq(19u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(700u, snap.disp.stats.meseta.load());
+    expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save && snap.has_character);
+    expect_eq(2u, snap.snapshot_time_usecs);
+    // no verified return to base (or used up): nothing changes
+    snap = fresh();
+    expect(!spire_guard_run_again_retake(snap, false, base_changed.first, base_changed.second, 921, 2));
+    expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
+    expect_eq(1u, snap.snapshot_time_usecs);
+    // another character on the card, or another marker: nothing changes
+    snap = fresh();
+    expect(!spire_guard_run_again_retake(snap, true, other.first, other.second, 921, 2));
+    expect_eq(1000u, snap.disp.stats.meseta.load());
+    snap = fresh();
+    snap.restore_pending = true;
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    snap = fresh();
+    snap.awaiting_save = true;
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    snap = fresh();
+    snap.run_in_progress = false;
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    snap = fresh();
+    snap.has_character = false;
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+  }
+
+  phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v48, B-BASIS-13)");
+  {
+    expect_eq(0, spire_meta_open_rung(0, 0));
+    expect_eq(2, spire_meta_open_rung(0, 2)); // opened by the base, nothing won
+    expect_eq(2, spire_meta_open_rung(2, 1)); // the win is higher
+    expect_eq(3, spire_meta_open_rung(1, 3));
+    expect_eq(3, spire_meta_open_rung(0, 7)); // never past Ultimate
+    // the gate: a low character with BaseRung 2 for Run I enters Very Hard in a Battle game, not Ultimate
+    expect(SpireLadderGate::RUNG_OPEN == spire_meta_ladder_gate(true, true, spire_meta_open_rung(0, 2), 2, 10, 79));
+    expect(SpireLadderGate::REFUSED == spire_meta_ladder_gate(true, true, spire_meta_open_rung(0, 2), 3, 10, 89));
+    expect(SpireLadderGate::REFUSED == spire_meta_ladder_gate(true, true, spire_meta_open_rung(0, 0), 1, 10, 19));
+    // meta.json with BaseRung and no win: the open rung is BaseRung, the won rung stays 0
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-baserung-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto name = (dir / "base.meta.json").string();
+    phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[],\"BaseRung\":{\"1\":2,\"2\":9}}");
+    auto file = spire_meta_load_file(name);
+    expect_eq(2, spire_meta_base_rung(file, 1));
+    expect_eq(3, spire_meta_base_rung(file, 2)); // clamped
+    expect_eq(0, spire_meta_ladder_rung(file.flags, 1)); // BaseRung is no win
+    expect_eq(2, spire_meta_open_rung(file, 1));
+    expect_eq(3, spire_meta_open_rung(file, 2));
+    expect_eq(0, spire_meta_open_rung(file, 0)); // a quest of neither run
+    expect(SpireLadderGate::RUNG_OPEN == spire_meta_ladder_gate(true, true, spire_meta_open_rung(file, 1), 2, 10, 79));
+    // the AvailableIf of q982 (Run I Very Hard) opens with the combined rung
+    auto expr = ResourceDASM::Expression::Node::parse("V_Difficulty == 2 && SPIRE_RUN1 >= 2");
+    ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+        .difficulty = Difficulty::VERY_HARD, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+        .spire_rooms = 0, .spire_run1 = spire_meta_open_rung(file, 1), .spire_run2 = 0};
+    expect(env.evaluate(*expr) != 0);
+    // a won rung above BaseRung still decides; a file without BaseRung has none
+    file.flags[std::make_pair(uint8_t(2), SPIRE_META_FLAG_RUN1_WON)] = true; // Run I won on Very Hard
+    expect_eq(3, spire_meta_open_rung(file, 1));
+    phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[]}");
+    expect(spire_meta_load_file(name).base_rung.empty());
+    expect_eq(0, spire_meta_open_rung(spire_meta_load_file(name), 1));
+    std::filesystem::remove_all(dir);
+  }
+
   phosg::log_info_f("-- Spire records: photon splinters (rooms + 5 per boss) * (1 + 0.1 per heat), rounded down (v47)");
   {
     expect_eq(0u, spire_splinters_for_run(0, 0, 0));
@@ -576,7 +737,7 @@ void run_static_tests() {
       expect(text.find('\n') == std::string::npos);
     }
     expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000));
-    expect_eq(std::string("Run over - back to the lobby. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3));
+    expect_eq(std::string("Run over. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3)); // v48: both outcomes
     expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
     // v36: the quest's codes from spike/stadstart b29f310 (kind << 24 | a << 8 | b)
     expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Continue = leave room."), spire_bridge_message_text(0x47000000));
@@ -1337,8 +1498,8 @@ void run_static_tests() {
     expect(!spire_meta_load_file(local(spire_meta_filename_for(42, &b))).exists);
     // A's file is from before B-REGIE-10-2 (no marker); B here has an empty file of its own from then: both cleared
     // as before
-    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a};
-    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b};
+    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a, .base_rung = {}};
+    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b, .base_rung = {}};
     auto to_a = spire_meta_delivery_entries(file_a, 0, false);
     auto to_b = spire_meta_delivery_entries(file_b, 0, false);
     expect_eq(1, value_of(to_a, 0x0384));                    // A's own unlock

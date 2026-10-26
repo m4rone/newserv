@@ -2453,17 +2453,12 @@ static void on_quest_loaded(std::shared_ptr<Lobby> l) {
       l->assign_inventory_and_bank_item_ids(lc, true);
 
     } else if (l->quest->meta.battle_rules) {
-      if (is_v4(lc->version())) {
-        lc->change_bank(lc->bb_character_index);
-      }
-      // Spire guard (v6): store the real character before the overlay replaces it (see SpireFlagBridge.hh)
-      if (!spire_guard_begin_run(lc, l)) {
+      // Spire guard (v6, v48): the guard's snapshot, then the overlay; shared with the Spire run again ('I')
+      if (!spire_create_battle_overlay(lc, l)) {
         // v12: no snapshot stored, so no overlay that the client could save over the real character
         lc->channel->disconnect();
         continue;
       }
-      lc->create_battle_overlay(l->quest->meta.battle_rules, s->data->level_table(lc->version()));
-      lc->log.info_f("Created battle overlay");
     }
   }
 }

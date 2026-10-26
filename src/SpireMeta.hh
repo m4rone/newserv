@@ -64,6 +64,9 @@ struct SpireMetaFile {
   bool exists = false;
   SpireMetaAdopted adopted = SpireMetaAdopted::NO_MARKER;
   SpireMetaFlags flags;
+  // v48 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II; 0-3, see spire_meta_open_rung), in
+  // the file as "BaseRung": {"1": n, "2": n}; written only if a run has one, so older files stay as they are
+  std::map<uint8_t, uint8_t> base_rung;
 };
 SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
 SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags
@@ -111,8 +114,16 @@ bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t fla
 // plus q984-q986. 0 = a quest of neither run (no ladder flag).
 uint8_t spire_meta_ladder_run(uint32_t quest_number);
 uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
-// The highest difficulty open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
+// The highest difficulty won open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
 uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
+// v48 (B-BASIS-13, Marck via the regie): a rung is open if it was won (spire_meta_ladder_rung) or the base opened it
+// (BaseRung in meta.json, per run). The open rung is the larger of the two, at most 3 (Ultimate). BaseRung never counts
+// as a win: records "Won", the ladder flags 0x38B/0x38C and the "Unlocked" text come from wins only. Every open rung
+// the server computes (SPIRE_RUN1/2 in AvailableIf, the difficulty gate, the quest menu note) goes through
+// spire_meta_ladder_rung_for_client, which combines them. Nothing sets BaseRung yet (the base shop, slice 4).
+uint8_t spire_meta_base_rung(const SpireMetaFile& file, uint8_t run); // 0 without one, at most 3
+uint8_t spire_meta_open_rung(uint8_t won_rung, uint8_t base_rung);
+uint8_t spire_meta_open_rung(const SpireMetaFile& file, uint8_t run);
 // The difficulty a finish flag is stored on: the payout flags (0x3A0-0x3A2) on Normal (q925 pays there, plan §5), every
 // other flag on the game's difficulty.
 uint8_t spire_meta_flag_difficulty(uint16_t flag_num, uint8_t game_difficulty);
@@ -129,7 +140,8 @@ std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level
 // The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
 // runs are open there), so a hidden run quest is never a silent nothing.
 std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty);
-// The rung of a run for a client's real character (its meta file; 0 without one or on a read error). Never throws.
+// The open rung of a run for a client's real character (its meta file, v48 won or BaseRung; 0 without one or on a read
+// error). Never throws.
 uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run);
 
 // Called from the 'F' record code after the records are saved. Sets the run's unlock and payout flags for the
