@@ -926,11 +926,13 @@ void run_static_tests() {
     expect(fin.warning.empty());
     spire_records_save(name, 42, rec);
     expect_eq(70u, balance());
-    // a second 'F' of the run pays nothing, and a late room of a finished run pays nothing
+    // a second 'F' of the run pays nothing; F2 fix (M1): a later room of the run (resumed after a partner-left 'F')
+    // is still paid, and its bonus difference comes with the next 'F'
     rec = spire_records_load(name);
     expect_eq(0u, spire_records_finish_splinters(rec, &payout, 0x11111111, 4, rooms, boss_rooms, 10, 2).added);
-    expect_eq(0u, spire_records_credit_room(rec, payout, 0x11111111, 11, false, false));
     expect_eq(70u, rec.splinters);
+    expect_eq(3u, spire_records_credit_room(rec, payout, 0x11111111, 11, false, false));
+    expect_eq(73u, rec.splinters);
     // a new run id pays again; a practice run pays 0; run id 0 (no run) pays 0
     expect_eq(3u, spire_records_credit_room_file(name, 42, payout, 0x22222222, 3, false, false));
     expect_eq(0u, spire_records_credit_room_file(name, 42, payout, 0x33333333, 3, false, true));
@@ -996,6 +998,110 @@ void run_static_tests() {
       expect_eq(static_cast<uint32_t>(SPIRE_RECORDS_CREDITED_RUNS + 3), r.credited.back().run_id);
     }
     std::filesystem::remove_all(dir);
+  }
+
+  phosg::log_info_f("-- Spire records route B F2 fix: rooms after a partner-left 'F', the bonus on a prior balance, a repeated 'F'");
+  {
+    // routeb-f2-critic.md M1, M2, L4. Every check is logged before any is asserted, so one run shows each that fails.
+    std::vector<std::string> failures;
+    auto check = [&](const std::string& what, bool ok) {
+      phosg::log_info_f("   F2 fix check {}: {}", what, ok ? "ok" : "FAILS");
+      if (!ok) {
+        failures.emplace_back(what);
+      }
+    };
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-f2fix-{}", getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const SpireShopPayout payout{.per_room = 3, .per_boss = 10, .pact_tenths = 1};
+    std::set<uint8_t> no_rooms;
+
+    // M1: duo run X, the partner freezes at k6, the timer's "player left" end keeps the savestates; the remaining
+    // player's quest sends 'F' (2 pacts). Later both resume X (same run id) and finish k7-k10, then 'F' again.
+    {
+      auto name = (dir / "0000000042.m1.records.json").string();
+      uint32_t first = 0;
+      for (uint8_t k = 1; k <= 6; k++) {
+        first += spire_records_credit_room_file(name, 42, payout, 0x51515151, k, k == 4, false);
+      }
+      check("M1 k1-k6 pay 28", first == 28);
+      auto rec = spire_records_load(name);
+      auto fin1 = spire_records_finish_splinters(rec, &payout, 0x51515151, 2, no_rooms, no_rooms, 6, 1);
+      spire_records_save(name, 42, rec);
+      check("M1 the first 'F' adds floor(28 * 2 / 10) = 5", (fin1.pact_bonus == 5) && (fin1.added == 5));
+      uint32_t resumed = 0;
+      for (uint8_t k = 7; k <= 10; k++) {
+        resumed += spire_records_credit_room_file(name, 42, payout, 0x51515151, k, k == 8, false);
+      }
+      check("M1 the resumed k7-k10 pay 22 after the 'F'", resumed == 22);
+      rec = spire_records_load(name);
+      auto fin2 = spire_records_finish_splinters(rec, &payout, 0x51515151, 2, no_rooms, no_rooms, 4, 1);
+      spire_records_save(name, 42, rec);
+      check("M1 the second 'F' pays only the difference floor(50 * 2 / 10) - 5 = 5", (fin2.pact_bonus == 5) && (fin2.added == 5));
+      rec = spire_records_load(name);
+      check("M1 balance 28 + 5 + 22 + 5 = 60", rec.splinters == 60);
+      check("M1 BonusPaid 10 is in the file", (rec.credited.size() == 1) && (rec.credited[0].bonus_paid == 10) &&
+          (rec.credited[0].base == 50));
+      // a resend of the last 'F' pays nothing
+      auto fin3 = spire_records_finish_splinters(rec, &payout, 0x51515151, 2, no_rooms, no_rooms, 4, 1);
+      check("M1 a resent 'F' pays 0", (fin3.added == 0) && (rec.splinters == 60));
+      // an entry written before the fix ('Finished' without 'BonusPaid') never pays its bonus twice
+      auto old_name = (dir / "0000000042.old.records.json").string();
+      phosg::save_file(old_name, "{\"SerialNumber\": 42, \"BestScore\": 0, \"BestTime\": 0, \"Runs\": 1, \"Won\": 0, "
+          "\"Splinters\": 70, \"SplintersTotal\": 70, \"Credited\": [{\"Run\": 7, \"Rooms\": [1], \"Bosses\": [], "
+          "\"Base\": 50, \"Finished\": true}]}");
+      auto old_rec = spire_records_load(old_name);
+      check("M1 a pre-fix finished entry pays no bonus again",
+          spire_records_finish_splinters(old_rec, &payout, 7, 4, no_rooms, no_rooms, 1, 0).added == 0);
+    }
+
+    // M2: a balance of 100 before the run; 'F' with 4 pacts adds floor(50 * 4 / 10) = 20 on the run's 50, not 60 on 150
+    {
+      auto name = (dir / "0000000042.m2.records.json").string();
+      phosg::save_file(name, "{\"SerialNumber\": 42, \"BestScore\": 0, \"BestTime\": 0, \"Runs\": 3, \"Won\": 1, "
+          "\"Splinters\": 100, \"SplintersTotal\": 100}");
+      for (uint8_t k = 1; k <= 10; k++) {
+        spire_records_credit_room_file(name, 42, payout, 0x52525252, k, (k == 4) || (k == 8), false);
+      }
+      auto rec = spire_records_load(name);
+      check("M2 the run pays 50 on top of 100", rec.splinters == 150);
+      auto fin = spire_records_finish_splinters(rec, &payout, 0x52525252, 4, no_rooms, no_rooms, 10, 2);
+      check("M2 'F' with 4 pacts adds 20, not 60", (fin.pact_bonus == 20) && (rec.splinters == 170));
+    }
+
+    // L4: a repeated 'F' of one run counts Won (and the difficulty's Won) once; Runs is counted at 'B', never at 'F'
+    {
+      auto name = (dir / "0000000042.l4.records.json").string();
+      SpireRecords rec;
+      rec.runs = 1;
+      auto s1 = spire_records_finish_stats(rec, 0x54545454, 1, 500, 900, true);
+      check("L4 the first won 'F' counts", s1.new_score && s1.new_time && (rec.won == 1) &&
+          (rec.per_difficulty[1] == std::make_pair<uint32_t, uint32_t>(1, 900)) && (rec.best_time == 900));
+      spire_records_save(name, 42, rec);
+      rec = spire_records_load(name);
+      auto s2 = spire_records_finish_stats(rec, 0x54545454, 1, 500, 900, true);
+      check("L4 the same 'F' again (after a reload) counts nothing", !s2.new_score && !s2.new_time && (rec.won == 1) &&
+          (rec.per_difficulty[1].first == 1) && (rec.runs == 1) && (rec.best_time == 900) && (rec.best_score == 500));
+      spire_records_finish_stats(rec, 0x55555555, 1, 400, 800, true);
+      check("L4 another run's won 'F' counts", (rec.won == 2) && (rec.per_difficulty[1].first == 2) && (rec.best_time == 800));
+      // partner left: a not-won 'F', then the resumed run is won: Won once
+      spire_records_finish_stats(rec, 0x56565656, 1, 100, 300, false);
+      check("L4 a not-won 'F' counts no win", rec.won == 2);
+      spire_records_finish_stats(rec, 0x56565656, 1, 600, 1000, true);
+      spire_records_finish_stats(rec, 0x56565656, 1, 600, 1000, true);
+      check("L4 the resumed run's win counts once", (rec.won == 3) && (rec.per_difficulty[1].first == 3));
+      // and the pact bonus of a run whose won 'F' came first is still paid (the legacy V too)
+      SpireRecords legacy;
+      spire_records_finish_splinters(legacy, nullptr, 0x57575757, 4, {1, 2}, {}, 2, 0);
+      spire_records_finish_stats(legacy, 0x57575757, 0, 10, 100, true);
+      check("L4 the stats after the legacy V keep its splinters", legacy.splinters == 2);
+    }
+
+    std::filesystem::remove_all(dir);
+    for (const auto& what : failures) {
+      phosg::log_error_f("   F2 fix check failed: {}", what);
+    }
+    expect(failures.empty());
   }
 
   phosg::log_info_f("-- Spire shop route B F2: the Payout block (PerRoom 3, PerBoss 10, PactTenths 1), parsed strictly");

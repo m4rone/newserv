@@ -136,7 +136,12 @@ struct SpireRunCredit {
   std::set<uint8_t> rooms; // k paid PerRoom
   std::set<uint8_t> bosses; // k paid PerBoss
   uint32_t base = 0; // the splinters paid for these rooms: the pact bonus base at 'F'
-  bool finished = false; // its 'F' came: no more credit, no second pact bonus
+  bool finished = false; // an 'F' of the run came (for the log; a resumed run still credits its rooms, F2 fix M1)
+  // F2 fix (routeb-f2-critic.md M1): the pact bonus paid so far; each 'F' pays only what floor(base * pacts *
+  // PactTenths / 10) exceeds it by, so a resend pays 0 and an 'F' after a resume pays the difference. An entry saved
+  // before the fix (Finished without BonusPaid) loads as fully paid.
+  uint32_t bonus_paid = 0;
+  bool won = false; // F2 fix (L4): a won 'F' of the run counted in Won and the difficulty's Won
 };
 // v18: records per character (system/spire-bridge/<serial>.<character>.records.json)
 struct SpireRecords {
@@ -154,7 +159,8 @@ SpireRecords spire_records_load(const std::string& filename); // empty records i
 void spire_records_save(const std::string& filename, uint32_t serial_number, const SpireRecords& rec);
 // Pays room k of run run_id: PerRoom if k is not paid yet, PerBoss on top if boss and k is not paid as a boss yet (an
 // arrival may store a boss room before its clear). Returns the splinters added: 0 for a practice run, run_id 0, a k
-// outside 1-255, a run whose 'F' came, or a k paid already.
+// outside 1-255, or a k paid already. F2 fix (M1): an 'F' of the run does not stop it; a run resumed after a
+// partner-left 'F' still pays its rooms.
 uint32_t spire_records_credit_room(
     SpireRecords& rec, const SpireShopPayout& payout, uint32_t run_id, uint8_t k, bool boss, bool practice);
 // The same on the file: loaded, and saved only if something was added. Throws on a file error.
@@ -169,9 +175,19 @@ struct SpireFinishSplinters {
   bool legacy = false; // paid the old V (spire_splinters_for_run): no Payout block, or no run id
   std::string warning; // one line for the log, or ""
 };
-// 'F' of run run_id. With payout: pays rooms/boss_rooms not paid yet, then floor(base * pacts * PactTenths / 10) once per
-// run. Without payout (or run_id 0): the old spire_splinters_for_run(legacy_rooms, legacy_bosses, 0) plus a warning,
+// 'F' of run run_id. With payout: pays rooms/boss_rooms not paid yet, then what floor(base * pacts * PactTenths / 10)
+// exceeds the bonus paid at earlier 'F's of the run by (F2 fix M1). Without payout (or run_id 0): the old spire_splinters_for_run(legacy_rooms, legacy_bosses, 0) plus a warning,
 // unless the run's rooms were paid already (then nothing, plus a warning).
+// F2 fix (L4): the record stats of an 'F'. Best score and best time are a maximum and a minimum, so a repeat changes
+// nothing; Won and the difficulty's Won count a run id once (SpireRunCredit::won; run_id 0 always counts). Runs is
+// counted at 'B', never here. Call it after spire_records_finish_splinters: it may create the run's credit entry.
+struct SpireFinishStats {
+  bool new_score = false;
+  bool new_time = false;
+  bool won_counted = false;
+};
+SpireFinishStats spire_records_finish_stats(
+    SpireRecords& rec, uint32_t run_id, uint8_t difficulty, uint32_t score, uint32_t seconds, bool won);
 SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const SpireShopPayout* payout, uint32_t run_id,
     uint8_t pacts, const std::set<uint8_t>& rooms, const std::set<uint8_t>& boss_rooms, uint32_t legacy_rooms,
     uint32_t legacy_bosses);

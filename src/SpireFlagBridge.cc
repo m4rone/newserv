@@ -1735,6 +1735,9 @@ SpireRecords spire_records_load(const std::string& filename) {
         }
         e.base = e_json->get_int("Base");
         e.finished = e_json->get_bool("Finished", false);
+        // F2 fix (M1): before BonusPaid, a finished entry had its whole bonus; never pay it again
+        e.bonus_paid = e_json->get_int("BonusPaid", e.finished ? 0xFFFFFFFF : 0);
+        e.won = e_json->get_bool("Won", false);
         ret.credited.emplace_back(std::move(e));
       }
     }
@@ -1780,7 +1783,7 @@ void spire_records_save(const std::string& filename, uint32_t serial_number, con
         bosses.emplace_back(k);
       }
       list.emplace_back(phosg::JSON::dict({{"Run", e.run_id}, {"Rooms", std::move(rooms)}, {"Bosses", std::move(bosses)},
-          {"Base", e.base}, {"Finished", e.finished}}));
+          {"Base", e.base}, {"Finished", e.finished}, {"BonusPaid", e.bonus_paid}, {"Won", e.won}}));
     }
     json.emplace("Credited", std::move(list));
   }
@@ -1797,7 +1800,8 @@ static SpireRunCredit* spire_records_credit_for(SpireRecords& rec, uint32_t run_
   if (!create) {
     return nullptr;
   }
-  rec.credited.emplace_back(SpireRunCredit{.run_id = run_id, .rooms = {}, .bosses = {}, .base = 0, .finished = false});
+  rec.credited.emplace_back(SpireRunCredit{
+      .run_id = run_id, .rooms = {}, .bosses = {}, .base = 0, .finished = false, .bonus_paid = 0, .won = false});
   while (rec.credited.size() > SPIRE_RECORDS_CREDITED_RUNS) {
     rec.credited.erase(rec.credited.begin());
   }
@@ -1817,9 +1821,6 @@ uint32_t spire_records_credit_room(
     return 0;
   }
   auto* e = spire_records_credit_for(rec, run_id, false);
-  if (e && e->finished) {
-    return 0;
-  }
   bool new_room = !e || !e->rooms.contains(k);
   bool new_boss = boss && (!e || !e->bosses.contains(k));
   if (!new_room && !new_boss) {
@@ -1857,11 +1858,7 @@ SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const Spi
     uint32_t legacy_bosses) {
   SpireFinishSplinters ret;
   auto* e = run_id ? spire_records_credit_for(rec, run_id, false) : nullptr;
-  if (e && e->finished) {
-    ret.base = e->base;
-    ret.warning = std::format("'F' of run {:08X} came before: no splinters paid twice", run_id);
-    return ret;
-  }
+  bool came_before = e && e->finished;
   if (payout && run_id) {
     std::set<uint8_t> all = rooms;
     all.insert(boss_rooms.begin(), boss_rooms.end());
@@ -1870,10 +1867,22 @@ SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const Spi
     }
     e = spire_records_credit_for(rec, run_id, true);
     ret.base = e->base;
+    // F2 fix (M1): only what the bonus on the run's base exceeds the bonus paid at earlier 'F's by
     uint64_t bonus = (static_cast<uint64_t>(e->base) * pacts * payout->pact_tenths) / 10;
-    ret.pact_bonus = spire_records_add_splinters(rec, bonus);
+    uint64_t owed = (bonus > e->bonus_paid) ? (bonus - e->bonus_paid) : 0;
+    ret.pact_bonus = spire_records_add_splinters(rec, owed);
+    e->bonus_paid = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(e->bonus_paid) + ret.pact_bonus, 0xFFFFFFFF));
     e->finished = true;
     ret.added = ret.caught_up + ret.pact_bonus;
+    if (came_before) {
+      ret.warning = std::format("'F' of run {:08X} came before: paid only the difference ({} for rooms, {} bonus)", run_id,
+          ret.caught_up, ret.pact_bonus);
+    }
+    return ret;
+  }
+  if (came_before) {
+    ret.base = e->base;
+    ret.warning = std::format("'F' of run {:08X} came before: no splinters paid twice", run_id);
     return ret;
   }
   if (e) { // the rooms were paid while the run had a Payout block: never the old V on top
@@ -1888,6 +1897,36 @@ SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const Spi
   ret.warning = payout
       ? std::string("no run id at 'F' (no 'B' in this game): paid the old rooms + 5 per boss")
       : std::format("no Payout block in {}: paid the old rooms + 5 per boss at 'F'", SPIRE_SHOP_CATALOGUE_FILE);
+  return ret;
+}
+
+// F2 fix (L4): see SpireFlagBridge.hh
+SpireFinishStats spire_records_finish_stats(
+    SpireRecords& rec, uint32_t run_id, uint8_t difficulty, uint32_t score, uint32_t seconds, bool won) {
+  SpireFinishStats ret;
+  ret.new_score = score > rec.best_score;
+  ret.new_time = won && (!rec.best_time || (seconds < rec.best_time));
+  if (ret.new_score) {
+    rec.best_score = score;
+  }
+  if (ret.new_time) {
+    rec.best_time = seconds;
+  }
+  if (won) {
+    auto& e = rec.per_difficulty[difficulty & 3];
+    if (!e.second || (seconds < e.second)) {
+      e.second = seconds;
+    }
+    auto* run = run_id ? spire_records_credit_for(rec, run_id, true) : nullptr;
+    if (!run || !run->won) {
+      rec.won++;
+      e.first++;
+      ret.won_counted = true;
+      if (run) {
+        run->won = true;
+      }
+    }
+  }
   return ret;
 }
 
@@ -1980,24 +2019,6 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   if (it != spire_records_pending_score.end()) {
     spire_records_pending_score.erase(it);
   }
-  bool new_score = score > rec.best_score;
-  bool new_time = is_won && (!rec.best_time || (seconds < rec.best_time));
-  if (new_score) {
-    rec.best_score = score;
-  }
-  if (is_won) {
-    rec.won++;
-  }
-  if (new_time) {
-    rec.best_time = seconds;
-  }
-  if (is_won) {
-    auto& e = rec.per_difficulty[static_cast<uint8_t>(l->difficulty) & 3];
-    e.first++;
-    if (!e.second || (seconds < e.second)) {
-      e.second = seconds;
-    }
-  }
   // Route B F2: the rooms were paid when their checkpoint was stored (spire_records_credit_room); 'F' adds the pact
   // bonus and pays rooms of this game the checkpoint could not pay. Without a Payout block, the old V (v48 below).
   // v48: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
@@ -2020,6 +2041,13 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   uint32_t run_id = game_run ? game_run->run_id : 0;
   auto paid = spire_records_finish_splinters(rec, payout ? &*payout : nullptr, run_id, finish.pacts, run_rooms.rooms,
       run_rooms.boss_rooms, rooms + rooms_before_resume, bosses);
+  // F2 fix (L4): after the splinters, since it may create the run's credit entry; a repeated 'F' counts Won once
+  auto stats = spire_records_finish_stats(rec, run_id, static_cast<uint8_t>(l->difficulty), score, seconds, is_won);
+  bool new_score = stats.new_score;
+  bool new_time = stats.new_time;
+  if (is_won && !stats.won_counted) {
+    c->log.warning_f("Spire records: won 'F' of run {:08X} came before; Won not counted again", run_id);
+  }
   spire_records_save(filename, serial_number, rec);
   if (!paid.warning.empty()) {
     c->log.warning_f("Spire records: {}", paid.warning);
