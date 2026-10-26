@@ -206,10 +206,10 @@ void run_static_tests() {
     expect(SPIRE_GUARD_LOBBY_REFRESH_GAP >= std::chrono::milliseconds(100)); // several frames apart at 30 fps
   }
 
-  phosg::log_info_f("-- Spire guard: the restored client gets the 69 for its own slot right before its 67, as $loadchar sends it (v45)");
+  phosg::log_info_f("-- Spire guard: the restored client gets no 69 and no 67 for its own slot in the refresh (v46)");
   {
-    // 2026-10-26 11:44:33: a 67 without that 69 (v43) was followed by a crash in the lobby; 69, C5, 67 ran 11 times
-    expect_eq((std::vector<uint8_t>{0x69, 0x67}), (spire_guard_refresh_self_commands()));
+    // v43 (67 alone) crashed 2026-10-26 11:44:33 on the pc; v45 (69, 67) froze the client 12:39:05 in the lab
+    expect(spire_guard_refresh_self_commands().empty());
   }
 
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");

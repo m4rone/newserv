@@ -462,6 +462,9 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   18 s later (2026-10-26 11:44:33, BidX alone in the lobby after q921); the $loadchar order (69, C5, 67 for the
 //   restored client) ran 11 times on the pc on 2026-10-25 without a crash, 6 of them alone in the lobby. The other
 //   players keep the v43 order (69, the gap, 68).
+// - v46: undoes v45 and v43's 67 for the restored client: it gets no 69 and no 67 at all, since the function call (B2)
+//   already set its character in memory. v45's 69 and 67 left Kamako frozen and invisible in the lobby, no 6x3E/3F
+//   for 5 min (2026-10-26 12:39:05, lab, alone in the lobby). Only the other players get the refresh (69, gap, 68).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -589,8 +592,7 @@ constexpr auto SPIRE_GUARD_LOBBY_REFRESH_GAP = std::chrono::milliseconds(300);
 std::vector<uint64_t> spire_guard_refresh_leave_targets(const std::vector<uint64_t>& in_lobby, uint64_t self_id);
 std::vector<uint64_t> spire_guard_refresh_join_targets(
     const std::vector<uint64_t>& told_leave, const std::vector<uint64_t>& in_lobby_now, uint64_t self_id);
-// v45: the commands the restored client gets in the refresh, in this order: 0x69 (its own slot leaves) and 0x67 (the
-// lobby with the restored character); both after the gap, in the same frame, as $loadchar sends them.
+// v46: the commands the restored client gets in the refresh: none (v45 sent 0x69 and 0x67 and froze the client).
 std::vector<uint8_t> spire_guard_refresh_self_commands();
 
 // Called before a client joins or creates a game (v10). Returns false, after sending the client a short message, if a

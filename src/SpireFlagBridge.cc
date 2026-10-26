@@ -2725,7 +2725,7 @@ std::vector<uint64_t> spire_guard_refresh_join_targets(
 }
 
 std::vector<uint8_t> spire_guard_refresh_self_commands() {
-  return {0x69, 0x67};
+  return {};
 }
 
 static std::vector<uint64_t> spire_guard_lobby_client_ids(std::shared_ptr<const Lobby> l) {
@@ -2763,8 +2763,9 @@ static asio::awaitable<void> spire_guard_refresh_lobby(std::shared_ptr<Client> c
           serial_number, !c->channel->connected() ? "disconnected" : "left the lobby");
       co_return;
     }
-    // v45: like $loadchar, the 69 for its own slot first, then the 67. Measured 2026-10-26 11:44:33 (pc): the v43 67
-    // without that 69 was followed by a crash in the lobby 18 s later; the $loadchar order ran 11 times without one.
+    // v46: the restored client gets nothing; the function call (B2) already set its character in memory. Both forms
+    // of a refresh for its own slot failed once: v43's 67 alone was followed by a crash 18 s later (2026-10-26
+    // 11:44:33, pc), v45's 69 and 67 left the client frozen and invisible (2026-10-26 12:39:05, lab, Kamako alone).
     for (uint8_t command : spire_guard_refresh_self_commands()) {
       if (command == 0x69) {
         send_command_t(c, 0x69, slot, leave_cmd);
