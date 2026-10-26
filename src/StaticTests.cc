@@ -629,35 +629,35 @@ void run_static_tests() {
       }
     });
 
-    f1_case("e: the run copy signature (amendment 6)", [&]() {
-      // the snapshot holds the real mag; the stronger candidate holds no type-02 item of its data1[0-1]: a run copy
+    f1_case("e: a stronger copy without the real mag; the mag signature is gone (B-REGIE-14-9)", [&]() {
+      // the snapshot holds the real mag; the stronger candidate holds none: refused by the level and EXP equality
       auto real = make("BidX", 52, 90000, 1000, 19, 0x01, {kama});
       auto snap = snapshot_of(real, true);
       snap.run_copy_print = print_of(make("BidX", 19, 9000, 400, 12, 0x20, {}));
       auto stronger = make("BidX", 60, 120000, 2000, 24, 0x01, {});
       expect(!spire_guard_matches_print(stronger.first, stronger.second, snap.run_copy_print));
-      expect(spire_guard_run_copy_signature(stronger.first, snap.inventory));
+      expect(spire_guard_snapshot_not_worse(stronger.first, stronger.second, snap)); // the v56 rule alone lets it in
       expect(!spire_guard_retake_ok(stronger.first, stronger.second, snap, std::nullopt));
       expect(!spire_guard_run_again_retake(snap, true, stronger.first, stronger.second, 921, 2, std::nullopt));
       expect(unchanged(snap, real));
       // holding a run mag of another kind instead (unequipped, invisible to holds_run_mag without a ledger): still a run copy
       auto with_run_mag = make("BidX", 60, 120000, 2000, 23, 0x01, {run_mag});
       expect(!spire_guard_run_again_retake(snap, true, with_run_mag.first, with_run_mag.second, 921, 2, std::nullopt));
+      // B-REGIE-14-9 (C3): the real level and EXP without the mag (deposited in the base) is the real character; before
+      // the fix the signature refused it, and the exit restore then pushed the deposited mag back next to the bank copy
       auto exit_copy = make("BidX", 52, 90000, 2000, 24, 0x01, {});
       auto exit_snap = snapshot_of(real, false);
       exit_snap.run_copy_print = snap.run_copy_print;
-      expect(!spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, std::nullopt));
-      expect(unchanged(exit_snap, real));
-      // the real mag back (fed in the base: other stat bytes, same data1[0-1]): no signature, the re-take goes on
+      expect(spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, std::nullopt));
+      expect(spire_guard_same_state(exit_snap.inventory, exit_snap.disp, exit_copy.first, exit_copy.second));
+      // the real mag back (fed in the base: other stat bytes), the re-take goes on
       Bytes fed = kama;
       fed[3] = 0x52;
       auto real_fed = make("BidX", 52, 90000, 1000, 19, 0x01, {fed});
-      expect(!spire_guard_run_copy_signature(real_fed.first, snap.inventory));
       expect(spire_guard_run_again_retake(snap, true, real_fed.first, real_fed.second, 921, 2, std::nullopt));
-      // a snapshot without a mag: the signature never fires
+      // a snapshot without a mag
       auto no_mag = make("Testa", 5, 300, 50, 3, 0x01, {});
       auto grown = make("Testa", 5, 300, 50, 4, 0x01, {});
-      expect(!spire_guard_run_copy_signature(grown.first, no_mag.first));
       auto plain = snapshot_of(no_mag, true);
       plain.run_copy_print = print_of(make("Testa", 19, 9000, 400, 12, 0x20, {}));
       expect(spire_guard_run_again_retake(plain, true, grown.first, grown.second, 921, 2, std::nullopt));
@@ -667,7 +667,7 @@ void run_static_tests() {
       auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
       auto run_copy = make("Testa", 19, 9000, 400, 12, 0x20, {});
       auto print = print_of(run_copy);
-      expect(print.exists && (print.level == 18) && (print.exp == 9000) && (print.num_items == 12));
+      expect(print.exists && (print.level == 18));
       // the item order and the item IDs do not change the hash; the meseta does
       auto reordered = run_copy;
       std::swap(reordered.first.items[0], reordered.first.items[11]);
@@ -722,6 +722,122 @@ void run_static_tests() {
       snap.run_copy_print = print_of(make("M4ia", 17, 4200, 0, 18, 0x60, {same_kind_run_mag}));
       expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
     });
+
+    // Fix round 1 (routeb-f1-critic.md C1-C5, B-REGIE-14-9). Every check is logged before any is asserted, so one run
+    // shows each one that fails.
+    std::vector<std::string> fix_failures;
+    auto check = [&](const std::string& what, bool ok) {
+      phosg::log_info_f("   F1 fix check {}: {}", what, ok ? "ok" : "FAILS");
+      if (!ok) {
+        fix_failures.emplace_back(what);
+      }
+    };
+    const Bytes plain_mag = {0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // a fresh Mag
+    const Bytes sato = {0x02, 0x2A, 0xC8, 0x00, 0xF4, 0x01, 0xE8, 0x03, 0xD0, 0x07, 0x00, 0x00};
+
+    f1_case("C1: the print's level with another EXP, no mag in the snapshot", [&]() {
+      // GC: the overlay's EXP stays the start value (0 from Lv1), so the print holds {Lv19, EXP 0}. The 'I' 61 is the
+      // save form: Lv19 with its real EXP 9000 and four equipped items, one of them a step-0 run mag of the plain kind.
+      auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(make("Testa", 19, 0, 400, 12, 0x20, {}));
+      auto save_form = make("Testa", 19, 9000, 400, 3, 0x20, {plain_mag});
+      check("C1 retake_ok refuses the save form", !spire_guard_retake_ok(save_form.first, save_form.second, snap, std::nullopt));
+      check("C1 'I' refuses the save form",
+          !spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+      check("C1 the snapshot stays", unchanged(snap, real));
+      // the same with a snapshot that holds the same plain mag kind
+      auto real_mag = make("Testa", 5, 300, 50, 3, 0x01, {plain_mag});
+      auto snap_mag = snapshot_of(real_mag, true);
+      snap_mag.run_copy_print = snap.run_copy_print;
+      check("C1 'I' refuses the save form (snapshot with a plain mag)",
+          !spire_guard_run_again_retake(snap_mag, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+      // C2: the old rule (not worse) against the new one (exact): the snapshot's level, one EXP point more
+      auto fresh = snapshot_of(real, true);
+      fresh.run_copy_print = snap_mag.run_copy_print;
+      auto one_more = make("Testa", 5, 301, 50, 4, 0x01, {});
+      check("C2 'I' refuses the snapshot's level with one EXP point more",
+          !spire_guard_run_again_retake(fresh, true, one_more.first, one_more.second, 921, 2, std::nullopt));
+      // and the real character (exact level and EXP, more items from the bank) still passes
+      fresh = snapshot_of(real, true);
+      fresh.run_copy_print = snap_mag.run_copy_print;
+      auto real_plus = make("Testa", 5, 300, 50, 4, 0x01, {});
+      check("C2 'I' takes the real character with a bank item",
+          spire_guard_run_again_retake(fresh, true, real_plus.first, real_plus.second, 921, 2, std::nullopt));
+    });
+
+    f1_case("C3: a bank mag swap in the base (deposit Kama, withdraw Sato)", [&]() {
+      auto real = make("BidX", 52, 90000, 1000, 19, 0x01, {kama});
+      auto swapped = make("BidX", 52, 90000, 1000, 19, 0x01, {sato});
+      auto print = print_of(make("BidX", 19, 0, 400, 12, 0x20, {}));
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print;
+      check("C3 'I' takes the swapped mag", spire_guard_run_again_retake(snap, true, swapped.first, swapped.second, 921, 2, std::nullopt));
+      check("C3 the snapshot holds Sato, not Kama", spire_guard_same_state(snap.inventory, snap.disp, swapped.first, swapped.second));
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = print;
+      check("C3 the 98 after 'O' takes the swapped mag",
+          spire_guard_base_exit_follow(exit_snap, true, swapped.first, swapped.second, std::nullopt));
+      check("C3 the exit restore pushes Sato, not Kama",
+          spire_guard_same_state(exit_snap.inventory, exit_snap.disp, swapped.first, swapped.second));
+    });
+
+    f1_case("C2/C4/C5: the guard file (round trip, print lifecycle, a bad field)", [&]() {
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-guardfile-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      auto name = (dir / "0000000042.json").string();
+      auto real = make("Testa", 5, 300, 50, 3, 0x01, {plain_mag});
+      auto run_copy = make("Testa", 19, 0, 400, 12, 0x20, {});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(run_copy);
+      snap.run_copy_print.hash = 0xFEDCBA9876543210; // above 2^63: stored as hex text
+      spire_guard_save(name, 42, snap);
+      auto loaded = spire_guard_load(name);
+      check("C2 round trip: markers", loaded.run_in_progress && !loaded.restore_pending && !loaded.awaiting_save);
+      check("C2 round trip: character", loaded.has_character && unchanged(loaded, real) && (loaded.quest_number == 921));
+      check("C2 round trip: print", loaded.run_copy_print.exists && (loaded.run_copy_print.level == 18) &&
+          (loaded.run_copy_print.hash == 0xFEDCBA9876543210));
+      // C4: an 'O' without a run copy to print leaves no print of an earlier 'O' in the file
+      auto second = spire_guard_load(name);
+      check("C4 storing no print succeeds", spire_guard_store_print(name, 42, second, nullptr, nullptr));
+      check("C4 no stale print in the file", !spire_guard_load(name).run_copy_print.exists);
+      // C4: an 'O' with a run copy stores exactly that run copy's print
+      auto other_copy = make("Testa", 22, 0, 900, 14, 0x40, {});
+      check("C4 storing the print succeeds", spire_guard_store_print(name, 42, second, &other_copy.first, &other_copy.second));
+      auto stored = spire_guard_load(name).run_copy_print;
+      check("C4 the new print is in the file", stored.exists && (stored.level == 21) && (stored.hash == print_of(other_copy).hash));
+      // C4: a print that cannot be saved is reported, so the caller refuses the push
+      auto unwritable = (dir / "missing" / "0000000042.json").string();
+      check("C4 a failed save is reported",
+          !spire_guard_store_print(unwritable, 42, second, &other_copy.first, &other_copy.second));
+      // C5: a bad print or overlay block reads as none; the snapshot itself loads (no login lockout)
+      for (const std::string bad_print : {"{\"Level\": 18, \"Hash\": \"XYZ\"}", "{\"Level\": 18, \"Hash\": 7}",
+               "{\"Level\": \"abc\", \"Hash\": \"0000000000000001\"}"}) {
+        auto json = phosg::JSON::parse(phosg::load_file(name));
+        json.as_dict().erase("RunCopyPrint");
+        json.as_dict().erase("Overlay");
+        json.emplace("RunCopyPrint", phosg::JSON::parse(bad_print));
+        json.emplace("Overlay", phosg::JSON::parse("{\"Level\": \"x\"}"));
+        phosg::save_file(name, json.serialize());
+        bool threw = false;
+        SpireGuardSnapshot tolerant;
+        try {
+          tolerant = spire_guard_load(name);
+        } catch (const std::exception&) {
+          threw = true;
+        }
+        check("C5 no throw for " + bad_print, !threw);
+        check("C5 reads as no print, the snapshot stays, for " + bad_print,
+            !tolerant.run_copy_print.exists && tolerant.has_character && unchanged(tolerant, real) && tolerant.run_in_progress);
+      }
+      std::filesystem::remove_all(dir);
+    });
+
+    for (const auto& what : fix_failures) {
+      phosg::log_error_f("   F1 fix check failed: {}", what);
+    }
+    expect(fix_failures.empty());
   }
 
   phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v49, B-BASIS-13)");

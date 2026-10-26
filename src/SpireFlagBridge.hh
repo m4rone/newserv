@@ -594,13 +594,14 @@ bool spire_guard_marker_open(bool protected_character, bool run_in_progress, boo
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
 
 // F1 (route B): the print of the run copy, taken at 'O' right before the restore push from the server's mirror of the
-// run copy (the battle overlay). A later 61 that matches it (spire_guard_matches_print) is the run copy, never the real
-// character. hash is fnv1a64 over every item's data1 and data2 (sorted, item IDs ignored) and then the meseta.
+// run copy (the battle overlay). Its existence is the file's proof that this run's 'O' happened; a later 61 or 98 whose
+// items and meseta match hash (spire_guard_matches_print) is the run copy, never the real character. hash is fnv1a64
+// over every item's data1 and data2 (sorted, item IDs ignored) and then the meseta. level (0-based) is only for the log.
+// The mirror's EXP is not kept: on GC the server never learns the run copy's EXP (6x30 carries the level only), so the
+// overlay keeps its start value (F1 fix, routeb-f1-critic.md C1).
 struct SpireRunCopyPrint {
   bool exists = false;
   uint32_t level = 0;
-  uint32_t exp = 0;
-  uint32_t num_items = 0;
   uint64_t hash = 0;
 };
 
@@ -976,26 +977,39 @@ bool spire_run_again_floor_ok(uint32_t floor);
 // player was still the run copy, and the 'I' re-take stored it as the real character).
 bool spire_guard_snapshot_not_worse(
     const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot);
+SpireGuardSnapshot spire_guard_load(const std::string& filename);
+void spire_guard_save(const std::string& filename, uint32_t serial_number, const SpireGuardSnapshot& snapshot);
+bool spire_guard_store_print(const std::string& filename, uint32_t serial_number, SpireGuardSnapshot& snapshot,
+    const PlayerInventory* inventory, const PlayerDispDataV4* disp);
+// The guard's snapshot file (F1 fix: no longer static, for the round-trip test). Loading throws only for a bad
+// marker or character field; a bad Overlay, QuestNumber, SnapshotTime or RunCopyPrint reads as absent with a warning
+// (C5: a hand-edited print never locks the login).
+SpireGuardSnapshot spire_guard_load(const std::string& filename);
+void spire_guard_save(const std::string& filename, uint32_t serial_number, const SpireGuardSnapshot& snapshot);
 // F1 (route B): the print of a run copy (SpireRunCopyPrint) from the server's mirror of it
 SpireRunCopyPrint spire_guard_run_copy_print(const PlayerInventory& inventory, const PlayerDispDataV4& disp);
-// F1: true if the data is the printed run copy: the print's level and EXP, or its item and meseta hash. An in-game 61
-// is the client's save form (equipped items only), so the hash alone would miss a run copy; level and EXP catch it.
+// F1 fix (C4), the print step of 'O': saves the snapshot without its earlier print, then (if a run copy is given) with
+// the new print. False if a save failed; the caller then refuses the push, so "no print, no re-take" holds in the file.
+bool spire_guard_store_print(const std::string& filename, uint32_t serial_number, SpireGuardSnapshot& snapshot,
+    const PlayerInventory* inventory, const PlayerDispDataV4* disp);
+// F1: true if the data is the printed run copy by its item and meseta hash. It catches a 98 (the full inventory); an
+// in-game 61 is the client's save form (equipped items only) and never matches, and for that the level and EXP
+// equality of spire_guard_retake_ok decides.
 bool spire_guard_matches_print(
     const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireRunCopyPrint& print);
 // F1: true if the inventory holds an item whose 12 data1 bytes equal the ledger's run mag
 bool spire_guard_holds_run_mag(const PlayerInventory& inventory, const SpireRunMagBytes& run_mag);
-// F1 (amendment 6, measured: the client strips the real mag from its run copy, routeb-mag-vraag.md E1/E3): true if
-// the snapshot holds a mag (type 02) and the data holds none with the same data1[0-1]: that is a run copy. Errs only
-// to the safe side: a mag sold or swapped in the base keeps the stored snapshot.
-bool spire_guard_run_copy_signature(const PlayerInventory& inventory, const PlayerInventory& snapshot_inventory);
 // F1: whether data may replace the snapshot of an open run, at both re-take callers (spire_guard_run_again_retake,
-// spire_guard_base_exit_follow): not worse (spire_guard_snapshot_not_worse), a print stored at 'O' that the data does
-// not match, not holding the ledger's run mag, and no run copy signature. When in doubt (no print), the snapshot stays.
+// spire_guard_base_exit_follow): not worse (spire_guard_snapshot_not_worse), the snapshot's exact level and EXP (the
+// base gives neither; F1 fix, B-REGIE-14-9), a print stored at 'O' that the data does not match, and not holding the
+// ledger's run mag. When in doubt (no print), the snapshot stays. The mag signature of amendment 6 is gone
+// (B-REGIE-14-9): a bank mag swap in the base is the real character, and refusing it lost the withdrawn mag at the
+// exit restore (routeb-f1-critic.md C3).
 bool spire_guard_retake_ok(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
     const SpireGuardSnapshot& snapshot, const SpireRunMagBytes& run_mag);
 // The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
 // RunInProgress alone and a character, and the data is the same character (name, class, section ID) and (F1) passes
-// spire_guard_retake_ok (not worse, not the run copy's print, no run mag, no run copy signature); then the snapshot
+// spire_guard_retake_ok (not worse, the exact level and EXP, not the run copy's print, no run mag); then the snapshot
 // takes the data, the quest and the time, and RunInProgress stays. run_mag: the ledger's run mag (F6), or std::nullopt.
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs, const SpireRunMagBytes& run_mag);
@@ -1003,9 +1017,9 @@ bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_return
 // held the real character since the verified push, so the snapshot takes what the base changed (items, meseta),
 // and the restore at the game exit pushes that instead of the run start's data (a bank withdrawal in the base
 // would otherwise be pushed away). False (snapshot unchanged) unless base_returned, the snapshot has a character
-// and RestorePending alone (spire_guard_end_run just turned RunInProgress into it), and the data is the same character
-// with the snapshot's level and EXP (the base gives no EXP; anything else keeps the run start's data) that (F1) passes
-// spire_guard_retake_ok. RestorePending stays: the restore at the game exit still runs.
+// and RestorePending alone (spire_guard_end_run just turned RunInProgress into it), and the data (F1) passes
+// spire_guard_retake_ok (the same character with the snapshot's level and EXP; the base gives no EXP, anything else
+// keeps the run start's data). RestorePending stays: the restore at the game exit still runs.
 bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, const SpireRunMagBytes& run_mag);
 

@@ -3634,6 +3634,8 @@ static asio::awaitable<void> on_61_98(std::shared_ptr<Client> c, Channel::Messag
       throw std::logic_error("player data command not implemented for version");
   }
   player->inventory.decode_from_client(c->version());
+  // Spire run mag (F6, amendment 3): an in-game 61 (also the $savechar one in ChatCommands.cc) refreshes the run copy
+  if (msg.command == 0x61) spire_run_mag_note_in_game_61(c);
   c->channel->language = player->inventory.language;
   c->login->account->save();
 
