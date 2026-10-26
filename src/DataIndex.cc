@@ -2424,6 +2424,12 @@ std::vector<ItemData> DataIndex::spire_kit_tools(const ItemData::StackLimits& li
   return ret;
 }
 
+std::vector<ItemData> DataIndex::spire_kit_scape_dolls() {
+  ItemData doll = ItemData::from_data(phosg::parse_data_string("030900"));
+  doll.data1[5] = 1;
+  return std::vector<ItemData>(10, doll);
+}
+
 std::vector<ItemData> DataIndex::spire_kit_materials(const ItemData::StackLimits& limits, const SpireKitMaterials& m) {
   std::vector<ItemData> ret;
   const std::vector<std::pair<uint8_t, size_t>> materials = {

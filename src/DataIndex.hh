@@ -233,6 +233,8 @@ struct DataIndex {
   // Marck 2026-10-25: "$kit tools" drops full stacks of Dimate, Trimate, Difluid, Trifluid, Sol, Moon and Star
   // Atomizer, and one Scape Doll.
   static std::vector<ItemData> spire_kit_tools(const ItemData::StackLimits& limits);
+  // Marck 2026-10-26: "$kit dolls" drops 10 Scape Dolls, one item each (a Scape Doll never stacks).
+  static std::vector<ItemData> spire_kit_scape_dolls();
   // The materials of "$kit mat" in the order Power, Mind, Evade, Def, Luck, HP, TP, as many items as limits needs per
   // stack (GC v3: one material per item). spire_kit_material_batch returns the next at most
   // SPIRE_KIT_MATERIAL_BATCH items after the first already_dropped ones; empty when all are dropped.

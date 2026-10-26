@@ -812,6 +812,14 @@ void run_static_tests() {
     expect_eq(8, tools.size());
     expect_eq(10, tools.at(3).data1[5]); // Trifluid x10
     expect_eq(1, tools.at(7).data1[5]); // Scape Doll x1
+    // $kit dolls: 10 separate Scape Dolls
+    auto dolls = DataIndex::spire_kit_scape_dolls();
+    expect_eq(10, dolls.size());
+    for (const auto& doll : dolls) {
+      expect_eq(0x03, doll.data1[0]);
+      expect_eq(0x09, doll.data1[1]);
+      expect_eq(1, doll.data1[5]);
+    }
     expect(DataIndex::spire_kit_material_message(0, 0).find("niets") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("30 neergelegd") != std::string::npos);
     expect(DataIndex::spire_kit_material_message(30, 245).find("nog 245 over") != std::string::npos);
