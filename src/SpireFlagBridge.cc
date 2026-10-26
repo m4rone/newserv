@@ -2777,6 +2777,8 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
 // v39: clients whose 98 from a Normal or Solo game under AwaitingSave is still to be taken into the snapshot. Keyed by
 // the Client's address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_follow_pending;
+// v61: the clients that left the base game under AwaitingSave (spire_guard_end_run); the next 84 sends them a 97
+static std::unordered_set<const Client*> spire_guard_base_game_left;
 
 // v51: clients whose 98 leaves a Spire game after a verified 'O' (spire_guard_base_exit_follow). Keyed by the Client's
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
@@ -2820,6 +2822,7 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
               l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO)), base_game)) {
         spire_guard_follow_pending.emplace(c.get());
       } else if (snapshot.awaiting_save && base_game) {
+        spire_guard_base_game_left.emplace(c.get());
         c->log.info_f("Spire guard: 98 of the base game (q{}) for serial {:010}; AwaitingSave stays open until a login 61 equals the snapshot {} (v59)",
             quest_number, serial_number, spire_guard_describe(snapshot));
       }
@@ -4074,6 +4077,20 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
 }
 
 // v47: the restore runs when the client leaves the game, before the lobby join (see SpireFlagBridge.hh)
+
+// v61: 97 with flag 1 makes the client save its character to the memory card (CommandFormats.hh). Measured 2026-10-26
+// (lab, cardwatch): the client writes its card at every game join with only the equipped items (Sega's protection
+// against a game that is not left properly) and wrote nothing at a server-sent 6x73 exit, so after a Spire run and the
+// base the card kept 8 of 23 items until the next login restore. Sent only when the save buffer holds the verified real
+// character: after a verified game exit restore and after the base game (pushed and verified before q925).
+static void spire_guard_save_to_card(std::shared_ptr<Client> c, uint32_t serial_number, const char* why) {
+  if (!c->channel->connected() || c->lobby.lock()) {
+    return; // only between the game and the lobby, like the restore itself
+  }
+  send_command(c, 0x97, 0x01);
+  c->log.info_f("Spire guard: 97 (save to memory card) sent for serial {:010} after {} (v61)", serial_number, why);
+}
+
 asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   if (!serial_number) {
@@ -4094,6 +4111,9 @@ asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c
     co_return false;
   }
   if (!spire_guard_marker_open(c->is_spire_protected(), false, snapshot.restore_pending, false)) {
+    if (spire_guard_base_game_left.erase(c.get()) && snapshot.awaiting_save && !c->is_spire_protected()) {
+      spire_guard_save_to_card(c, serial_number, "the base game");
+    }
     co_return true;
   }
 
@@ -4110,6 +4130,7 @@ asio::awaitable<bool> spire_guard_restore_at_game_exit(std::shared_ptr<Client> c
   }
   c->log.info_f("Spire guard: restored {} for serial {:010} at the game exit; the lobby join follows; marker stays until the next login confirms it",
       spire_guard_describe(snapshot), serial_number);
+  spire_guard_save_to_card(c, serial_number, "the game exit restore");
   co_return true;
 }
 
