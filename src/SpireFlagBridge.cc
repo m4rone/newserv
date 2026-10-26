@@ -3261,7 +3261,11 @@ static asio::awaitable<void> spire_base_return(
   }
 
   // v57: with a base quest the live player is never pushed in this game; the client leaves it for the base game
-  bool base_game = (refusal == R::NONE) && c->require_server_state()->data->spire_base_quest_number;
+  // v58: the floor, a load and B2 matter only to the push; the base game needs none of them (a follower that stayed on
+  // Pioneer 2 goes along)
+  bool base_game = ((refusal == R::NONE) || (refusal == R::NOT_ON_FIELD) || (refusal == R::LOADING) ||
+                       (refusal == R::NO_FUNCTIONS)) &&
+      c->require_server_state()->data->spire_base_quest_number;
   if (base_game) {
     refusal = R::BASE_GAME;
   }
@@ -3364,15 +3368,27 @@ bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
   mark.expected = std::max<size_t>(1, l->count_clients());
   mark.quest_number = quest_number;
   mark.run_quest_number = l->quest->meta.quest_number;
-  spire_base_game_marks[serial_number] = mark;
-  if (auto it = spire_run_ends.find(l->lobby_id); it != spire_run_ends.end()) {
-    it->second.exit_sent.emplace(c->lobby_client_id); // the server's own run-over 6x73 must not follow
+  // v58: the whole party goes: every client of the run's game is marked and sent out once (one that the server already
+  // sent back to the lobby after the run end is only marked)
+  auto end_it = spire_run_ends.find(l->lobby_id);
+  for (const auto& lc : l->clients) {
+    uint32_t lc_serial = lc ? spire_bridge_serial_for_client(lc) : 0;
+    auto have = lc_serial ? spire_base_game_marks.find(lc_serial) : spire_base_game_marks.end();
+    if (!lc_serial || ((have != spire_base_game_marks.end()) && (have->second.group == mark.group) &&
+                          (have->second.mode == mark.mode))) {
+      continue; // already on its way from this game (a stale mark of another game is replaced)
+    }
+    spire_base_game_marks[lc_serial] = mark;
+    bool already_sent = (end_it != spire_run_ends.end()) && !end_it->second.exit_sent.emplace(lc->lobby_client_id).second;
+    if (!already_sent || (lc == c)) {
+      G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
+      lc->channel->send(0x60, 0x00, cmd);
+    }
+    lc->log.info_f("Spire base game: serial {:010} leaves q{} game {:08X} ({} from client {}, 6x73{}); base quest q{} follows in the lobby ({} client(s) in this run)",
+        lc_serial, l->quest->meta.quest_number, l->lobby_id, why, c->lobby_client_id, already_sent ? " already sent" : "",
+        quest_number, mark.expected);
   }
-  G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
-  c->channel->send(0x60, 0x00, cmd);
-  c->log.info_f("Spire base game: serial {:010} leaves q{} game {:08X} ({}, 6x73); base quest q{} follows in the lobby ({} client(s) in this run)",
-      serial_number, l->quest->meta.quest_number, l->lobby_id, why, quest_number, mark.expected);
-  return true;
+  return spire_base_game_marks.count(serial_number);
 }
 
 // Starts the base quest once every client of the run is in the base game and none loads, or after SPIRE_BASE_GAME_WAIT
