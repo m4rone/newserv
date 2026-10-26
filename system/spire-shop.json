@@ -49,7 +49,7 @@
     }
   },
   "MetaHeat": {
-    "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column.",
+    "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column. The quest builds one override row set per H 0..7 (pso-roguelike spike/basis-quest economy.json meta_heat.H_max = the highest H here, slice 5) and plays H = r108 clamped to 0..7: a cell above 7 needs a new quest build, or it plays the H 7 rows.",
     "HAuto": {
       "HUmar": [0, 0, 0, 1, 3, 3, 2, 5, 5],
       "HUnewearl": [0, 0, 1, 1, 2, 3, 4, 4, 5],
