@@ -224,7 +224,10 @@ void run_static_tests() {
     expect_eq(0x4F000001u, spire_base_return_answer(R::NONE));
     expect_eq(0x4F000500u, spire_base_return_answer(R::LOADING));
     expect_eq(0x4F000B00u, spire_base_return_answer(R::PUSH_NOT_VERIFIED));
-    for (uint8_t z = 1; z <= static_cast<uint8_t>(R::PUSH_NOT_VERIFIED); z++) {
+    // v57: the base game is a FAIL to the quest (no warp in this game); the client leaves with 6x73
+    expect_eq(0x4F000C00u, spire_base_return_answer(R::BASE_GAME));
+    expect_eq(std::string("the client goes to the base game"), std::string(spire_base_return_refusal_name(R::BASE_GAME)));
+    for (uint8_t z = 1; z <= static_cast<uint8_t>(R::BASE_GAME); z++) {
       expect_eq(SPIRE_BASE_RETURN_FAIL, spire_base_return_answer(static_cast<R>(z)) & 0xFF);
     }
     // the code letter is free: no other r248 code or 4CC starts with 'O'

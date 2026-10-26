@@ -161,6 +161,9 @@ struct DataIndex {
   // Quest numbers in which the Spire register bridge applies (SpireBridgeQuests); empty = the bridge never takes a
   // register write (see SpireFlagBridge.hh)
   std::unordered_set<uint32_t> spire_bridge_quest_numbers;
+  // v57: the base game (SpireBaseQuest): after a run, the clients leave the Battle game and the server puts them in a
+  // normal game that runs this quest (Pioneer 2 with the quartermaster); 0 (the key is missing) = no base game
+  uint32_t spire_base_quest_number = 0;
   // v15: quests the Spire guard protects; unset (the key is missing) means the guard uses spire_bridge_quest_numbers
   std::optional<std::unordered_set<uint32_t>> spire_guard_quest_numbers;
   // Regie pso-regie-9: quests outside the Spire run that read the Spire meta flags (SpireMetaQuests, e.g. the E06

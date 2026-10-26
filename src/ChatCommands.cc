@@ -2097,6 +2097,18 @@ ChatCommandDefinition cc_playrec(
       co_return;
     });
 
+// v57: the base game without a run end (lab): this client leaves the Spire game for the base game (SpireBaseQuest)
+ChatCommandDefinition cc_spirebase(
+    {"$spirebase"},
+    +[](const Args& a) -> asio::awaitable<void> {
+      a.check_debug_enabled();
+      a.check_is_game(true);
+      if (!spire_base_game_request(a.c, a.c->require_lobby(), "$spirebase")) {
+        throw precondition_failed("$C6No base game:\nno SpireBaseQuest,\nno serial or no quest");
+      }
+      co_return;
+    });
+
 ChatCommandDefinition cc_qcall(
     {"$qcall"},
     +[](const Args& a) -> asio::awaitable<void> {

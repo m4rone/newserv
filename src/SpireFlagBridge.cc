@@ -18,6 +18,7 @@
 #include "AsyncUtils.hh"
 #include "Compression.hh"
 #include "InventoryBackup.hh"
+#include "ReceiveCommands.hh"
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireBBATxGuard.hh"
@@ -884,6 +885,8 @@ const char* spire_base_return_refusal_name(SpireBaseReturnRefusal r) {
       return "already sent back to the lobby";
     case SpireBaseReturnRefusal::PUSH_NOT_VERIFIED:
       return "the push was not verified";
+    case SpireBaseReturnRefusal::BASE_GAME:
+      return "the client goes to the base game";
   }
   return "unknown";
 }
@@ -3252,6 +3255,11 @@ static asio::awaitable<void> spire_base_return(
     refusal = R::MARKER;
   }
 
+  // v57: with a base quest the live player is never pushed in this game; the client leaves it for the base game
+  bool base_game = (refusal == R::NONE) && c->require_server_state()->data->spire_base_quest_number;
+  if (base_game) {
+    refusal = R::BASE_GAME;
+  }
   if (refusal == R::NONE) {
     // The server's own 6x73 after an 'X' must not land during the push or the warp: claim it for this client
     uint8_t slot = c->lobby_client_id;
@@ -3295,13 +3303,168 @@ static asio::awaitable<void> spire_base_return(
   } catch (const std::exception& e) {
     c->log.warning_f("Spire base return: failed to answer serial {:010}: {}", serial_number, e.what());
   }
-  if (refusal == R::NONE) {
+  if (base_game) {
+    c->log.info_f("Spire base return: serial {:010} in q{} goes to the base game (r{}={:08X}); no push in this game",
+        serial_number, quest_number, SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
+    if (!spire_base_game_request(c, l, "'O'")) {
+      // Back to the default: the server's 6x73 after an 'X' as before
+      if (auto it = spire_run_ends.find(l->lobby_id); it != spire_run_ends.end() && it->second.over_announced) {
+        asio::co_spawn(*c->require_server_state()->io_context, spire_run_over_exit(c, l, SPIRE_RUN_OVER_LOBBY_DELAY),
+            asio::detached);
+      }
+    }
+  } else if (refusal == R::NONE) {
     c->log.info_f("Spire base return: OK for serial {:010} in q{}: the real character is back, the quest may warp to Pioneer 2 (r{}={:08X}); marker unchanged",
         serial_number, quest_number, SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
   } else {
     c->log.info_f("Spire base return: FAIL for serial {:010} in q{}: {}; the quest leaves with 6x73 (r{}={:08X})",
         serial_number, quest_number, spire_base_return_refusal_name(refusal), SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
   }
+}
+
+// v57: the base game (SpireFlagBridge.hh). Marks by serial (a client object does not survive a reconnect, and a
+// reconnect drops the mark on purpose: the login restore then runs alone); groups by the run's game id.
+struct SpireBaseGameMark {
+  uint32_t group = 0;
+  Episode episode = Episode::EP1;
+  Difficulty difficulty = Difficulty::NORMAL;
+  size_t expected = 1;
+};
+struct SpireBaseGameGroup {
+  std::weak_ptr<Lobby> game;
+};
+static std::unordered_map<uint32_t, SpireBaseGameMark> spire_base_game_marks;
+static std::unordered_map<uint32_t, SpireBaseGameGroup> spire_base_game_groups;
+
+bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, const char* why) {
+  auto s = c->require_server_state();
+  uint32_t quest_number = s->data->spire_base_quest_number;
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  if (!quest_number || !serial_number || !l || !l->is_game() || !l->quest || (c->lobby.lock() != l)) {
+    return false;
+  }
+  if (!s->data->quest_index->get(quest_number)) {
+    c->log.warning_f("Spire base game: base quest q{} not found; serial {:010} stays in this game", quest_number, serial_number);
+    return false;
+  }
+  SpireBaseGameMark mark;
+  mark.group = l->lobby_id;
+  mark.episode = l->episode;
+  mark.difficulty = l->difficulty;
+  mark.expected = std::max<size_t>(1, l->count_clients());
+  spire_base_game_marks[serial_number] = mark;
+  if (auto it = spire_run_ends.find(l->lobby_id); it != spire_run_ends.end()) {
+    it->second.exit_sent.emplace(c->lobby_client_id); // the server's own run-over 6x73 must not follow
+  }
+  G_UnusedHeader cmd = {0x73, 0x01, 0x0000}; // as $exit in a quest
+  c->channel->send(0x60, 0x00, cmd);
+  c->log.info_f("Spire base game: serial {:010} leaves q{} game {:08X} ({}, 6x73); base quest q{} follows in the lobby ({} client(s) in this run)",
+      serial_number, l->quest->meta.quest_number, l->lobby_id, why, quest_number, mark.expected);
+  return true;
+}
+
+// Starts the base quest once every client of the run is in the base game and none loads, or after SPIRE_BASE_GAME_WAIT
+// with the ones that came. A game that empties meanwhile is dropped.
+static asio::awaitable<void> spire_base_game_start(std::weak_ptr<Lobby> weak_game, uint32_t group, size_t expected) {
+  auto started = std::chrono::steady_clock::now();
+  for (;;) {
+    co_await async_sleep(std::chrono::seconds(1));
+    auto game = weak_game.lock();
+    if (!game || !game->count_clients()) {
+      if (auto it = spire_base_game_groups.find(group); it != spire_base_game_groups.end() && it->second.game.expired()) {
+        spire_base_game_groups.erase(it);
+      }
+      co_return;
+    }
+    auto waited = std::chrono::steady_clock::now() - started;
+    if (!spire_game_any_client_loading(game) && ((game->count_clients() >= expected) || (waited >= SPIRE_BASE_GAME_WAIT))) {
+      break;
+    }
+    if (waited >= 3 * SPIRE_BASE_GAME_WAIT) {
+      game->log.warning_f("Spire base game: a client is still loading after {} s; base quest not started",
+          std::chrono::duration_cast<std::chrono::seconds>(waited).count());
+      spire_base_game_groups.erase(group);
+      co_return;
+    }
+  }
+  spire_base_game_groups.erase(group); // a client of this run that comes later gets its own base game
+  auto game = weak_game.lock();
+  if (!game || game->quest) {
+    co_return;
+  }
+  auto s = game->require_server_state();
+  auto q = s->data->quest_index->get(s->data->spire_base_quest_number);
+  if (!q) {
+    game->log.warning_f("Spire base game: base quest q{} not found", s->data->spire_base_quest_number);
+    co_return;
+  }
+  for (const auto& lc : game->clients) {
+    if (lc && !q->version(lc->version(), lc->language())) {
+      game->log.warning_f("Spire base game: base quest q{} has no version for client {}; not started",
+          s->data->spire_base_quest_number, lc->lobby_client_id);
+      co_return;
+    }
+  }
+  set_lobby_quest(game, q, true);
+  game->log.info_f("Spire base game: q{} started in base game {:08X} with {} of {} client(s)",
+      s->data->spire_base_quest_number, game->lobby_id, game->count_clients(), expected);
+}
+
+static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, uint32_t serial_number, SpireBaseGameMark mark) {
+  co_await async_sleep(SPIRE_BASE_GAME_LOBBY_SETTLE);
+  auto c = weak_c.lock();
+  if (!c || !c->channel->connected()) {
+    co_return;
+  }
+  auto current = c->lobby.lock();
+  if (!current || current->is_game() || c->check_flag(Client::Flag::LOADING)) {
+    c->log.info_f("Spire base game: serial {:010} is not standing in a lobby; no base game", serial_number);
+    co_return;
+  }
+  try {
+    auto s = c->require_server_state();
+    auto q = s->data->quest_index->get(s->data->spire_base_quest_number);
+    if (!q || !q->version(c->version(), c->language())) {
+      c->log.warning_f("Spire base game: base quest q{} missing for this client; serial {:010} stays in the lobby",
+          s->data->spire_base_quest_number, serial_number);
+      co_return;
+    }
+    auto& group = spire_base_game_groups[mark.group];
+    auto game = group.game.lock();
+    bool created = false;
+    if (game && (!game->is_game() || game->quest || (game->count_clients() >= game->max_clients))) {
+      game = nullptr;
+    }
+    if (!game) {
+      game = create_game_generic(s, c, "Spire base", "", mark.episode, GameMode::NORMAL, mark.difficulty, false);
+      if (!game) {
+        c->log.warning_f("Spire base game: creating the base game failed for serial {:010}; stays in the lobby", serial_number);
+        co_return;
+      }
+      group.game = game;
+      created = true;
+    }
+    s->change_client_lobby(c, game);
+    c->set_flag(Client::Flag::LOADING);
+    c->log.info_f("Spire base game: serial {:010} {} base game {:08X} (run game {:08X}, {} expected)", serial_number,
+        created ? "created" : "joined", game->lobby_id, mark.group, mark.expected);
+    if (created) {
+      asio::co_spawn(*s->io_context, spire_base_game_start(game, mark.group, mark.expected), asio::detached);
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire base game: failed for serial {:010}: {}", serial_number, e.what());
+  }
+}
+
+void spire_base_game_after_lobby_join(std::shared_ptr<Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  auto it = serial_number ? spire_base_game_marks.find(serial_number) : spire_base_game_marks.end();
+  if (it == spire_base_game_marks.end()) {
+    return;
+  }
+  auto mark = it->second;
+  spire_base_game_marks.erase(it);
+  asio::co_spawn(*c->require_server_state()->io_context, spire_base_game_join(c, serial_number, mark), asio::detached);
 }
 
 // v49: the run again ('I', SpireFlagBridge.hh). The per-game state of a run lives further down

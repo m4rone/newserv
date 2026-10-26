@@ -703,6 +703,21 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
 constexpr auto SPIRE_LOBBY_TEXT_DELAY = std::chrono::seconds(3);
 void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 
+// v57: the base game. The live player of a Battle game stays the run copy whatever the server pushes into the save
+// buffer (measured 2026-10-26: after 'O' OK and the warp the 61 on Pioneer 2 showed the run copy), and only leaving the
+// game gives the client its real character back. So with SpireBaseQuest set, a run end that asks 'O' (or the debug
+// command $spirebase) does not push: the client is sent out of the game (6x73), the game exit restore runs as for any
+// Spire game end, and once the client stands in a lobby the server puts it in a normal game that runs the base quest.
+// The clients of one run share one base game (the first one in creates it, the quest starts when all are in or after
+// SPIRE_BASE_GAME_WAIT). A client that left meanwhile, or a base game that is gone or already started, is left alone.
+constexpr auto SPIRE_BASE_GAME_LOBBY_SETTLE = std::chrono::seconds(4);
+constexpr auto SPIRE_BASE_GAME_WAIT = std::chrono::seconds(40);
+// Marks c (of game l) for the base game and sends it out of l with 6x73. Returns false (nothing marked or sent) if
+// there is no base quest, the client has no serial, or l is not a game with a quest.
+bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, const char* why);
+// From on_84 after the lobby join of a client that left a game: if it is marked, put it in its base game.
+void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
+
 // v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose
 // arrival writes the card (B-E01-41): with the real character in memory that write is harmless. The 6x73 run end (v35)
@@ -737,6 +752,7 @@ enum class SpireBaseReturnRefusal : uint8_t {
   RESTORE_RUNNING, // a restore or $kitlobby already runs for this client
   ALREADY_SENT_BACK, // the server's 6x73 already went to this client
   PUSH_NOT_VERIFIED, // the push failed, timed out or its 61 does not equal the snapshot
+  BASE_GAME, // v57: no push; the client leaves this game and the server puts it in the base game (SpireBaseQuest)
 };
 struct SpireBaseReturnState {
   bool has_character = false;

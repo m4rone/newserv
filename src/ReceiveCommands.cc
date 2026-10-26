@@ -3166,6 +3166,8 @@ static asio::awaitable<void> on_84(std::shared_ptr<Client> c, Channel::Message& 
     s->add_client_to_available_lobby(c, false);
     // v35: texts the Spire bridge held during the run (records at the run end) go out now, in the lobby
     spire_deliver_lobby_texts(c);
+    // v57: a client sent out of a run for the base game goes there from this lobby (see SpireFlagBridge.hh)
+    spire_base_game_after_lobby_join(c);
 
   } else {
     // If the client already is in a lobby, then they're using the lobby teleporter; add them to the lobby they
