@@ -71,6 +71,14 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       ret.flags[std::make_pair(difficulty, flag_num)] = entry_json->get_bool("Set");
     }
   }
+  if (json.contains("BaseRung")) { // v48 (B-BASIS-13)
+    for (uint8_t run = 1; run <= 2; run++) {
+      int64_t rung = json.at("BaseRung").get_int(std::to_string(run), 0);
+      if (rung > 0) {
+        ret.base_rung[run] = std::min<int64_t>(rung, 3);
+      }
+    }
+  }
   return ret;
 }
 
@@ -102,6 +110,13 @@ static void spire_meta_save(const std::string& filename, uint32_t serial_number,
     flags_json.emplace_back(phosg::JSON::dict({{"Difficulty", key.first}, {"Flag", key.second}, {"Set", is_set}}));
   }
   auto json = phosg::JSON::dict({{"SerialNumber", serial_number}, {"Flags", std::move(flags_json)}});
+  if (!file.base_rung.empty()) { // v48 (B-BASIS-13): kept through every flag write, since each one loads the file first
+    auto base_rung_json = phosg::JSON::dict();
+    for (const auto& [run, rung] : file.base_rung) {
+      base_rung_json.emplace(std::to_string(run), rung);
+    }
+    json.emplace("BaseRung", std::move(base_rung_json));
+  }
   if (file.adopted == SpireMetaAdopted::UNKNOWN) {
     json.emplace("Adopted", "unknown");
   } else if (file.adopted == SpireMetaAdopted::KNOWN) {
@@ -278,6 +293,22 @@ uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run) {
   return ret;
 }
 
+uint8_t spire_meta_base_rung(const SpireMetaFile& file, uint8_t run) {
+  auto it = file.base_rung.find(run);
+  return (it == file.base_rung.end()) ? 0 : std::min<uint8_t>(it->second, 3);
+}
+
+uint8_t spire_meta_open_rung(uint8_t won_rung, uint8_t base_rung) {
+  return std::min<uint8_t>(std::max(won_rung, base_rung), 3);
+}
+
+uint8_t spire_meta_open_rung(const SpireMetaFile& file, uint8_t run) {
+  if (!spire_meta_ladder_flag(run)) {
+    return 0; // a quest of neither run has no ladder
+  }
+  return spire_meta_open_rung(spire_meta_ladder_rung(file.flags, run), spire_meta_base_rung(file, run));
+}
+
 uint8_t spire_meta_flag_difficulty(uint16_t flag_num, uint8_t game_difficulty) {
   return ((flag_num >= SPIRE_META_FLAG_PAY_WIN) && (flag_num <= SPIRE_META_FLAG_PAY_RECORD)) ? 0 : game_difficulty;
 }
@@ -326,7 +357,7 @@ uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8
     auto character = c->character_file(false, false);
     std::string filename = spire_meta_filename_for(c->login->gc_license->serial_number,
         character ? &character->disp : nullptr);
-    return filename.empty() ? 0 : spire_meta_ladder_rung(spire_meta_load(filename), run);
+    return filename.empty() ? 0 : spire_meta_open_rung(spire_meta_load_file(filename), run); // v48: won or BaseRung
   } catch (const std::exception& e) {
     c->log.warning_f("Spire meta: ladder rung unreadable: {}; Normal only", e.what());
     return 0;
