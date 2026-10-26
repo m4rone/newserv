@@ -2779,7 +2779,7 @@ static asio::awaitable<void> spire_guard_refresh_lobby(std::shared_ptr<Client> c
         send_player_join_notification(lc, l, c);
       }
     }
-    c->log.info_f("Spire guard: lobby refreshed for serial {:010}: 69 and 67 to the client, 69 to {} and 68 to {} other player(s) {} ms apart",
+    c->log.info_f("Spire guard: lobby refreshed for serial {:010}: nothing to the client, 69 to {} and 68 to {} other player(s) {} ms apart",
         serial_number, told_leave.size(), join_targets.size(),
         told_leave.empty() ? 0 : std::chrono::duration_cast<std::chrono::milliseconds>(SPIRE_GUARD_LOBBY_REFRESH_GAP).count());
   } catch (const std::exception& e) {
