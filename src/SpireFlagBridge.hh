@@ -2,9 +2,11 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <chrono>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <memory>
 #include <vector>
@@ -320,9 +322,10 @@ bool spire_practice_blocks_flag(bool practice, uint16_t flag_num);
 // The one ticker line at 'B': "Run resumed at room k: ..." (with the savestate), "Practice run: ...", or "" for a run
 // from its first room
 std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss);
-// The second ticker line of a resumed run (regie 2026-10-26): a mag stays out of the savestate (spire_savestate_items),
-// and the run copy also holds the real mag, so the server cannot tell a mag found in the run from it; the line comes
-// on every resume, "" otherwise. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that
+// The second ticker line of a resumed run (regie 2026-10-26): a mag stays out of the savestate (spire_savestate_items)
+// until the run mag ledger (F6). The run copy never holds the real mag (server and client both strip it under
+// forbid_mags 0, routeb-mag-vraag.md), so a mag in the run copy is a run mag; the line comes on every resume, ""
+// otherwise. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that
 // line aside (as the room clear text, v36).
 constexpr const char* SPIRE_RESUME_MAG_TEXT = "A mag found in this run does not come back.";
 constexpr auto SPIRE_RESUME_MAG_TEXT_DELAY = std::chrono::milliseconds(4000);
@@ -576,6 +579,17 @@ bool spire_guard_marker_open(bool protected_character, bool run_in_progress, boo
 // is the decision, kept free of state for the static tests.
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_SECONDS = 180;
 
+// F1 (route B): the print of the run copy, taken at 'O' right before the restore push from the server's mirror of the
+// run copy (the battle overlay). A later 61 that matches it (spire_guard_matches_print) is the run copy, never the real
+// character. hash is fnv1a64 over every item's data1 and data2 (sorted, item IDs ignored) and then the meseta.
+struct SpireRunCopyPrint {
+  bool exists = false;
+  uint32_t level = 0;
+  uint32_t exp = 0;
+  uint32_t num_items = 0;
+  uint64_t hash = 0;
+};
+
 // The guard's snapshot file of one character (serial number plus character, see spire_guard_character_id).
 struct SpireGuardSnapshot {
   // Set at quest load; a 98 or the next login turns it into restore_pending (v8)
@@ -600,6 +614,8 @@ struct SpireGuardSnapshot {
   bool has_character = false;
   PlayerInventory inventory;
   PlayerDispDataV4 disp;
+  // F1: stored at 'O' (spire_base_return), cleared at a run start that sets the marker (spire_guard_run_start_apply)
+  SpireRunCopyPrint run_copy_print;
 };
 
 // v39 (regie, kracht-voorbij-normaal.md section 6): how the guard tells the real character from a run copy. Never by
@@ -946,21 +962,41 @@ bool spire_run_again_floor_ok(uint32_t floor);
 // player was still the run copy, and the 'I' re-take stored it as the real character).
 bool spire_guard_snapshot_not_worse(
     const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireGuardSnapshot& snapshot);
+// F1 (route B): the print of a run copy (SpireRunCopyPrint) from the server's mirror of it
+SpireRunCopyPrint spire_guard_run_copy_print(const PlayerInventory& inventory, const PlayerDispDataV4& disp);
+// F1: true if the data is the printed run copy: the print's level and EXP, or its item and meseta hash. An in-game 61
+// is the client's save form (equipped items only), so the hash alone would miss a run copy; level and EXP catch it.
+bool spire_guard_matches_print(
+    const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireRunCopyPrint& print);
+// F1: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (F6); std::nullopt while no
+// ledger exists, and then spire_guard_holds_run_mag is false.
+using SpireRunMagBytes = std::optional<std::array<uint8_t, 12>>;
+// F1: true if the inventory holds an item whose 12 data1 bytes equal the ledger's run mag
+bool spire_guard_holds_run_mag(const PlayerInventory& inventory, const SpireRunMagBytes& run_mag);
+// F1 (amendment 6, measured: the client strips the real mag from its run copy, routeb-mag-vraag.md E1/E3): true if
+// the snapshot holds a mag (type 02) and the data holds none with the same data1[0-1]: that is a run copy. Errs only
+// to the safe side: a mag sold or swapped in the base keeps the stored snapshot.
+bool spire_guard_run_copy_signature(const PlayerInventory& inventory, const PlayerInventory& snapshot_inventory);
+// F1: whether data may replace the snapshot of an open run, at both re-take callers (spire_guard_run_again_retake,
+// spire_guard_base_exit_follow): not worse (spire_guard_snapshot_not_worse), a print stored at 'O' that the data does
+// not match, not holding the ledger's run mag, and no run copy signature. When in doubt (no print), the snapshot stays.
+bool spire_guard_retake_ok(const PlayerInventory& inventory, const PlayerDispDataV4& disp,
+    const SpireGuardSnapshot& snapshot, const SpireRunMagBytes& run_mag);
 // The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
-// RunInProgress alone and a character, and the data is the same character (name, class, section ID) and (v56) not
-// worse than the snapshot (spire_guard_snapshot_not_worse); then the snapshot takes the data, the quest and the time,
-// and RunInProgress stays.
+// RunInProgress alone and a character, and the data is the same character (name, class, section ID) and (F1) passes
+// spire_guard_retake_ok (not worse, not the run copy's print, no run mag, no run copy signature); then the snapshot
+// takes the data, the quest and the time, and RunInProgress stays. run_mag: the ledger's run mag (F6), or std::nullopt.
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs);
+    const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs, const SpireRunMagBytes& run_mag);
 // v51: the 98 of a client that leaves the game after a verified return to base ('O' OK, no 'I' since): its memory has
 // held the real character since the verified push, so the snapshot takes what the base changed (items, meseta),
 // and the restore at the game exit pushes that instead of the run start's data (a bank withdrawal in the base
 // would otherwise be pushed away). False (snapshot unchanged) unless base_returned, the snapshot has a character
 // and RestorePending alone (spire_guard_end_run just turned RunInProgress into it), and the data is the same character
-// with the snapshot's level and EXP (the base gives no EXP; anything else keeps the run start's data). RestorePending
-// stays: the restore at the game exit still runs.
+// with the snapshot's level and EXP (the base gives no EXP; anything else keeps the run start's data) that (F1) passes
+// spire_guard_retake_ok. RestorePending stays: the restore at the game exit still runs.
 bool spire_guard_base_exit_follow(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
-    const PlayerDispDataV4& disp);
+    const PlayerDispDataV4& disp, const SpireRunMagBytes& run_mag);
 
 // v49: the battle overlay of one client at a run start, shared by on_quest_loaded and the run again ('I'): the bank
 // (BB), the guard's run start (spire_guard_begin_run, which keeps an open marker's snapshot), then

@@ -345,12 +345,14 @@ void run_static_tests() {
       snap.snapshot_time_usecs = 1;
       snap.inventory = real.first;
       snap.disp = real.second;
+      auto printed = make(3, 0x00, 5, 0, "BidX", 3); // F1: the run copy's print, stored at 'O'
+      snap.run_copy_print = spire_guard_run_copy_print(printed.first, printed.second);
       return snap;
     };
     // after 'O' OK: the 61 of the base is the real character, the snapshot takes it and RunInProgress stays
     auto spent = make(20, 0x00, 51, 700, "BidX", 3); // spent meseta in the base
     auto snap = fresh();
-    expect(spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect(spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save && snap.has_character);
@@ -358,17 +360,17 @@ void run_static_tests() {
     // v56 (live 2026-10-26 20:47:39): never fewer items, a lower level or less EXP than the stored snapshot; the
     // stored one stays. One item fewer, the run copy (Lv6, 3 items), the same level with less EXP:
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1u, snap.snapshot_time_usecs);
     auto run_copy = make(3, 0x00, 5, 0, "BidX", 3);
-    expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
     expect_eq(51u, snap.disp.stats.level.load());
     snap.disp.stats.exp = 90000;
     auto less_exp = make(20, 0x00, 51, 1000, "BidX", 3);
     less_exp.second.stats.exp = 89999;
     expect(!spire_guard_snapshot_not_worse(less_exp.first, less_exp.second, snap));
-    expect(!spire_guard_run_again_retake(snap, true, less_exp.first, less_exp.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, less_exp.first, less_exp.second, 921, 2, std::nullopt));
     expect_eq(90000u, snap.disp.stats.exp.load());
     // more items and a higher level are not worse
     auto gained = make(21, 0x00, 52, 0, "BidX", 3);
@@ -377,25 +379,25 @@ void run_static_tests() {
     expect(!spire_guard_snapshot_not_worse(other.first, other.second, fresh()));
     // no verified return to base (or used up): nothing changes
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, false, spent.first, spent.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, false, spent.first, spent.second, 921, 2, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1u, snap.snapshot_time_usecs);
     // another character on the card, or another marker: nothing changes
     snap = fresh();
-    expect(!spire_guard_run_again_retake(snap, true, other.first, other.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, other.first, other.second, 921, 2, std::nullopt));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     snap = fresh();
     snap.restore_pending = true;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
     snap = fresh();
     snap.awaiting_save = true;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
     snap = fresh();
     snap.run_in_progress = false;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
     snap = fresh();
     snap.has_character = false;
-    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2));
+    expect(!spire_guard_run_again_retake(snap, true, spent.first, spent.second, 921, 2, std::nullopt));
   }
 
   phosg::log_info_f("-- Spire guard: the game exit after 'O' and 'I' restores, never a stale snapshot (v51)");
@@ -423,6 +425,7 @@ void run_static_tests() {
       snap.run_in_progress = true;
       snap.inventory = real.first;
       snap.disp = real.second;
+      snap.run_copy_print = spire_guard_run_copy_print(run_copy.first, run_copy.second); // F1: stored at 'O'
       return snap;
     };
     // the game exit: spire_guard_end_run turns RunInProgress into RestorePending (SpireFlagBridge.cc, the 98)
@@ -440,7 +443,7 @@ void run_static_tests() {
     // as it is now (the run start's 20 items would push the bank item away)
     auto snap = at_run_start();
     end_run(snap);
-    expect(spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+    expect(spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
     expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(snap.restore_pending && !snap.run_in_progress && !snap.awaiting_save);
@@ -448,35 +451,35 @@ void run_static_tests() {
     // (a) 'O' OK, nothing changed in the base: the snapshot stays equal, the exit push changes nothing
     snap = at_run_start();
     end_run(snap);
-    expect(spire_guard_base_exit_follow(snap, true, real.first, real.second));
+    expect(spire_guard_base_exit_follow(snap, true, real.first, real.second, std::nullopt));
     expect(spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second));
     // (a) a 98 that is not the real character (the run copy's level or EXP, another character): the run start stays
     snap = at_run_start();
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, true, run_copy.first, run_copy.second));
+    expect(!spire_guard_base_exit_follow(snap, true, run_copy.first, run_copy.second, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     auto higher = make(21, 52, 95000, 700, "BidX");
-    expect(!spire_guard_base_exit_follow(snap, true, higher.first, higher.second));
+    expect(!spire_guard_base_exit_follow(snap, true, higher.first, higher.second, std::nullopt));
     auto other = make(21, 51, 90000, 700, "M4ia");
-    expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second));
+    expect(!spire_guard_base_exit_follow(snap, true, other.first, other.second, std::nullopt));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     // v56: the real level and EXP but fewer items than the snapshot: kept
     auto fewer = make(19, 51, 90000, 700, "BidX");
-    expect(!spire_guard_base_exit_follow(snap, true, fewer.first, fewer.second));
+    expect(!spire_guard_base_exit_follow(snap, true, fewer.first, fewer.second, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     // (a) only after end_run: never while RunInProgress, AwaitingSave or without a character
     snap = at_run_start();
-    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
     snap.run_in_progress = false;
     snap.awaiting_save = true;
-    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second));
+    expect(!spire_guard_base_exit_follow(snap, true, base_changed.first, base_changed.second, std::nullopt));
 
     // (b) 'O' failed (or never asked): no base_returned, the 98 (the run copy) is ignored, the run start's snapshot
     // is pushed at the exit
     snap = at_run_start();
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
-    expect(!spire_guard_base_exit_follow(snap, false, base_changed.first, base_changed.second));
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second, std::nullopt));
+    expect(!spire_guard_base_exit_follow(snap, false, base_changed.first, base_changed.second, std::nullopt));
     expect_eq(20u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(1000u, snap.disp.stats.meseta.load());
     expect(exit_restore_runs(snap));
@@ -484,14 +487,240 @@ void run_static_tests() {
     // (c) 'O' OK, 'I' (the snapshot taken again in the base, the run copy pushed, the 'O' OK used up), then leave: the
     // 98 holds the run copy and is ignored, the exit pushes the snapshot taken at the 'I'
     snap = at_run_start();
-    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2));
+    expect(spire_guard_run_again_retake(snap, true, base_changed.first, base_changed.second, 921, 2, std::nullopt));
     end_run(snap);
-    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second));
+    expect(!spire_guard_base_exit_follow(snap, false, run_copy.first, run_copy.second, std::nullopt));
     expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
     expect_eq(700u, snap.disp.stats.meseta.load());
     expect(exit_restore_runs(snap));
     // a protected character never gets the exit restore
     expect(!spire_guard_marker_open(true, false, snap.restore_pending, false));
+  }
+
+  phosg::log_info_f("-- Spire guard: a run copy never becomes the snapshot at either re-take (F1, route B)");
+  {
+    using Bytes = std::array<uint8_t, 12>;
+    // Measured mag bytes (routeb-mag-vraag.md): Kama LV200 (BidX), Pitri LV200 (M4ia); the HU start-floor run mag (plan F6)
+    const Bytes kama = {0x02, 0x06, 0xC8, 0x50, 0x0C, 0x07, 0x0E, 0x30, 0x0E, 0x0E, 0xC2, 0x09};
+    const Bytes pitri = {0x02, 0x1D, 0xC8, 0xA3, 0xF4, 0x01, 0x1C, 0x25, 0x10, 0x27, 0x00, 0x00};
+    const Bytes run_mag = {0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00};
+    // n plain items (data1[1] numbers them from first), then the given ones; item IDs as a 61 has them
+    auto make = [](const char* name, uint32_t level, uint32_t exp, uint32_t meseta, size_t n, uint8_t first,
+                    std::vector<Bytes> extra) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[0] = 0x01;
+        ret.first.items[z].data.data1[1] = first + z;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      for (size_t z = 0; z < extra.size(); z++) {
+        memcpy(ret.first.items[n + z].data.data1.data(), extra[z].data(), 12);
+        ret.first.items[n + z].data.id = 0x00010100 + z;
+      }
+      ret.first.num_items = n + extra.size();
+      ret.second.stats.level = level - 1; // stored 0-based
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      ret.second.visual.name.encode(name, Language::ENGLISH);
+      ret.second.visual.sh.section_id = 3;
+      return ret;
+    };
+    auto snapshot_of = [](const std::pair<PlayerInventory, PlayerDispDataV4>& real, bool run_in_progress) {
+      SpireGuardSnapshot snap;
+      snap.has_character = true;
+      snap.run_in_progress = run_in_progress;
+      snap.restore_pending = !run_in_progress; // the 98 after 'O' is checked after spire_guard_end_run
+      snap.quest_number = 921;
+      snap.snapshot_time_usecs = 1;
+      snap.inventory = real.first;
+      snap.disp = real.second;
+      return snap;
+    };
+    auto print_of = [](const std::pair<PlayerInventory, PlayerDispDataV4>& d) {
+      return spire_guard_run_copy_print(d.first, d.second);
+    };
+    auto unchanged = [](const SpireGuardSnapshot& snap, const std::pair<PlayerInventory, PlayerDispDataV4>& real) {
+      return spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second) && (snap.snapshot_time_usecs == 1);
+    };
+    auto f1_case = [](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   F1 ({})", name);
+      fn();
+    };
+
+    f1_case("a: a stronger run copy with the stored print", [&]() {
+      // The test character Lv5, EXP 300, 3 items; the live player after 'O' is still the run copy Lv19 with 12 items
+      auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
+      auto run_copy = make("Testa", 19, 9000, 400, 12, 0x20, {});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(run_copy);
+      expect(spire_guard_snapshot_not_worse(run_copy.first, run_copy.second, snap)); // the v56 rule alone lets it in
+      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
+      expect(unchanged(snap, real));
+      // the in-game 61 is the save form (equipped items only): the print's level and EXP still match
+      auto save_form = make("Testa", 19, 9000, 400, 4, 0x20, {});
+      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+      // the same items and meseta at another level (hash only) match too
+      auto same_items = make("Testa", 20, 9100, 400, 12, 0x20, {});
+      expect(spire_guard_matches_print(same_items.first, same_items.second, snap.run_copy_print));
+      expect(!spire_guard_run_again_retake(snap, true, same_items.first, same_items.second, 921, 2, std::nullopt));
+      expect(unchanged(snap, real));
+      // the 98 after 'O' at the snapshot's level and EXP: the hash finds the run copy's items
+      auto equal_stats = make("Testa", 5, 300, 400, 12, 0x20, {});
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = print_of(equal_stats);
+      expect(!spire_guard_base_exit_follow(exit_snap, true, equal_stats.first, equal_stats.second, std::nullopt));
+      expect(unchanged(exit_snap, real));
+    });
+
+    f1_case("b: a different print, but holding the ledger's run mag", [&]() {
+      auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
+      auto run_copy = make("Testa", 19, 9000, 400, 11, 0x20, {run_mag});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(make("Testa", 18, 8000, 300, 10, 0x40, {}));
+      expect(!spire_guard_matches_print(run_copy.first, run_copy.second, snap.run_copy_print));
+      expect(spire_guard_holds_run_mag(run_copy.first, run_mag));
+      expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, run_mag));
+      expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, run_mag));
+      expect(unchanged(snap, real));
+      auto exit_copy = make("Testa", 5, 300, 400, 11, 0x20, {run_mag});
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = snap.run_copy_print;
+      expect(!spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, run_mag));
+      expect(unchanged(exit_snap, real));
+      // the exact 12 bytes: the same mag kind with other stats is not the ledger's mag; no ledger (before F6): false
+      Bytes other_stats = run_mag;
+      other_stats[4] = 0x50;
+      expect(!spire_guard_holds_run_mag(make("Testa", 5, 300, 0, 0, 0, {other_stats}).first, run_mag));
+      expect(!spire_guard_holds_run_mag(run_copy.first, std::nullopt));
+    });
+
+    f1_case("c: the real character after a verified restore plus one bank item", [&]() {
+      auto real = make("BidX", 52, 90000, 1000, 19, 0x01, {kama});
+      auto with_bank_item = make("BidX", 52, 90000, 1000, 20, 0x01, {kama});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(make("BidX", 19, 9000, 400, 12, 0x20, {}));
+      expect(spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap, run_mag));
+      expect(spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2, run_mag));
+      expect_eq(21u, static_cast<uint32_t>(snap.inventory.num_items));
+      expect(snap.run_in_progress && (snap.snapshot_time_usecs == 2));
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = snap.run_copy_print;
+      expect(spire_guard_base_exit_follow(exit_snap, true, with_bank_item.first, with_bank_item.second, run_mag));
+      expect_eq(21u, static_cast<uint32_t>(exit_snap.inventory.num_items));
+      // when in doubt the snapshot stays: no print stored at 'O'
+      snap = snapshot_of(real, true);
+      expect(!spire_guard_retake_ok(with_bank_item.first, with_bank_item.second, snap, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, with_bank_item.first, with_bank_item.second, 921, 2, std::nullopt));
+      expect(unchanged(snap, real));
+    });
+
+    f1_case("d: the live case of 2026-10-26 20:47:39 (B-BASIS-60)", [&]() {
+      // M4ia Lv162 with 27 items (Pitri among them); the 'I' 61 showed the run copy Lv17 with 3 items, no mag
+      auto real = make("M4ia", 162, 4000000, 90000, 26, 0x01, {pitri});
+      auto run_copy = make("M4ia", 17, 4200, 0, 3, 0x60, {});
+      auto snap = snapshot_of(real, true);
+      for (bool printed : {false, true}) {
+        snap.run_copy_print = printed ? print_of(make("M4ia", 17, 4200, 0, 18, 0x60, {})) : SpireRunCopyPrint();
+        expect(!spire_guard_retake_ok(run_copy.first, run_copy.second, snap, std::nullopt));
+        expect(!spire_guard_run_again_retake(snap, true, run_copy.first, run_copy.second, 921, 2, std::nullopt));
+        expect(unchanged(snap, real));
+      }
+    });
+
+    f1_case("e: the run copy signature (amendment 6)", [&]() {
+      // the snapshot holds the real mag; the stronger candidate holds no type-02 item of its data1[0-1]: a run copy
+      auto real = make("BidX", 52, 90000, 1000, 19, 0x01, {kama});
+      auto snap = snapshot_of(real, true);
+      snap.run_copy_print = print_of(make("BidX", 19, 9000, 400, 12, 0x20, {}));
+      auto stronger = make("BidX", 60, 120000, 2000, 24, 0x01, {});
+      expect(!spire_guard_matches_print(stronger.first, stronger.second, snap.run_copy_print));
+      expect(spire_guard_run_copy_signature(stronger.first, snap.inventory));
+      expect(!spire_guard_retake_ok(stronger.first, stronger.second, snap, std::nullopt));
+      expect(!spire_guard_run_again_retake(snap, true, stronger.first, stronger.second, 921, 2, std::nullopt));
+      expect(unchanged(snap, real));
+      // holding a run mag of another kind instead (unequipped, invisible to holds_run_mag without a ledger): still a run copy
+      auto with_run_mag = make("BidX", 60, 120000, 2000, 23, 0x01, {run_mag});
+      expect(!spire_guard_run_again_retake(snap, true, with_run_mag.first, with_run_mag.second, 921, 2, std::nullopt));
+      auto exit_copy = make("BidX", 52, 90000, 2000, 24, 0x01, {});
+      auto exit_snap = snapshot_of(real, false);
+      exit_snap.run_copy_print = snap.run_copy_print;
+      expect(!spire_guard_base_exit_follow(exit_snap, true, exit_copy.first, exit_copy.second, std::nullopt));
+      expect(unchanged(exit_snap, real));
+      // the real mag back (fed in the base: other stat bytes, same data1[0-1]): no signature, the re-take goes on
+      Bytes fed = kama;
+      fed[3] = 0x52;
+      auto real_fed = make("BidX", 52, 90000, 1000, 19, 0x01, {fed});
+      expect(!spire_guard_run_copy_signature(real_fed.first, snap.inventory));
+      expect(spire_guard_run_again_retake(snap, true, real_fed.first, real_fed.second, 921, 2, std::nullopt));
+      // a snapshot without a mag: the signature never fires
+      auto no_mag = make("Testa", 5, 300, 50, 3, 0x01, {});
+      auto grown = make("Testa", 5, 300, 50, 4, 0x01, {});
+      expect(!spire_guard_run_copy_signature(grown.first, no_mag.first));
+      auto plain = snapshot_of(no_mag, true);
+      plain.run_copy_print = print_of(make("Testa", 19, 9000, 400, 12, 0x20, {}));
+      expect(spire_guard_run_again_retake(plain, true, grown.first, grown.second, 921, 2, std::nullopt));
+    });
+
+    f1_case("print: kept in the run, cleared by the next run start", [&]() {
+      auto real = make("Testa", 5, 300, 50, 3, 0x01, {});
+      auto run_copy = make("Testa", 19, 9000, 400, 12, 0x20, {});
+      auto print = print_of(run_copy);
+      expect(print.exists && (print.level == 18) && (print.exp == 9000) && (print.num_items == 12));
+      // the item order and the item IDs do not change the hash; the meseta does
+      auto reordered = run_copy;
+      std::swap(reordered.first.items[0], reordered.first.items[11]);
+      reordered.first.items[3].data.id = 0x00810003;
+      expect_eq(print.hash, print_of(reordered).hash);
+      auto more_meseta = run_copy;
+      more_meseta.second.stats.meseta = 401;
+      expect(print.hash != print_of(more_meseta).hash);
+      SpireGuardSnapshot snap;
+      snap.run_copy_print = print;
+      expect_eq(SpireGuardRunStart::FRESH, spire_guard_run_start_apply(snap, real.first, real.second, 921, 1));
+      expect(!snap.run_copy_print.exists);
+      snap.run_copy_print = print; // an open run keeps its print
+      expect_eq(SpireGuardRunStart::KEPT_OPEN_RUN, spire_guard_run_start_apply(snap, run_copy.first, run_copy.second, 921, 2));
+      expect(snap.run_copy_print.exists);
+    });
+
+    f1_case("f: hard stop mid-run, the login 61 is the run copy's save form (amendment 7)", [&]() {
+      // The card holds the run copy's save form after a hard stop: the equipped run items and the equipped run mag, never
+      // the real mag (routeb-mag-vraag.md section 2 point 5). The run mag here has the real mag's kind on purpose.
+      Bytes same_kind_run_mag = pitri;
+      for (size_t z = 2; z < 12; z++) {
+        same_kind_run_mag[z] = run_mag[z];
+      }
+      auto real = make("M4ia", 162, 4000000, 90000, 26, 0x01, {pitri});
+      auto save_form = make("M4ia", 17, 4200, 0, 3, 0x60, {same_kind_run_mag});
+      auto snap = snapshot_of(real, true);
+      // the login of a RunInProgress snapshot turns it into RestorePending (spire_guard_restore_if_needed); under
+      // AwaitingSave alone the same 61 is no confirmation either
+      SpireGuardSnapshot awaiting = snap;
+      awaiting.run_in_progress = false;
+      awaiting.awaiting_save = true;
+      expect(!spire_guard_awaiting_save_login_apply(awaiting, save_form.first, save_form.second));
+      expect(awaiting.restore_pending && unchanged(awaiting, real));
+      // the verification of the 61 after the push (spire_guard_verify_restore): level and EXP, items and meseta, materials
+      auto verified = [&](const std::pair<PlayerInventory, PlayerDispDataV4>& after) {
+        bool same_stats = (after.second.stats.level == snap.disp.stats.level) && (after.second.stats.exp == snap.disp.stats.exp);
+        bool same_items = spire_guard_same_inventory(after.first, after.second.stats.meseta, snap.inventory, snap.disp.stats.meseta) &&
+            spire_guard_same_materials(after.first, snap.inventory);
+        return spire_guard_push_verified(same_stats, same_items);
+      };
+      expect(!verified(save_form)); // the push did not land: still pending
+      // the real level, EXP and item count, but the run mag in the real mag's place (same data1[0-1]): still pending
+      auto run_mag_in_place = make("M4ia", 162, 4000000, 90000, 26, 0x01, {same_kind_run_mag});
+      expect(!verified(run_mag_in_place));
+      // only the real mag's 12 bytes back verify the restore
+      auto restored = make("M4ia", 162, 4000000, 90000, 26, 0x01, {pitri});
+      std::swap(restored.first.items[0], restored.first.items[26]); // another order and other IDs, as a 61 has them
+      restored.first.items[5].data.id = 0x00210005;
+      expect(verified(restored));
+      // and the save form never becomes the snapshot by a re-take either
+      snap.run_copy_print = print_of(make("M4ia", 17, 4200, 0, 18, 0x60, {same_kind_run_mag}));
+      expect(!spire_guard_run_again_retake(snap, true, save_form.first, save_form.second, 921, 2, std::nullopt));
+    });
   }
 
   phosg::log_info_f("-- Spire ladder: the base can open a rung next to the ladder; BaseRung is no win (v49, B-BASIS-13)");
@@ -3534,8 +3763,9 @@ void run_static_tests() {
 
   phosg::log_info_f("-- Spire savestate: written from the run copy, replaced by the next, deleted only at a true run end (v44)");
   {
-    // The run copy: the real mag (kept by forbid_mags 0), a run weapon with grind and special, the Glass weapon, an
-    // empty slot and a stack of Monomates
+    // The run copy: a mag of the run (never the real mag: forbid_mags 0 strips it from the server's run copy,
+    // Client.cc:696-697, and the GC client strips it from its live run copy, routeb-mag-vraag.md E1/E3), a run weapon
+    // with grind and special, the Glass weapon, an empty slot and a stack of Monomates
     PlayerInventory overlay;
     overlay.num_items = 5;
     auto put = [&](size_t z, std::array<uint8_t, 12> d1, uint32_t id) {
@@ -3544,13 +3774,13 @@ void run_static_tests() {
       }
       overlay.items[z].data.id = id;
     };
-    put(0, {0x02, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00010000); // mag
+    put(0, {0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00}, 0x00810000); // a run mag (HU L22)
     put(1, {0x00, 0x01, 0x00, 0x05, 0x8A, 0, 0, 0, 0, 0, 0, 0}, 0x00810001); // Saber +5, special
     put(2, {0x00, 0x05, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810002); // the Glass weapon, +8
     put(4, {0x03, 0x00, 0x00, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00810003); // Monomate x4
     int32_t glass = 99;
     auto items = spire_savestate_items(overlay, 0x00810002, &glass);
-    expect_eq(3u, items.size()); // no mag, no empty slot
+    expect_eq(3u, items.size()); // no mag (until the F6 ledger keeps the ledgered one), no empty slot
     expect_eq(0x00, items[0].data1[0]);
     expect_eq(0x8A, items[0].data1[4]); // the special stays: the quest creates the item with its full data1
     expect_eq(0x05, items[0].data1[3]); // and the grind (B-E01-188: equip_item would make a plain one from data1[0-2])
