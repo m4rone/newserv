@@ -533,16 +533,162 @@ void run_static_tests() {
     std::filesystem::remove_all(dir);
   }
 
-  phosg::log_info_f("-- Spire records: photon splinters (rooms + 5 per boss) * (1 + 0.1 per heat), rounded down (v48)");
+  phosg::log_info_f("-- Spire records route B F2: 3 per room and 10 per boss when the checkpoint is stored, once per run and k, pacts at 'F'");
   {
-    expect_eq(0u, spire_splinters_for_run(0, 0, 0));
-    expect_eq(1u, spire_splinters_for_run(1, 0, 0));     // died in room 2
-    expect_eq(18u, spire_splinters_for_run(8, 2, 0));    // room 1 through De Rol Le: 8 + 5 * 2
-    expect_eq(19u, spire_splinters_for_run(8, 2, 1));    // heat 1: 18 * 1.1 = 19.8
-    expect_eq(27u, spire_splinters_for_run(8, 2, 5));    // heat 5: 18 * 1.5
-    expect_eq(36u, spire_splinters_for_run(8, 2, 10));   // heat 10: double
-    expect_eq(5u, spire_splinters_for_run(0, 1, 0));
-    expect_eq(0xFFFFFFFFu, spire_splinters_for_run(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)); // never wraps
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-splinters-{}", getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    auto name = (dir / "0000000042.char.records.json").string();
+    const SpireShopPayout payout{.per_room = 3, .per_boss = 10, .pact_tenths = 1};
+    auto balance = [&]() { return spire_records_load(name).splinters; };
+    // a run's rooms k1-k10 with bosses at k4 (Dragon) and k8 (De Rol Le), each paid when its checkpoint is stored
+    auto credit_run = [&](uint32_t run_id, uint8_t last_k) {
+      uint32_t sum = 0;
+      for (uint8_t k = 1; k <= last_k; k++) {
+        sum += spire_records_credit_room_file(name, 42, payout, run_id, k, (k == 4) || (k == 8), false);
+      }
+      return sum;
+    };
+    // a freeze after k6 (boss k4), no 'F': 6 * 3 + 10 = 28, kept in records.json
+    expect_eq(28u, credit_run(0x11111111, 6));
+    expect_eq(28u, balance());
+    expect_eq(28u, spire_records_load(name).splinters_total);
+    // the resume keeps the run id: k1-k6 again pay nothing, k7-k10 pay the rest: 10 rooms and 2 bosses give 50
+    expect_eq(22u, credit_run(0x11111111, 10));
+    expect_eq(50u, balance());
+    // the same k twice pays 3 once (a respawn reloads the floor); the file keeps the set, also over a restart
+    expect_eq(0u, spire_records_credit_room_file(name, 42, payout, 0x11111111, 3, false, false));
+    expect_eq(0u, spire_records_credit_room_file(name, 42, payout, 0x11111111, 4, true, false));
+    auto rec = spire_records_load(name);
+    expect_eq(1u, rec.credited.size());
+    expect_eq(0x11111111u, rec.credited[0].run_id);
+    expect_eq(10u, rec.credited[0].rooms.size());
+    expect(rec.credited[0].bosses == (std::set<uint8_t>{4, 8}));
+    expect_eq(50u, rec.credited[0].base);
+    // 'F' with 4 pacts adds only the pact bonus floor(50 * 4 * 1 / 10) = 20: exactly 70, never 50 + 50 + 20 = 120. The
+    // rooms of this game passed in are paid already (no catch-up), and the old V (10 rooms, 2 bosses) is not paid
+    std::set<uint8_t> rooms, boss_rooms{4, 8};
+    for (uint8_t k = 1; k <= 10; k++) {
+      rooms.emplace(k);
+    }
+    auto fin = spire_records_finish_splinters(rec, &payout, 0x11111111, 4, rooms, boss_rooms, 10, 2);
+    expect_eq(20u, fin.added);
+    expect_eq(20u, fin.pact_bonus);
+    expect_eq(0u, fin.caught_up);
+    expect_eq(50u, fin.base);
+    expect(!fin.legacy);
+    expect(fin.warning.empty());
+    spire_records_save(name, 42, rec);
+    expect_eq(70u, balance());
+    // a second 'F' of the run pays nothing, and a late room of a finished run pays nothing
+    rec = spire_records_load(name);
+    expect_eq(0u, spire_records_finish_splinters(rec, &payout, 0x11111111, 4, rooms, boss_rooms, 10, 2).added);
+    expect_eq(0u, spire_records_credit_room(rec, payout, 0x11111111, 11, false, false));
+    expect_eq(70u, rec.splinters);
+    // a new run id pays again; a practice run pays 0; run id 0 (no run) pays 0
+    expect_eq(3u, spire_records_credit_room_file(name, 42, payout, 0x22222222, 3, false, false));
+    expect_eq(0u, spire_records_credit_room_file(name, 42, payout, 0x33333333, 3, false, true));
+    expect_eq(0u, spire_records_credit_room_file(name, 42, payout, 0, 3, false, false));
+    expect_eq(73u, balance());
+    expect_eq(73u, spire_records_load(name).splinters_total);
+    // an arrival may store a boss room before its clear: the clear still pays the boss
+    expect_eq(3u, spire_records_credit_room_file(name, 42, payout, 0x22222222, 4, false, false));
+    expect_eq(10u, spire_records_credit_room_file(name, 42, payout, 0x22222222, 4, true, false));
+    // pacts 0: 'F' adds nothing; 2 pacts on 50: 60 (the numbers table)
+    {
+      SpireRecords r;
+      for (uint8_t k = 1; k <= 10; k++) {
+        spire_records_credit_room(r, payout, 7, k, (k == 4) || (k == 8), false);
+      }
+      SpireRecords r0 = r;
+      expect_eq(0u, spire_records_finish_splinters(r0, &payout, 7, 0, {}, {}, 10, 2).added);
+      expect_eq(50u, r0.splinters);
+      expect_eq(10u, spire_records_finish_splinters(r, &payout, 7, 2, {}, {}, 10, 2).added);
+      expect_eq(60u, r.splinters);
+    }
+    // catch-up at 'F': rooms of this game the checkpoint could not pay (the catalogue was unreadable then)
+    {
+      SpireRecords r;
+      spire_records_credit_room(r, payout, 8, 1, false, false);
+      auto f = spire_records_finish_splinters(r, &payout, 8, 0, {1, 2, 3, 4}, {4}, 4, 1);
+      expect_eq(19u, f.caught_up); // k2, k3, k4 + boss k4
+      expect_eq(22u, f.base);
+      expect_eq(22u, r.splinters);
+    }
+    // no Payout block: the old V at 'F', rooms + 5 per boss = 20 for 10 rooms and 2 bosses, plus a warning
+    {
+      SpireRecords r;
+      auto f = spire_records_finish_splinters(r, nullptr, 9, 4, rooms, boss_rooms, 10, 2);
+      expect_eq(20u, f.added);
+      expect(f.legacy);
+      expect(!f.warning.empty());
+      expect_eq(20u, r.splinters);
+      // no run id (a quest without 'B'): the old V too, never 0
+      SpireRecords r2;
+      auto f2 = spire_records_finish_splinters(r2, &payout, 0, 4, rooms, boss_rooms, 10, 2);
+      expect_eq(20u, f2.added);
+      expect(f2.legacy && !f2.warning.empty());
+      // the Payout block gone after the rooms were paid: nothing more at 'F' (never the old V on top), a warning
+      SpireRecords r3;
+      spire_records_credit_room(r3, payout, 10, 1, false, false);
+      auto f3 = spire_records_finish_splinters(r3, nullptr, 10, 4, {1}, {}, 1, 0);
+      expect_eq(0u, f3.added);
+      expect(!f3.warning.empty());
+      expect_eq(3u, r3.splinters);
+    }
+    // the fallback formula itself, never wrapping
+    expect_eq(20u, spire_splinters_for_run(10, 2, 0));
+    expect_eq(0xFFFFFFFFu, spire_splinters_for_run(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF));
+    // at most SPIRE_RECORDS_CREDITED_RUNS runs are kept, the oldest dropped first
+    {
+      SpireRecords r;
+      for (uint32_t run = 1; run <= SPIRE_RECORDS_CREDITED_RUNS + 3; run++) {
+        spire_records_credit_room(r, payout, run, 1, false, false);
+      }
+      expect_eq(SPIRE_RECORDS_CREDITED_RUNS, r.credited.size());
+      expect_eq(4u, r.credited.front().run_id);
+      expect_eq(static_cast<uint32_t>(SPIRE_RECORDS_CREDITED_RUNS + 3), r.credited.back().run_id);
+    }
+    std::filesystem::remove_all(dir);
+  }
+
+  phosg::log_info_f("-- Spire shop route B F2: the Payout block (PerRoom 3, PerBoss 10, PactTenths 1), parsed strictly");
+  {
+    std::string shipped = phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE);
+    auto repo = spire_shop_parse(shipped);
+    expect(repo.payout.has_value());
+    expect_eq(3u, repo.payout->per_room);
+    expect_eq(10u, repo.payout->per_boss);
+    expect_eq(1u, repo.payout->pact_tenths);
+    auto with_payout = [&](const phosg::JSON* block) {
+      auto j = phosg::JSON::parse(shipped);
+      j.erase("Payout");
+      if (block) {
+        j.emplace("Payout", phosg::JSON(*block));
+      }
+      return j.serialize();
+    };
+    expect(!spire_shop_parse(with_payout(nullptr)).payout.has_value()); // no block: the fallback at 'F'
+    auto refused = [&](const phosg::JSON& block) {
+      try {
+        spire_shop_parse(with_payout(&block));
+        return false;
+      } catch (const std::exception&) {
+        return true;
+      }
+    };
+    using J = phosg::JSON;
+    expect(refused(J::list({3, 10, 1})));
+    expect(refused(J::dict({{"PerRoom", 3}, {"PerBoss", 10}}))); // PactTenths missing
+    expect(refused(J::dict({{"PerRoom", 3}, {"PerBoss", 10}, {"PactTenths", 1}, {"PerKill", 1}}))); // unknown key
+    expect(refused(J::dict({{"PerRoom", -1}, {"PerBoss", 10}, {"PactTenths", 1}})));
+    expect(refused(J::dict({{"PerRoom", 2.5}, {"PerBoss", 10}, {"PactTenths", 1}})));
+    expect(refused(J::dict({{"PerRoom", "3"}, {"PerBoss", 10}, {"PactTenths", 1}})));
+    expect(refused(J::dict({{"PerRoom", 3}, {"PerBoss", 1001}, {"PactTenths", 1}})));
+    expect(refused(J::dict({{"PerRoom", 3}, {"PerBoss", 10}, {"PactTenths", 11}})));
+    J good = J::dict({{"_what", "a note"}, {"PerRoom", 4}, {"PerBoss", 0}, {"PactTenths", 10}});
+    auto ok = spire_shop_parse(with_payout(&good));
+    expect(ok.payout.has_value() && (ok.payout->per_room == 4) && (ok.payout->per_boss == 0) && (ok.payout->pact_tenths == 10));
   }
 
   phosg::log_info_f("-- Spire shop: debit, balance, cap, sale, rung threshold and the heat table (v50, B-BASIS-2/-3/-13)");
@@ -2322,6 +2468,36 @@ void run_static_tests() {
     expect(!has(spire_meta_flags_for_finish(deathless, 6, false), SPIRE_META_FLAG_PAY_RECORD));
     expect_eq(std::string("Iron man"), std::string(spire_meta_flag_name(SPIRE_META_FLAG_PACT_FIRST)));
     expect(spire_meta_flag_name(SPIRE_META_FLAG_PAY_WIN) == nullptr);
+
+    // Route B F2: 'F' round trip with the pacts in bits 19-21 (clamped to 4). Bits 16-18 and 23 keep their meaning,
+    // bit 22 stays 0, the seconds stay in the low 16 bits, and the flags do not depend on the pacts
+    for (uint32_t seconds : {0u, 0xFFFFu}) {
+      for (uint32_t exams = 0; exams <= 2; exams++) {
+        for (uint32_t deathless = 0; deathless <= 1; deathless++) {
+          for (uint32_t won = 0; won <= 1; won++) {
+            for (uint32_t pacts = 0; pacts <= 7; pacts++) {
+              uint32_t value = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | (won << 23) |
+                  (pacts << SPIRE_META_FINISH_PACTS_SHIFT) | (deathless ? SPIRE_META_FINISH_DEATHLESS : 0) |
+                  (exams << SPIRE_META_FINISH_EXAMS_SHIFT) | seconds;
+              expect_eq(0u, (value >> 22) & 1);
+              auto d = spire_meta_decode_finish(value);
+              expect_eq(won == 1, d.won);
+              expect_eq(won ? 2u : exams, static_cast<uint32_t>(d.exams));
+              expect_eq(deathless == 1, d.deathless);
+              expect_eq(std::min<uint32_t>(pacts, 4), static_cast<uint32_t>(d.pacts));
+              expect_eq(seconds, value & 0xFFFF);
+              auto no_pacts = spire_meta_decode_finish(value & ~(7u << SPIRE_META_FINISH_PACTS_SHIFT));
+              expect_eq(0u, static_cast<uint32_t>(no_pacts.pacts));
+              expect((no_pacts.won == d.won) && (no_pacts.exams == d.exams) && (no_pacts.deathless == d.deathless));
+              expect(spire_meta_flags_for_finish(no_pacts, 0, false) == spire_meta_flags_for_finish(d, 0, false));
+            }
+          }
+        }
+      }
+    }
+    auto pacts7 = spire_meta_decode_finish(7u << SPIRE_META_FINISH_PACTS_SHIFT); // all pact bits, won bit clear
+    expect_eq(4u, static_cast<uint32_t>(pacts7.pacts));
+    expect(!pacts7.won && (pacts7.exams == 0) && !pacts7.deathless);
   }
 
   phosg::log_info_f("-- Spire drops: class filter, one area ahead, pity, one boss weapon per player (B-E01-108)");

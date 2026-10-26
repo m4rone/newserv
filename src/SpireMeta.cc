@@ -224,6 +224,7 @@ SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value) {
   ret.won = (finish_value >> 23) & 1;
   ret.exams = (finish_value >> SPIRE_META_FINISH_EXAMS_SHIFT) & 3;
   ret.deathless = finish_value & SPIRE_META_FINISH_DEATHLESS;
+  ret.pacts = std::min<uint8_t>((finish_value >> SPIRE_META_FINISH_PACTS_SHIFT) & 7, SPIRE_META_FINISH_PACTS_MAX);
   if (ret.won) {
     ret.exams = 2; // a quest from before v24 sends only the won bit; a win always passed both exams
   }
@@ -496,6 +497,32 @@ SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
       }
     }
     ret.items.emplace_back(std::move(item));
+  }
+  // route B F2: the splinter payout, strict (a typo must not quietly fall back to the old payout)
+  if (json.contains("Payout")) {
+    const auto& payout_json = json.at("Payout");
+    if (!payout_json.is_dict()) {
+      throw std::runtime_error("Payout is no dict");
+    }
+    for (const auto& [key, _] : payout_json.as_dict()) {
+      if (!key.starts_with("_") && (key != "PerRoom") && (key != "PerBoss") && (key != "PactTenths")) {
+        throw std::runtime_error(std::format("Payout has an unknown key {}", key));
+      }
+    }
+    auto value = [&](const char* key, uint32_t max) -> uint32_t {
+      if (!payout_json.contains(key)) {
+        throw std::runtime_error(std::format("Payout has no {}", key));
+      }
+      const auto& v = payout_json.at(key);
+      if (!v.is_int() || (v.as_int() < 0) || (v.as_int() > static_cast<int64_t>(max))) {
+        throw std::runtime_error(std::format("Payout {} is no integer in 0-{}", key, max));
+      }
+      return v.as_int();
+    };
+    ret.payout = SpireShopPayout{
+        .per_room = value("PerRoom", SPIRE_SHOP_PAYOUT_PER_ROOM_MAX),
+        .per_boss = value("PerBoss", SPIRE_SHOP_PAYOUT_PER_ROOM_MAX),
+        .pact_tenths = value("PactTenths", SPIRE_SHOP_PAYOUT_PACT_TENTHS_MAX)};
   }
   const auto& heat_json = json.at("MetaHeat");
   for (size_t rung = 0; rung < ret.heat.size(); rung++) {

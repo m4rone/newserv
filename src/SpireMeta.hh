@@ -2,6 +2,7 @@
 
 #include <array>
 #include <map>
+#include <optional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,11 @@ constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
 
 constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits
 constexpr uint32_t SPIRE_META_FINISH_DEATHLESS = 1 << 18;
+// Route B F2: the pacts the run carried, bits 19-21 of 'F' (the quest adds pacts << 19 before its score_keep jump, so a
+// lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 22 is unused and bit 23
+// is the won bit; a quest that does not send pacts sends 0.
+constexpr uint32_t SPIRE_META_FINISH_PACTS_SHIFT = 19; // 3 bits
+constexpr uint8_t SPIRE_META_FINISH_PACTS_MAX = 4;
 
 // Keyed by (difficulty, flag number); true = set, false = cleared. Same meaning as the bridge's flag entries.
 using SpireMetaFlags = std::map<std::pair<uint8_t, uint16_t>, bool>;
@@ -163,6 +169,7 @@ struct SpireMetaFinish {
   bool won = false;
   uint8_t exams = 0;
   bool deathless = false;
+  uint8_t pacts = 0; // route B F2: 0-SPIRE_META_FINISH_PACTS_MAX
 };
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
 
@@ -200,13 +207,27 @@ struct SpireShopItem {
 // rung's quests carry their own heat rows, q981-q986, curve_spire.economy() on sim/plan-spire-<rung>.json). HAuto is
 // required; a rung without its table plays H 0 there.
 constexpr const char* SPIRE_SHOP_HEAT_KEYS[4] = {"HAuto", "HAutoHard", "HAutoVHard", "HAutoUltimate"};
+// Route B F2: the splinter payout, the catalogue's "Payout" block {"PerRoom": 3, "PerBoss": 10, "PactTenths": 1}. A room k
+// of a run earns PerRoom when its checkpoint is stored, a boss room PerBoss on top (a boss room counts as a room), once
+// per (run, k) and durable in records.json; at 'F' the run adds floor(credited * pacts * PactTenths / 10). Without the
+// block the server pays the old (rooms + SPIRE_SPLINTERS_PER_BOSS * bosses) at 'F' and logs a warning.
+constexpr uint32_t SPIRE_SHOP_PAYOUT_PER_ROOM_MAX = 1000;
+constexpr uint32_t SPIRE_SHOP_PAYOUT_PACT_TENTHS_MAX = 10;
+struct SpireShopPayout {
+  uint32_t per_room = 0;
+  uint32_t per_boss = 0;
+  uint32_t pact_tenths = 0;
+};
 struct SpireShopCatalogue {
   std::vector<SpireShopItem> items; // SPIRE_SHOP_NUM_ITEMS, in SPIRE_SHOP_ITEM_NAMES order
   // per rung (0 Normal ... 3 Ultimate, SPIRE_SHOP_HEAT_KEYS): class name (name_for_char_class) -> H_auto by P, -1 = null
   std::array<std::map<std::string, std::vector<int32_t>>, 4> heat;
+  std::optional<SpireShopPayout> payout; // route B F2: absent without a "Payout" block
 };
 // Throws on a malformed catalogue (a missing item, a price list shorter than on_sale, on_sale above max, a P or Levels
-// list that does not have max + 1 entries).
+// list that does not have max + 1 entries; a Payout block that is no dict, lacks PerRoom, PerBoss or PactTenths, has
+// another key not starting with '_', or a value that is no integer in 0-SPIRE_SHOP_PAYOUT_PER_ROOM_MAX, PactTenths
+// 0-SPIRE_SHOP_PAYOUT_PACT_TENTHS_MAX).
 SpireShopCatalogue spire_shop_parse(const std::string& json_text);
 // The level of item i (0 if none).
 uint32_t spire_shop_level(const std::map<std::string, uint32_t>& upgrades, size_t index);

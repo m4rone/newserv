@@ -1514,16 +1514,7 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
 // v18: records per character (SPIRE_BRIDGE_REC_*). The character comes from the server's character data (the 61 at
 // login), never the Battle overlay, so each character on a card has its own records (E04 AC-6).
 
-struct SpireRecords {
-  uint32_t best_score = 0;
-  uint32_t best_time = 0; // seconds; 0 = no won run yet
-  uint32_t runs = 0;
-  uint32_t won = 0;
-  uint32_t splinters = 0; // v48: photon splinters to spend
-  uint32_t splinters_total = 0; // v48: photon splinters ever earned
-  // ladder (plan-unlockables §2): won runs and best won time per difficulty (0 Normal ... 3 Ultimate), for the board
-  std::map<uint8_t, std::pair<uint32_t, uint32_t>> per_difficulty;
-};
+// SpireRecords: SpireFlagBridge.hh
 static const char* SPIRE_RECORDS_DIFFICULTY_KEYS[4] = {"Normal", "Hard", "VeryHard", "Ultimate"};
 // The score of the run ('K'), per client until its 'F'
 static std::unordered_map<const Client*, uint32_t> spire_records_pending_score;
@@ -1537,7 +1528,7 @@ static std::string spire_records_filename(std::shared_ptr<Client> c, uint32_t se
       spire_guard_character_id(character->disp));
 }
 
-static SpireRecords spire_records_load(const std::string& filename) {
+SpireRecords spire_records_load(const std::string& filename) {
   SpireRecords ret;
   if (std::filesystem::is_regular_file(filename)) {
     auto json = phosg::JSON::parse(phosg::load_file(filename));
@@ -1547,6 +1538,21 @@ static SpireRecords spire_records_load(const std::string& filename) {
     ret.won = json.get_int("Won");
     ret.splinters = json.get_int("Splinters", 0);
     ret.splinters_total = json.get_int("SplintersTotal", 0);
+    if (json.contains("Credited")) { // route B F2
+      for (const auto& e_json : json.get_list("Credited")) {
+        SpireRunCredit e;
+        e.run_id = e_json->get_int("Run");
+        for (const auto& k : e_json->get_list("Rooms")) {
+          e.rooms.emplace(k->as_int());
+        }
+        for (const auto& k : e_json->get_list("Bosses")) {
+          e.bosses.emplace(k->as_int());
+        }
+        e.base = e_json->get_int("Base");
+        e.finished = e_json->get_bool("Finished", false);
+        ret.credited.emplace_back(std::move(e));
+      }
+    }
     if (json.contains("Difficulties")) {
       const auto& d = json.at("Difficulties");
       for (uint8_t z = 0; z < 4; z++) {
@@ -1560,7 +1566,7 @@ static SpireRecords spire_records_load(const std::string& filename) {
   return ret;
 }
 
-static void spire_records_save(const std::string& filename, uint32_t serial_number, const SpireRecords& rec) {
+void spire_records_save(const std::string& filename, uint32_t serial_number, const SpireRecords& rec) {
   auto json = phosg::JSON::dict({
       {"SerialNumber", serial_number},
       {"BestScore", rec.best_score},
@@ -1577,7 +1583,127 @@ static void spire_records_save(const std::string& filename, uint32_t serial_numb
     }
     json.emplace("Difficulties", std::move(d));
   }
+  if (!rec.credited.empty()) { // route B F2
+    auto list = phosg::JSON::list();
+    for (const auto& e : rec.credited) {
+      auto rooms = phosg::JSON::list();
+      for (uint8_t k : e.rooms) {
+        rooms.emplace_back(k);
+      }
+      auto bosses = phosg::JSON::list();
+      for (uint8_t k : e.bosses) {
+        bosses.emplace_back(k);
+      }
+      list.emplace_back(phosg::JSON::dict({{"Run", e.run_id}, {"Rooms", std::move(rooms)}, {"Bosses", std::move(bosses)},
+          {"Base", e.base}, {"Finished", e.finished}}));
+    }
+    json.emplace("Credited", std::move(list));
+  }
   spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
+}
+
+// Route B F2: the run's credit entry (created if asked; then the oldest runs past SPIRE_RECORDS_CREDITED_RUNS go)
+static SpireRunCredit* spire_records_credit_for(SpireRecords& rec, uint32_t run_id, bool create) {
+  for (auto& e : rec.credited) {
+    if (e.run_id == run_id) {
+      return &e;
+    }
+  }
+  if (!create) {
+    return nullptr;
+  }
+  rec.credited.emplace_back(SpireRunCredit{.run_id = run_id, .rooms = {}, .bosses = {}, .base = 0, .finished = false});
+  while (rec.credited.size() > SPIRE_RECORDS_CREDITED_RUNS) {
+    rec.credited.erase(rec.credited.begin());
+  }
+  return &rec.credited.back();
+}
+
+static uint32_t spire_records_add_splinters(SpireRecords& rec, uint64_t amount) {
+  uint32_t added = static_cast<uint32_t>(std::min<uint64_t>(amount, 0xFFFFFFFF - rec.splinters));
+  rec.splinters += added;
+  rec.splinters_total = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(rec.splinters_total) + added, 0xFFFFFFFF));
+  return added;
+}
+
+uint32_t spire_records_credit_room(
+    SpireRecords& rec, const SpireShopPayout& payout, uint32_t run_id, uint8_t k, bool boss, bool practice) {
+  if (practice || !run_id || !k) {
+    return 0;
+  }
+  auto* e = spire_records_credit_for(rec, run_id, false);
+  if (e && e->finished) {
+    return 0;
+  }
+  bool new_room = !e || !e->rooms.contains(k);
+  bool new_boss = boss && (!e || !e->bosses.contains(k));
+  if (!new_room && !new_boss) {
+    return 0;
+  }
+  if (!e) {
+    e = spire_records_credit_for(rec, run_id, true);
+  }
+  uint64_t amount = 0;
+  if (new_room) {
+    e->rooms.emplace(k);
+    amount += payout.per_room;
+  }
+  if (new_boss) {
+    e->bosses.emplace(k);
+    amount += payout.per_boss;
+  }
+  uint32_t added = spire_records_add_splinters(rec, amount);
+  e->base = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(e->base) + added, 0xFFFFFFFF));
+  return added;
+}
+
+uint32_t spire_records_credit_room_file(const std::string& filename, uint32_t serial_number,
+    const SpireShopPayout& payout, uint32_t run_id, uint8_t k, bool boss, bool practice) {
+  auto rec = spire_records_load(filename);
+  uint32_t added = spire_records_credit_room(rec, payout, run_id, k, boss, practice);
+  if (added) {
+    spire_records_save(filename, serial_number, rec);
+  }
+  return added;
+}
+
+SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const SpireShopPayout* payout, uint32_t run_id,
+    uint8_t pacts, const std::set<uint8_t>& rooms, const std::set<uint8_t>& boss_rooms, uint32_t legacy_rooms,
+    uint32_t legacy_bosses) {
+  SpireFinishSplinters ret;
+  auto* e = run_id ? spire_records_credit_for(rec, run_id, false) : nullptr;
+  if (e && e->finished) {
+    ret.base = e->base;
+    ret.warning = std::format("'F' of run {:08X} came before: no splinters paid twice", run_id);
+    return ret;
+  }
+  if (payout && run_id) {
+    std::set<uint8_t> all = rooms;
+    all.insert(boss_rooms.begin(), boss_rooms.end());
+    for (uint8_t k : all) {
+      ret.caught_up += spire_records_credit_room(rec, *payout, run_id, k, boss_rooms.contains(k), false);
+    }
+    e = spire_records_credit_for(rec, run_id, true);
+    ret.base = e->base;
+    uint64_t bonus = (static_cast<uint64_t>(e->base) * pacts * payout->pact_tenths) / 10;
+    ret.pact_bonus = spire_records_add_splinters(rec, bonus);
+    e->finished = true;
+    ret.added = ret.caught_up + ret.pact_bonus;
+    return ret;
+  }
+  if (e) { // the rooms were paid while the run had a Payout block: never the old V on top
+    ret.base = e->base;
+    e->finished = true;
+    ret.warning = std::format("no Payout block in {} at 'F' of run {:08X}; its {} splinter(s) for rooms stay, no pact bonus",
+        SPIRE_SHOP_CATALOGUE_FILE, run_id, e->base);
+    return ret;
+  }
+  ret.legacy = true;
+  ret.added = spire_records_add_splinters(rec, spire_splinters_for_run(legacy_rooms, legacy_bosses, 0));
+  ret.warning = payout
+      ? std::string("no run id at 'F' (no 'B' in this game): paid the old rooms + 5 per boss")
+      : std::format("no Payout block in {}: paid the old rooms + 5 per boss at 'F'", SPIRE_SHOP_CATALOGUE_FILE);
+  return ret;
 }
 
 static std::string spire_records_board_text(const SpireRecords& rec) {
@@ -1685,6 +1811,8 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       e.second = seconds;
     }
   }
+  // Route B F2: the rooms were paid when their checkpoint was stored (spire_records_credit_room); 'F' adds the pact
+  // bonus and pays rooms of this game the checkpoint could not pay. Without a Payout block, the old V (v48 below).
   // v48: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
   const auto& run_rooms = spire_run_rooms_for(c, l->lobby_id);
   uint32_t rooms = run_rooms.rooms.size();
@@ -1693,14 +1821,31 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       (cr->savestate.values.size() > SPIRE_SS_K) && (cr->savestate.values[SPIRE_SS_K] > cr->start_room)) {
     rooms_before_resume = cr->savestate.values[SPIRE_SS_K] - cr->start_room; // cleared before the resume
   }
-  uint32_t bosses = std::max<uint32_t>(spire_meta_decode_finish(value).exams, run_rooms.boss_rooms.size());
-  uint32_t splinters = spire_splinters_for_run(rooms + rooms_before_resume, bosses, 0);
-  rec.splinters = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(rec.splinters) + splinters, 0xFFFFFFFF));
-  rec.splinters_total = static_cast<uint32_t>(
-      std::min<uint64_t>(static_cast<uint64_t>(rec.splinters_total) + splinters, 0xFFFFFFFF));
+  auto finish = spire_meta_decode_finish(value);
+  uint32_t bosses = std::max<uint32_t>(finish.exams, run_rooms.boss_rooms.size());
+  std::optional<SpireShopPayout> payout;
+  try {
+    payout = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE)).payout;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire records: {} unreadable at 'F' ({}); no Payout", SPIRE_SHOP_CATALOGUE_FILE, e.what());
+  }
+  const auto* game_run = spire_game_run_for(l);
+  uint32_t run_id = game_run ? game_run->run_id : 0;
+  auto paid = spire_records_finish_splinters(rec, payout ? &*payout : nullptr, run_id, finish.pacts, run_rooms.rooms,
+      run_rooms.boss_rooms, rooms + rooms_before_resume, bosses);
   spire_records_save(filename, serial_number, rec);
-  c->log.info_f("Spire records: {} photon splinter(s) for serial {:010} in q{} ({} room(s) in this game + {} before the resume, {} boss(es), heat choice 0); balance {}, total {}",
-      splinters, serial_number, quest_number, rooms, rooms_before_resume, bosses, rec.splinters, rec.splinters_total);
+  if (!paid.warning.empty()) {
+    c->log.warning_f("Spire records: {}", paid.warning);
+  }
+  if (paid.legacy) {
+    c->log.info_f("Spire records: {} photon splinter(s) for serial {:010} in q{} ({} room(s) in this game + {} before the resume, {} boss(es), heat choice 0); balance {}, total {}",
+        paid.added, serial_number, quest_number, rooms, rooms_before_resume, bosses, rec.splinters, rec.splinters_total);
+  } else {
+    c->log.info_f("Spire records: run {:08X} finished for serial {:010} in q{}: {} splinter(s) paid for its rooms, {} pact(s) "
+        "add {}, {} caught up at 'F'; balance {}, total {}",
+        run_id, serial_number, quest_number, paid.base, finish.pacts, paid.pact_bonus, paid.caught_up, rec.splinters,
+        rec.splinters_total);
+  }
   spire_run_mark_ended(l, "records: run finished");
   std::string text = new_score ? std::format("New best score: {}!", rec.best_score)
                                : std::format("Best score: {}.", rec.best_score);
@@ -4689,7 +4834,44 @@ static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor
   spire_checkpoint_store(l, l->clients, k, boss);
 }
 
+// Route B F2: pays room k to the client's records (SpireShopPayout, spire_records_credit_room), after the checkpoint
+// file (as the shop's BUY: the other file first, records.json second). Only a run that is no practice run and has a run
+// id ('B' came); a failure here is caught up at 'F' from the rooms of this game. Never throws.
+static void spire_checkpoint_credit(std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number,
+    const std::optional<SpireShopPayout>& payout, uint8_t k, bool boss) {
+  try {
+    if (!payout) {
+      return;
+    }
+    auto* cr = spire_client_run_for(lc, l, false);
+    const auto* game_run = spire_game_run_for(l);
+    if (!cr || !cr->began || !game_run) {
+      lc->log.info_f("Spire splinters: room {} not paid: no run started in this game", k);
+      return;
+    }
+    std::string filename = spire_records_filename(lc, serial_number);
+    if (filename.empty()) {
+      return;
+    }
+    uint32_t added = spire_records_credit_room_file(filename, serial_number, *payout, game_run->run_id, k, boss,
+        cr->practice);
+    if (added) {
+      lc->log.info_f("Spire splinters: room {}{} of run {:08X} pays {} for serial {:010}", k, boss ? " (boss)" : "",
+          game_run->run_id, added, serial_number);
+    }
+  } catch (const std::exception& e) {
+    lc->log.warning_f("Spire splinters: failed to pay room {}: {}", k, e.what());
+  }
+}
+
 static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss) {
+  // Route B F2: the Payout block, read at every store (SpireMeta.hh); unreadable = no payout now ('F' catches up)
+  std::optional<SpireShopPayout> payout;
+  try {
+    payout = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE)).payout;
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire splinters: {} unreadable ({}); room {} not paid now", SPIRE_SHOP_CATALOGUE_FILE, e.what(), k);
+  }
   for (const auto& lc : clients) {
     if (!lc || (lc->version() != Version::GC_V3)) {
       continue;
@@ -4697,10 +4879,8 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
     try {
       // v48: the rooms of this run in this game, for the splinters at 'F' (before the file, which keeps every run)
       auto& run_rooms = spire_run_rooms_for(lc, l->lobby_id);
-      run_rooms.rooms.emplace(k);
-      if (boss) {
-        run_rooms.boss_rooms.emplace(k);
-      }
+      bool new_room = run_rooms.rooms.emplace(k).second;
+      bool new_boss = boss && run_rooms.boss_rooms.emplace(k).second;
       uint32_t serial_number = spire_bridge_serial_for_client(lc);
       std::string filename = spire_checkpoint_filename(lc, serial_number);
       if (filename.empty()) {
@@ -4711,6 +4891,9 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       // A room already stored (a respawn reloads its floor, an arrival repeats) never moves the last room back
       bool known = (cp.rooms >> (k - 1)) & 1;
       if (known && (k < cp.last_room)) {
+        if (new_room || new_boss) {
+          spire_checkpoint_credit(l, lc, serial_number, payout, k, new_boss);
+        }
         continue;
       }
       cp.rooms |= (1u << (k - 1));
@@ -4727,6 +4910,9 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       spire_bridge_write_durable(filename, json.serialize(phosg::JSON::SerializeOption::FORMAT));
       lc->log.info_f("Spire checkpoint: room {} cleared in q{}; rooms {:08X} in {}", k, cp.last_quest, cp.rooms,
           filename);
+      if (new_room || new_boss) {
+        spire_checkpoint_credit(l, lc, serial_number, payout, k, new_boss);
+      }
     } catch (const std::exception& e) {
       lc->log.warning_f("Spire checkpoint: failed to store room {}: {}", k, e.what());
     }

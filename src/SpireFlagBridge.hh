@@ -114,8 +114,60 @@ constexpr uint8_t SPIRE_BRIDGE_REC_BOARD = 'Y';
 // resumed run the rooms from its start room up to the room it resumed at; bosses = the larger of the exams passed in
 // the 'F' code (bits 16-17) and the boss rooms cleared in this game. The heat choice is not known on the server yet (no
 // code carries it), so it counts 0 until the quest sends it. A practice run and a run without 'F' earn nothing.
+// Route B F2: with the catalogue's Payout block (SpireShopPayout, SpireMeta.hh) this is only the fallback: the rooms are
+// paid when their checkpoint is stored (spire_records_credit_room), and 'F' adds only the pact bonus
+// (spire_records_finish_splinters). Without the block 'F' pays this V and logs a warning.
 constexpr uint32_t SPIRE_SPLINTERS_PER_BOSS = 5;
 uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_choice);
+
+// Route B F2: the splinters credited to one run, in records.json "Credited" (a list, oldest first, at most
+// SPIRE_RECORDS_CREDITED_RUNS runs; the savestate resumes only the latest run). Idempotent per (run, k): a respawn, an
+// arrival repeat, a resume or a server restart never pays a room twice; a freeze keeps what was paid.
+constexpr size_t SPIRE_RECORDS_CREDITED_RUNS = 16;
+struct SpireRunCredit {
+  uint32_t run_id = 0;
+  std::set<uint8_t> rooms; // k paid PerRoom
+  std::set<uint8_t> bosses; // k paid PerBoss
+  uint32_t base = 0; // the splinters paid for these rooms: the pact bonus base at 'F'
+  bool finished = false; // its 'F' came: no more credit, no second pact bonus
+};
+// v18: records per character (system/spire-bridge/<serial>.<character>.records.json)
+struct SpireRecords {
+  uint32_t best_score = 0;
+  uint32_t best_time = 0; // seconds; 0 = no won run yet
+  uint32_t runs = 0;
+  uint32_t won = 0;
+  uint32_t splinters = 0; // v48: photon splinters to spend
+  uint32_t splinters_total = 0; // v48: photon splinters ever earned
+  // ladder (plan-unlockables §2): won runs and best won time per difficulty (0 Normal ... 3 Ultimate), for the board
+  std::map<uint8_t, std::pair<uint32_t, uint32_t>> per_difficulty;
+  std::vector<SpireRunCredit> credited; // route B F2
+};
+SpireRecords spire_records_load(const std::string& filename); // empty records if there is no file; throws on a bad one
+void spire_records_save(const std::string& filename, uint32_t serial_number, const SpireRecords& rec);
+// Pays room k of run run_id: PerRoom if k is not paid yet, PerBoss on top if boss and k is not paid as a boss yet (an
+// arrival may store a boss room before its clear). Returns the splinters added: 0 for a practice run, run_id 0, a k
+// outside 1-255, a run whose 'F' came, or a k paid already.
+uint32_t spire_records_credit_room(
+    SpireRecords& rec, const SpireShopPayout& payout, uint32_t run_id, uint8_t k, bool boss, bool practice);
+// The same on the file: loaded, and saved only if something was added. Throws on a file error.
+uint32_t spire_records_credit_room_file(const std::string& filename, uint32_t serial_number,
+    const SpireShopPayout& payout, uint32_t run_id, uint8_t k, bool boss, bool practice);
+// What 'F' adds (all of it is in added, already in rec).
+struct SpireFinishSplinters {
+  uint32_t added = 0;
+  uint32_t caught_up = 0; // rooms of this game the checkpoint could not pay (the catalogue was unreadable then)
+  uint32_t base = 0; // all splinters paid for the run's rooms
+  uint32_t pact_bonus = 0;
+  bool legacy = false; // paid the old V (spire_splinters_for_run): no Payout block, or no run id
+  std::string warning; // one line for the log, or ""
+};
+// 'F' of run run_id. With payout: pays rooms/boss_rooms not paid yet, then floor(base * pacts * PactTenths / 10) once per
+// run. Without payout (or run_id 0): the old spire_splinters_for_run(legacy_rooms, legacy_bosses, 0) plus a warning,
+// unless the run's rooms were paid already (then nothing, plus a warning).
+SpireFinishSplinters spire_records_finish_splinters(SpireRecords& rec, const SpireShopPayout* payout, uint32_t run_id,
+    uint8_t pacts, const std::set<uint8_t>& rooms, const std::set<uint8_t>& boss_rooms, uint32_t legacy_rooms,
+    uint32_t legacy_bosses);
 
 // v19: the run timer on the server, instead of the quest's t_timer clock. The leader writes, at its run start,
 //   'S' << 24 | warning minutes before the end << 16 | time limit in seconds (r95, after Haste)
