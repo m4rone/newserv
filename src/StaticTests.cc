@@ -21,6 +21,7 @@
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMag.hh"
 #include "SpireMeta.hh"
 #include "SendCommands.hh"
 
@@ -3761,6 +3762,248 @@ void run_static_tests() {
     expect(obj_st == nullptr);
   }
 
+  phosg::log_info_f("-- Spire run mag: step, bytes, merge, refusals, idempotence (F6, route B)");
+  {
+    auto f6_case = [](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   F6 ({})", name);
+      fn();
+    };
+    using Bytes = SpireMagBytes;
+    auto word = [](const Bytes& b, size_t which) -> uint16_t { return b[4 + which * 2] | (b[5 + which * 2] << 8); };
+    auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+    const auto& hu = table.classes.at("HU");
+
+    f6_case("every row of the shipped spire-mag.json", [&]() {
+      auto names = phosg::JSON::parse(phosg::load_file("system/tables/names-v3.json"));
+      expect(table.enabled);
+      expect_eq(3u, table.classes.size());
+      for (const char* cls : {"HU", "RA", "FO"}) {
+        const auto& line = table.classes.at(cls);
+        expect_eq(5u, line.steps.size());
+        std::vector<SpireMagRow> rows = line.steps;
+        for (const auto& f : line.floors) {
+          rows.emplace_back(f.row);
+        }
+        for (const auto& row : rows) {
+          auto b = spire_mag_row_bytes(row);
+          expect_eq(0x02, b[0]);
+          expect_eq(row.id, b[1]);
+          uint32_t sum = 0;
+          for (size_t z = 0; z < 4; z++) {
+            expect_eq(0, word(b, z) & 1); // every stat even
+            sum += word(b, z) / 100;
+          }
+          expect_eq(sum, b[2]); // LL == the sum of the four levels
+          expect(b[2] <= 200);
+          expect(names.contains(std::format("02{:02X}00", b[1]))); // a type-02 id of V3
+        }
+        for (size_t s = 1; s < line.steps.size(); s++) {
+          auto prev = spire_mag_row_bytes(line.steps[s - 1]);
+          auto cur = spire_mag_row_bytes(line.steps[s]);
+          for (size_t z = 0; z < 4; z++) {
+            expect(word(cur, z) >= word(prev, z)); // monotone per stat
+          }
+          expect(cur[1] != prev[1]); // a visible evolve at every step
+          expect(cur[2] > prev[2]);
+        }
+        // every step under every start floor and an already fed mag keeps the same rules
+        for (uint32_t bonus : {0u, 5u, 10u, 14u}) {
+          Bytes prev{};
+          for (size_t s = 0; s < line.steps.size(); s++) {
+            auto b = spire_mag_step_bytes(line, s, bonus, std::nullopt);
+            uint32_t sum = 0;
+            for (size_t z = 0; z < 4; z++) {
+              expect_eq(0, word(b, z) & 1);
+              sum += word(b, z) / 100;
+              expect(!s || (word(b, z) >= word(prev, z)));
+            }
+            expect_eq(sum, b[2]);
+            expect(b[2] <= 200);
+            prev = b;
+          }
+        }
+      }
+      expect_eq(std::string("HU"), spire_mag_archetype(0));
+      expect_eq(std::string("RA"), spire_mag_archetype(11));
+      expect_eq(std::string("FO"), spire_mag_archetype(10));
+      expect_eq(std::string(""), spire_mag_archetype(12));
+      expect_eq(std::set<uint8_t>({4, 8, 11, 15, 18, 21, 24, 27}), table.boss_rooms);
+    });
+
+    f6_case("HU start floor L22", [&]() {
+      Bytes l22 = {0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00};
+      expect(l22 == spire_mag_step_bytes(hu, 0, 14, std::nullopt)); // a Lv15 start (+14) begins at Varuna L22
+      Bytes l13 = {0x02, 0x01, 0x0D, 0x00, 0x20, 0x03, 0xF4, 0x01, 0x00, 0x00, 0x00, 0x00};
+      expect(l13 == spire_mag_step_bytes(hu, 0, 5, std::nullopt)); // Lv6 start: Varuna L13 (8/5/0/0)
+      expect(l13 == spire_mag_step_bytes(hu, 0, 10, std::nullopt)); // Lv11 start: the same floor
+      Bytes l5 = {0x02, 0x00, 0x05, 0x00, 0xF4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+      expect(l5 == spire_mag_step_bytes(hu, 0, 0, std::nullopt)); // no bought levels: Mag L5
+      // after the Dragon under the L22 floor: merged per stat (11/18/0/1), the step's kind (Varuna) and LL 30
+      auto s1 = spire_mag_step_bytes(hu, 1, 14, std::nullopt);
+      expect_eq(0x01, s1[1]);
+      expect_eq(30, s1[2]);
+      expect_eq(1100, word(s1, 0));
+      expect_eq(1800, word(s1, 1));
+      expect_eq(100, word(s1, 3));
+    });
+
+    f6_case("merge: a fed POW 23.50 against the step's 18.00", [&]() {
+      Bytes fed = {0x02, 0x00, 0x1E, 0x00, 0xBC, 0x02, 0x2E, 0x09, 0x00, 0x00, 0x00, 0x00}; // DEF 7.00, POW 23.50
+      auto b = spire_mag_step_bytes(hu, 1, 0, fed);
+      expect_eq(2350, word(b, 1)); // POW stays 23.50
+      expect_eq(700, word(b, 0));
+      expect_eq(30, b[2]); // LL recomputed: 7 + 23
+      expect_eq(0x01, b[1]); // the step's kind (Varuna)
+      expect_eq(0x00, b[3]);
+      // a mirrored mag that would push the merge past 200 keeps its own stats
+      Bytes big = {0x02, 0x05, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x4E, 0x00, 0x00}; // DEX 200.00
+      auto c = spire_mag_step_bytes(hu, 4, 0, big);
+      expect_eq(200, c[2]);
+      expect_eq(20000, word(c, 2));
+    });
+
+    f6_case("idempotence: EXAM twice, ASK after a resume", [&]() {
+      SpireRunMagLedger led;
+      led.run_id = 0x1234;
+      led.start_step = spire_mag_start_step(table, 1);
+      expect_eq(0u, led.start_step);
+      auto d = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 1, {}, 0); // kit
+      expect(d.result);
+      expect_eq(0u, d.expected_step);
+      expect_eq(-1, led.issued_step); // only a RESULT 1 issues it
+      // the answer was lost to a floor load: the same ASK gets the same mag again
+      auto again = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 1, {}, 0);
+      expect(again.result && (again.bytes == d.bytes));
+      expect(spire_run_mag_result(led, true));
+      expect_eq(0, led.issued_step);
+      expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 2, {}, 0).result); // the next room: nothing owed
+      expect(spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0).result); // the Dragon
+      expect(spire_run_mag_result(led, true));
+      expect_eq(1, led.issued_step);
+      // EXAM k8 twice issues one step
+      auto e8 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0);
+      expect(e8.result);
+      expect_eq(2u, e8.expected_step);
+      expect(spire_run_mag_result(led, true));
+      auto e8b = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0);
+      expect(!e8b.result);
+      expect_eq(2u, e8b.expected_step);
+      expect_eq(2, led.issued_step);
+      expect(!spire_run_mag_result(led, true)); // nothing offered: a stray RESULT changes nothing
+      expect_eq(2, led.issued_step);
+      // the server's own boss clear of k8 counted in this game changes nothing either
+      expect(!spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 9, {4, 8}, 0).result);
+      // ASK after a resume: the ledger from the savestate holds 2 bosses and issued_step 2
+      SpireRunMagLedger resumed;
+      resumed.run_id = 0x1234;
+      resumed.boss_rooms = {4, 8};
+      resumed.issued_step = 2;
+      resumed.last_mirrored = e8.bytes;
+      auto r = spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_ASK, 9, {}, 0);
+      expect(!r.result);
+      expect_eq(2u, r.expected_step);
+      // the last step is the cap: a boss after Dark Falz adds nothing
+      SpireRunMagLedger full;
+      full.boss_rooms = {4, 8, 11, 15};
+      full.issued_step = 4;
+      expect(!spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 18, {}, 0).result);
+      expect_eq(4u, spire_mag_expected_step(5, 0, 5, true));
+      // a practice run from k9 starts after two bosses
+      expect_eq(2u, spire_mag_start_step(table, 9));
+      expect_eq(0u, spire_mag_start_step(table, 4));
+    });
+
+    f6_case("pack full: the step stays owed", [&]() {
+      SpireRunMagLedger led;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto e = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e.result);
+      expect(spire_run_mag_result(led, false)); // item_create2 gave FFFFFFFF
+      expect_eq(0, led.issued_step);
+      expect(led.last_mirrored == spire_mag_step_bytes(hu, 0, 0, std::nullopt));
+      auto a = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 5, {}, 0); // the next room start
+      expect(a.result);
+      expect(a.bytes == e.bytes);
+      expect(led.boss_rooms.count(4));
+    });
+
+    f6_case("the ledger follows the feed mirror", [&]() {
+      SpireRunMagLedger led;
+      auto issued = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
+      Bytes fed = issued;
+      fed[6] = 0x2E; // POW 18.00 -> 23.50
+      fed[7] = 0x09;
+      fed[2] = 30;
+      expect(!spire_run_mag_follow_mirror(led, {fed})); // no mag issued yet: nothing to follow
+      led.issued_step = 1;
+      led.last_mirrored = issued;
+      expect(!spire_run_mag_follow_mirror(led, {fed, issued})); // two type-02 items: never guess
+      expect(!spire_run_mag_follow_mirror(led, {})); // the mag is gone (dropped): the ledger keeps its bytes
+      expect(spire_run_mag_follow_mirror(led, {fed}));
+      expect(led.last_mirrored == fed);
+      expect(!spire_run_mag_follow_mirror(led, {issued})); // a lower level is not a fed run mag
+      expect(led.last_mirrored == fed);
+    });
+
+    f6_case("refusals", [&]() {
+      using R = SpireRunMagRefusal;
+      SpireRunMagState ok;
+      ok.gc_v3 = true;
+      ok.spire_game = true;
+      ok.has_overlay = true;
+      ok.run_in_progress = true;
+      ok.enabled = true;
+      ok.has_table = true;
+      ok.overlay_mags = 1;
+      expect_eq(R::NONE, spire_run_mag_refusal(ok));
+      auto with = [&](const std::function<void(SpireRunMagState&)>& fn) {
+        SpireRunMagState st = ok;
+        fn(st);
+        return spire_run_mag_refusal(st);
+      };
+      expect_eq(R::NOT_GC_V3, with([](auto& st) { st.gc_v3 = false; }));
+      expect_eq(R::NO_SPIRE_GAME, with([](auto& st) { st.spire_game = false; }));
+      expect_eq(R::NO_OVERLAY, with([](auto& st) { st.has_overlay = false; }));
+      expect_eq(R::RESTORE_PENDING, with([](auto& st) { st.restore_pending = true; }));
+      expect_eq(R::MARKER, with([](auto& st) { st.run_in_progress = false; }));
+      expect_eq(R::BASE_RETURNED, with([](auto& st) { st.base_returned = true; }));
+      expect_eq(R::RUN_AGAIN, with([](auto& st) { st.run_again = true; }));
+      expect_eq(R::REFRESHED_BY_61, with([](auto& st) { st.refreshed_by_61 = true; }));
+      expect_eq(R::DISABLED, with([](auto& st) { st.enabled = false; }));
+      expect_eq(R::NO_TABLE, with([](auto& st) { st.has_table = false; }));
+      expect_eq(R::TWO_MAGS, with([](auto& st) { st.overlay_mags = 2; }));
+      expect_eq(R::NONE, with([](auto& st) { st.overlay_mags = 0; }));
+      // amendment 8: the q925 base game, the real character with its real mag live and no run copy
+      expect_eq(R::NO_OVERLAY, with([](auto& st) {
+        st.has_overlay = false;
+        st.overlay_mags = 1;
+      }));
+      // Enabled false answers 0 even where everything else would give a mag
+      expect_eq(R::DISABLED, with([](auto& st) { st.enabled = false; st.has_table = false; }));
+      expect_eq(std::string("BASE_RETURNED"), std::string(spire_run_mag_refusal_name(R::BASE_RETURNED)));
+      expect_eq(0x5A000000u, SPIRE_RUN_MAG_TAG);
+      expect_eq(0x5A000601u, spire_run_mag_answer(SPIRE_RUN_MAG_TAG, 0x06, true));
+      expect_eq(0x5A00FF00u, spire_run_mag_answer(SPIRE_RUN_MAG_TAG, SPIRE_RUN_MAG_NO_OLD, false));
+    });
+
+    f6_case("texts", [&]() {
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna"));
+      for (const std::string& t : {spire_run_mag_evolve_text("Ashvinau"), std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT),
+               std::string(SPIRE_RUN_MAG_REMINDER_TEXT), std::string(SPIRE_RUN_MAG_SHIELD_TEXT),
+               std::string(SPIRE_KIT_USE_TEXT), std::string(SPIRE_RESUME_MAG_TEXT)}) {
+        expect_eq(t, spire_ticker_line(t)); // one ticker line each
+      }
+      expect_eq(std::string("Your Spire Mag comes back: equip it."), std::string(SPIRE_RESUME_MAG_TEXT));
+    });
+
+    f6_case("hex round trip", [&]() {
+      Bytes b = {0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00};
+      expect_eq(std::string("020116004C04E80300006400"), spire_run_mag_bytes_hex(b));
+      expect(b == spire_run_mag_bytes_from_hex("020116004C04E80300006400"));
+    });
+  }
+
   phosg::log_info_f("-- Spire savestate: written from the run copy, replaced by the next, deleted only at a true run end (v44)");
   {
     // The run copy: a mag of the run (never the real mag: forbid_mags 0 strips it from the server's run copy,
@@ -3779,8 +4022,8 @@ void run_static_tests() {
     put(2, {0x00, 0x05, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810002); // the Glass weapon, +8
     put(4, {0x03, 0x00, 0x00, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00810003); // Monomate x4
     int32_t glass = 99;
-    auto items = spire_savestate_items(overlay, 0x00810002, &glass);
-    expect_eq(3u, items.size()); // no mag (until the F6 ledger keeps the ledgered one), no empty slot
+    auto items = spire_savestate_items(overlay, 0x00810002, &glass, std::nullopt);
+    expect_eq(3u, items.size()); // no ledger: no mag; no empty slot
     expect_eq(0x00, items[0].data1[0]);
     expect_eq(0x8A, items[0].data1[4]); // the special stays: the quest creates the item with its full data1
     expect_eq(0x05, items[0].data1[3]); // and the grind (B-E01-188: equip_item would make a plain one from data1[0-2])
@@ -3791,7 +4034,7 @@ void run_static_tests() {
       equipped.items[1].flags = 0x00000008;
       equipped.items[1].state = 2;
       int32_t g = 0;
-      auto again = spire_savestate_items(equipped, 0, &g);
+      auto again = spire_savestate_items(equipped, 0, &g, std::nullopt);
       expect_eq(3u, again.size());
       expect(!memcmp(&again[0], &items[0], sizeof(ItemData)));
     }
@@ -3800,10 +4043,77 @@ void run_static_tests() {
     for (const auto& item : items) {
       expect(item.data1[0] != 0x02);
     }
-    expect_eq(3u, spire_savestate_items(overlay, 0, &glass).size());
+    expect_eq(3u, spire_savestate_items(overlay, 0, &glass, std::nullopt).size());
     expect_eq(-1, glass); // no Glass item
     put(3, {0x03, 0x09, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810004); // a Scape Doll: lives are a counter
-    expect_eq(3u, spire_savestate_items(overlay, 0, &glass).size());
+    expect_eq(3u, spire_savestate_items(overlay, 0, &glass, std::nullopt).size());
+    {
+      // F6 (amendments 1 and 2): the run mag the ledger last mirrored comes back, matched on all 12 data1 bytes
+      phosg::log_info_f("   F6 (savestate: the ledger's run mag kept, any other type-02 item and the Scape Doll dropped)");
+      SpireRunMagBytes ledger_mag = SpireMagBytes{0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00};
+      auto kept = spire_savestate_items(overlay, 0x00810002, &glass, ledger_mag);
+      expect_eq(4u, kept.size());
+      expect_eq(0x02, kept[0].data1[0]);
+      expect(!memcmp(kept[0].data1.data(), ledger_mag->data(), 12));
+      expect_eq(2, glass); // the Glass index counts the kept mag
+      for (const auto& item : kept) {
+        expect(!((item.data1[0] == 0x03) && (item.data1[1] == 0x09))); // still no Scape Doll
+      }
+      // the same kind with other stats is not the ledger's mag (a partner's run mag of the same class, or the run
+      // before an 'I'): dropped
+      SpireRunMagBytes other_stats = ledger_mag;
+      (*other_stats)[6] = 0xEA;
+      expect_eq(3u, spire_savestate_items(overlay, 0, &glass, other_stats).size());
+      // two items with the ledger's exact bytes: only one comes back
+      PlayerInventory twice = overlay;
+      twice.num_items = 6;
+      twice.items[5] = twice.items[0];
+      twice.items[5].data.id = 0x00810005;
+      int32_t g2 = 0;
+      auto one = spire_savestate_items(twice, 0, &g2, ledger_mag);
+      expect_eq(4u, one.size());
+      expect_eq(1u, std::count_if(one.begin(), one.end(), [](const ItemData& it) { return it.data1[0] == 0x02; }));
+      // restore after the run: a 61 that still holds the run mag in the real mag's place is no verified push
+      PlayerInventory real_inv = overlay;
+      const uint8_t pitri[12] = {0x02, 0x1D, 0xC8, 0xA3, 0xF4, 0x01, 0x1C, 0x25, 0x10, 0x27, 0x00, 0x00}; // LV200
+      for (size_t i = 0; i < 12; i++) {
+        real_inv.items[0].data.data1[i] = pitri[i];
+      }
+      PlayerInventory after_push = real_inv;
+      for (size_t i = 0; i < 12; i++) {
+        after_push.items[0].data.data1[i] = (*ledger_mag)[i];
+      }
+      expect(!spire_guard_push_verified(true, spire_guard_same_inventory(after_push, 0, real_inv, 0) &&
+          spire_guard_same_materials(after_push, real_inv)));
+      expect(spire_guard_push_verified(true, spire_guard_same_inventory(real_inv, 0, real_inv, 0) &&
+          spire_guard_same_materials(real_inv, real_inv)));
+      // the ledger travels in the savestate file
+      SpireSavestate ss;
+      ss.run_id = 0xABCD0001;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      SpireRunMagLedger led;
+      led.run_id = ss.run_id;
+      led.issued_step = 2;
+      led.start_step = 0;
+      led.boss_rooms = {4, 8};
+      led.last_mirrored = ledger_mag;
+      led.lean = 2;
+      ss.run_mag = led;
+      auto back = spire_savestate_from_json(spire_savestate_to_json(ss, 1));
+      expect(back.run_mag.has_value());
+      expect_eq(0xABCD0001u, back.run_mag->run_id);
+      expect_eq(2, back.run_mag->issued_step);
+      expect_eq(std::set<uint8_t>({4, 8}), back.run_mag->boss_rooms);
+      expect(back.run_mag->last_mirrored == ledger_mag);
+      expect_eq(2, back.run_mag->lean);
+      SpireSavestate no_mag = ss;
+      no_mag.run_mag.reset();
+      expect(!spire_savestate_from_json(spire_savestate_to_json(no_mag, 1)).run_mag.has_value());
+      // the resume line comes only when the savestate brings a mag back
+      expect_eq(std::string("Your Spire Mag comes back: equip it."), spire_run_resume_mag_ticker(true, true));
+      expect(spire_run_resume_mag_ticker(true, false).empty());
+      expect(spire_run_resume_mag_ticker(false, true).empty());
+    }
 
     // 'V' writes only from a run copy, after 'B', before the run end, with all values
     const size_t n = SPIRE_SAVESTATE_NUM_VALUES;
@@ -3960,10 +4270,10 @@ void run_static_tests() {
       expect_eq(line, spire_ticker_line(line)); // one line, no window in a run (v35)
     }
     // the mag line of a resume (regie 2026-10-26): on every resume, one line, no longer than the practice line
-    expect_eq(std::string("A mag found in this run does not come back."), spire_run_resume_mag_ticker(true));
-    expect(spire_run_resume_mag_ticker(false).empty());
-    expect_eq(spire_run_resume_mag_ticker(true), spire_ticker_line(spire_run_resume_mag_ticker(true)));
-    expect(spire_run_resume_mag_ticker(true).size() <= spire_run_start_ticker(false, true, nullptr).size());
+    expect_eq(std::string("Your Spire Mag comes back: equip it."), spire_run_resume_mag_ticker(true, true));
+    expect(spire_run_resume_mag_ticker(false, true).empty());
+    expect_eq(spire_run_resume_mag_ticker(true, true), spire_ticker_line(spire_run_resume_mag_ticker(true, true)));
+    expect(spire_run_resume_mag_ticker(true, true).size() <= spire_run_start_ticker(false, true, nullptr).size());
 
     // the draw seed: the same run, room, n-th draw and inputs give the same draw; anything else another one
     std::vector<uint32_t> in(16, 3);

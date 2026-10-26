@@ -1,0 +1,169 @@
+#pragma once
+
+#include <stdint.h>
+
+#include <array>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+// Route B F6 (server half): the run mag ("Spire Mag"). The server decides everything; the quest asks, creates, swaps
+// and acks. Plan: pso-roguelike new-features/roguelike/output/plan-route-b-2026-10-26.md ("1. Run mag", the run mag
+// numbers, F6, invariants 2-8, and the amendments after the mag measurement, which override it).
+//
+// Request in r248: 'Z' << 24 | sub << 16 | k (the room the quest is in).
+//   sub 1 ASK (kit point; room start while a mag is pending), sub 4 EXAM (exam_reward at a boss clear: room k counts as
+//   a beaten boss), sub 2 RESULT (low byte 1: the create succeeded, 0: item_create2 gave FFFFFFFF), sub 3 NO_MAG (the
+//   equip reminder at a boss room start), sub 5 LEAN (low byte 1 Fang/Mind, 2 Shell: stored only; F10 picks the column).
+// Answer to ASK and EXAM: r20-r31 the new mag's data1 (12 registers, one byte each), r41 = SPIRE_RUN_MAG_TAG |
+// old_type << 8 | result (result 1: create this mag, 0: no change; old_type: data1[1] of the run mag the run copy holds
+// now, 0xFF if none), then r248 = 'DONE'. RESULT, NO_MAG and LEAN get no answer (the quest waits for none).
+// Shared contract with the quest: pso-roguelike quests/spire/ROUTEB-F6-PROTOCOL.md (quest 18ba60c).
+//
+// The pure parts live here, for the static tests; the handler, the ledger store and the texts in SpireFlagBridge.cc.
+
+constexpr uint8_t SPIRE_BRIDGE_RUN_MAG = 'Z';
+constexpr uint8_t SPIRE_RUN_MAG_ASK = 1;
+constexpr uint8_t SPIRE_RUN_MAG_RESULT = 2;
+constexpr uint8_t SPIRE_RUN_MAG_NO_MAG = 3;
+constexpr uint8_t SPIRE_RUN_MAG_EXAM = 4;
+constexpr uint8_t SPIRE_RUN_MAG_LEAN = 5;
+constexpr uint8_t SPIRE_RUN_MAG_ANSWER_REGISTER = 41; // shared with 'O' and 'I'; the quest sets it to 0 before asking
+constexpr uint8_t SPIRE_RUN_MAG_ITEM_FIRST_REGISTER = 20; // r20-r31, the RS_ITEM registers of the 'J' item loop
+constexpr uint8_t SPIRE_RUN_MAG_NO_OLD = 0xFF;
+// The top byte of every answer in r41 ('Z' << 24): r41 is shared with 'J', 'I', 'M' and 'O', each tagged by its letter
+constexpr uint32_t SPIRE_RUN_MAG_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_RUN_MAG) << 24; // 0x5A000000
+constexpr const char* SPIRE_RUN_MAG_FILE = "system/spire-mag.json";
+
+using SpireMagBytes = std::array<uint8_t, 12>;
+
+// One row of the table: the mag kind (data1[1]) and the four stats in levels.
+struct SpireMagRow {
+  uint8_t id = 0;
+  uint16_t def = 0;
+  uint16_t pow = 0;
+  uint16_t dex = 0;
+  uint16_t mind = 0;
+};
+// A start-level floor: from this start_level bonus on (SpireMeta's spire_start_level_bonus: +5, +10, +14), the run mag
+// starts at least at this Sega challenge template mag (PlayerSubordinates.cc v3 templates), merged per stat.
+struct SpireMagFloor {
+  uint32_t min_bonus = 0;
+  SpireMagRow row;
+};
+struct SpireMagLine {
+  std::vector<SpireMagRow> steps; // step 0 = the kit, step n = after the n-th boss
+  std::vector<SpireMagFloor> floors; // ascending min_bonus
+};
+struct SpireMagTable {
+  bool enabled = false; // false: every 'Z' answers 0 (the data-only kill switch)
+  std::map<std::string, SpireMagLine> classes; // "HU", "RA", "FO"
+  std::set<uint8_t> boss_rooms; // the boss rooms k (Episode 1 k4-k15, Episode 2 k18-k27: one room counter)
+};
+// Strict: throws on a missing key, an empty line, a stat above 200, a row whose levels sum above 200.
+SpireMagTable spire_mag_parse(const std::string& json_text);
+
+// "HU", "RA" or "FO" for a character class (0-11); "" for any other value.
+const char* spire_mag_archetype(uint8_t char_class);
+
+// The mag level: the sum of the four stat levels (data1 words / 100).
+uint32_t spire_mag_level_of(const SpireMagBytes& bytes);
+// The 12 data1 bytes of a row, built as ItemData::assign_mag_stats does (ItemData.cc:281-294): 02 ZZ LL 00, then
+// DEF, POW, DEX, MIND as little-endian words in hundredths, each & 0x7FFE. Photon blasts 0 (data2 cannot be set by
+// item_create2, so no photon blast flags either).
+SpireMagBytes spire_mag_row_bytes(const SpireMagRow& row);
+
+// The step the run's mag should be at: min(num_steps - 1, start_step + bosses + (exam of a room not counted yet)).
+uint32_t spire_mag_expected_step(size_t num_steps, uint32_t start_step, size_t stored_bosses, bool exam_new_boss);
+// The start step of a run that first asks in room k: the boss rooms before k (a practice run that starts
+// after a boss gets the mag of that point; a run from its first room starts at 0).
+uint32_t spire_mag_start_step(const SpireMagTable& table, uint8_t k);
+
+// The bytes of step `step` for a line: the step row, merged per stat with the highest floor the start bonus reaches and
+// with the mag the ledger last mirrored (so fed progress is never lost). The kind is the step row's, or the floor's
+// when the floor's level is above the step's. LL is recomputed as the sum; if the merge would pass 200, the mirrored
+// mag's stats stay (it is a valid mag already) under the step's kind.
+SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+    const std::optional<SpireMagBytes>& last_mirrored);
+
+// The ledger of one run mag: per (serial, character id, run id), kept by run id and step, never by item id (item ids
+// change per game). Persisted in the savestate file ("RunMag").
+struct SpireRunMagLedger {
+  uint32_t run_id = 0;
+  int32_t issued_step = -1; // -1: no mag issued yet; advanced only by a RESULT 1 (protocol: a lost answer stays owed)
+  int32_t offered_step = -1; // the step of the last answer with result 1, until its RESULT
+  uint32_t start_step = 0;
+  std::set<uint8_t> boss_rooms; // the boss rooms k this run counted (EXAM, and the server's own boss clears)
+  std::optional<SpireMagBytes> last_mirrored; // the run mag's data1 as last mirrored (overlay) or created
+  std::optional<SpireMagBytes> offered; // the mag of the last answer with result 1, until its RESULT
+  uint8_t lean = 0; // 0 none (default Fang/Mind), 1 Fang/Mind, 2 Shell
+};
+
+// Why a 'Z' that would create or count a mag is refused (the answer is then result 0, old type 0xFF). The order of
+// the checks is the order below.
+enum class SpireRunMagRefusal {
+  NONE = 0,
+  NOT_GC_V3,
+  NO_SPIRE_GAME, // not a guarded Spire game (Battle, replace_char, SpireGuardQuests)
+  NO_OVERLAY, // no run copy: the real character (q925 base game, or after the run)
+  RESTORE_PENDING, // the snapshot's restore is pending
+  MARKER, // the snapshot's marker is not RunInProgress
+  BASE_RETURNED, // 'O' OK in this game: the client holds the real character
+  RUN_AGAIN, // an 'I' (run again) happened in this game since the quest load: the live player is the earlier run copy
+  REFRESHED_BY_61, // an in-game 61 refreshed the overlay: it may hold the real mag (the save buffer after a push)
+  DISABLED, // spire-mag.json "Enabled" false
+  NO_TABLE, // spire-mag.json missing or unreadable, or no line for the class
+  TWO_MAGS, // the overlay holds more than one type-02 item: the quest's find_inventory_item could take the wrong one
+};
+struct SpireRunMagState {
+  bool gc_v3 = false;
+  bool spire_game = false;
+  bool has_overlay = false;
+  bool restore_pending = false;
+  bool run_in_progress = false;
+  bool base_returned = false;
+  bool run_again = false;
+  bool refreshed_by_61 = false;
+  bool enabled = false;
+  bool has_table = false;
+  size_t overlay_mags = 0; // type-02 items in the overlay
+};
+SpireRunMagRefusal spire_run_mag_refusal(const SpireRunMagState& st);
+const char* spire_run_mag_refusal_name(SpireRunMagRefusal r);
+
+// r41 of an answer
+uint32_t spire_run_mag_answer(uint32_t tag, uint8_t old_type, bool result);
+
+// The decision of an ASK or EXAM, with the ledger updated: whether a new mag is answered (then bytes holds it). An
+// EXAM adds k to the ledger's boss rooms. Idempotent: the same EXAM twice, an ASK after a resume, a floor reload never
+// issue a step twice (issued_step moves only at RESULT 1). server_boss_rooms: the boss rooms the server counted in
+// this game for this client.
+struct SpireRunMagDecision {
+  bool result = false;
+  uint32_t expected_step = 0;
+  SpireMagBytes bytes{};
+};
+SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
+    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus);
+// RESULT: 1 issues the offered mag (issued_step = its step, last_mirrored = it); 0 leaves the step owed (the quest asks
+// again at the next room start). Returns false if nothing was offered.
+bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created);
+
+// The run mag in an overlay's items (data1 of every type-02 item): the ledger follows the mirror (feeding) only when
+// exactly one type-02 item is there and the ledger has issued a mag; its level must not be below the ledger's (feeding
+// never lowers it). Returns true if last_mirrored changed.
+bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<SpireMagBytes>& overlay_mags);
+
+// The ledger in the savestate file
+std::string spire_run_mag_bytes_hex(const SpireMagBytes& bytes);
+SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on a bad string
+
+// Ticker texts (C4_SRVMSG path, spire_send_ticker); the evolve text carries the Sega name
+constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag grows next room";
+constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
+constexpr const char* SPIRE_RUN_MAG_SHIELD_TEXT = "Your mag shields you";
+constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
+constexpr uint8_t SPIRE_RUN_MAG_SHIELD_FROM_K = 8; // the boss burst (F7) starts at De Rol Le, not at the Dragon
+std::string spire_run_mag_evolve_text(const std::string& sega_name);

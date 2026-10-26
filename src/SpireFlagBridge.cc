@@ -455,17 +455,26 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
 
 // ---- v44 savestate (SpireFlagBridge.hh). The pure parts first, then the run per game and per client, then the files.
 
-std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id, int32_t* glass_index) {
+std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id,
+    int32_t* glass_index, const SpireRunMagBytes& run_mag) {
   std::vector<ItemData> ret;
   *glass_index = -1;
+  bool run_mag_kept = false;
   for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
     const auto& item = inventory.items[z].data;
-    // A mag stays out until the run mag ledger (F6) keeps the ledgered one. A type-02 item here is never the real mag:
-    // forbid_mags 0 (FORBID_ALL) strips it from the server's run copy (Client.cc:696-697), and the GC client strips it
-    // from its live run copy too (lab memory dumps, no live TItemMag in any run; pc journal 2026-10-26 20:47:39-41;
-    // new-features/roguelike/output/routeb-mag-vraag.md). The real mag only sits in the client's save buffer.
-    if (item.empty() || (item.data1[0] == 0x02) || spire_drop_is_forbidden(item)) { // never a Scape Doll (B-E01-96)
+    if (item.empty() || spire_drop_is_forbidden(item)) { // never a Scape Doll (B-E01-96)
       continue;
+    }
+    // F6: only the ledger's run mag comes back, matched on all 12 data1 bytes and kept once. A type-02 item here is
+    // never the real mag: forbid_mags 0 (FORBID_ALL) strips it from the server's run copy (Client.cc:696-697), and the
+    // GC client strips it from its live run copy too (lab memory dumps, no live TItemMag in any run; pc journal
+    // 2026-10-26 20:47:39-41; new-features/roguelike/output/routeb-mag-vraag.md). Any other type-02 item (a partner's
+    // run mag of the same class, the run mag before an 'I') is dropped.
+    if (item.data1[0] == 0x02) {
+      if (run_mag_kept || !run_mag || memcmp(item.data1.data(), run_mag->data(), 12)) {
+        continue;
+      }
+      run_mag_kept = true;
     }
     if (glass_item_id && (item.id == glass_item_id)) {
       *glass_index = ret.size();
@@ -533,6 +542,24 @@ std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_nu
       {"GlassIndex", ss.glass_index},
       {"Time", ss.time_usecs},
   });
+  if (ss.run_mag) { // F6: the run mag ledger, keyed by run id and step, never by item id
+    const auto& led = *ss.run_mag;
+    phosg::JSON bosses = phosg::JSON::list();
+    for (uint8_t k : led.boss_rooms) {
+      bosses.emplace_back(k);
+    }
+    auto led_json = phosg::JSON::dict({
+        {"RunId", led.run_id},
+        {"IssuedStep", led.issued_step},
+        {"StartStep", led.start_step},
+        {"BossRooms", std::move(bosses)},
+        {"Lean", led.lean},
+    });
+    if (led.last_mirrored) {
+      led_json.emplace("LastMirrored", spire_run_mag_bytes_hex(*led.last_mirrored));
+    }
+    json.emplace("RunMag", std::move(led_json));
+  }
   return json.serialize(phosg::JSON::SerializeOption::FORMAT);
 }
 
@@ -563,6 +590,21 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     ret.glass_index = -1;
   }
   ret.time_usecs = json.get_int("Time", 0);
+  if (json.contains("RunMag")) {
+    const auto& led_json = json.at("RunMag");
+    SpireRunMagLedger led;
+    led.run_id = led_json.get_int("RunId");
+    led.issued_step = led_json.get_int("IssuedStep");
+    led.start_step = led_json.get_int("StartStep");
+    for (const auto& k : led_json.get_list("BossRooms")) {
+      led.boss_rooms.emplace(k->as_int());
+    }
+    led.lean = led_json.get_int("Lean", 0);
+    if (led_json.contains("LastMirrored")) {
+      led.last_mirrored = spire_run_mag_bytes_from_hex(led_json.get_string("LastMirrored"));
+    }
+    ret.run_mag = led;
+  }
   ret.exists = true;
   return ret;
 }
@@ -590,8 +632,8 @@ std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSaves
   return practice ? "Practice run: records and unlocks do not count." : "";
 }
 
-std::string spire_run_resume_mag_ticker(bool resumed) {
-  return resumed ? SPIRE_RESUME_MAG_TEXT : "";
+std::string spire_run_resume_mag_ticker(bool resumed, bool has_mag) {
+  return (resumed && has_mag) ? SPIRE_RESUME_MAG_TEXT : "";
 }
 
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values) {
@@ -735,6 +777,117 @@ static std::string spire_savestate_describe(const SpireSavestate& ss) {
   return std::format("run {:08X} room {} variant {} ({} items, {} lives, {} s, start room {}{})", ss.run_id,
       ss.values[SPIRE_SS_K], ss.values[SPIRE_SS_VARIANT], ss.items.size(), ss.values[SPIRE_SS_LIVES],
       ss.values[SPIRE_SS_ELAPSED], ss.start_room, ss.practice ? ", practice" : "");
+}
+
+// ---- Route B F6: the run mag ledger (SpireMag.hh) per (serial, character id, run id). In memory, and in the savestate
+// file ("RunMag", written at every 'V'); a resume takes the savestate's ledger (it matches the items the resume gives
+// back), and after a server restart the savestate file is read when the run has no ledger in memory.
+struct SpireRunMagStore {
+  std::map<uint32_t, SpireRunMagLedger> runs; // run id -> ledger
+  uint32_t latest_run_id = 0;
+};
+static std::unordered_map<std::string, SpireRunMagStore> spire_run_mag_store; // "<serial>.<character id>"
+
+static std::string spire_run_mag_key(std::shared_ptr<const Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  auto character = c->character_file(false, false); // the server's character data, never the overlay
+  if (!character || !serial_number) {
+    return "";
+  }
+  return std::format("{:010}.{}", serial_number, spire_guard_character_id(character->disp));
+}
+
+static SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client> c, uint32_t run_id, bool create) {
+  std::string key = spire_run_mag_key(c);
+  if (!run_id || key.empty()) {
+    return nullptr;
+  }
+  auto store_it = spire_run_mag_store.find(key);
+  if (store_it == spire_run_mag_store.end()) {
+    if (spire_run_mag_store.size() > 1024) {
+      spire_run_mag_store.clear();
+    }
+    store_it = spire_run_mag_store.emplace(key, SpireRunMagStore{}).first;
+  }
+  auto& store = store_it->second;
+  auto it = store.runs.find(run_id);
+  if (it == store.runs.end()) {
+    SpireSavestate ss = spire_savestate_load_logged(c);
+    if (ss.exists && ss.run_mag && (ss.run_mag->run_id == run_id)) {
+      it = store.runs.emplace(run_id, *ss.run_mag).first;
+      c->log.info_f("Spire run mag: ledger of run {:08X} read from the savestate (step {})", run_id, it->second.issued_step);
+    } else if (!create) {
+      return nullptr;
+    } else {
+      SpireRunMagLedger led;
+      led.run_id = run_id;
+      it = store.runs.emplace(run_id, led).first;
+    }
+  }
+  store.latest_run_id = run_id;
+  if (store.runs.size() > 4) {
+    std::erase_if(store.runs, [&](const auto& e) { return e.first != run_id; });
+  }
+  return &it->second;
+}
+
+// A resume takes the savestate's ledger, or none (a savestate from before F6: the items hold no mag either)
+static void spire_run_mag_adopt(std::shared_ptr<const Client> c, uint32_t run_id, const std::optional<SpireRunMagLedger>& led) {
+  std::string key = spire_run_mag_key(c);
+  if (!run_id || key.empty()) {
+    return;
+  }
+  auto& store = spire_run_mag_store[key];
+  store.runs.erase(run_id);
+  if (led && (led->run_id == run_id)) {
+    store.runs.emplace(run_id, *led);
+    store.latest_run_id = run_id;
+  }
+  c->log.info_f("Spire run mag: ledger of run {:08X} from the resumed savestate: {}", run_id,
+      led ? std::format("step {}, {} boss room(s)", led->issued_step, led->boss_rooms.size()) : std::string("none"));
+}
+
+// The 12 data1 bytes of every type-02 item of an inventory
+static std::vector<SpireMagBytes> spire_run_mag_inventory_mags(const PlayerInventory& inventory) {
+  std::vector<SpireMagBytes> ret;
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z].data;
+    if (!item.empty() && (item.data1[0] == 0x02)) {
+      SpireMagBytes b;
+      memcpy(b.data(), item.data1.data(), 12);
+      ret.emplace_back(b);
+    }
+  }
+  return ret;
+}
+
+// Amendment 3: an in-game 61 refreshes the overlay with the client's save buffer, which after a push is the real
+// character with the real mag; from then on in that game 'Z' is refused and 'V' no longer updates the ledger.
+// Amendment 4: an 'I' (run again) in a game leaves the earlier run copy live; 'Z' is refused in that game until the
+// next quest load. Both are forgotten at the quest load (spire_checkpoint_run_started), when the overlay is made anew.
+struct SpireOverlayRefreshed {
+  std::weak_ptr<const Client> client;
+  uint32_t lobby_id = 0;
+};
+static std::unordered_map<const Client*, SpireOverlayRefreshed> spire_overlay_refreshed;
+static std::unordered_set<uint32_t> spire_run_again_games;
+
+void spire_run_mag_note_in_game_61(std::shared_ptr<const Client> c) {
+  auto l = c->lobby.lock();
+  if (!l || !l->is_game() || !c->has_overlay()) {
+    return;
+  }
+  if (spire_overlay_refreshed.size() > 256) {
+    std::erase_if(spire_overlay_refreshed, [](const auto& e) { return e.second.client.expired(); });
+  }
+  spire_overlay_refreshed[c.get()] = SpireOverlayRefreshed{c, l->lobby_id};
+  c->log.info_f("Spire run mag: an in-game 61 refreshed the run copy in game {:X}; 'Z' and the ledger's 'V' update are off in this game",
+      l->lobby_id);
+}
+
+static bool spire_run_mag_overlay_refreshed(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  auto it = spire_overlay_refreshed.find(c.get());
+  return (it != spire_overlay_refreshed.end()) && (it->second.client.lock() == c) && (it->second.lobby_id == l->lobby_id);
 }
 
 // A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run at every true
@@ -1272,12 +1425,37 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   ss.quest_number = quest_number;
   ss.start_room = cr->start_room;
   ss.practice = cr->practice;
-  ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index);
+  // F6: the ledger follows the feed mirror (the overlay), unless an in-game 61 refreshed it; only its run mag comes back
+  auto* led = spire_run_mag_ledger_for(c, run->run_id, false);
+  if (led && !spire_run_mag_overlay_refreshed(c, l) &&
+      spire_run_mag_follow_mirror(*led, spire_run_mag_inventory_mags(overlay->inventory))) {
+    c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
+        spire_run_mag_bytes_hex(*led->last_mirrored));
+  }
+  ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index,
+      led ? led->last_mirrored : std::nullopt);
+  if (led) {
+    ss.run_mag = *led;
+  }
+  uint32_t room_k = values[SPIRE_SS_K];
   ss.values = std::move(values);
   ss.time_usecs = phosg::now();
   spire_bridge_write_durable(filename, spire_savestate_to_json(ss, serial_number));
   run->savestate_files.emplace(filename);
-  c->log.info_f("Spire savestate: stored {} in {}", spire_savestate_describe(ss), filename);
+  c->log.info_f("Spire savestate: stored {} in {}{}", spire_savestate_describe(ss), filename,
+      ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "");
+  // F6: the boss burst (F7, quest) from De Rol Le on: the 'V' of a room start is the server's view of that start
+  try {
+    if (room_k >= SPIRE_RUN_MAG_SHIELD_FROM_K) {
+      auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+      if (table.boss_rooms.count(room_k)) {
+        spire_send_ticker(c, SPIRE_RUN_MAG_SHIELD_TEXT);
+        c->log.info_f("Spire run mag: boss room {} starts; sent \"{}\"", room_k, SPIRE_RUN_MAG_SHIELD_TEXT);
+      }
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire run mag: {} unreadable ({}); no boss room text", SPIRE_RUN_MAG_FILE, e.what());
+  }
 }
 
 static void spire_send_register(std::shared_ptr<Client> c, uint8_t register_number, uint32_t value) {
@@ -1343,6 +1521,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     run->savestate_files.emplace(spire_savestate_filename(c)); // a true end deletes it even if this client is gone by then
     cr->answered_resume = true;
     cr->savestate = std::move(own);
+    spire_run_mag_adopt(c, run->run_id, cr->savestate.run_mag); // F6
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
       spire_send_register(c, reg, cr->savestate.values[index]);
     }
@@ -1503,7 +1682,9 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_base_returned.erase(c.get()); // v49: an 'O' OK of an earlier quest never allows an 'I'
   spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
   spire_run_rooms.erase(c.get()); // v48
+  spire_overlay_refreshed.erase(c.get()); // F6: the quest load makes the overlay anew
   if (auto l = c->lobby.lock()) {
+    spire_run_again_games.erase(l->lobby_id); // F6
     spire_run_forget_end(l->lobby_id, "quest start", c->log);
     if (spire_game_runs.erase(l->lobby_id)) {
       c->log.info_f("Spire savestate: the run of this game forgotten at the quest start");
@@ -1765,7 +1946,9 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     if (!ticker.empty()) {
       spire_send_ticker(c, ticker);
     }
-    std::string mag_ticker = spire_run_resume_mag_ticker(cr->resumed);
+    bool resumed_mag = std::any_of(cr->savestate.items.begin(), cr->savestate.items.end(),
+        [](const ItemData& item) { return item.data1[0] == 0x02; });
+    std::string mag_ticker = spire_run_resume_mag_ticker(cr->resumed, resumed_mag);
     if (!mag_ticker.empty()) {
       spire_send_ticker_later(c, l, mag_ticker, SPIRE_RESUME_MAG_TEXT_DELAY);
     }
@@ -1903,6 +2086,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   auto refusal = SpireShopRefusal::NONE;
   std::string what = (sub == SPIRE_SHOP_LIST) ? "LIST" : (sub == SPIRE_SHOP_BUY) ? "BUY" : (sub == SPIRE_SHOP_START) ? "START" : "?";
   std::string detail;
+  bool kit_use_text = false;
   try {
     auto character = c->character_file(false, false);
     std::string records_filename = spire_records_filename(c, serial_number);
@@ -1970,6 +2154,8 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
           upgrades[SPIRE_SHOP_ITEM_NAMES[0]] = run_bonus;
         }
       }
+      kit_use_text = (sub == SPIRE_SHOP_START) &&
+          (spire_shop_level(upgrades, 2) || spire_shop_level(upgrades, 3)); // hp_mat, atp_grind
       uint32_t strength = spire_shop_strength(cat, upgrades);
       uint32_t heat = spire_shop_heat(cat, char_class, strength, spire_meta_ladder_quest_rung(quest_number)); // v54
       std::string heat_str = std::format("H {}", heat);
@@ -2002,6 +2188,11 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   uint32_t answer = spire_shop_answer(sub, refusal);
   spire_send_register(c, SPIRE_SHOP_ANSWER_REGISTER, answer);
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+  if (kit_use_text) { // route B F5/F6: the kit hands out the HP Materials and Monogrinders right after this answer
+    if (auto cl = c->lobby.lock()) {
+      spire_send_ticker_later(c, cl, SPIRE_KIT_USE_TEXT, SPIRE_KIT_USE_TEXT_DELAY);
+    }
+  }
   c->log.info_f("Spire shop: {} {:08X} for serial {:010} in q{}: {} ({}){}; r{}={:08X}", what, value, serial_number,
       quest_number, (refusal == SpireShopRefusal::NONE) ? "OK" : "FAIL", spire_shop_refusal_name(refusal), detail,
       SPIRE_SHOP_ANSWER_REGISTER, answer);
@@ -2015,6 +2206,162 @@ static asio::awaitable<void> spire_run_again(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
 
 bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value);
+
+// ---- Route B F6: the run mag request 'Z' (SpireMag.hh; contract: quests/spire/ROUTEB-F6-PROTOCOL.md)
+static std::string spire_guard_filename_for(std::shared_ptr<Client> c, uint32_t serial_number);
+static SpireGuardSnapshot spire_guard_load(const std::string& filename);
+
+static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t sub = (value >> 16) & 0xFF;
+  uint8_t k = value & 0xFF;
+  auto* run = spire_game_run_for(l);
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+
+  if ((sub == SPIRE_RUN_MAG_RESULT) || (sub == SPIRE_RUN_MAG_NO_MAG) || (sub == SPIRE_RUN_MAG_LEAN)) {
+    // no answer: the quest waits for none (protocol)
+    auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, sub == SPIRE_RUN_MAG_LEAN) : nullptr;
+    if (sub == SPIRE_RUN_MAG_LEAN) {
+      if (led) {
+        led->lean = k;
+      }
+      c->log.info_f("Spire run mag: LEAN {} for serial {:010} in q{}{}", k, serial_number, quest_number,
+          led ? "" : " (no run: not stored)");
+    } else if (sub == SPIRE_RUN_MAG_NO_MAG) {
+      bool issued = led && (led->issued_step >= 0);
+      if (issued) {
+        spire_send_ticker(c, SPIRE_RUN_MAG_REMINDER_TEXT);
+      }
+      c->log.info_f("Spire run mag: NO_MAG at room {} for serial {:010} in q{}{}", k, serial_number, quest_number,
+          issued ? "; reminder sent" : "; no mag issued in this run, no text");
+    } else {
+      bool created = value & 1;
+      int32_t before = led ? led->issued_step : -1;
+      auto offered = led ? led->offered : std::nullopt;
+      bool known = led && spire_run_mag_result(*led, created);
+      if (!known) {
+        c->log.warning_f("Spire run mag: RESULT {} for serial {:010} in q{} without an offered mag; ignored", created,
+            serial_number, quest_number);
+      } else if (!created) {
+        spire_send_ticker(c, SPIRE_RUN_MAG_PACK_FULL_TEXT);
+        c->log.info_f("Spire run mag: RESULT 0 (pack full) for serial {:010} in q{}; step {} stays owed", serial_number,
+            quest_number, before + 1);
+      } else {
+        std::string name = std::format("Mag {:02X}", (*offered)[1]);
+        try {
+          auto names = c->require_server_state()->data->item_name_index_opt(Version::GC_V3);
+          if (names) {
+            auto it = names->all_by_primary_identifier().find(0x02000000 | (static_cast<uint32_t>((*offered)[1]) << 16));
+            if (it != names->all_by_primary_identifier().end()) {
+              name = it->second->name;
+            }
+          }
+        } catch (const std::exception&) {
+        }
+        spire_send_ticker(c, (before < 0) ? SPIRE_RUN_MAG_REMINDER_TEXT : spire_run_mag_evolve_text(name));
+        c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} issued, {} {} (run {:08X})",
+            serial_number, quest_number, led->issued_step, name, spire_run_mag_bytes_hex(*offered), run->run_id);
+      }
+    }
+    return;
+  }
+
+  if ((sub != SPIRE_RUN_MAG_ASK) && (sub != SPIRE_RUN_MAG_EXAM)) {
+    c->log.info_f("Spire run mag: unknown sub {} ({:08X}) for serial {:010} in q{}; ignored", sub, value, serial_number,
+        quest_number);
+    return;
+  }
+
+  using R = SpireRunMagRefusal;
+  SpireRunMagState st;
+  SpireMagTable table;
+  const SpireMagLine* line = nullptr;
+  std::string detail;
+  R refusal = R::NONE;
+  try {
+    st.gc_v3 = (c->version() == Version::GC_V3);
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    st.spire_game = (c->lobby.lock() == l) && l->is_game() && (l->mode == GameMode::BATTLE) && l->quest && rules &&
+        rules->replace_char && spire_guard_quest_is_guarded(c, quest_number);
+    st.has_overlay = !!overlay;
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    if (!filename.empty() && std::filesystem::is_regular_file(filename)) {
+      auto snapshot = spire_guard_load(filename);
+      st.restore_pending = snapshot.restore_pending;
+      st.run_in_progress = snapshot.run_in_progress;
+    }
+    st.base_returned = spire_base_returned_has(c, l->lobby_id);
+    st.run_again = spire_run_again_games.count(l->lobby_id);
+    st.refreshed_by_61 = spire_run_mag_overlay_refreshed(c, l);
+    st.enabled = true; // a missing or broken file is NO_TABLE
+    try {
+      table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+      st.enabled = table.enabled;
+      auto character = c->character_file(false, false);
+      const char* arch = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "";
+      auto it = table.classes.find(arch);
+      if (it != table.classes.end()) {
+        line = &it->second;
+      }
+      st.has_table = !!line;
+    } catch (const std::exception& e) {
+      detail = std::format(" ({}: {})", SPIRE_RUN_MAG_FILE, e.what());
+    }
+    st.overlay_mags = overlay ? spire_run_mag_inventory_mags(overlay->inventory).size() : 0;
+    refusal = spire_run_mag_refusal(st);
+  } catch (const std::exception& e) {
+    refusal = R::MARKER;
+    detail = std::format(" ({})", e.what());
+  }
+
+  uint8_t old_type = SPIRE_RUN_MAG_NO_OLD;
+  SpireRunMagDecision decision;
+  if (refusal == R::NONE) {
+    if (!run) { // the kit's ASK may come before 'B': the game's run starts here as at 'B'
+      run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
+    }
+    auto* led = spire_run_mag_ledger_for(c, run->run_id, true);
+    if (led->issued_step < 0 && led->boss_rooms.empty() && !led->offered) {
+      led->start_step = spire_mag_start_step(table, k);
+    }
+    auto mags = spire_run_mag_inventory_mags(overlay->inventory);
+    if (spire_run_mag_follow_mirror(*led, mags)) {
+      c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
+          spire_run_mag_bytes_hex(*led->last_mirrored));
+    }
+    if (mags.size() == 1) {
+      old_type = mags[0][1];
+    }
+    std::set<uint8_t> server_bosses;
+    auto rr_it = spire_run_rooms.find(c.get());
+    if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {
+      server_bosses = rr_it->second.boss_rooms;
+    }
+    uint32_t start_bonus = 0;
+    auto sl_it = spire_start_level_run.find(c.get());
+    if ((sl_it != spire_start_level_run.end()) && (sl_it->second.lobby_id == l->lobby_id) &&
+        (sl_it->second.quest_number == quest_number)) {
+      start_bonus = sl_it->second.bonus;
+    }
+    decision = spire_run_mag_decide(*led, *line, sub, k, server_bosses, start_bonus);
+    detail += std::format("; run {:08X}, start step {}, boss rooms {}, issued step {}, expected step {}, start bonus {}, {} mag(s) in the run copy",
+        run->run_id, led->start_step, led->boss_rooms.size(), led->issued_step, decision.expected_step, start_bonus,
+        mags.size());
+    if (decision.result) {
+      for (size_t z = 0; z < 12; z++) {
+        spire_send_register(c, SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + z, decision.bytes[z]);
+      }
+      detail += std::format("; new mag {}", spire_run_mag_bytes_hex(decision.bytes));
+    }
+  }
+  uint32_t answer = spire_run_mag_answer(SPIRE_RUN_MAG_TAG, old_type, decision.result);
+  spire_send_register(c, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
+  spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+  c->log.info_f("Spire run mag: {} room {} for serial {:010} in q{}: {} ({}){}; r{}={:08X}",
+      (sub == SPIRE_RUN_MAG_EXAM) ? "EXAM" : "ASK", k, serial_number, quest_number,
+      (refusal != R::NONE) ? "FAIL" : decision.result ? "NEW MAG" : "no change", spire_run_mag_refusal_name(refusal),
+      detail, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
+}
 
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
@@ -2066,6 +2413,10 @@ bool spire_bridge_handle_register(
       }
       if ((value >> 24) == SPIRE_BRIDGE_SHOP) { // v50
         spire_shop_handle(c, serial_number, quest_number, value);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_RUN_MAG) { // route B F6
+        spire_run_mag_handle(c, l, serial_number, quest_number, value);
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_RUN_AGAIN) { // v49
@@ -2469,10 +2820,15 @@ bool spire_guard_snapshot_not_worse(
       (disp.stats.exp >= snapshot.disp.stats.exp) && (inventory.num_items >= snapshot.inventory.num_items);
 }
 
-// F1 (route B): the run mag's 12 bytes as the ledger last mirrored them for this client's run. The ledger arrives with
-// F6; until then there is none, so spire_guard_holds_run_mag is false and the other F1 terms decide.
-static SpireRunMagBytes spire_guard_ledger_run_mag(std::shared_ptr<const Client>) {
-  return std::nullopt;
+// F1 (route B): the run mag's 12 bytes as the ledger last mirrored them for this client's latest run (F6); std::nullopt
+// without a ledger or before a mag was issued, and then spire_guard_holds_run_mag is false and the other F1 terms decide.
+static SpireRunMagBytes spire_guard_ledger_run_mag(std::shared_ptr<const Client> c) {
+  auto it = spire_run_mag_store.find(spire_run_mag_key(c));
+  if (it == spire_run_mag_store.end()) {
+    return std::nullopt;
+  }
+  auto run_it = it->second.runs.find(it->second.latest_run_id);
+  return (run_it == it->second.runs.end()) ? std::nullopt : run_it->second.last_mirrored;
 }
 
 // F1 (route B): see SpireFlagBridge.hh
@@ -3304,6 +3660,7 @@ static asio::awaitable<std::shared_ptr<PSOBBCharacterFile>> spire_guard_push_cha
   {
     SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61", drop);
     after = co_await send_get_player_info(c, false);
+    spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
   }
   co_return after.character;
 }
@@ -3341,6 +3698,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     {
       SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30)", drop);
       info = co_await send_get_player_info(c, true);
+      spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
     }
     if (!info.is_full_info || !info.character) {
       c->log.warning_f("Spire guard: client sent no full character (no 30); nothing restored for serial {:010}, marker kept",
@@ -3442,6 +3800,7 @@ static asio::awaitable<void> spire_base_return_prove(std::weak_ptr<Client> weak_
       {
         SpireGuardWatchdog watchdog(executor, c, serial_number, "61 for the base proof", false);
         now = co_await send_get_player_info(c, false);
+        spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
       }
       if (!now.character) {
         why = "no 61";
@@ -3922,6 +4281,7 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     {
       SpireGuardWatchdog watchdog(executor, c, serial_number, "61 for the run again", false);
       now = co_await send_get_player_info(c, false);
+      spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
     }
     SpireGuardSnapshot before = snapshot;
     if (!now.character ||
@@ -3969,6 +4329,7 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     {
       SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30)", false);
       info = co_await send_get_player_info(c, true);
+      spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
     }
     if (!info.is_full_info || !info.character || !spire_guard_same_character(info.character->disp, snapshot.disp)) {
       c->log.warning_f("Spire run again: no full character (30) of the snapshot's character for serial {:010}; nothing pushed",
@@ -4047,6 +4408,7 @@ static asio::awaitable<void> spire_run_again(
     } else {
       c->log.info_f("Spire run again: making the run copy for serial {:010} in q{} on floor {:02X}", serial_number,
           quest_number, c->floor);
+      spire_run_again_games.emplace(l->lobby_id); // F6 (amendment 4): no 'Z' in this game until the next quest load
       refusal = co_await spire_run_again_push(c, l, serial_number, quest_number, filename, snapshot);
     }
   }
@@ -4162,6 +4524,7 @@ asio::awaitable<std::string> spire_kit_lobby_push(std::shared_ptr<Client> c, uin
     {
       SpireGuardWatchdog watchdog(executor, c, serial_number, "full character (30) for $kitlobby", false);
       info = co_await send_get_player_info(c, true);
+      spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
     }
     if (!info.is_full_info || !info.character) {
       co_return "$C6Kan niet: geen\nvolledig personage.";
@@ -4188,6 +4551,7 @@ asio::awaitable<std::string> spire_kit_lobby_push(std::shared_ptr<Client> c, uin
     {
       SpireGuardWatchdog watchdog(executor, c, serial_number, "verifying 61 for $kitlobby", false);
       after = co_await send_get_player_info(c, false);
+      spire_run_mag_note_in_game_61(c); // F6 (amendment 3)
     }
     if (!after.character || (after.character->disp.stats.level != ch->disp.stats.level) ||
         (after.character->disp.stats.exp != ch->disp.stats.exp) ||

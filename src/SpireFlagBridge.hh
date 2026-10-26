@@ -13,6 +13,7 @@
 
 #include "Client.hh"
 #include "Lobby.hh"
+#include "SpireMag.hh"
 #include "SpireMeta.hh"
 #include "StaticGameData.hh"
 
@@ -56,6 +57,10 @@
 //   (6x73): the writer SPIRE_RUN_OVER_LOBBY_DELAY after its own 'X', a partner after its own 'X' too or at the latest
 //   SPIRE_RUN_OVER_PARTNER_DELAY after the first. Never to Pioneer 2 (B-E01-41); the 98 and the lobby join run the
 //   guard's restore as for a Quit.
+
+// F1: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (F6, SpireMag.hh);
+// std::nullopt while no ledger exists, and then spire_guard_holds_run_mag is false.
+using SpireRunMagBytes = std::optional<SpireMagBytes>;
 
 // The range of quest flags that is bridged (inclusive on both ends). Flags outside this range are never recorded.
 constexpr uint16_t SPIRE_BRIDGE_FIRST_FLAG = 0x0380;
@@ -286,11 +291,15 @@ struct SpireSavestate {
   std::vector<ItemData> items;
   int32_t glass_index = -1; // index in items of the Glass run item, -1 = none
   uint64_t time_usecs = 0;
+  std::optional<SpireRunMagLedger> run_mag; // F6: the run mag ledger of this run ("RunMag"), if the run has one
 };
 // The pure parts, for the static tests:
-// The items a savestate takes from a run copy: every item but empty slots and mags, in inventory order; *glass_index is
-// the position of the item whose id is glass_item_id (0: none) among them, or -1.
-std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id, int32_t* glass_index);
+// The items a savestate takes from a run copy: every item but empty slots, Scape Dolls and mags, in inventory order;
+// F6: the one exception is the run mag, an item whose 12 data1 bytes equal run_mag (the ledger's last mirrored run mag;
+// amendment 2: never matched by data1[1] alone), kept once. *glass_index is the position of the item whose id is
+// glass_item_id (0: none) among them, or -1.
+std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id,
+    int32_t* glass_index, const SpireRunMagBytes& run_mag);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
@@ -322,14 +331,19 @@ bool spire_practice_blocks_flag(bool practice, uint16_t flag_num);
 // The one ticker line at 'B': "Run resumed at room k: ..." (with the savestate), "Practice run: ...", or "" for a run
 // from its first room
 std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss);
-// The second ticker line of a resumed run (regie 2026-10-26): a mag stays out of the savestate (spire_savestate_items)
-// until the run mag ledger (F6). The run copy never holds the real mag (server and client both strip it under
-// forbid_mags 0, routeb-mag-vraag.md), so a mag in the run copy is a run mag; the line comes on every resume, ""
-// otherwise. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that
-// line aside (as the room clear text, v36).
-constexpr const char* SPIRE_RESUME_MAG_TEXT = "A mag found in this run does not come back.";
+// The second ticker line of a resumed run (F6): the savestate brings the ledger's run mag back
+// (spire_savestate_items), unequipped, so the line asks the player to equip it; "" when not resumed or the savestate
+// holds no mag. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that line aside (as
+// the room clear text, v36).
+constexpr const char* SPIRE_RESUME_MAG_TEXT = "Your Spire Mag comes back: equip it.";
 constexpr auto SPIRE_RESUME_MAG_TEXT_DELAY = std::chrono::milliseconds(4000);
-std::string spire_run_resume_mag_ticker(bool resumed);
+std::string spire_run_resume_mag_ticker(bool resumed, bool has_mag);
+// Route B F6 (amendment 3): an in-game 61 refreshed this client's overlay (on_61_98 writes it there); 'Z' is refused
+// and 'V' no longer updates the run mag ledger in that game until the next quest load. Called after every 61 the
+// bridge requests; does nothing outside a game or without an overlay.
+void spire_run_mag_note_in_game_61(std::shared_ptr<const Client> c);
+// Route B F6: the kit text follows the 'M' START answer by this much, so the kit items exist when it shows
+constexpr auto SPIRE_KIT_USE_TEXT_DELAY = std::chrono::milliseconds(3000);
 // The seed of the draw 'Q' of a run: run id, room, n-th draw of the client in that room and the input values.
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
@@ -968,9 +982,6 @@ SpireRunCopyPrint spire_guard_run_copy_print(const PlayerInventory& inventory, c
 // is the client's save form (equipped items only), so the hash alone would miss a run copy; level and EXP catch it.
 bool spire_guard_matches_print(
     const PlayerInventory& inventory, const PlayerDispDataV4& disp, const SpireRunCopyPrint& print);
-// F1: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (F6); std::nullopt while no
-// ledger exists, and then spire_guard_holds_run_mag is false.
-using SpireRunMagBytes = std::optional<std::array<uint8_t, 12>>;
 // F1: true if the inventory holds an item whose 12 data1 bytes equal the ledger's run mag
 bool spire_guard_holds_run_mag(const PlayerInventory& inventory, const SpireRunMagBytes& run_mag);
 // F1 (amendment 6, measured: the client strips the real mag from its run copy, routeb-mag-vraag.md E1/E3): true if

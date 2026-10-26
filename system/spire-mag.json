@@ -1,0 +1,49 @@
+{
+  "_comment": "Route B F6: the Spire run mag (SpireMag.hh). Read at every 'Z' request; a missing or broken file answers every 'Z' with no mag. Enabled false is the data-only kill switch: every 'Z' answers 0, no restart needed. Steps: step 0 = the kit, step n = after the n-th boss; stats are levels (DEF/POW/DEX/MIND), the data1 words are levels x 100. Id is data1[1] (decimal), chosen along Sega's evolution rules (Items.cc player_feed_mag) so each step is a Sega mag of that level. Per stat the server keeps max(step, start floor, the run mag as last mirrored), so feeding is never lost. StartFloors: from that start_level bonus on, the mag starts at least at Sega's challenge template mag (PlayerSubordinates.cc v3 templates: HU Varuna L13 and L22, RA Kalki L12 and L20, FO Vritra L13 and L22). BossRooms: the boss rooms k (one room counter: Episode 1 k4-k15, Episode 2 k18-k27; ROUTEB-F6-PROTOCOL.md); after the last step a boss adds nothing (Ep2 steps are data-only later); a run that first asks in room k starts at the number of boss rooms before k (practice runs).",
+  "Enabled": true,
+  "Classes": {
+    "HU": {
+      "_what": "Fang (attack). Mag 0, Varuna 1, Rudra 14, Varaha 5, Kama 6. Step 4 is not Sega's Sato L70 (POW 30): that would lower POW.",
+      "Steps": [
+        {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
+        {"Id": 1, "Def": 7, "Pow": 18, "Dex": 0, "Mind": 0},
+        {"Id": 14, "Def": 9, "Pow": 30, "Dex": 1, "Mind": 0},
+        {"Id": 5, "Def": 12, "Pow": 42, "Dex": 1, "Mind": 0},
+        {"Id": 6, "Def": 14, "Pow": 46, "Dex": 5, "Mind": 5}
+      ],
+      "StartFloors": [
+        {"MinBonus": 5, "Id": 1, "Def": 8, "Pow": 5, "Dex": 0, "Mind": 0},
+        {"MinBonus": 14, "Id": 1, "Def": 11, "Pow": 10, "Dex": 0, "Mind": 1}
+      ]
+    },
+    "RA": {
+      "_what": "Fang (attack). Mag 0, Kalki 13, Surya 3, Kama 6, Madhu 38.",
+      "Steps": [
+        {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
+        {"Id": 13, "Def": 6, "Pow": 16, "Dex": 3, "Mind": 0},
+        {"Id": 3, "Def": 8, "Pow": 27, "Dex": 5, "Mind": 0},
+        {"Id": 6, "Def": 10, "Pow": 38, "Dex": 7, "Mind": 0},
+        {"Id": 38, "Def": 12, "Pow": 46, "Dex": 7, "Mind": 5}
+      ],
+      "StartFloors": [
+        {"MinBonus": 5, "Id": 13, "Def": 5, "Pow": 2, "Dex": 5, "Mind": 0},
+        {"MinBonus": 14, "Id": 13, "Def": 6, "Pow": 4, "Dex": 8, "Mind": 2}
+      ]
+    },
+    "FO": {
+      "_what": "Mind (techs): the HU line with POW and MIND swapped. Mag 0, Vritra 25, Namuci 26, Kabanda 30, Naga 28.",
+      "Steps": [
+        {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
+        {"Id": 25, "Def": 7, "Pow": 0, "Dex": 0, "Mind": 18},
+        {"Id": 26, "Def": 9, "Pow": 0, "Dex": 1, "Mind": 30},
+        {"Id": 30, "Def": 12, "Pow": 0, "Dex": 1, "Mind": 42},
+        {"Id": 28, "Def": 14, "Pow": 5, "Dex": 5, "Mind": 46}
+      ],
+      "StartFloors": [
+        {"MinBonus": 5, "Id": 25, "Def": 8, "Pow": 1, "Dex": 0, "Mind": 4},
+        {"MinBonus": 14, "Id": 25, "Def": 10, "Pow": 4, "Dex": 1, "Mind": 7}
+      ]
+    }
+  },
+  "BossRooms": [4, 8, 11, 15, 18, 21, 24, 27]
+}

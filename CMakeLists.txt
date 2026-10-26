@@ -132,6 +132,7 @@ set(SOURCES
     src/SpireDraw.cc
     src/SpireDrops.cc
     src/SpireFlagBridge.cc
+    src/SpireMag.cc
     src/SpireMeta.cc
     src/StaticGameData.cc
     src/StaticTests.cc
