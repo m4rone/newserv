@@ -2471,6 +2471,100 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
   }
 }
 
+// v53: the server-side heat steps (SpireFlagBridge.hh spire_heat_quest_bin, SpireMeta.hh SpireHeatPatch)
+struct SpireHeatLeader {
+  uint32_t heat = 0;
+  std::string detail;
+};
+
+// The game leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
+// and the shop catalogue, start_level counted as the run copy this quest load gives it (spire_start_level_bonus_for_client),
+// plus the chosen heat (H_keuze), which the server does not know yet (0). Throws on a file error.
+static SpireHeatLeader spire_heat_for_leader(std::shared_ptr<const Lobby> l) {
+  SpireHeatLeader ret;
+  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
+  if (!leader || (leader->version() != Version::GC_V3) || !leader->login || !leader->login->gc_license) {
+    ret.detail = "no GC leader";
+    return ret;
+  }
+  auto character = leader->character_file(true, false);
+  std::string filename = spire_meta_filename_for(leader->login->gc_license->serial_number,
+      character ? &character->disp : nullptr);
+  if (!character || filename.empty()) {
+    ret.detail = "leader has no character data";
+    return ret;
+  }
+  auto meta = spire_meta_load_file(filename);
+  auto cat = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+  auto upgrades = meta.upgrades;
+  uint32_t run_bonus = spire_start_level_bonus_for_client(leader, l);
+  if (run_bonus < spire_shop_level(upgrades, 0)) {
+    upgrades[SPIRE_SHOP_ITEM_NAMES[0]] = run_bonus;
+  }
+  uint8_t char_class = character->disp.visual.sh.char_class;
+  uint32_t strength = spire_shop_strength(cat, upgrades);
+  ret.heat = spire_shop_heat(cat, char_class, strength);
+  ret.detail = std::format("leader {:010} {}, P {}, H_auto {}, H_keuze 0", leader->login->gc_license->serial_number,
+      name_for_char_class(char_class), strength, ret.heat);
+  return ret;
+}
+
+// The patched (compressed) .bin per quest .bin and step: every client of a game gets the same bytes, compressed once.
+// The weak_ptr keeps a reloaded quest index from matching a freed .bin at the same address.
+struct SpireHeatCacheEntry {
+  std::weak_ptr<const std::string> source;
+  std::shared_ptr<const std::string> patched;
+  uint32_t step = 0;
+};
+static std::map<std::pair<const std::string*, uint32_t>, SpireHeatCacheEntry> spire_heat_bin_cache;
+
+std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> c,
+    std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
+  if (!bin_contents || !l->is_game() || !l->quest) {
+    return bin_contents;
+  }
+  uint32_t quest_number = l->quest->meta.quest_number;
+  std::string filename = std::format("{}/q{}.json", SPIRE_HEAT_PATCH_DIR, quest_number);
+  try {
+    if (!std::filesystem::is_regular_file(filename) || !spire_guard_quest_is_guarded(c, quest_number)) {
+      return bin_contents;
+    }
+    if (c->version() != Version::GC_V3) {
+      c->log.warning_f("Spire heat: q{} not patched for a {} client; it plays the H 0 rows", quest_number,
+          phosg::name_for_enum(c->version()));
+      return bin_contents;
+    }
+    auto leader = spire_heat_for_leader(l);
+    if (leader.heat == 0) {
+      c->log.info_f("Spire heat: q{} sent at H 0 ({}), the quest's own rows", quest_number, leader.detail);
+      return bin_contents;
+    }
+    auto key = std::make_pair(bin_contents.get(), leader.heat);
+    auto it = spire_heat_bin_cache.find(key);
+    if ((it != spire_heat_bin_cache.end()) && (it->second.source.lock() == bin_contents)) {
+      c->log.info_f("Spire heat: q{} sent at H {} ({}), the same .bin as the game's other clients", quest_number,
+          it->second.step, leader.detail);
+      return it->second.patched;
+    }
+    auto patch = spire_heat_patch_parse(phosg::load_file(filename));
+    if (patch.quest_number != quest_number) {
+      throw std::runtime_error(std::format("{} is the heat patch of q{}", filename, patch.quest_number));
+    }
+    std::string bin = prs_decompress(*bin_contents);
+    uint32_t step = spire_heat_patch_bin(bin, patch, leader.heat);
+    auto ret = std::make_shared<const std::string>(prs_compress(bin));
+    std::erase_if(spire_heat_bin_cache, [](const auto& e) { return e.second.source.expired(); });
+    spire_heat_bin_cache[key] = SpireHeatCacheEntry{bin_contents, ret, step};
+    c->log.info_f("Spire heat: q{} sent at H {} ({}{}), {} field(s) from {}", quest_number, step, leader.detail,
+        (step != leader.heat) ? std::format(", capped at HeatMax {}", patch.heat_max) : "", patch.fields.size(),
+        filename);
+    return ret;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire heat: q{} sent unpatched, at its H 0 rows: {}", quest_number, e.what());
+    return bin_contents;
+  }
+}
+
 // v49: the overlay creation of on_quest_loaded, shared with the run again ('I'). v52: with the start_level bonus
 bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool run_again) {
   if (is_v4(c->version())) {

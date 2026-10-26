@@ -879,6 +879,15 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
 
+// v53 (B-BASIS-54): the quest .bin set_lobby_quest sends this client, before spire_start_level_quest_bin: for a guarded
+// Spire quest with a heat patch (SpireMeta.hh SPIRE_HEAT_PATCH_DIR/q<N>.json) and a GC client, a copy with the override
+// rows of ONE heat step for the whole game: the leader's H = H_auto(class, P) as its 'M' START has it (start_level as
+// this quest load gives its run copy) + the chosen heat (not known on the server yet: 0). Every client of the game gets
+// the same bytes (compressed once per .bin and step). H 0, no patch file, or any error (logged): the quest's own .bin,
+// which plays the H 0 rows. Never throws.
+std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> c,
+    std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
+
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);
 void spire_bridge_write_durable(const std::string& filename, const std::string& data);

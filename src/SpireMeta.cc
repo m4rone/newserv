@@ -647,3 +647,92 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
   }
   return count;
 }
+
+// v53: the server-side heat steps (SpireMeta.hh)
+static std::string spire_heat_hex_bytes(const std::string& hex) {
+  auto nibble = [&](char ch) -> uint8_t {
+    if ((ch >= '0') && (ch <= '9')) {
+      return ch - '0';
+    }
+    if ((ch >= 'A') && (ch <= 'F')) {
+      return ch - 'A' + 10;
+    }
+    if ((ch >= 'a') && (ch <= 'f')) {
+      return ch - 'a' + 10;
+    }
+    throw std::runtime_error(std::format("value {} is not hex", hex));
+  };
+  if (hex.empty() || (hex.size() & 1)) {
+    throw std::runtime_error(std::format("value {} has no whole bytes", hex));
+  }
+  std::string ret;
+  for (size_t z = 0; z < hex.size(); z += 2) {
+    ret.push_back(static_cast<char>((nibble(hex[z]) << 4) | nibble(hex[z + 1])));
+  }
+  return ret;
+}
+
+SpireHeatPatch spire_heat_patch_parse(const std::string& json_text) {
+  auto json = phosg::JSON::parse(json_text);
+  SpireHeatPatch ret;
+  ret.quest_number = json.get_int("Quest");
+  int64_t bin_size = json.get_int("BinSize");
+  int64_t heat_max = json.get_int("HeatMax");
+  if ((bin_size <= 0) || (heat_max < 0) || (heat_max > 255)) {
+    throw std::runtime_error(std::format("BinSize {} or HeatMax {} out of range", bin_size, heat_max));
+  }
+  ret.bin_size = bin_size;
+  ret.heat_max = heat_max;
+  for (const auto& field_json : json.get_list("Fields")) {
+    SpireHeatPatch::Field field;
+    int64_t offset = field_json->get_int("Offset");
+    for (const auto& v : field_json->get_list("Values")) {
+      field.values.emplace_back(spire_heat_hex_bytes(v->as_string()));
+    }
+    if (field.values.size() != ret.heat_max + 1) {
+      throw std::runtime_error(std::format("field at {}: {} value(s) for H 0..{}", offset, field.values.size(),
+          ret.heat_max));
+    }
+    size_t width = field.values[0].size();
+    for (const auto& v : field.values) {
+      if (v.size() != width) {
+        throw std::runtime_error(std::format("field at {}: values of {} and {} bytes", offset, width, v.size()));
+      }
+    }
+    if (field_json->contains("Width") && (field_json->get_int("Width") != static_cast<int64_t>(width))) {
+      throw std::runtime_error(std::format("field at {}: Width {} but {}-byte values", offset,
+          field_json->get_int("Width"), width));
+    }
+    if ((offset < 0) || (static_cast<uint64_t>(offset) + width > ret.bin_size)) {
+      throw std::runtime_error(std::format("field at {} (+{}) outside the {}-byte .bin", offset, width, ret.bin_size));
+    }
+    field.offset = offset;
+    ret.fields.emplace_back(std::move(field));
+  }
+  std::sort(ret.fields.begin(), ret.fields.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
+  for (size_t z = 1; z < ret.fields.size(); z++) {
+    const auto& prev = ret.fields[z - 1];
+    if (prev.offset + prev.values[0].size() > ret.fields[z].offset) {
+      throw std::runtime_error(std::format("fields at {} and {} overlap", prev.offset, ret.fields[z].offset));
+    }
+  }
+  return ret;
+}
+
+uint32_t spire_heat_patch_bin(std::string& decompressed_bin, const SpireHeatPatch& patch, uint32_t heat) {
+  if (decompressed_bin.size() != patch.bin_size) {
+    throw std::runtime_error(std::format("the .bin has {} bytes, the heat patch is for {}", decompressed_bin.size(),
+        patch.bin_size));
+  }
+  for (const auto& field : patch.fields) {
+    if (decompressed_bin.compare(field.offset, field.values[0].size(), field.values[0]) != 0) {
+      throw std::runtime_error(std::format("the .bin at {} does not hold the H 0 bytes of the heat patch",
+          field.offset));
+    }
+  }
+  uint32_t step = std::min(heat, patch.heat_max);
+  for (const auto& field : patch.fields) {
+    decompressed_bin.replace(field.offset, field.values[step].size(), field.values[step]);
+  }
+  return step;
+}

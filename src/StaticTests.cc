@@ -723,6 +723,67 @@ void run_static_tests() {
     expect_eq(std::string("\x49\x20\x00\x00\x00\xF8\x71", 7), room);
   }
 
+  phosg::log_info_f("-- Spire heat: the sidecar writes one step's bytes into the H 0 .bin, or nothing on any doubt (v53)");
+  {
+    auto throws = [](const std::function<void()>& fn) {
+      try {
+        fn();
+      } catch (const std::exception&) {
+        return true;
+      }
+      return false;
+    };
+    // a 16-byte .bin with a 4-byte field at 2 (a .data row) and a 2-byte field at 10 (a threshold), steps H 0..3
+    std::string h0_bin = std::string("\x00\x01\xAA\xAA\xAA\xAA\x06\x07\x08\x09\x10\x11\x0C\x0D\x0E\x0F", 16);
+    std::string side = R"({"Quest": 921, "BinSize": 16, "HeatMax": 3, "Fields": [
+        {"Offset": 10, "Width": 2, "Values": ["1011", "2021", "3031", "4041"]},
+        {"Offset": 2, "Width": 4, "Values": ["AAAAAAAA", "bbbbbbbb", "CCCCCCCC", "DDDDDDDD"]}]})";
+    auto patch = spire_heat_patch_parse(side);
+    expect_eq(921u, patch.quest_number);
+    expect_eq(16u, patch.bin_size);
+    expect_eq(3u, patch.heat_max);
+    expect_eq(2u, patch.fields.size());
+    expect_eq(2u, patch.fields[0].offset); // sorted by offset
+    for (uint32_t h = 0; h <= 5; h++) {
+      std::string bin = h0_bin;
+      uint32_t step = std::min<uint32_t>(h, 3); // an H past HeatMax plays the top step
+      expect_eq(step, spire_heat_patch_bin(bin, patch, h));
+      std::string want = h0_bin;
+      want.replace(2, 4, std::string(4, static_cast<char>(0xAA + 0x11 * step)));
+      want.replace(10, 2, std::string{static_cast<char>(0x10 * (step + 1)), static_cast<char>(0x10 * (step + 1) + 1)});
+      expect_eq(want, bin);
+      expect_eq(h0_bin.size(), bin.size()); // the layout never moves
+    }
+    // the sidecar of another build: a .bin of another size, or without the H 0 bytes at a field, stays unchanged
+    std::string longer = h0_bin + "x";
+    std::string longer_before = longer;
+    expect(throws([&]() { spire_heat_patch_bin(longer, patch, 2); }));
+    expect_eq(longer_before, longer);
+    std::string other = h0_bin;
+    other[11] = 0x12;
+    std::string other_before = other;
+    expect(throws([&]() { spire_heat_patch_bin(other, patch, 2); }));
+    expect_eq(other_before, other);
+    // malformed sidecars are refused at parse
+    auto bad = [&](const std::string& fields, size_t bin_size = 16) {
+      return throws([&]() {
+        spire_heat_patch_parse(std::format(R"({{"Quest": 921, "BinSize": {}, "HeatMax": 1, "Fields": [{}]}})", bin_size, fields));
+      });
+    };
+    expect(!bad(R"({"Offset": 0, "Width": 1, "Values": ["00", "01"]})"));
+    expect(bad(R"({"Offset": 0, "Width": 1, "Values": ["00"]})")); // fewer values than H 0..HeatMax
+    expect(bad(R"({"Offset": 0, "Width": 1, "Values": ["00", "0102"]})")); // values of different widths
+    expect(bad(R"({"Offset": 0, "Width": 2, "Values": ["00", "01"]})")); // Width is not the values' width
+    expect(bad(R"({"Offset": 0, "Values": ["0", "1"]})")); // half a byte
+    expect(bad(R"({"Offset": 0, "Values": ["", ""]})")); // width 0
+    expect(bad(R"({"Offset": 0, "Values": ["zz", "01"]})")); // no hex
+    expect(bad(R"({"Offset": 15, "Values": ["0000", "0101"]})")); // past the end of the .bin
+    expect(bad(R"({"Offset": -1, "Values": ["00", "01"]})"));
+    expect(bad(R"({"Offset": 0, "Values": ["0000", "0101"]}, {"Offset": 1, "Values": ["00", "01"]})")); // overlap
+    expect(!bad(R"({"Offset": 0, "Values": ["0000", "0101"]}, {"Offset": 2, "Values": ["00", "01"]})")); // adjacent
+    expect(throws([]() { spire_heat_patch_parse(R"({"Quest": 921, "BinSize": 16, "Fields": []})"); })); // no HeatMax
+  }
+
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)

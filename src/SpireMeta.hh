@@ -245,3 +245,27 @@ uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus);
 // In a decompressed GC/v3 quest .bin: the rule block's "arg_pushl base_char_level; ba_set_char_level" (49 <u32 LE>
 // F8 71). Returns how many there are and replaces the level with new_char_level only if there is exactly one.
 size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_char_level, uint32_t new_char_level);
+
+// v53 (B-BASIS-54): the heat steps server-side. A Spire quest built with the heat steps carries the override rows of H 0
+// in a layout that is the same for every step H 0..HeatMax, and a sidecar SPIRE_HEAT_PATCH_DIR/q<N>.json (pso-roguelike
+// quests/spire make_spire.py heat_patch_sidecar) that lists every byte range that differs over H: its offset in the
+// DECOMPRESSED .bin, its width and its bytes per step. The server writes the bytes of one step into the .bin it sends
+// (spire_heat_quest_bin, SpireFlagBridge.hh): the client then plays the rows of that H with no heat switch of its own.
+//   {"Quest": 921, "BinSize": 160848, "HeatMax": 7, "Fields": [{"Offset": 1234, "Width": 36, "Values": ["3A00..", ...]}]}
+constexpr const char* SPIRE_HEAT_PATCH_DIR = "system/spire-heat";
+struct SpireHeatPatch {
+  struct Field {
+    size_t offset = 0;
+    std::vector<std::string> values; // values[h]: the bytes of step h, all of one width
+  };
+  uint32_t quest_number = 0;
+  size_t bin_size = 0;
+  uint32_t heat_max = 0;
+  std::vector<Field> fields; // by offset, never overlapping
+};
+// Throws on a malformed sidecar: a missing key, a value that is no even-length hex, a field without HeatMax + 1
+// values or with values of different widths (or width 0), a field past BinSize, overlapping fields.
+SpireHeatPatch spire_heat_patch_parse(const std::string& json_text);
+// Writes the bytes of step min(heat, HeatMax) into a decompressed .bin and returns that step. Throws, with the .bin
+// unchanged, unless the .bin has BinSize bytes and every field holds its H 0 bytes (the sidecar of another build).
+uint32_t spire_heat_patch_bin(std::string& decompressed_bin, const SpireHeatPatch& patch, uint32_t heat);

@@ -2532,9 +2532,10 @@ void set_lobby_quest(std::shared_ptr<Lobby> l, std::shared_ptr<const Quest> q, b
     std::string bin_filename = vq->bin_filename();
     std::string dat_filename = vq->dat_filename();
     std::string xb_filename = vq->xb_filename();
-    // Spire start level (v52): a guarded Spire quest's rule block raised by the client's start_level upgrade
+    // Spire start level (v52): a guarded Spire quest's rule block raised by the client's start_level upgrade; Spire
+    // heat (v53): before that, the override rows of the game's heat step (the leader's)
     send_open_quest_file(lc, bin_filename, bin_filename, xb_filename, vq->meta.quest_number, QuestFileType::ONLINE,
-        spire_start_level_quest_bin(lc, l, vq->bin_contents));
+        spire_start_level_quest_bin(lc, l, spire_heat_quest_bin(lc, l, vq->bin_contents)));
     send_open_quest_file(
         lc, dat_filename, dat_filename, xb_filename, vq->meta.quest_number, QuestFileType::ONLINE, vq->dat_contents);
 
