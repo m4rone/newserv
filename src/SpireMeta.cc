@@ -79,6 +79,14 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       }
     }
   }
+  if (json.contains("Upgrades")) { // v49 (B-BASIS-2)
+    for (const auto& [name, level_json] : json.get_dict("Upgrades")) {
+      int64_t level = level_json->as_int();
+      if (level > 0) {
+        ret.upgrades[name] = std::min<int64_t>(level, 0xFFFF);
+      }
+    }
+  }
   return ret;
 }
 
@@ -116,6 +124,13 @@ static void spire_meta_save(const std::string& filename, uint32_t serial_number,
       base_rung_json.emplace(std::to_string(run), rung);
     }
     json.emplace("BaseRung", std::move(base_rung_json));
+  }
+  if (!file.upgrades.empty()) { // v49 (B-BASIS-2): kept through every flag write, as BaseRung
+    auto upgrades_json = phosg::JSON::dict();
+    for (const auto& [name, level] : file.upgrades) {
+      upgrades_json.emplace(name, level);
+    }
+    json.emplace("Upgrades", std::move(upgrades_json));
   }
   if (file.adopted == SpireMetaAdopted::UNKNOWN) {
     json.emplace("Adopted", "unknown");
@@ -419,4 +434,185 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
     text += difficulty ? "\nReward waiting on Normal: see the Quartermaster." : "\nReward waiting: see the Quartermaster.";
   }
   return text;
+}
+
+// v49: the base shop (SpireMeta.hh)
+
+SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
+  auto json = phosg::JSON::parse(json_text);
+  SpireShopCatalogue ret;
+  const auto& items_json = json.at("Items");
+  for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
+    const char* name = SPIRE_SHOP_ITEM_NAMES[z];
+    if (!items_json.contains(name)) {
+      throw std::runtime_error(std::format("catalogue has no item {}", name));
+    }
+    const auto& item_json = items_json.at(name);
+    SpireShopItem item;
+    item.max = item_json.get_int("Max");
+    item.on_sale = item_json.get_int("OnSale", item.max);
+    item.rung = (z >= 4) ? (z - 3) : 0;
+    if (item.on_sale > item.max) {
+      throw std::runtime_error(std::format("item {}: OnSale {} above Max {}", name, item.on_sale, item.max));
+    }
+    for (const auto& v : item_json.get_list("Price")) {
+      item.price.emplace_back(v->as_int());
+    }
+    if (item.price.size() < item.on_sale) {
+      throw std::runtime_error(std::format("item {}: {} price(s) for {} level(s) on sale", name, item.price.size(),
+          item.on_sale));
+    }
+    if (item.rung) {
+      item.p_needed = item_json.get_int("PNeeded");
+    } else {
+      for (const auto& v : item_json.get_list("P")) {
+        item.strength.emplace_back(v->as_int());
+      }
+      if (item.strength.size() != item.max + 1) {
+        throw std::runtime_error(std::format("item {}: P has {} entries for levels 0-{}", name, item.strength.size(),
+            item.max));
+      }
+    }
+    ret.items.emplace_back(std::move(item));
+  }
+  for (const auto& [cls, row_json] : json.at("MetaHeat").get_dict("HAuto")) {
+    auto& row = ret.heat[cls];
+    for (const auto& v : row_json->as_list()) {
+      row.emplace_back(v->is_null() ? -1 : static_cast<int32_t>(v->as_int()));
+    }
+  }
+  return ret;
+}
+
+uint32_t spire_shop_level(const std::map<std::string, uint32_t>& upgrades, size_t index) {
+  if (index >= SPIRE_SHOP_NUM_ITEMS) {
+    return 0;
+  }
+  auto it = upgrades.find(SPIRE_SHOP_ITEM_NAMES[index]);
+  return (it == upgrades.end()) ? 0 : it->second;
+}
+
+uint32_t spire_shop_strength(const SpireShopCatalogue& cat, const std::map<std::string, uint32_t>& upgrades) {
+  uint32_t ret = 0;
+  for (size_t z = 0; z < cat.items.size(); z++) {
+    const auto& item = cat.items[z];
+    if (!item.strength.empty()) {
+      ret += item.strength[std::min<size_t>(spire_shop_level(upgrades, z), item.strength.size() - 1)];
+    }
+  }
+  return ret;
+}
+
+uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength) {
+  auto it = cat.heat.find(name_for_char_class(char_class));
+  if ((it == cat.heat.end()) || it->second.empty()) {
+    return 0;
+  }
+  // P past the table: its last column; a cell without a heat (no H keeps the band): the last heat at a lower P
+  for (size_t p = std::min<size_t>(strength, it->second.size() - 1) + 1; p > 0; p--) {
+    if (it->second[p - 1] >= 0) {
+      return it->second[p - 1];
+    }
+  }
+  return 0;
+}
+
+const char* spire_shop_refusal_name(SpireShopRefusal r) {
+  switch (r) {
+    case SpireShopRefusal::NONE:
+      return "none";
+    case SpireShopRefusal::NO_CHARACTER:
+      return "no character";
+    case SpireShopRefusal::NO_CATALOGUE:
+      return "no catalogue";
+    case SpireShopRefusal::UNKNOWN_ITEM:
+      return "unknown item or request";
+    case SpireShopRefusal::MAX_LEVEL:
+      return "at its cap";
+    case SpireShopRefusal::NOT_ON_SALE:
+      return "next level not on sale";
+    case SpireShopRefusal::STRENGTH:
+      return "strength below the threshold";
+    case SpireShopRefusal::RUNG_CLOSED:
+      return "the rung below is not open";
+    case SpireShopRefusal::ALREADY_OPEN:
+      return "already open for both runs";
+    case SpireShopRefusal::BALANCE:
+      return "not enough splinters";
+    case SpireShopRefusal::FILE_ERROR:
+      return "file error";
+  }
+  return "unknown";
+}
+
+// Every refusal but the balance
+static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]) {
+  if (index >= cat.items.size()) {
+    return SpireShopRefusal::UNKNOWN_ITEM;
+  }
+  const auto& item = cat.items[index];
+  uint32_t level = spire_shop_level(upgrades, index);
+  if (level >= item.max) {
+    return SpireShopRefusal::MAX_LEVEL;
+  }
+  if (level >= item.on_sale) {
+    return SpireShopRefusal::NOT_ON_SALE;
+  }
+  if (item.rung) {
+    if (std::min(open_rung[0], open_rung[1]) >= item.rung) {
+      return SpireShopRefusal::ALREADY_OPEN; // nothing to open: never take splinters for it
+    }
+    if (spire_shop_strength(cat, upgrades) < item.p_needed) {
+      return SpireShopRefusal::STRENGTH;
+    }
+    if (std::max(open_rung[0], open_rung[1]) + 1 < item.rung) {
+      return SpireShopRefusal::RUNG_CLOSED;
+    }
+  }
+  return SpireShopRefusal::NONE;
+}
+
+SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2]) {
+  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung);
+  if (r != SpireShopRefusal::NONE) {
+    return r;
+  }
+  return (balance < cat.items[index].price[spire_shop_level(upgrades, index)]) ? SpireShopRefusal::BALANCE
+                                                                                : SpireShopRefusal::NONE;
+}
+
+uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]) {
+  if (spire_shop_item_refusal(cat, index, upgrades, open_rung) != SpireShopRefusal::NONE) {
+    return 0;
+  }
+  return cat.items[index].price[spire_shop_level(upgrades, index)];
+}
+
+uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, SpireMetaFile& file) {
+  const auto& item = cat.items.at(index);
+  uint32_t level = spire_shop_level(file.upgrades, index);
+  uint32_t price = item.price.at(level);
+  file.upgrades[SPIRE_SHOP_ITEM_NAMES[index]] = level + 1;
+  if (item.rung) {
+    for (uint8_t run = 1; run <= 2; run++) {
+      file.base_rung[run] = std::max<uint8_t>(spire_meta_base_rung(file, run), item.rung);
+    }
+  }
+  return price;
+}
+
+SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename) {
+  *filename = spire_meta_filename(c, serial_number);
+  if (filename->empty()) {
+    return SpireMetaFile();
+  }
+  bool adopted;
+  return spire_meta_load_or_adopt(c, *filename, serial_number, &adopted);
+}
+
+void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file) {
+  spire_meta_save(filename, serial_number, file);
 }

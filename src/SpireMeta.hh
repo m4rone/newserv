@@ -67,6 +67,10 @@ struct SpireMetaFile {
   // v48 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II; 0-3, see spire_meta_open_rung), in
   // the file as "BaseRung": {"1": n, "2": n}; written only if a run has one, so older files stay as they are
   std::map<uint8_t, uint8_t> base_rung;
+  // v49 (B-BASIS-2): the base shop's upgrades, name -> level (SPIRE_SHOP_ITEM_NAMES), in the file as
+  // "Upgrades": {"hp_mat": 2, ...}. One block for every difficulty (a flag is per difficulty, an upgrade is not);
+  // written only if there is one, kept through every flag write like BaseRung
+  std::map<std::string, uint32_t> upgrades;
 };
 SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
 SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags
@@ -157,5 +161,69 @@ struct SpireMetaFinish {
   bool deathless = false;
 };
 SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
+
+// v49 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2/-3/-13): the base shop. The quartermaster on Pioneer 2 sells
+// upgrades for photon splinters (records.json Splinters); the server checks the balance, debits it and keeps the levels
+// in meta.json (Upgrades). The catalogue (prices, caps, the strength P per level, the rung thresholds and the heat table)
+// is data: SPIRE_SHOP_CATALOGUE_FILE, read at every request (a missing or broken file closes the shop). The item order
+// below is the protocol's: item index i is SPIRE_SHOP_ITEM_NAMES[i] in the 'M' code and in the answer registers.
+// - start_level, kit_tier, hp_mat, atp_grind: strength. P = the sum over them of the catalogue's P at the owned level
+//   (level equivalents, B-BASIS-3). The kit hook applies them at the run start ('M' START).
+// - open_hard, open_vh, open_ult (B-BASIS-13): BaseRung 1, 2, 3 for Spire Run I and II. Buyable only with P at least
+//   the item's threshold (PNeeded) and the rung below open for one of the runs (won or BaseRung); refused while both
+//   runs have the rung open already. They count 0 toward P. BaseRung is never a win.
+// - H = H_auto(P, class) (curve_spire.economy() meta_heat): the heat the run gets from its strength; P past the table
+//   takes the last column, a cell without a heat (null) the last heat of the class at a lower P. The chosen heat
+//   (H_keuze) is not known on the server yet and is not added.
+constexpr const char* SPIRE_SHOP_CATALOGUE_FILE = "system/spire-shop.json";
+constexpr size_t SPIRE_SHOP_NUM_ITEMS = 7;
+constexpr const char* SPIRE_SHOP_ITEM_NAMES[SPIRE_SHOP_NUM_ITEMS] = {
+    "start_level", "kit_tier", "hp_mat", "atp_grind", "open_hard", "open_vh", "open_ult"};
+struct SpireShopItem {
+  uint32_t max = 0; // the level cap (design)
+  uint32_t on_sale = 0; // the highest level the shop sells now (<= max); a level without its mechanism is not sold
+  std::vector<uint32_t> price; // price[n - 1]: splinters for level n
+  std::vector<uint32_t> strength; // strength[n]: P at level n (strength[0] = 0); empty for a rung item
+  uint8_t rung = 0; // 1-3 for open_hard/open_vh/open_ult, 0 otherwise
+  uint32_t p_needed = 0; // a rung item: the P the character needs to buy it
+};
+struct SpireShopCatalogue {
+  std::vector<SpireShopItem> items; // SPIRE_SHOP_NUM_ITEMS, in SPIRE_SHOP_ITEM_NAMES order
+  std::map<std::string, std::vector<int32_t>> heat; // class name (name_for_char_class) -> H_auto by P, -1 = null
+};
+// Throws on a malformed catalogue (a missing item, a price list shorter than on_sale, on_sale above max).
+SpireShopCatalogue spire_shop_parse(const std::string& json_text);
+// The level of item i (0 if none).
+uint32_t spire_shop_level(const std::map<std::string, uint32_t>& upgrades, size_t index);
+uint32_t spire_shop_strength(const SpireShopCatalogue& cat, const std::map<std::string, uint32_t>& upgrades);
+uint32_t spire_shop_heat(const SpireShopCatalogue& cat, uint8_t char_class, uint32_t strength);
+enum class SpireShopRefusal : uint8_t {
+  NONE = 0,
+  NO_CHARACTER, // no serial, not GC V3 or no character data
+  NO_CATALOGUE, // SPIRE_SHOP_CATALOGUE_FILE missing or malformed
+  UNKNOWN_ITEM, // an index past the catalogue, or a sub-request that is no LIST, BUY or START
+  MAX_LEVEL, // the item is at its cap
+  NOT_ON_SALE, // the next level has no mechanism yet (on_sale)
+  STRENGTH, // a rung item: P below its threshold
+  RUNG_CLOSED, // a rung item: the rung below is open for neither run
+  ALREADY_OPEN, // a rung item: both runs have the rung open already
+  BALANCE, // not enough splinters
+  FILE_ERROR, // meta.json or records.json could not be written
+};
+const char* spire_shop_refusal_name(SpireShopRefusal r);
+// The decision of a BUY of item index, free of state for the static tests. open_rung[r - 1] = the open rung of run r
+// (spire_meta_open_rung).
+SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2]);
+// The price of the next level of item index, or 0 if it cannot be bought now for any reason but the balance.
+uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2]);
+// A BUY without a refusal on the meta file: the item one level up, and for a rung item BaseRung of both runs at least
+// the rung. Returns the price to debit.
+uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, SpireMetaFile& file);
+// The character's meta file for the shop: loaded, or adopted (and written) if it has none; *filename gets its name
+// ("" without character data: then nothing is loaded). Throws on a file error.
+SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename);
+void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file);
 std::vector<uint16_t> spire_meta_flags_for_finish(const SpireMetaFinish& f, uint8_t char_class, bool new_best_time);
 const char* spire_meta_flag_name(uint16_t flag_num); // nullptr for a flag that is not announced
