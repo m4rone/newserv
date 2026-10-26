@@ -1,0 +1,68 @@
+{
+  "_comment": "Spire base shop catalogue (newserv guard v49, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price, P and PNeeded is a placeholder until the balance is tuned (one full Normal run room 1 through De Rol Le earns 18 splinters).",
+  "Items": {
+    "start_level": {
+      "_what": "+1 start level per level (1 level equivalent each). OnSale 0: the quest has no way yet to raise the run copy's level (the client builds it from the rule block's ba_set_char_level), so nothing is sold until that exists.",
+      "Max": 5,
+      "OnSale": 0,
+      "Price": [15, 30, 45, 60, 75],
+      "P": [0, 1, 2, 3, 4, 5]
+    },
+    "kit_tier": {
+      "_what": "level 1: the second kit of the class archetype (the quest's existing second-kit branch, Dagger/Rifle/Barta) from the first run. OnSale 1: level 2 has no kit yet.",
+      "Max": 2,
+      "OnSale": 1,
+      "Price": [30, 60],
+      "P": [0, 2, 4]
+    },
+    "hp_mat": {
+      "_what": "2 HP Materials per level in the start kit (each +2 max HP when used); 2 levels count 1 level equivalent.",
+      "Max": 5,
+      "OnSale": 5,
+      "Price": [8, 16, 24, 32, 40],
+      "P": [0, 0, 1, 1, 2, 2]
+    },
+    "atp_grind": {
+      "_what": "2 Monogrinders per level in the start kit (each +1 grind on the weapon when used); 1 level equivalent per level.",
+      "Max": 5,
+      "OnSale": 5,
+      "Price": [10, 20, 30, 40, 50],
+      "P": [0, 1, 2, 3, 4, 5]
+    },
+    "open_hard": {
+      "_what": "BaseRung 1 (Hard) for Spire Run I and II (B-BASIS-13). PNeeded: the end of the sim's meta-heat table (P 8), where H_auto is 4-7, about f 1.0 on the hardest Normal room (k3 HU 0.75 + 0.05 H, top of Normal at H 5).",
+      "Max": 1,
+      "Price": [60],
+      "PNeeded": 8
+    },
+    "open_vh": {
+      "_what": "BaseRung 2 (Very Hard). PNeeded: placeholder, 4 level equivalents past Hard; the sim has no Hard table yet (slice 5).",
+      "Max": 1,
+      "Price": [120],
+      "PNeeded": 12
+    },
+    "open_ult": {
+      "_what": "BaseRung 3 (Ultimate). PNeeded: placeholder, 4 past Very Hard.",
+      "Max": 1,
+      "Price": [240],
+      "PNeeded": 16
+    }
+  },
+  "MetaHeat": {
+    "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column.",
+    "HAuto": {
+      "HUmar": [0, 0, 0, 1, 3, 3, 2, 5, 5],
+      "HUnewearl": [0, 0, 1, 1, 2, 3, 4, 4, 5],
+      "HUcast": [0, 0, 1, 2, 3, 3, 4, 5, 6],
+      "HUcaseal": [0, 1, 1, 2, 3, 3, 4, 5, null],
+      "RAmar": [0, 0, 0, 0, 0, 1, 3, 4, 4],
+      "RAmarl": [0, 0, 1, 1, 2, 2, 3, 4, 4],
+      "RAcast": [0, 0, 0, 1, 1, 3, 3, 4, 4],
+      "RAcaseal": [0, 1, 1, 2, 3, 3, 5, 6, 7],
+      "FOmar": [0, 0, 3, 3, 3, 3, 3, 3, 4],
+      "FOmarl": [0, 0, 3, 3, 3, 3, 4, 4, 5],
+      "FOnewm": [0, 0, 0, 0, 1, 1, 2, 2, 4],
+      "FOnewearl": [0, 1, 2, 2, 2, 3, 4, 4, 4]
+    }
+  }
+}

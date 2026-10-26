@@ -1713,6 +1713,97 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   return true;
 }
 
+uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
+  return SPIRE_SHOP_TAG | (static_cast<uint32_t>(sub) << 16) | (static_cast<uint32_t>(r) << 8) |
+      ((r == SpireShopRefusal::NONE) ? 1 : 0);
+}
+
+// v49: the base shop ('M', SpireFlagBridge.hh and SpireMeta.hh). Always answers the client (state registers when it
+// has a character and the catalogue, r41, then 'DONE'). Throws nothing.
+static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t sub = (value >> 16) & 0xFF;
+  size_t index = value & 0xFF;
+  auto refusal = SpireShopRefusal::NONE;
+  std::string what = (sub == SPIRE_SHOP_LIST) ? "LIST" : (sub == SPIRE_SHOP_BUY) ? "BUY" : (sub == SPIRE_SHOP_START) ? "START" : "?";
+  std::string detail;
+  try {
+    auto character = c->character_file(false, false);
+    std::string records_filename = spire_records_filename(c, serial_number);
+    std::string meta_filename;
+    SpireMetaFile meta;
+    if (character && !records_filename.empty()) {
+      meta = spire_meta_load_for_client(c, serial_number, &meta_filename);
+    }
+    SpireShopCatalogue cat;
+    if (!character || records_filename.empty() || meta_filename.empty()) {
+      refusal = SpireShopRefusal::NO_CHARACTER;
+    } else if ((sub != SPIRE_SHOP_LIST) && (sub != SPIRE_SHOP_BUY) && (sub != SPIRE_SHOP_START)) {
+      refusal = SpireShopRefusal::UNKNOWN_ITEM;
+    } else {
+      try {
+        cat = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+      } catch (const std::exception& e) {
+        refusal = SpireShopRefusal::NO_CATALOGUE;
+        detail = std::format(" ({}: {})", SPIRE_SHOP_CATALOGUE_FILE, e.what());
+      }
+    }
+    if (refusal == SpireShopRefusal::NONE) {
+      auto rec = spire_records_load(records_filename);
+      uint8_t open_rung[2] = {spire_meta_open_rung(meta, 1), spire_meta_open_rung(meta, 2)};
+      if (sub == SPIRE_SHOP_BUY) {
+        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung);
+        if (refusal == SpireShopRefusal::NONE) {
+          uint32_t level_before = spire_shop_level(meta.upgrades, index);
+          uint32_t price = spire_shop_apply_buy(cat, index, meta);
+          try {
+            // the level first, then the debit: a failure between the two writes costs the player nothing
+            spire_meta_save_file(meta_filename, serial_number, meta);
+            rec.splinters -= price;
+            spire_records_save(records_filename, serial_number, rec);
+          } catch (const std::exception& e) {
+            refusal = SpireShopRefusal::FILE_ERROR;
+            detail = std::format(" ({})", e.what());
+          }
+          if (refusal == SpireShopRefusal::NONE) {
+            open_rung[0] = spire_meta_open_rung(meta, 1);
+            open_rung[1] = spire_meta_open_rung(meta, 2);
+            detail = std::format(" {} {} -> {} for {} splinter(s)", SPIRE_SHOP_ITEM_NAMES[index], level_before,
+                level_before + 1, price);
+          }
+        } else if (index < SPIRE_SHOP_NUM_ITEMS) {
+          detail = std::format(" {}", SPIRE_SHOP_ITEM_NAMES[index]);
+        }
+      }
+      uint8_t char_class = character->disp.visual.sh.char_class;
+      uint32_t strength = spire_shop_strength(cat, meta.upgrades);
+      uint32_t heat = spire_shop_heat(cat, char_class, strength);
+      std::string levels_str;
+      for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
+        uint32_t level = spire_shop_level(meta.upgrades, z);
+        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung);
+        spire_send_register(c, SPIRE_SHOP_LEVEL_FIRST_REGISTER + z, level);
+        spire_send_register(c, SPIRE_SHOP_PRICE_FIRST_REGISTER + z, price);
+        levels_str += std::format(" {}={}/{}", SPIRE_SHOP_ITEM_NAMES[z], level, price);
+      }
+      spire_send_register(c, SPIRE_SHOP_BALANCE_REGISTER, rec.splinters);
+      spire_send_register(c, SPIRE_SHOP_STRENGTH_REGISTER, strength);
+      spire_send_register(c, SPIRE_SHOP_HEAT_REGISTER, heat);
+      detail += std::format("; balance {}, P {}, H {} ({}), level/next price:{}, rungs open {}/{}", rec.splinters,
+          strength, heat, name_for_char_class(char_class), levels_str, open_rung[0], open_rung[1]);
+    }
+  } catch (const std::exception& e) {
+    refusal = SpireShopRefusal::FILE_ERROR;
+    detail = std::format(" ({})", e.what());
+  }
+  uint32_t answer = spire_shop_answer(sub, refusal);
+  spire_send_register(c, SPIRE_SHOP_ANSWER_REGISTER, answer);
+  spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+  c->log.info_f("Spire shop: {} {:08X} for serial {:010} in q{}: {} ({}){}; r{}={:08X}", what, value, serial_number,
+      quest_number, (refusal == SpireShopRefusal::NONE) ? "OK" : "FAIL", spire_shop_refusal_name(refusal), detail,
+      SPIRE_SHOP_ANSWER_REGISTER, answer);
+}
+
 // v46: the return to base ('O'), below with the guard's restore
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
@@ -1763,6 +1854,10 @@ bool spire_bridge_handle_register(
       if ((value >> 24) == SPIRE_BRIDGE_BASE_RETURN) {
         asio::co_spawn(*c->require_server_state()->io_context,
             spire_base_return(c, std::const_pointer_cast<Lobby>(l), serial_number, quest_number), asio::detached);
+        return true;
+      }
+      if ((value >> 24) == SPIRE_BRIDGE_SHOP) { // v49
+        spire_shop_handle(c, serial_number, quest_number, value);
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_RUN_AGAIN) { // v48

@@ -438,6 +438,158 @@ void run_static_tests() {
     expect_eq(0xFFFFFFFFu, spire_splinters_for_run(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)); // never wraps
   }
 
+  phosg::log_info_f("-- Spire shop: debit, balance, cap, sale, rung threshold and the heat table (v49, B-BASIS-2/-3/-13)");
+  {
+    using R = SpireShopRefusal;
+    // a small catalogue: start_level not on sale, kit_tier cap 2 with 1 on sale, Hard at P 3
+    auto cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 5, "OnSale": 0, "Price": [15, 30, 45, 60, 75], "P": [0, 1, 2, 3, 4, 5]},
+        "kit_tier": {"Max": 2, "OnSale": 1, "Price": [30, 60], "P": [0, 2, 4]},
+        "hp_mat": {"Max": 2, "Price": [8, 16], "P": [0, 0, 1]},
+        "atp_grind": {"Max": 3, "Price": [10, 20, 30], "P": [0, 1, 2, 3]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 3},
+        "open_vh": {"Max": 1, "Price": [120], "PNeeded": 5},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 9}},
+      "MetaHeat": {"HAuto": {"HUmar": [0, 0, 1, 2, null, 4], "RAmar": [0, null, null]}}})");
+    expect_eq(SPIRE_SHOP_NUM_ITEMS, cat.items.size());
+    expect_eq(0, cat.items[0].on_sale);
+    expect_eq(2, cat.items[2].on_sale); // OnSale missing: the cap
+    expect_eq(1, cat.items[4].rung);
+    expect_eq(3, cat.items[6].rung);
+    uint8_t closed[2] = {0, 0};
+    std::map<std::string, uint32_t> up;
+    // debit: atp_grind level 1 costs 10, the level goes up, the price of the next level follows
+    expect(R::NONE == spire_shop_buy_refusal(cat, 3, up, 10, closed));
+    SpireMetaFile file;
+    expect_eq(10u, spire_shop_apply_buy(cat, 3, file));
+    expect_eq(1u, spire_shop_level(file.upgrades, 3));
+    expect_eq(20u, spire_shop_next_price(cat, 3, file.upgrades, closed));
+    expect(file.base_rung.empty()); // a strength item opens no rung
+    // insufficient balance: refused, and the price is still shown
+    expect(R::BALANCE == spire_shop_buy_refusal(cat, 3, file.upgrades, 19, closed));
+    expect(R::NONE == spire_shop_buy_refusal(cat, 3, file.upgrades, 20, closed));
+    expect_eq(20u, spire_shop_next_price(cat, 3, file.upgrades, closed));
+    // cap: atp_grind at 3 of 3
+    up = {{"atp_grind", 3}};
+    expect(R::MAX_LEVEL == spire_shop_buy_refusal(cat, 3, up, 9999, closed));
+    expect_eq(0u, spire_shop_next_price(cat, 3, up, closed));
+    // not on sale: start_level (OnSale 0) and kit_tier level 2 (OnSale 1); a balance never buys them
+    expect(R::NOT_ON_SALE == spire_shop_buy_refusal(cat, 0, {}, 9999, closed));
+    expect(R::NONE == spire_shop_buy_refusal(cat, 1, {}, 30, closed));
+    expect(R::NOT_ON_SALE == spire_shop_buy_refusal(cat, 1, {{"kit_tier", 1}}, 9999, closed));
+    expect(R::MAX_LEVEL == spire_shop_buy_refusal(cat, 1, {{"kit_tier", 2}}, 9999, closed));
+    expect(R::UNKNOWN_ITEM == spire_shop_buy_refusal(cat, 7, {}, 9999, closed));
+    // strength P: the catalogue's P at each owned level, rung items count 0
+    expect_eq(0u, spire_shop_strength(cat, {}));
+    expect_eq(2u + 1u + 3u, spire_shop_strength(cat, {{"kit_tier", 1}, {"hp_mat", 2}, {"atp_grind", 3}, {"open_hard", 1}}));
+    expect_eq(5u, spire_shop_strength(cat, {{"start_level", 99}})); // a level past the table takes its last P
+    // rung threshold: Hard needs P 3; at P 2 refused, at P 3 bought, and BaseRung of both runs becomes 1
+    std::map<std::string, uint32_t> p2 = {{"atp_grind", 2}}, p3 = {{"atp_grind", 3}};
+    expect(R::STRENGTH == spire_shop_buy_refusal(cat, 4, p2, 9999, closed));
+    expect_eq(0u, spire_shop_next_price(cat, 4, p2, closed));
+    expect(R::NONE == spire_shop_buy_refusal(cat, 4, p3, 60, closed));
+    expect(R::BALANCE == spire_shop_buy_refusal(cat, 4, p3, 59, closed));
+    SpireMetaFile rung_file;
+    rung_file.upgrades = p3;
+    expect_eq(60u, spire_shop_apply_buy(cat, 4, rung_file));
+    expect_eq(1, spire_meta_base_rung(rung_file, 1));
+    expect_eq(1, spire_meta_base_rung(rung_file, 2));
+    expect_eq(1u, spire_shop_level(rung_file.upgrades, 4));
+    expect_eq(3u, spire_shop_strength(cat, rung_file.upgrades));
+    // Very Hard needs the rung below open for one run (won or BaseRung) and P 5
+    std::map<std::string, uint32_t> p5 = {{"kit_tier", 1}, {"atp_grind", 3}};
+    expect(R::RUNG_CLOSED == spire_shop_buy_refusal(cat, 5, p5, 9999, closed));
+    uint8_t hard_run1[2] = {1, 0};
+    expect(R::NONE == spire_shop_buy_refusal(cat, 5, p5, 120, hard_run1));
+    expect(R::STRENGTH == spire_shop_buy_refusal(cat, 5, p3, 9999, hard_run1)); // the threshold before the rung
+    // already open for both runs (ladder wins): no splinters taken for nothing; open for one run only: still sold
+    uint8_t hard_both[2] = {1, 1};
+    expect(R::ALREADY_OPEN == spire_shop_buy_refusal(cat, 4, p3, 9999, hard_both));
+    expect(R::NONE == spire_shop_buy_refusal(cat, 4, p3, 9999, hard_run1));
+    // BaseRung never goes down: a file with BaseRung 2 keeps 2 when open_hard is bought
+    SpireMetaFile high;
+    high.base_rung = {{1, 2}, {2, 0}};
+    spire_shop_apply_buy(cat, 4, high);
+    expect_eq(2, spire_meta_base_rung(high, 1));
+    expect_eq(1, spire_meta_base_rung(high, 2));
+    // the heat: H_auto(P, class); null takes the last heat at a lower P, P past the table its last column, an unknown
+    // class or a class without a heat 0
+    expect_eq(0u, spire_shop_heat(cat, 0, 0)); // HUmar
+    expect_eq(2u, spire_shop_heat(cat, 0, 3));
+    expect_eq(2u, spire_shop_heat(cat, 0, 4)); // null at P 4
+    expect_eq(4u, spire_shop_heat(cat, 0, 5));
+    expect_eq(4u, spire_shop_heat(cat, 0, 50));
+    expect_eq(0u, spire_shop_heat(cat, 3, 2)); // RAmar: nulls after P 0
+    expect_eq(0u, spire_shop_heat(cat, 2, 5)); // HUcast is not in this table
+    // the answer: 'M' tag, sub-request in bits 16-23, refusal in bits 8-15, OK only without a refusal
+    expect_eq(0x4D030001u, spire_shop_answer(SPIRE_SHOP_START, R::NONE));
+    expect_eq(0x4D020900u, spire_shop_answer(SPIRE_SHOP_BUY, R::BALANCE));
+    expect_eq(0x4D010200u, spire_shop_answer(SPIRE_SHOP_LIST, R::NO_CATALOGUE));
+    for (uint8_t z = 1; z <= static_cast<uint8_t>(R::FILE_ERROR); z++) {
+      expect_eq(0u, spire_shop_answer(SPIRE_SHOP_BUY, static_cast<R>(z)) & 0xFF);
+      expect(std::string(spire_shop_refusal_name(static_cast<R>(z))) != "unknown");
+    }
+    // the answer registers are outside every register the bridge stores or the quest's server channels use
+    for (uint8_t reg = SPIRE_SHOP_LEVEL_FIRST_REGISTER; reg < SPIRE_SHOP_PRICE_FIRST_REGISTER + SPIRE_SHOP_NUM_ITEMS; reg++) {
+      expect(reg != SPIRE_SHOP_ANSWER_REGISTER);
+      expect(reg < SPIRE_RESUME_ITEM_FIRST_REGISTER);
+    }
+    for (uint8_t reg : {SPIRE_SHOP_BALANCE_REGISTER, SPIRE_SHOP_STRENGTH_REGISTER, SPIRE_SHOP_HEAT_REGISTER}) {
+      expect((reg < SPIRE_BRIDGE_FIRST_REGISTER) && (reg != SPIRE_BRIDGE_DRAW_RESULT_REGISTER));
+    }
+    // the code letter is free: no other r248 code or 4CC starts with 'M'
+    for (uint8_t letter : {SPIRE_BRIDGE_MSG_WAVE, SPIRE_BRIDGE_MSG_LIFE, SPIRE_BRIDGE_MSG_TIME, SPIRE_BRIDGE_MSG_PARTNER,
+             SPIRE_BRIDGE_MSG_RUN_OVER, SPIRE_BRIDGE_MSG_PAUSE_B, SPIRE_BRIDGE_MSG_DOWN, SPIRE_BRIDGE_MSG_HINT,
+             SPIRE_BRIDGE_MSG_APPROACH, SPIRE_BRIDGE_MSG_PROMPT, SPIRE_BRIDGE_REC_BEGIN, SPIRE_BRIDGE_REC_SCORE,
+             SPIRE_BRIDGE_REC_FINISH, SPIRE_BRIDGE_REC_BOARD, SPIRE_BRIDGE_TIMER_START, SPIRE_BRIDGE_TIMER_END,
+             SPIRE_BRIDGE_DRAW_REQUEST, SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_BRIDGE_RESUME, SPIRE_BRIDGE_BASE_RETURN,
+             SPIRE_BRIDGE_RUN_AGAIN}) {
+      expect(letter != SPIRE_BRIDGE_SHOP);
+    }
+    for (uint32_t fourcc : {SPIRE_BRIDGE_REQUEST_VALUE, SPIRE_BRIDGE_DONE_VALUE, SPIRE_BRIDGE_BATTLE_END_VALUE,
+             SPIRE_BRIDGE_ROOM_CLEAR_VALUE}) {
+      expect((fourcc >> 24) != SPIRE_BRIDGE_SHOP);
+    }
+    // malformed catalogues are refused (the shop then answers NO_CATALOGUE)
+    auto throws = [](const std::string& text) {
+      try {
+        spire_shop_parse(text);
+      } catch (const std::exception&) {
+        return true;
+      }
+      return false;
+    };
+    expect(throws("{\"Items\": {}, \"MetaHeat\": {\"HAuto\": {}}}"));
+    expect(throws("{\"Items\": {\"start_level\": {\"Max\": 1, \"OnSale\": 2, \"Price\": [1, 2], \"P\": [0, 1]}}}"));
+    // meta.json: Upgrades and BaseRung survive a save and a load (every flag write loads and saves the whole file)
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-shop-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto name = (dir / "shop.meta.json").string();
+    SpireMetaFile saved;
+    saved.flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)] = true;
+    saved.upgrades = {{"hp_mat", 2}, {"open_hard", 1}};
+    saved.base_rung = {{1, 1}, {2, 1}};
+    spire_meta_save_file(name, 42, saved);
+    auto loaded = spire_meta_load_file(name);
+    expect_eq(2u, spire_shop_level(loaded.upgrades, 2));
+    expect_eq(1u, spire_shop_level(loaded.upgrades, 4));
+    expect_eq(1, spire_meta_base_rung(loaded, 2));
+    expect(loaded.flags.at(std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)));
+    phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[]}");
+    expect(spire_meta_load_file(name).upgrades.empty()); // an older file has none
+    std::filesystem::remove_all(dir);
+    // the catalogue in the repository parses, sells Hard within reach and has a heat row for every class
+    auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+    std::map<std::string, uint32_t> all_on_sale;
+    for (size_t z = 0; z < 4; z++) {
+      all_on_sale[SPIRE_SHOP_ITEM_NAMES[z]] = repo.items[z].on_sale;
+    }
+    expect(spire_shop_strength(repo, all_on_sale) >= repo.items[4].p_needed);
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      expect(repo.heat.count(name_for_char_class(cls)));
+    }
+  }
+
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)
@@ -1544,8 +1696,8 @@ void run_static_tests() {
     expect(!spire_meta_load_file(local(spire_meta_filename_for(42, &b))).exists);
     // A's file is from before B-REGIE-10-2 (no marker); B here has an empty file of its own from then: both cleared
     // as before
-    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a, .base_rung = {}};
-    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b, .base_rung = {}};
+    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a, .base_rung = {}, .upgrades = {}};
+    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b, .base_rung = {}, .upgrades = {}};
     auto to_a = spire_meta_delivery_entries(file_a, 0, false);
     auto to_b = spire_meta_delivery_entries(file_b, 0, false);
     expect_eq(1, value_of(to_a, 0x0384));                    // A's own unlock

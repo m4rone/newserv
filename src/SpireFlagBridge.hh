@@ -11,6 +11,7 @@
 
 #include "Client.hh"
 #include "Lobby.hh"
+#include "SpireMeta.hh"
 #include "StaticGameData.hh"
 
 // Spire flag bridge (GC V3 only).
@@ -85,8 +86,8 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
 //   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
-// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v46) and the
-// run again ('I', v48).
+// codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v46), the
+// run again ('I', v48) and the base shop ('M', v49).
 constexpr uint8_t SPIRE_BRIDGE_MSG_WAVE = 'W';
 constexpr uint8_t SPIRE_BRIDGE_MSG_LIFE = 'L';
 constexpr uint8_t SPIRE_BRIDGE_MSG_TIME = 'T';
@@ -820,6 +821,33 @@ SpireRunAgainRefusal spire_run_again_refusal(const SpireRunAgainState& st);
 const char* spire_run_again_refusal_name(SpireRunAgainRefusal r);
 // The r41 answer value for a refusal (NONE = OK).
 uint32_t spire_run_again_answer(SpireRunAgainRefusal r);
+// v49 (plan-basis-metawinkel 2026-10-26 slice 4, B-BASIS-2): the base shop, catalogue and rules in SpireMeta.hh. The
+// quest writes 'M' << 24 | sub << 16 | argument to register 248, from each client for its own character (no leader):
+//   sub SPIRE_SHOP_LIST: the balance and the levels, for the quartermaster's page
+//   sub SPIRE_SHOP_BUY, argument = item index (SPIRE_SHOP_ITEM_NAMES): the server checks the item and the balance in
+//     records.json (Splinters), writes the level one up to meta.json (Upgrades; a rung item also BaseRung of both runs)
+//     and then debits Splinters (in that order: a failure between the two writes costs the player nothing)
+//   sub SPIRE_SHOP_START: at the run start, before the kit: the levels for the kit hook and the run's heat
+// The server answers that client, always, like 'O': first (with a character and a catalogue) the state registers
+// below, then register SPIRE_SHOP_ANSWER_REGISTER = SPIRE_SHOP_TAG | sub << 16 | refusal << 8 | result (1 OK, 0 FAIL),
+// then r248 = 'DONE'. The quest sets r41 to 0 first and waits for r41 >> 24 == 'M'. The state registers (after a BUY
+// the new state): r1-r7 the level of item 0-6, r8-r14 the price of its next level (0: at its cap, not on sale, or
+// closed by its threshold or rung; a price is sent even if the balance is short), r105 the balance, r106 P (strength
+// in level equivalents), r107 H = H_auto(P, class).
+constexpr uint8_t SPIRE_BRIDGE_SHOP = 'M';
+constexpr uint8_t SPIRE_SHOP_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_REGISTER; // r41, as 'J', 'O' and 'I' (another tag)
+constexpr uint32_t SPIRE_SHOP_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_SHOP) << 24;
+constexpr uint8_t SPIRE_SHOP_LIST = 1;
+constexpr uint8_t SPIRE_SHOP_BUY = 2;
+constexpr uint8_t SPIRE_SHOP_START = 3;
+constexpr uint8_t SPIRE_SHOP_LEVEL_FIRST_REGISTER = 1; // r1-r7
+constexpr uint8_t SPIRE_SHOP_PRICE_FIRST_REGISTER = 8; // r8-r14
+constexpr uint8_t SPIRE_SHOP_BALANCE_REGISTER = 105;
+constexpr uint8_t SPIRE_SHOP_STRENGTH_REGISTER = 106;
+constexpr uint8_t SPIRE_SHOP_HEAT_REGISTER = 107;
+// The r41 answer of an 'M' (refusal NONE = OK).
+uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r);
+
 // The floors an 'I' may come from: Pioneer 2 and Forest 1 (floor 1 is also the first field floor of Episode 2).
 bool spire_run_again_floor_ok(uint32_t floor);
 // The snapshot step of an 'I': false (snapshot unchanged) unless the 'O' OK was not used yet, the snapshot has
