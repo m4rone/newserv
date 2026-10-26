@@ -832,7 +832,9 @@ uint32_t spire_run_again_answer(SpireRunAgainRefusal r);
 // then r248 = 'DONE'. The quest sets r41 to 0 first and waits for r41 >> 24 == 'M'. The state registers (after a BUY
 // the new state): r1-r7 the level of item 0-6, r8-r14 the price of its next level (0: at its cap, not on sale, or
 // closed by its threshold or rung; a price is sent even if the balance is short), r105 the balance, r106 P (strength
-// in level equivalents), r107 H = H_auto(P, class).
+// in level equivalents), r107 H: after LIST and BUY the client's own H_auto(P, class); v55, after START the game's H,
+// the heat step the rows of this client's quest .bin carry (spire_heat_start_answer), so every client of a game gets
+// the leader's H that the patch wrote and its r107/r108 agree with the rows it plays.
 constexpr uint8_t SPIRE_BRIDGE_SHOP = 'M';
 constexpr uint8_t SPIRE_SHOP_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_REGISTER; // r41, as 'J', 'O' and 'I' (another tag)
 constexpr uint32_t SPIRE_SHOP_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_SHOP) << 24;
@@ -884,9 +886,24 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
 // rows of ONE heat step for the whole game: the leader's H = H_auto(class, P) as its 'M' START has it (start_level as
 // this quest load gives its run copy) + the chosen heat (not known on the server yet: 0). Every client of the game gets
 // the same bytes (compressed once per .bin and step). H 0, no patch file, or any error (logged): the quest's own .bin,
-// which plays the H 0 rows. Never throws.
+// which plays the H 0 rows. Never throws. v55: remembers the step it sent for the client's 'M' START (SpireHeatSent).
 std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
+
+// v55: the heat step of the rows in the quest .bin a client got (spire_heat_quest_bin), in which game and quest. The
+// chosen heat (H_keuze: the pacts; the design's unlocked heat 0-6 has no menu yet) is picked in the quest after the
+// .bin is sent (score.py pacts_menu on Pioneer 2), so the step stays the leader's H_auto, clamped to the sidecar's
+// HeatMax; H_keuze counts only in the score and reward path.
+struct SpireHeatSent {
+  uint32_t lobby_id = 0;
+  uint32_t quest_number = 0;
+  uint32_t step = 0;
+};
+// The H the 'M' START answer sends (SPIRE_SHOP_HEAT_REGISTER, which the quest copies into META_HEAT r108): the step of
+// the rows this client's .bin carries, when sent is for this game and quest; else 0, the quest's own H 0 rows (no heat
+// patch, a non-GC client, an error, or no record). Never the client's own H_auto: a follower with another class or P
+// plays the leader's rows, and a level bought after the quest load changes no row before the next load.
+uint32_t spire_heat_start_answer(const SpireHeatSent* sent, uint32_t lobby_id, uint32_t quest_number);
 
 // Shared with SpireMeta (v22): the character id of a 61 (name, class, section ID) and the crash-safe file write.
 std::string spire_guard_character_id(const PlayerDispDataV4& disp);

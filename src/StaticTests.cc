@@ -821,6 +821,39 @@ void run_static_tests() {
     expect(throws([]() { spire_heat_patch_parse(R"({"Quest": 921, "BinSize": 16, "Fields": []})"); })); // no HeatMax
   }
 
+  phosg::log_info_f("-- Spire heat: 'M' START answers every client with the step its .bin was patched at (v55)");
+  {
+    // the game's H: the leader's H_auto (H_keuze is chosen in the quest after the .bin is sent), clamped to HeatMax
+    auto cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 5, "Price": [1, 1, 1, 1, 1], "P": [0, 1, 2, 3, 4, 5]},
+        "kit_tier": {"Max": 1, "Price": [1], "P": [0, 2]},
+        "hp_mat": {"Max": 1, "Price": [1], "P": [0, 0]},
+        "atp_grind": {"Max": 1, "Price": [1], "P": [0, 1]},
+        "open_hard": {"Max": 1, "Price": [1], "PNeeded": 8},
+        "open_vh": {"Max": 1, "Price": [1], "PNeeded": 9},
+        "open_ult": {"Max": 1, "Price": [1], "PNeeded": 10}},
+      "MetaHeat": {"HAuto": {"HUmar": [0, 2, 4, 6, 9], "RAmar": [0, 1, 1, 2, 3]}}})");
+    auto patch = spire_heat_patch_parse(R"({"Quest": 921, "BinSize": 2, "HeatMax": 7, "Fields": [
+        {"Offset": 0, "Width": 1, "Values": ["00", "01", "02", "03", "04", "05", "06", "07"]}]})");
+    uint32_t leader_h = spire_shop_heat(cat, 0, 4); // HUmar leader, P 4: H_auto 9, past HeatMax
+    uint32_t follower_h = spire_shop_heat(cat, 3, 1); // RAmar follower, P 1: its own H_auto 1
+    expect_eq(9u, leader_h);
+    expect_eq(1u, follower_h);
+    std::string bin("\x00\x00", 2);
+    uint32_t step = spire_heat_patch_bin(bin, patch, leader_h);
+    expect_eq(7u, step); // the rows of H 7 for every client of the game
+    // every GC client of the game got the same step; START sends it, not the client's own H_auto
+    SpireHeatSent sent{12, 921, step};
+    expect_eq(7u, spire_heat_start_answer(&sent, 12, 921));
+    expect(spire_heat_start_answer(&sent, 12, 921) != follower_h);
+    // a record of another game or quest, or none (no heat patch, a non-GC client, an error): the quest's H 0 rows
+    expect_eq(0u, spire_heat_start_answer(&sent, 13, 921));
+    expect_eq(0u, spire_heat_start_answer(&sent, 12, 981));
+    expect_eq(0u, spire_heat_start_answer(nullptr, 12, 921));
+    SpireHeatSent h0{12, 921, 0};
+    expect_eq(0u, spire_heat_start_answer(&h0, 12, 921));
+  }
+
   phosg::log_info_f("-- Spire guard: a run start under AwaitingSave keeps the snapshot unless the data equals it (v32, v39)");
   {
     // arguments: awaiting_save, same_state (v39: no level argument; a lower and a higher level both mean !same_state)

@@ -1729,6 +1729,15 @@ struct SpireStartLevelSent {
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_sent;
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_run;
 
+// v55: the heat step of each client's quest .bin (spire_heat_quest_bin sets it at every send, SpireFlagBridge.hh
+// SpireHeatSent), for the 'M' START answer. Keyed by the Client's address and never dereferenced; a 98
+// (spire_guard_end_run) drops it.
+static std::unordered_map<const Client*, SpireHeatSent> spire_heat_sent;
+
+uint32_t spire_heat_start_answer(const SpireHeatSent* sent, uint32_t lobby_id, uint32_t quest_number) {
+  return (sent && (sent->lobby_id == lobby_id) && (sent->quest_number == quest_number)) ? sent->step : 0;
+}
+
 uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
   return SPIRE_SHOP_TAG | (static_cast<uint32_t>(sub) << 16) | (static_cast<uint32_t>(r) << 8) |
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
@@ -1809,6 +1818,15 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       uint8_t char_class = character->disp.visual.sh.char_class;
       uint32_t strength = spire_shop_strength(cat, upgrades);
       uint32_t heat = spire_shop_heat(cat, char_class, strength, spire_meta_ladder_quest_rung(quest_number)); // v54
+      std::string heat_str = std::format("H {}", heat);
+      if (sub == SPIRE_SHOP_START) { // v55: the game's H, the rows this client's .bin carries (SpireHeatSent)
+        auto cl = c->lobby.lock();
+        auto it = spire_heat_sent.find(c.get());
+        uint32_t own = heat;
+        heat = spire_heat_start_answer((it != spire_heat_sent.end()) ? &it->second : nullptr,
+            cl ? cl->lobby_id : 0, quest_number);
+        heat_str = std::format("H {} of the game's rows (own H_auto {})", heat, own);
+      }
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
         uint32_t level = spire_shop_level(upgrades, z);
@@ -1820,8 +1838,8 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       spire_send_register(c, SPIRE_SHOP_BALANCE_REGISTER, rec.splinters);
       spire_send_register(c, SPIRE_SHOP_STRENGTH_REGISTER, strength);
       spire_send_register(c, SPIRE_SHOP_HEAT_REGISTER, heat);
-      detail += std::format("; balance {}, P {}, H {} ({}), level/next price:{}, rungs open {}/{}", rec.splinters,
-          strength, heat, name_for_char_class(char_class), levels_str, open_rung[0], open_rung[1]);
+      detail += std::format("; balance {}, P {}, {} ({}), level/next price:{}, rungs open {}/{}", rec.splinters,
+          strength, heat_str, name_for_char_class(char_class), levels_str, open_rung[0], open_rung[1]);
     }
   } catch (const std::exception& e) {
     refusal = SpireShopRefusal::FILE_ERROR;
@@ -2521,6 +2539,7 @@ static std::map<std::pair<const std::string*, uint32_t>, SpireHeatCacheEntry> sp
 
 std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
+  spire_heat_sent.erase(c.get()); // v55: set again below only for a .bin whose rows are of a known step
   if (!bin_contents || !l->is_game() || !l->quest) {
     return bin_contents;
   }
@@ -2538,6 +2557,7 @@ std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> 
     auto leader = spire_heat_for_leader(l);
     if (leader.heat == 0) {
       c->log.info_f("Spire heat: q{} sent at H 0 ({}), the quest's own rows", quest_number, leader.detail);
+      spire_heat_sent[c.get()] = SpireHeatSent{l->lobby_id, quest_number, 0};
       return bin_contents;
     }
     auto key = std::make_pair(bin_contents.get(), leader.heat);
@@ -2545,6 +2565,7 @@ std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> 
     if ((it != spire_heat_bin_cache.end()) && (it->second.source.lock() == bin_contents)) {
       c->log.info_f("Spire heat: q{} sent at H {} ({}), the same .bin as the game's other clients", quest_number,
           it->second.step, leader.detail);
+      spire_heat_sent[c.get()] = SpireHeatSent{l->lobby_id, quest_number, it->second.step};
       return it->second.patched;
     }
     auto patch = spire_heat_patch_parse(phosg::load_file(filename));
@@ -2559,6 +2580,7 @@ std::shared_ptr<const std::string> spire_heat_quest_bin(std::shared_ptr<Client> 
     c->log.info_f("Spire heat: q{} sent at H {} ({}{}), {} field(s) from {}", quest_number, step, leader.detail,
         (step != leader.heat) ? std::format(", capped at HeatMax {}", patch.heat_max) : "", patch.fields.size(),
         filename);
+    spire_heat_sent[c.get()] = SpireHeatSent{l->lobby_id, quest_number, step};
     return ret;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire heat: q{} sent unpatched, at its H 0 rows: {}", quest_number, e.what());
@@ -2740,6 +2762,7 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
   spire_guard_base_exit_pending.erase(c.get());
   spire_start_level_sent.erase(c.get()); // v52
   spire_start_level_run.erase(c.get());
+  spire_heat_sent.erase(c.get()); // v55
   // v51: an 'O' OK belongs to the game the client leaves now; it never carries over to the next one
   bool base_returned = l && spire_base_returned_has(c, l->lobby_id);
   spire_base_returned.erase(c.get());

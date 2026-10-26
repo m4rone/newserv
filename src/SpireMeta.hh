@@ -178,7 +178,8 @@ SpireMetaFinish spire_meta_decode_finish(uint32_t finish_value);
 //   runs have the rung open already. They count 0 toward P. BaseRung is never a win.
 // - H = H_auto(P, class) (curve_spire.economy() meta_heat): the heat the run gets from its strength; P past the table
 //   takes the last column, a cell without a heat (null) the last heat of the class at a lower P. The chosen heat
-//   (H_keuze) is not known on the server yet and is not added. v54: the table of the quest's ladder rung
+//   (H_keuze) is not known on the server yet and is not added (v55: the pacts are chosen in the quest after its .bin
+//   is sent, so the heat patch cannot carry them; SpireFlagBridge.hh SpireHeatSent). v54: the table of the quest's ladder rung
 //   (spire_meta_ladder_quest_rung; Normal for every quest outside q981-q986).
 constexpr const char* SPIRE_SHOP_CATALOGUE_FILE = "system/spire-shop.json";
 constexpr size_t SPIRE_SHOP_NUM_ITEMS = 7;
