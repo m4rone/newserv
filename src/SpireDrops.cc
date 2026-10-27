@@ -165,6 +165,48 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
   return best.empty() ? ItemData() : best[random % best.size()];
 }
 
+bool spire_drops_fit_armor(const ItemParameterTable& pmt, ItemData& item, uint8_t char_class) {
+  if (item.empty() || (item.data1[0] != 0x01) || ((item.data1[1] != 0x01) && (item.data1[1] != 0x02))) {
+    return false;
+  }
+  uint8_t bits = spire_weapon_usability_bits(char_class); // armour carries the same usability bits as a weapon
+  uint32_t strength;
+  try {
+    const auto& def = pmt.get_armor_or_shield(item.data1[1], item.data1[2]);
+    if ((def.usability_flags & bits) == bits) {
+      return false;
+    }
+    strength = def.dfp + def.evp;
+  } catch (const std::exception&) {
+    return false; // not in Sega's table: left as it is
+  }
+  uint8_t best_index = 0; // the base Frame or Barrier when nothing else fits
+  uint32_t best_strength = 0;
+  bool found = false;
+  size_t count = pmt.num_armors_or_shields_in_class(item.data1[1]);
+  for (size_t index = 0; (index < count) && (index < 0x100); index++) {
+    ItemData a;
+    a.data1[0] = 0x01;
+    a.data1[1] = item.data1[1];
+    a.data1[2] = index;
+    if (pmt.is_item_rare(a)) {
+      continue;
+    }
+    const auto& def = pmt.get_armor_or_shield(a.data1[1], index);
+    uint32_t s = def.dfp + def.evp;
+    if (((def.usability_flags & bits) == bits) && (s <= strength) && (!found || (s >= best_strength))) {
+      best_index = index;
+      best_strength = s;
+      found = true;
+    }
+  }
+  const auto& def = pmt.get_armor_or_shield(item.data1[1], best_index);
+  item.data1[2] = best_index;
+  item.set_armor_or_shield_defense_bonus(std::min<int16_t>(item.get_armor_or_shield_defense_bonus(), def.dfp_range));
+  item.set_common_armor_evasion_bonus(std::min<int16_t>(item.get_common_armor_evasion_bonus(), def.evp_range));
+  return true;
+}
+
 SpireWeaponBoost spire_drops_boss_boost(const SpireDropsConfig& cfg, uint32_t k) {
   SpireWeaponBoost ret;
   if (k) {
@@ -273,6 +315,10 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
     item.clear();
     return "not a run item (rule book item 30)";
   }
+  // B-BEL-4: a frame or barrier he cannot wear becomes one he can; the pity count below sees it as before
+  const char* armor_why = spire_drops_fit_armor(pmt, item, p.char_class)
+      ? "frame or barrier this player cannot wear, replaced"
+      : nullptr;
   if (fit == SpireWeaponFit::NOW) {
     pity = 0;
     return nullptr;
@@ -292,7 +338,7 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
     }
   }
   pity++;
-  return nullptr;
+  return armor_why;
 }
 
 bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {

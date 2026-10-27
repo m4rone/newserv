@@ -3600,6 +3600,77 @@ void run_static_tests() {
     expect_eq(0, ch.inventory.num_items);
   }
 
+  phosg::log_info_f("-- Spire drops B-BEL-4: a force gets no frame or barrier it cannot wear");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto lv1 = [&](uint8_t cls) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, 5);
+      return p;
+    };
+    auto armor = [](uint8_t kind, uint8_t index) {
+      ItemData ret;
+      ret.data1[0] = 0x01;
+      ret.data1[1] = kind;
+      ret.data1[2] = index;
+      return ret;
+    };
+    auto wears = [&](const ItemData& it, uint8_t cls) {
+      uint8_t bits = spire_weapon_usability_bits(cls);
+      return (pmt->get_armor_or_shield(it.data1[1], it.data1[2]).usability_flags & bits) == bits;
+    };
+    auto strength = [&](const ItemData& it) {
+      const auto& def = pmt->get_armor_or_shield(it.data1[1], it.data1[2]);
+      return def.dfp + def.evp;
+    };
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    // Sega's table: the Armor (01 01 01) is not for forces (usability FB), the Frame (01 01 00) is for everyone
+    expect_eq(0xFB, pmt->get_armor_or_shield(1, 1).usability_flags);
+    expect_eq(0xFF, pmt->get_armor_or_shield(1, 0).usability_flags);
+    size_t replaced = 0;
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      for (uint8_t kind : {1, 2}) {
+        for (size_t index = 0; index < pmt->num_armors_or_shields_in_class(kind); index++) {
+          ItemData dropped = armor(kind, index);
+          ItemData it = dropped;
+          it.data1[5] = 3; // slots of a frame
+          uint32_t pity = 2;
+          spire_drops_filter_item(cfg, *pmt, it, lv1(cls), false, pity, 0);
+          expect_eq(3u, pity); // the pity count as before: one more drop without a usable weapon
+          expect_eq(0x01, it.data1[0]);
+          expect_eq(kind, it.data1[1]); // a frame stays a frame, a barrier a barrier
+          expect(wears(it, cls));
+          if (wears(dropped, cls)) {
+            expect_eq(index, it.data1[2]); // one he can wear stays as it is
+          } else {
+            replaced++;
+            expect((it.data1[2] == 0) || (strength(it) <= strength(dropped)));
+            expect(!pmt->is_item_rare(it));
+            expect_eq(3, it.data1[5]); // its slots stay
+          }
+        }
+      }
+    }
+    phosg::log_info_f("Spire armour: {} of the 12 classes' frame and barrier drops replaced", replaced);
+    expect(replaced > 0);
+    // A FOnewearl's drop: the Armor becomes the Frame; the Plate armour 01 01 05 (DFP 25, EVP 17) becomes the
+    // strongest common frame a force wears that is not stronger, 01 01 04 (DFP 20, EVP 15)
+    for (auto [index, want] : std::vector<std::pair<uint8_t, uint8_t>>{{1, 0}, {2, 0}, {5, 4}}) {
+      ItemData it = armor(1, index);
+      it.set_armor_or_shield_defense_bonus(9); // above the new frame's DFP range: capped
+      uint32_t pity = 0;
+      expect(spire_drops_filter_item(cfg, *pmt, it, lv1(8), false, pity, 0) != nullptr);
+      expect_eq(want, it.data1[2]);
+      expect(it.get_armor_or_shield_defense_bonus() <= pmt->get_armor_or_shield(1, want).dfp_range);
+      ItemData hu = armor(1, index); // a HUmar keeps it
+      expect(spire_drops_filter_item(cfg, *pmt, hu, lv1(0), false, pity, 0) == nullptr);
+      expect_eq(index, hu.data1[2]);
+    }
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();

@@ -80,6 +80,13 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
 // rangers), the common weapons of his class he lacks the least for. Empty only if his class can equip none.
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random);
 
+// B-BEL-4 (armour): a frame or barrier this class cannot wear (Sega's usability bits, as for weapons) becomes one of
+// the same kind it can wear: the strongest common one (DFP + EVP of Sega's table, the later one on a tie) that is not
+// stronger than the dropped one, else the base Frame or Barrier (index 0). Its slots stay, its DFP and EVP bonus are
+// capped at the new item's ranges. Returns true if the item changed. Any other item, one the class can wear, or one
+// not in Sega's table: unchanged. Pity does not see this (the item stays a non-weapon run item).
+bool spire_drops_fit_armor(const ItemParameterTable& pmt, ItemData& item, uint8_t char_class);
+
 // F8: the grind and Hit a weapon gets (0 = none)
 struct SpireWeaponBoost {
   uint8_t grind = 0;
