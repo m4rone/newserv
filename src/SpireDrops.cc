@@ -313,6 +313,21 @@ bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
   }
 }
 
+std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules) {
+  if (!quest_rules || (quest_rules->meseta_mode != BattleRules::MesetaMode::FORBID_ALL)) {
+    return quest_rules;
+  }
+  auto ret = std::make_shared<BattleRules>(*quest_rules);
+  ret->meseta_mode = BattleRules::MesetaMode::ALLOW; // ItemCreator::clear_item_if_restricted clears only FORBID_ALL
+  return ret;
+}
+
+static void spire_drops_apply_item_rules(std::shared_ptr<Lobby> l) {
+  if (l->item_creator && l->quest) {
+    l->item_creator->set_restrictions(spire_drops_item_rules(l->quest->meta.battle_rules));
+  }
+}
+
 static std::unordered_map<const Client*, uint32_t> spire_drops_pity;
 
 static const SpireDropsConfig* spire_drops_config_for(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
@@ -339,6 +354,7 @@ void spire_drops_quest_loaded(std::shared_ptr<Lobby> l, std::shared_ptr<const Cl
   }
   l->allowed_drop_modes |= (1 << static_cast<size_t>(cfg->drop_mode));
   l->drop_mode = cfg->drop_mode;
+  spire_drops_apply_item_rules(l); // B-BEL-4: Sega's meseta drops
   l->log.info_f("Spire drops: q{} uses the server's drops ({})", l->quest->meta.quest_number, cfg->str());
 }
 
@@ -357,6 +373,7 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
     return false;
   }
   try {
+    spire_drops_apply_item_rules(l); // B-BEL-4: also after a new item creator (leader change)
     auto s = c->require_server_state();
     auto p = c->character_file();
     auto pmt = s->data->item_parameter_table(c->version());

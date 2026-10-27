@@ -3546,6 +3546,60 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire drops B-BEL-4: Sega's meseta drops of enemies and boxes in a Spire game");
+  {
+    // The quest's rule block forbids meseta drops (spire.json meseta_drop_mode 1 = FORBID_ALL); in a Spire game with
+    // SpireDrops the server's item creator gets spire_drops_item_rules: the same rules with meseta allowed
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    auto common = std::make_shared<JSONCommonItemSet>(phosg::JSON::parse(phosg::load_file("system/tables/common-table-v3-v4.json")));
+    auto rare = std::make_shared<RareItemSet>(phosg::JSON::dict()); // no rares: only the common drops count
+    auto armor_set = std::make_shared<ArmorShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/armor-shop-random-set.json")));
+    auto tool_set = std::make_shared<ToolShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/tool-shop-random-set.json")));
+    auto weapon_set = std::make_shared<WeaponShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/weapon-shop-random-set-normal.json")));
+    auto tekker = std::make_shared<TekkerAdjustmentSet>(phosg::JSON::parse(phosg::load_file("system/tables/tekker-adjustment-set.json")));
+    auto limits = std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+    auto quest_rules = std::make_shared<BattleRules>();
+    quest_rules->meseta_mode = BattleRules::MesetaMode::FORBID_ALL;
+    quest_rules->lives = 3;
+    quest_rules->box_drop_area = 3;
+    auto spire_rules = spire_drops_item_rules(quest_rules);
+    expect(spire_rules && (spire_rules != quest_rules));
+    expect(spire_rules->meseta_mode == BattleRules::MesetaMode::ALLOW);
+    expect_eq(3u, spire_rules->lives.load()); // every other rule stays the quest's
+    expect_eq(3u, spire_rules->box_drop_area.load());
+    expect(quest_rules->meseta_mode == BattleRules::MesetaMode::FORBID_ALL); // the quest's own rules unchanged
+    auto allowing = std::make_shared<BattleRules>();
+    expect(spire_drops_item_rules(allowing) == allowing);
+    expect(spire_drops_item_rules(nullptr) == nullptr);
+    // Count the meseta among 1000 box drops and 1000 Booma drops on Forest 1 (area 01) with either rules
+    auto count_meseta = [&](std::shared_ptr<const BattleRules> rules, bool box) -> size_t {
+      ItemCreator ic(common, rare, armor_set, tool_set, weapon_set, tekker, pmt, limits, GameMode::BATTLE,
+          Difficulty::NORMAL, 0, std::make_shared<MT19937Generator>(0x5E6A), rules);
+      size_t ret = 0;
+      for (size_t z = 0; z < 1000; z++) {
+        auto res = box ? ic.on_box_item_drop(0x01, false) : ic.on_monster_item_drop(EnemyType::BOOMA, 0x01, false);
+        ret += (!res.item.empty() && (res.item.data1[0] == 0x04)) ? 1 : 0;
+      }
+      return ret;
+    };
+    size_t box_quest = count_meseta(quest_rules, true), box_spire = count_meseta(spire_rules, true);
+    size_t enemy_quest = count_meseta(quest_rules, false), enemy_spire = count_meseta(spire_rules, false);
+    phosg::log_info_f("Spire meseta of 1000 drops: boxes {} (quest rules) -> {} (Spire), Boomas {} -> {}",
+        box_quest, box_spire, enemy_quest, enemy_spire);
+    expect_eq(0u, box_quest); // what the quest's rule block does to a box's meseta
+    expect(box_spire > 0);
+    expect(enemy_spire > 0);
+    // Picking it up: the server adds a meseta drop to the character's meseta, never into the inventory
+    PSOBBCharacterFile ch;
+    ch.disp.stats.meseta = 300;
+    ItemData meseta;
+    meseta.data1[0] = 0x04;
+    meseta.data2d = 25;
+    ch.add_item(meseta, *limits);
+    expect_eq(325u, ch.disp.stats.meseta.load());
+    expect_eq(0, ch.inventory.num_items);
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();

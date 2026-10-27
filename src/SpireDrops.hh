@@ -11,6 +11,7 @@
 #include "ItemData.hh"
 #include "ItemParameterTable.hh"
 #include "LevelTable.hh"
+#include "PlayerSubordinates.hh"
 
 class Client;
 class Lobby;
@@ -127,8 +128,16 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
 // boss drop. Dark Falz and Olga Flow children alias their head, which keeps child_index 0 as the target.
 bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index = 0);
 
+// B-BEL-4 (meseta): the rules the server's item creator uses in a Spire game with SpireDrops: the quest's rule block
+// with meseta allowed. The quest forbids meseta drops (ba_set_meseta_drop_mode 1, which also goes to the client and
+// stays), but the server makes the drops and the Spire filter keeps meseta, so the server gives Sega's meseta drops of
+// enemies and boxes again. Every other rule stays the quest's. Returns quest_rules itself when it forbids no meseta
+// (or is null).
+std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules);
+
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
-// counter. Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a
+// counter, and give the lobby's item creator spire_drops_item_rules (again at every filtered drop, because the
+// lobby makes a new item creator with the quest's rules when its leader changes). Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a
 // change. Both no-ops outside a Spire game or without SpireDrops; the filter never throws (a missing table or
 // character keeps the item as it is). floor: the floor the item drops on (the drop request's), which gives the room
 // k; never the receiver's floor (critic M1: a SERVER_PRIVATE box drop reaches players on other floors, and a client's
