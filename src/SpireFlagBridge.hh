@@ -126,9 +126,9 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     waits: make room." A newserv from before bundle 9 takes 'C' 12 as an unknown point: no text, no log line.
 // Route B bundle 9 (quests/spire/ROUTEB9-PROTOCOL.md § 1 and § 3; SpireEquipItem.hh), from the writer, no text of their
 // own: 'C' 13 the kit weapon was made with grind G (low byte), not equipped · 'C' 14 the run mag was replaced after an
-// evolution. With r15 = 1 for the writer newserv sends it SpireEquipItem with the item id of the newest unequipped
-// weapon with grind G ('C' 13) or of the one run mag ('C' 14) in its copy of the inventory; r15 = 0 or no such item:
-// one log line, nothing sent. r15 (SPIRE_EQUIP_REGISTER) goes out in every 'M' answer, before DONE. With r15 = 1 the
+// evolution. With r143 = 1 for the writer newserv sends it SpireEquipItem with the item id of the newest unequipped
+// weapon with grind G ('C' 13) or of the one run mag ('C' 14) in its copy of the inventory; r143 = 0 or no such item:
+// one log line, nothing sent. r143 (SPIRE_EQUIP_REGISTER) goes out in every 'M' answer, before DONE. With r143 = 1 the
 // kit ticker names the grind and only the HP Materials, and the evolution text drops "Equip it: Item Pack > Mag."
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v48), the
