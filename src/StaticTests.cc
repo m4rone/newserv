@@ -4777,7 +4777,7 @@ void run_static_tests() {
 
     f6_case("bundle 2 S: the kit text after 'M' START", [&]() {
       expect(spire_kit_use_text_due(true, 1, 0, false, false)); // hp_mat only
-      // atp_grind alone makes it due too (the kit holds Monogrinders; B-REGIE-16-15, section "Spire bundle 8")
+      // hp_mat and atp_grind together (atp_grind alone: the bundle 8 case "kit ticker: materials and grinders")
       expect(spire_kit_use_text_due(true, 3, 3, false, false));
       expect(!spire_kit_use_text_due(true, 0, 0, false, false)); // no kit level (an old meta file): no text
       expect(!spire_kit_use_text_due(false, 1, 1, false, false)); // LIST or BUY: no text
