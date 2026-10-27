@@ -2287,6 +2287,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     uint32_t quest_number, uint32_t value) {
   uint8_t sub = (value >> 16) & 0xFF;
   uint8_t k = value & 0xFF;
+  uint8_t lean_bits = spire_run_mag_lean_bits(value); // F10: ASK and EXAM only
   auto* run = spire_game_run_for(l);
   auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
 
@@ -2294,11 +2295,10 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     // no answer: the quest waits for none (protocol)
     auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, sub == SPIRE_RUN_MAG_LEAN) : nullptr;
     if (sub == SPIRE_RUN_MAG_LEAN) {
-      if (led) {
-        led->lean = k;
-      }
-      c->log.info_f("Spire run mag: LEAN {} for serial {:010} in q{}{}", k, serial_number, quest_number,
-          led ? "" : " (no run: not stored)");
+      // F10: no quest sends a sub 5 (the lean travels in the ASK/EXAM bits); kept with the same rule
+      auto stored = led ? spire_run_mag_lean_store(*led, k) : SpireRunMagLeanStore::NONE;
+      c->log.info_f("Spire run mag: LEAN {} for serial {:010} in q{}: {}", k, serial_number, quest_number,
+          led ? spire_run_mag_lean_store_name(stored) : "no run: not stored");
     } else if (sub == SPIRE_RUN_MAG_NO_MAG) {
       bool issued = led && (led->issued_step >= 0);
       if (issued) {
@@ -2312,6 +2312,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       int32_t before = led ? led->step_before_offer : -1;
       int32_t offered_step = led ? led->offered_step : -1;
       auto offered = led ? led->offered : std::nullopt;
+      bool offered_shell = led && led->offered_shell; // F10: the evolve text names a Shell mag
       bool known = led && spire_run_mag_result(*led, created);
       if (!known) {
         c->log.warning_f("Spire run mag: RESULT {} for serial {:010} in q{} without an offered mag; ignored", created,
@@ -2332,9 +2333,10 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
-        spire_send_ticker(c, (before < 0) ? SPIRE_RUN_MAG_REMINDER_TEXT : spire_run_mag_evolve_text(name));
-        c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {} {} (run {:08X})",
-            serial_number, quest_number, led->issued_step, name, spire_run_mag_bytes_hex(*offered), run->run_id);
+        spire_send_ticker(c, (before < 0) ? SPIRE_RUN_MAG_REMINDER_TEXT : spire_run_mag_evolve_text(name, offered_shell));
+        c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {}{} {} (run {:08X})",
+            serial_number, quest_number, led->issued_step, name, offered_shell ? " (Shell)" : "",
+            spire_run_mag_bytes_hex(*offered), run->run_id);
       }
     }
     return;
@@ -2406,21 +2408,28 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       start_bonus = sl_it->second.bonus;
     }
     auto mags = spire_run_mag_inventory_mags(overlay->inventory);
-    handled = spire_run_mag_handle(*led, table, *line, sub, k, mags, server_bosses, start_bonus);
+    handled = spire_run_mag_handle(*led, table, *line, sub, k, mags, server_bosses, start_bonus, lean_bits);
+    if (handled.shell_fell_back) {
+      c->log.warning_f("Spire run mag: lean Shell for serial {:010} in q{}, but {} has no usable ShellSteps ({}); Steps answer",
+          serial_number, quest_number, SPIRE_RUN_MAG_FILE, line->shell_note);
+    }
     if (handled.followed_mirror) {
       c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
           spire_run_mag_bytes_hex(*led->last_mirrored));
     }
     const auto& decision = handled.decision;
-    detail += std::format("; run {:08X}, start step {}, boss rooms {}, issued step {}, expected step {}, start bonus {}, {} mag(s) in the run copy",
+    detail += std::format("; run {:08X}, start step {}, boss rooms {}, issued step {}, expected step {}, start bonus {}, {} mag(s) in the run copy, lean bits {} {}, lean {} ({})",
         run->run_id, led->start_step, led->boss_rooms.size(), led->issued_step, decision.expected_step, start_bonus,
-        mags.size());
+        mags.size(), lean_bits, spire_run_mag_lean_store_name(handled.lean_store), led->lean,
+        handled.shell ? "Shell column" : "Steps");
     if (decision.result) {
       for (size_t z = 0; z < 12; z++) {
         spire_send_register(c, SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + z, decision.bytes[z]);
       }
       detail += std::format("; new mag {}", spire_run_mag_bytes_hex(decision.bytes));
     }
+  } else if (lean_bits) {
+    detail += std::format("; lean bits {} not stored (refused)", lean_bits);
   }
   uint32_t answer = handled.answer;
   spire_send_register(c, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);

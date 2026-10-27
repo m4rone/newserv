@@ -4108,48 +4108,56 @@ void run_static_tests() {
       expect(table.enabled);
       expect_eq(3u, table.classes.size());
       for (const char* cls : {"HU", "RA", "FO"}) {
-        const auto& line = table.classes.at(cls);
-        expect_eq(5u, line.steps.size());
-        std::vector<SpireMagRow> rows = line.steps;
-        for (const auto& f : line.floors) {
-          rows.emplace_back(f.row);
-        }
-        for (const auto& row : rows) {
-          auto b = spire_mag_row_bytes(row);
-          expect_eq(0x02, b[0]);
-          expect_eq(row.id, b[1]);
-          uint32_t sum = 0;
-          for (size_t z = 0; z < 4; z++) {
-            expect_eq(0, word(b, z) & 1); // every stat even
-            sum += word(b, z) / 100;
+        const auto& full = table.classes.at(cls);
+        // F10: the Shell column is shipped for every class, as long as Steps, and keeps the same rules (randgevallen 4-5)
+        expect_eq(std::string(""), full.shell_note);
+        expect_eq(full.steps.size(), full.shell_steps.size());
+        const auto shell = spire_mag_column(full, SPIRE_RUN_MAG_LEAN_SHELL);
+        expect(shell.shell && !shell.fell_back);
+        for (const SpireMagLine* line_p : {&full, &shell.line}) {
+          const auto& line = *line_p;
+          expect_eq(5u, line.steps.size());
+          std::vector<SpireMagRow> rows = line.steps;
+          for (const auto& f : line.floors) {
+            rows.emplace_back(f.row);
           }
-          expect_eq(sum, b[2]); // LL == the sum of the four levels
-          expect(b[2] <= 200);
-          expect(names.contains(std::format("02{:02X}00", b[1]))); // a type-02 id of V3
-        }
-        for (size_t s = 1; s < line.steps.size(); s++) {
-          auto prev = spire_mag_row_bytes(line.steps[s - 1]);
-          auto cur = spire_mag_row_bytes(line.steps[s]);
-          for (size_t z = 0; z < 4; z++) {
-            expect(word(cur, z) >= word(prev, z)); // monotone per stat
-          }
-          expect(cur[1] != prev[1]); // a visible evolve at every step
-          expect(cur[2] > prev[2]);
-        }
-        // every step under every start floor and an already fed mag keeps the same rules
-        for (uint32_t bonus : {0u, 5u, 10u, 14u}) {
-          Bytes prev{};
-          for (size_t s = 0; s < line.steps.size(); s++) {
-            auto b = spire_mag_step_bytes(line, s, bonus, std::nullopt);
+          for (const auto& row : rows) {
+            auto b = spire_mag_row_bytes(row);
+            expect_eq(0x02, b[0]);
+            expect_eq(row.id, b[1]);
             uint32_t sum = 0;
             for (size_t z = 0; z < 4; z++) {
-              expect_eq(0, word(b, z) & 1);
+              expect_eq(0, word(b, z) & 1); // every stat even
               sum += word(b, z) / 100;
-              expect(!s || (word(b, z) >= word(prev, z)));
             }
-            expect_eq(sum, b[2]);
+            expect_eq(sum, b[2]); // LL == the sum of the four levels
             expect(b[2] <= 200);
-            prev = b;
+            expect(names.contains(std::format("02{:02X}00", b[1]))); // a type-02 id of V3
+          }
+          for (size_t s = 1; s < line.steps.size(); s++) {
+            auto prev = spire_mag_row_bytes(line.steps[s - 1]);
+            auto cur = spire_mag_row_bytes(line.steps[s]);
+            for (size_t z = 0; z < 4; z++) {
+              expect(word(cur, z) >= word(prev, z)); // monotone per stat
+            }
+            expect(cur[1] != prev[1]); // a visible evolve at every step
+            expect(cur[2] > prev[2]);
+          }
+          // every step under every start floor and an already fed mag keeps the same rules
+          for (uint32_t bonus : {0u, 5u, 10u, 14u}) {
+            Bytes prev{};
+            for (size_t s = 0; s < line.steps.size(); s++) {
+              auto b = spire_mag_step_bytes(line, s, bonus, std::nullopt);
+              uint32_t sum = 0;
+              for (size_t z = 0; z < 4; z++) {
+                expect_eq(0, word(b, z) & 1);
+                sum += word(b, z) / 100;
+                expect(!s || (word(b, z) >= word(prev, z)));
+              }
+              expect_eq(sum, b[2]);
+              expect(b[2] <= 200);
+              prev = b;
+            }
           }
         }
       }
@@ -4330,6 +4338,7 @@ void run_static_tests() {
       led.last_mirrored = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
       auto e8 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0);
       expect(e8.result);
+      led.lean = SPIRE_RUN_MAG_LEAN_SHELL; // F10: a Shell run (chosen at the kit)
       // the RESULT is lost; the next room start writes the savestate with this ledger
       SpireSavestate ss;
       ss.run_id = led.run_id;
@@ -4342,6 +4351,26 @@ void run_static_tests() {
       expect(!spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_ASK, 9, {}, 0).result);
       expect(!spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_EXAM, 8, {}, 0).result);
       expect_eq(2, resumed.issued_step);
+      // F10: the lean comes back with the ledger; a resume shows no menu, so the next EXAM carries lean bits 0 and
+      // still gets the Shell row (the column follows the ledger, not the bits)
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, resumed.lean);
+      auto last = resumed.last_mirrored;
+      auto e11 = spire_run_mag_handle(resumed, table, hu, SPIRE_RUN_MAG_EXAM, 11, {}, {}, 0, 0);
+      expect(e11.decision.result && e11.shell);
+      expect_eq(3u, e11.decision.expected_step);
+      expect(e11.decision.bytes == spire_mag_step_bytes(spire_mag_column(hu, SPIRE_RUN_MAG_LEAN_SHELL).line, 3, 0, last));
+      expect(!(e11.decision.bytes == spire_mag_step_bytes(hu, 3, 0, last)));
+      expect_eq(4200, word(e11.decision.bytes, 0)); // DEF 42: ShellSteps row 3
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, resumed.lean);
+      // an old savestate without "Lean" loads as no choice (the default column)
+      SpireRunMagLedger old_led = led;
+      old_led.lean = SPIRE_RUN_MAG_LEAN_NONE;
+      ss.run_mag = old_led;
+      std::string old_json = spire_savestate_to_json(ss, 1);
+      size_t lean_pos = old_json.find("\"Lean\"");
+      expect(lean_pos != std::string::npos);
+      old_json.replace(lean_pos, 6, "\"Xean\"");
+      expect_eq(SPIRE_RUN_MAG_LEAN_NONE, spire_savestate_from_json(old_json).run_mag->lean);
     });
 
     f6_case("the ledger follows the feed mirror", [&]() {
@@ -4406,20 +4435,20 @@ void run_static_tests() {
     // routeb-f6-critic.md C3-6: each case below fails under the mutation it names
     f6_case("handler: old_type is data1[1] of the one run mag, else 0xFF (C3-6 mutation 1)", [&]() {
       SpireRunMagLedger led;
-      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0);
+      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0, 0);
       expect(kit.decision.result);
       expect_eq(SPIRE_RUN_MAG_NO_OLD, kit.old_type); // no mag yet: the quest deletes nothing
       expect_eq(0x5A00FF01u, kit.answer);
       expect(spire_run_mag_result(led, true));
       // the Dragon: the run copy holds the kit mag (kind 0x00), so the quest must delete kind 0x00 after the create
-      auto dragon = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {}, 0);
+      auto dragon = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {}, 0, 0);
       expect(dragon.decision.result);
       expect_eq(kit.decision.bytes[1], dragon.old_type);
       expect_eq(0x00, dragon.old_type);
       expect_eq(0x5A000001u, dragon.answer);
       expect(spire_run_mag_result(led, true));
       // De Rol Le with the Dragon's mag (Varuna, kind 0x01) in the pack
-      auto rol = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {dragon.decision.bytes}, {}, 0);
+      auto rol = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {dragon.decision.bytes}, {}, 0, 0);
       expect(rol.decision.result);
       expect_eq(0x01, dragon.decision.bytes[1]);
       expect_eq(0x01, rol.old_type);
@@ -4427,7 +4456,7 @@ void run_static_tests() {
       // two type-02 items: never name one (the refusal catches this first; the pure part stays safe on its own)
       SpireRunMagLedger two;
       expect_eq(SPIRE_RUN_MAG_NO_OLD,
-          spire_run_mag_handle(two, table, hu, SPIRE_RUN_MAG_ASK, 1, {kit.decision.bytes, dragon.decision.bytes}, {}, 0).old_type);
+          spire_run_mag_handle(two, table, hu, SPIRE_RUN_MAG_ASK, 1, {kit.decision.bytes, dragon.decision.bytes}, {}, 0, 0).old_type);
       // a refusal's answer
       expect_eq(0x5A00FF00u, SpireRunMagHandled().answer);
     });
@@ -4463,22 +4492,22 @@ void run_static_tests() {
     f6_case("handler: the start step is set by the first ASK only (C3-6 mutation 5)", [&]() {
       // A run from room 1: kit at k1, the Dragon and De Rol Le examined, then an ASK at k9 (a non-boss clear)
       SpireRunMagLedger led;
-      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0);
+      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0, 0);
       expect_eq(0u, led.start_step);
       expect(spire_run_mag_result(led, true));
-      auto e4 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {4}, 0);
+      auto e4 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {4}, 0, 0);
       expect(spire_run_mag_result(led, true));
-      auto e8 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {e4.decision.bytes}, {4, 8}, 0);
+      auto e8 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {e4.decision.bytes}, {4, 8}, 0, 0);
       expect_eq(2u, e8.decision.expected_step);
       expect(spire_run_mag_result(led, true));
-      auto a9 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 9, {e8.decision.bytes}, {4, 8}, 0);
+      auto a9 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 9, {e8.decision.bytes}, {4, 8}, 0, 0);
       expect_eq(0u, led.start_step); // spire_mag_start_step(table, 9) would be 2
       expect_eq(2u, a9.decision.expected_step);
       expect(!a9.decision.result); // no skipped step
       expect_eq(2, led.issued_step);
       // a practice run that first asks at k9 starts after two bosses
       SpireRunMagLedger practice;
-      auto p9 = spire_run_mag_handle(practice, table, hu, SPIRE_RUN_MAG_ASK, 9, {}, {}, 0);
+      auto p9 = spire_run_mag_handle(practice, table, hu, SPIRE_RUN_MAG_ASK, 9, {}, {}, 0, 0);
       expect_eq(2u, practice.start_step);
       expect(p9.decision.result);
       expect_eq(2u, p9.decision.expected_step);
@@ -4511,6 +4540,162 @@ void run_static_tests() {
       expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
       expect(std::string(SPIRE_BOSS_BURST_TEXT).find("mag") == std::string::npos);
       expect(std::string(SPIRE_BOSS_BURST_TEXT).find("Mag") == std::string::npos);
+    });
+
+    // F10 mag lean (routeb2-f10-randgevallen.md, "Besluit na de critic" 1, 2, 6, 7, 8)
+    const auto hu_shell = spire_mag_column(hu, SPIRE_RUN_MAG_LEAN_SHELL).line;
+    using LS = SpireRunMagLeanStore;
+
+    f6_case("F10: the lean is bits 8-15 of the ASK/EXAM word", [&]() {
+      expect_eq(2, spire_run_mag_lean_bits(0x5A040204)); // 'Z' EXAM, lean 2 (Shell), k4
+      expect_eq(1, spire_run_mag_lean_bits(0x5A010101)); // 'Z' ASK, lean 1 (Fang/Mind), k1
+      expect_eq(0, spire_run_mag_lean_bits(0x5A010001)); // an ASK from a quest before F10: no choice
+      expect_eq(0x2A, spire_run_mag_lean_bits(0x5A012A01));
+    });
+
+    f6_case("F10: lean 2 picks the DEF-heavy row, lean 0 and 1 the default; only the row differs", [&]() {
+      for (uint8_t lean : {SPIRE_RUN_MAG_LEAN_NONE, SPIRE_RUN_MAG_LEAN_FANG, SPIRE_RUN_MAG_LEAN_SHELL}) {
+        bool is_shell = (lean == SPIRE_RUN_MAG_LEAN_SHELL);
+        SpireRunMagLedger led;
+        auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0, lean);
+        expect_eq(lean ? LS::STORED : LS::NONE, kit.lean_store);
+        expect_eq(lean, led.lean);
+        expect(kit.decision.result);
+        expect(kit.decision.bytes == spire_mag_step_bytes(hu, 0, 0, std::nullopt)); // step 0 the same for every lean
+        expect_eq(0x5A00FF01u, kit.answer);
+        expect(spire_run_mag_result(led, true));
+        expect(!led.offered_shell);
+        auto e4 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {4}, 0, lean);
+        expect(e4.decision.result);
+        expect_eq(1u, e4.decision.expected_step);
+        expect_eq(0x00, e4.old_type);
+        expect_eq(0x5A000001u, e4.answer); // the same answer for every lean: create the new mag, delete kind 0x00
+        expect(!e4.shell_fell_back);
+        expect_eq(is_shell, e4.shell);
+        expect_eq(is_shell, led.offered_shell);
+        expect(e4.decision.bytes == spire_mag_step_bytes(is_shell ? hu_shell : hu, 1, 0, kit.decision.bytes));
+        expect_eq(is_shell ? 1800 : 700, word(e4.decision.bytes, 0)); // DEF
+        expect_eq(is_shell ? 700 : 1800, word(e4.decision.bytes, 1)); // POW
+        expect_eq(0x01, e4.decision.bytes[1]); // Varuna in both columns (Sega's HU evolution reads no DEF)
+        expect(spire_run_mag_result(led, true));
+        expect(!led.offered_shell);
+      }
+    });
+
+    f6_case("F10: a lean after a step above the kit's is ignored, as is a value above 2 (sub 5 too)", [&]() {
+      SpireRunMagLedger led;
+      led.issued_step = 1;
+      led.boss_rooms = {4};
+      led.last_mirrored = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
+      auto e8 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {*led.last_mirrored}, {4, 8}, 0,
+          SPIRE_RUN_MAG_LEAN_SHELL);
+      expect_eq(LS::AFTER_STEP, e8.lean_store);
+      expect_eq(SPIRE_RUN_MAG_LEAN_NONE, led.lean);
+      expect(e8.decision.result && !e8.shell);
+      expect(e8.decision.bytes == spire_mag_step_bytes(hu, 2, 0, spire_mag_step_bytes(hu, 1, 0, std::nullopt)));
+      // a Fang run never turns Shell midway either
+      SpireRunMagLedger fang;
+      fang.issued_step = 1;
+      fang.lean = SPIRE_RUN_MAG_LEAN_FANG;
+      expect_eq(LS::AFTER_STEP, spire_run_mag_lean_store(fang, SPIRE_RUN_MAG_LEAN_SHELL));
+      expect_eq(SPIRE_RUN_MAG_LEAN_FANG, fang.lean);
+      // with only the kit's step issued (0) the lean is still taken, and a second choice replaces the first
+      SpireRunMagLedger kit;
+      kit.issued_step = 0;
+      expect_eq(LS::STORED, spire_run_mag_lean_store(kit, SPIRE_RUN_MAG_LEAN_SHELL));
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, kit.lean);
+      expect_eq(LS::STORED, spire_run_mag_lean_store(kit, SPIRE_RUN_MAG_LEAN_FANG));
+      expect_eq(SPIRE_RUN_MAG_LEAN_FANG, kit.lean);
+      // 0 stores nothing (it keeps a choice made earlier); above 2 is ignored
+      SpireRunMagLedger none;
+      expect_eq(LS::STORED, spire_run_mag_lean_store(none, SPIRE_RUN_MAG_LEAN_SHELL));
+      expect_eq(LS::NONE, spire_run_mag_lean_store(none, SPIRE_RUN_MAG_LEAN_NONE));
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, none.lean);
+      expect_eq(LS::INVALID, spire_run_mag_lean_store(none, 3));
+      expect_eq(LS::INVALID, spire_run_mag_lean_store(none, 0xFF));
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, none.lean);
+      expect_eq(std::string("stored"), std::string(spire_run_mag_lean_store_name(LS::STORED)));
+    });
+
+    f6_case("F10: a practice run from k >= 5 with Shell in its first ASK gets the Shell row of its start step", [&]() {
+      SpireRunMagLedger p;
+      auto p9 = spire_run_mag_handle(p, table, hu, SPIRE_RUN_MAG_ASK, 9, {}, {}, 0, SPIRE_RUN_MAG_LEAN_SHELL);
+      expect_eq(LS::STORED, p9.lean_store);
+      expect_eq(2u, p.start_step);
+      expect(p9.decision.result && p9.shell);
+      expect_eq(2u, p9.decision.expected_step);
+      expect(p9.decision.bytes == spire_mag_row_bytes(hu.shell_steps[2])); // 30/9/1/0 Rudra
+      expect_eq(3000, word(p9.decision.bytes, 0));
+      expect_eq(900, word(p9.decision.bytes, 1));
+      // FO from k16 (after four bosses): the last Shell step, Bana (FO's evolution reads DEF from L50 on)
+      SpireRunMagLedger f;
+      auto f16 = spire_run_mag_handle(f, table, table.classes.at("FO"), SPIRE_RUN_MAG_ASK, 16, {}, {}, 0,
+          SPIRE_RUN_MAG_LEAN_SHELL);
+      expect(f16.decision.result && f16.shell);
+      expect_eq(4u, f16.decision.expected_step);
+      expect_eq(0x24, f16.decision.bytes[1]);
+      expect_eq(4600, word(f16.decision.bytes, 0)); // DEF
+      expect_eq(1400, word(f16.decision.bytes, 3)); // MIND
+    });
+
+    f6_case("F10: a json without, with a short or with a bad ShellSteps answers Steps, never NO_TABLE", [&]() {
+      const std::string row0 = R"({"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0})";
+      const std::string fang1 = R"({"Id": 1, "Def": 7, "Pow": 18, "Dex": 0, "Mind": 0})";
+      const std::string shell1 = R"({"Id": 1, "Def": 18, "Pow": 7, "Dex": 0, "Mind": 0})";
+      auto json_with = [&](const std::string& shell) {
+        return R"({"Enabled": true, "Classes": {"HU": {"Steps": [)" + row0 + ", " + fang1 + "]" + shell +
+            R"(}}, "BossRooms": [4, 8]})";
+      };
+      auto steps_answer = [&](const SpireMagLine& line, bool want_shell) {
+        SpireRunMagLedger led;
+        led.issued_step = 0;
+        led.lean = SPIRE_RUN_MAG_LEAN_SHELL;
+        led.last_mirrored = spire_mag_row_bytes(line.steps[0]);
+        auto t = spire_mag_parse(json_with(""));
+        auto e4 = spire_run_mag_handle(led, t, line, SPIRE_RUN_MAG_EXAM, 4, {*led.last_mirrored}, {4}, 0, 0);
+        expect(e4.decision.result); // a mag is answered: the table stays usable
+        expect_eq(want_shell, e4.shell);
+        expect_eq(!want_shell, e4.shell_fell_back);
+        expect_eq(want_shell, led.offered_shell);
+        expect_eq(want_shell ? 1800 : 700, word(e4.decision.bytes, 0));
+      };
+      for (const std::string& bad : {std::string(""), ", \"ShellSteps\": [" + row0 + "]",
+               ", \"ShellSteps\": [" + row0 + R"(, {"Id": 1, "Def": 300, "Pow": 7, "Dex": 0, "Mind": 0}])",
+               std::string(", \"ShellSteps\": 7"), ", \"ShellSteps\": [" + row0 + R"(, {"Id": 1, "Def": 18}])"}) {
+        auto t = spire_mag_parse(json_with(bad)); // throws on none of them
+        const auto& line = t.classes.at("HU");
+        expect(line.shell_steps.empty());
+        expect(!line.shell_note.empty());
+        auto col = spire_mag_column(line, SPIRE_RUN_MAG_LEAN_SHELL);
+        expect(col.fell_back && !col.shell);
+        steps_answer(line, false);
+      }
+      expect_eq(std::string("no ShellSteps"), spire_mag_parse(json_with("")).classes.at("HU").shell_note);
+      expect_eq(std::string("ShellSteps has 1 rows, Steps 2"),
+          spire_mag_parse(json_with(", \"ShellSteps\": [" + row0 + "]")).classes.at("HU").shell_note);
+      // the same json with a good ShellSteps: the Shell row
+      auto good = spire_mag_parse(json_with(", \"ShellSteps\": [" + row0 + ", " + shell1 + "]"));
+      expect_eq(std::string(""), good.classes.at("HU").shell_note);
+      expect_eq(2u, good.classes.at("HU").shell_steps.size());
+      steps_answer(good.classes.at("HU"), true);
+      // a line whose shell_steps is not as long as steps (built by hand) falls back as well
+      SpireMagLine short_line = hu;
+      short_line.shell_steps.pop_back();
+      short_line.shell_note.clear();
+      auto col = spire_mag_column(short_line, SPIRE_RUN_MAG_LEAN_SHELL);
+      expect(col.fell_back && !col.shell);
+      expect_eq(hu.steps.size(), col.line.steps.size());
+      expect(spire_mag_row_bytes(col.line.steps[1]) == spire_mag_row_bytes(hu.steps[1]));
+      // lean 0 and 1 never fall back (nothing to fall back from)
+      expect(!spire_mag_column(short_line, SPIRE_RUN_MAG_LEAN_FANG).fell_back);
+      expect(!spire_mag_column(short_line, SPIRE_RUN_MAG_LEAN_NONE).fell_back);
+    });
+
+    f6_case("F10: the evolve text names Shell", [&]() {
+      expect_eq(std::string("Your mag evolves: Varuna (Shell). Equip it: Item Pack > Mag."),
+          spire_run_mag_evolve_text("Varuna", true));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false));
+      expect_eq(spire_run_mag_evolve_text("Bana", true), spire_ticker_line(spire_run_mag_evolve_text("Bana", true)));
     });
 
     f6_case("bundle 2 S: the kit text after 'M' START", [&]() {

@@ -56,6 +56,25 @@ SpireMagTable spire_mag_parse(const std::string& json_text) {
         line.floors.emplace_back(floor);
       }
     }
+    // F10: optional, and never fatal (an old or broken ShellSteps must not take the run mag away: NO_TABLE)
+    if (!line_json->contains("ShellSteps")) {
+      line.shell_note = "no ShellSteps";
+    } else {
+      try {
+        std::vector<SpireMagRow> shell;
+        size_t s = 0;
+        for (const auto& row_json : line_json->get_list("ShellSteps")) {
+          shell.emplace_back(spire_mag_parse_row(*row_json, std::format("{} shell step {}", name, s++)));
+        }
+        if (shell.size() != line.steps.size()) {
+          line.shell_note = std::format("ShellSteps has {} rows, Steps {}", shell.size(), line.steps.size());
+        } else {
+          line.shell_steps = std::move(shell);
+        }
+      } catch (const std::exception& e) {
+        line.shell_note = std::format("ShellSteps unreadable: {}", e.what());
+      }
+    }
     ret.classes.emplace(name, std::move(line));
   }
   for (const auto& k : json.get_list("BossRooms")) {
@@ -64,6 +83,21 @@ SpireMagTable spire_mag_parse(const std::string& json_text) {
       throw std::runtime_error(std::format("boss room {} outside 1-255", v));
     }
     ret.boss_rooms.emplace(v);
+  }
+  return ret;
+}
+
+SpireMagColumn spire_mag_column(const SpireMagLine& line, uint8_t lean) {
+  SpireMagColumn ret;
+  ret.line = line;
+  if (lean != SPIRE_RUN_MAG_LEAN_SHELL) {
+    return ret;
+  }
+  if (!line.shell_steps.empty() && (line.shell_steps.size() == line.steps.size())) {
+    ret.line.steps = line.shell_steps;
+    ret.shell = true;
+  } else {
+    ret.fell_back = true;
   }
   return ret;
 }
@@ -269,18 +303,57 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   return ret;
 }
 
+uint8_t spire_run_mag_lean_bits(uint32_t value) {
+  return (value >> 8) & 0xFF;
+}
+
+SpireRunMagLeanStore spire_run_mag_lean_store(SpireRunMagLedger& ledger, uint8_t lean) {
+  if (lean == SPIRE_RUN_MAG_LEAN_NONE) {
+    return SpireRunMagLeanStore::NONE;
+  }
+  if (lean > SPIRE_RUN_MAG_LEAN_SHELL) {
+    return SpireRunMagLeanStore::INVALID;
+  }
+  if (ledger.issued_step > 0) {
+    return SpireRunMagLeanStore::AFTER_STEP;
+  }
+  ledger.lean = lean;
+  return SpireRunMagLeanStore::STORED;
+}
+
+const char* spire_run_mag_lean_store_name(SpireRunMagLeanStore r) {
+  switch (r) {
+    case SpireRunMagLeanStore::NONE:
+      return "none";
+    case SpireRunMagLeanStore::STORED:
+      return "stored";
+    case SpireRunMagLeanStore::AFTER_STEP:
+      return "ignored (a step above the kit's is issued)";
+    case SpireRunMagLeanStore::INVALID:
+      return "ignored (not 0, 1 or 2)";
+  }
+  return "?";
+}
+
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus) {
+    uint32_t start_bonus, uint8_t lean_bits) {
   SpireRunMagHandled ret;
   if (ledger.issued_step < 0 && ledger.boss_rooms.empty() && !ledger.offered) {
     ledger.start_step = spire_mag_start_step(table, k);
   }
+  ret.lean_store = spire_run_mag_lean_store(ledger, lean_bits); // F10: before the decision
   ret.followed_mirror = spire_run_mag_follow_mirror(ledger, overlay_mags);
   if (overlay_mags.size() == 1) {
     ret.old_type = overlay_mags[0][1];
   }
-  ret.decision = spire_run_mag_decide(ledger, line, sub, k, server_boss_rooms, start_bonus);
+  auto column = spire_mag_column(line, ledger.lean);
+  ret.shell = column.shell;
+  ret.shell_fell_back = column.fell_back;
+  ret.decision = spire_run_mag_decide(ledger, column.line, sub, k, server_boss_rooms, start_bonus);
+  if (ret.decision.result) {
+    ledger.offered_shell = column.shell;
+  }
   ret.answer = spire_run_mag_answer(SPIRE_RUN_MAG_TAG, ret.old_type, ret.decision.result);
   return ret;
 }
@@ -300,6 +373,7 @@ bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
     ledger.issued_step = ledger.step_before_offer;
   }
   ledger.offered.reset();
+  ledger.offered_shell = false;
   ledger.offered_step = -1;
   ledger.step_before_offer = -1;
   return true;
@@ -310,6 +384,7 @@ bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<Sp
     // the offered mag was created and its RESULT lost: confirmed as by a RESULT 1
     ledger.last_mirrored = ledger.offered;
     ledger.offered.reset();
+    ledger.offered_shell = false;
     ledger.offered_step = -1;
     ledger.step_before_offer = -1;
     return true;
@@ -344,8 +419,8 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
   return ret;
 }
 
-std::string spire_run_mag_evolve_text(const std::string& sega_name) {
-  return std::format("Your mag evolves: {}. Equip it: Item Pack > Mag.", sega_name);
+std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell) {
+  return std::format("Your mag evolves: {}{}. Equip it: Item Pack > Mag.", sega_name, shell ? " (Shell)" : "");
 }
 
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent) {

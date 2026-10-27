@@ -13,10 +13,14 @@
 // and acks. Plan: pso-roguelike new-features/roguelike/output/plan-route-b-2026-10-26.md ("1. Run mag", the run mag
 // numbers, F6, invariants 2-8, and the amendments after the mag measurement, which override it).
 //
-// Request in r248: 'Z' << 24 | sub << 16 | k (the room the quest is in).
+// Request in r248: 'Z' << 24 | sub << 16 | lean << 8 | k (k: the room the quest is in; lean: bits 8-15, ASK and EXAM only).
 //   sub 1 ASK (kit point; a non-boss room clear while a mag is pending), sub 4 EXAM (exam_reward at a boss clear: room k counts as
 //   a beaten boss), sub 2 RESULT (low byte 1: the create succeeded, 0: item_create2 gave FFFFFFFF), sub 3 NO_MAG (the
-//   equip reminder at a boss room start), sub 5 LEAN (low byte 1 Fang/Mind, 2 Shell: stored only; F10 picks the column).
+//   equip reminder at a boss room start), sub 5 LEAN (low byte = lean; no quest sends it, the lean travels in the ASK/EXAM).
+// F10 lean (routeb2-f10-randgevallen.md, "Besluit na de critic" 1-2): 0 no choice (default), 1 Fang/Mind, 2 Shell. The
+//   server stores a lean only when it is not 0 and the ledger has issued no step above 0 (issued_step <= 0), before it
+//   decides the step; otherwise, and for any value above 2, it logs and ignores it. Lean 2 picks the class's ShellSteps
+//   column (spire-mag.json), lean 0 and 1 its Steps. A server from before F10 ignores bits 8-15: the run gets the default.
 // Answer to ASK and EXAM: r20-r31 the new mag's data1 (12 registers, one byte each), r41 = SPIRE_RUN_MAG_TAG |
 // old_type << 8 | result (result 1: create this mag, 0: no change; old_type: data1[1] of the run mag the run copy holds
 // now, 0xFF if none), then r248 = 'DONE'. RESULT, NO_MAG and LEAN get no answer (the quest waits for none).
@@ -30,6 +34,9 @@ constexpr uint8_t SPIRE_RUN_MAG_RESULT = 2;
 constexpr uint8_t SPIRE_RUN_MAG_NO_MAG = 3;
 constexpr uint8_t SPIRE_RUN_MAG_EXAM = 4;
 constexpr uint8_t SPIRE_RUN_MAG_LEAN = 5;
+constexpr uint8_t SPIRE_RUN_MAG_LEAN_NONE = 0; // no choice: the default column (Steps)
+constexpr uint8_t SPIRE_RUN_MAG_LEAN_FANG = 1; // Fang (HU/RA) or Mind (FO): Steps
+constexpr uint8_t SPIRE_RUN_MAG_LEAN_SHELL = 2; // Shell: ShellSteps (DEF swapped with POW for HU/RA, with MIND for FO)
 constexpr uint8_t SPIRE_RUN_MAG_ANSWER_REGISTER = 41; // shared with 'O' and 'I'; the quest sets it to 0 before asking
 constexpr uint8_t SPIRE_RUN_MAG_ITEM_FIRST_REGISTER = 20; // r20-r31, the RS_ITEM registers of the 'J' item loop
 constexpr uint8_t SPIRE_RUN_MAG_NO_OLD = 0xFF;
@@ -56,14 +63,29 @@ struct SpireMagFloor {
 struct SpireMagLine {
   std::vector<SpireMagRow> steps; // step 0 = the kit, step n = after the n-th boss
   std::vector<SpireMagFloor> floors; // ascending min_bonus
+  // F10: the Shell column (lean 2). Optional: missing, unreadable or not as long as steps leaves it empty and says why
+  // in shell_note; a Shell run then gets steps. It never makes the table unreadable (NO_TABLE).
+  std::vector<SpireMagRow> shell_steps;
+  std::string shell_note; // "" when shell_steps is usable
 };
 struct SpireMagTable {
   bool enabled = false; // false: every 'Z' answers 0 (the data-only kill switch)
   std::map<std::string, SpireMagLine> classes; // "HU", "RA", "FO"
   std::set<uint8_t> boss_rooms; // the boss rooms k (Episode 1 k4-k15, Episode 2 k18-k27: one room counter)
 };
-// Strict: throws on a missing key, an empty line, a stat above 200, a row whose levels sum above 200.
+// Strict: throws on a missing key, an empty line, a stat above 200, a row whose levels sum above 200. ShellSteps is the
+// one exception: a bad ShellSteps only empties that class's shell_steps (SpireMagLine::shell_note).
 SpireMagTable spire_mag_parse(const std::string& json_text);
+
+// F10: the column a lean picks. Lean 2 with a usable ShellSteps (as long as Steps): the line with steps = shell_steps
+// (shell true). Lean 2 without one: the line as it is (fell_back true, the caller logs it). Any other lean: the line.
+// Floors are the class's one list for both columns.
+struct SpireMagColumn {
+  SpireMagLine line;
+  bool shell = false;
+  bool fell_back = false;
+};
+SpireMagColumn spire_mag_column(const SpireMagLine& line, uint8_t lean);
 
 // "HU", "RA" or "FO" for a character class (0-11); "" for any other value.
 const char* spire_mag_archetype(uint8_t char_class);
@@ -101,8 +123,22 @@ struct SpireRunMagLedger {
   std::set<uint8_t> boss_rooms; // the boss rooms k this run counted (EXAM, and the server's own boss clears)
   std::optional<SpireMagBytes> last_mirrored; // the run mag's data1 as last mirrored (overlay) or created
   std::optional<SpireMagBytes> offered; // the mag of the last answer with result 1, until its RESULT
+  bool offered_shell = false; // F10: the offered mag came from the Shell column (the evolve text says so; in memory only)
   uint8_t lean = 0; // 0 none (default Fang/Mind), 1 Fang/Mind, 2 Shell
 };
+
+// F10: the lean bits of an ASK or EXAM word (bits 8-15)
+uint8_t spire_run_mag_lean_bits(uint32_t value);
+// F10: storing a lean (from the ASK/EXAM bits, or a sub 5) in the ledger. Stored only when it is 1 or 2 and the ledger
+// has issued no step above 0; the column of a run never changes once a step above the kit's is out.
+enum class SpireRunMagLeanStore {
+  NONE = 0, // lean 0: nothing chosen, nothing stored
+  STORED,
+  AFTER_STEP, // issued_step > 0: ignored
+  INVALID, // above 2: ignored
+};
+SpireRunMagLeanStore spire_run_mag_lean_store(SpireRunMagLedger& ledger, uint8_t lean);
+const char* spire_run_mag_lean_store_name(SpireRunMagLeanStore r);
 
 // Why a 'Z' that would create or count a mag is refused (the answer is then result 0, old type 0xFF). The order of
 // the checks is the order below.
@@ -154,15 +190,22 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
 // from the asking room (only while the ledger has issued, counted and offered nothing, so a later ASK never moves it),
 // the ledger following the fed mag (spire_run_mag_follow_mirror), the old type the quest deletes (data1[1] of the one
 // run mag in the overlay; SPIRE_RUN_MAG_NO_OLD with none or more than one), the decision and the r41 answer.
+// F10: lean is the word's bits 8-15 (spire_run_mag_lean_bits). It is stored (spire_run_mag_lean_store) after the start
+// step and before the decision, so the first ASK of a practice run from k >= 5 already gets its column; the column
+// follows the ledger's lean (spire_mag_column), never the bits alone, so a resumed ASK without bits keeps it. The lean
+// changes only which row is answered: never the result, the old type or the r41 answer.
 struct SpireRunMagHandled {
   SpireRunMagDecision decision;
   uint8_t old_type = SPIRE_RUN_MAG_NO_OLD;
   bool followed_mirror = false;
   uint32_t answer = SPIRE_RUN_MAG_TAG | (static_cast<uint32_t>(SPIRE_RUN_MAG_NO_OLD) << 8); // a refusal's answer
+  SpireRunMagLeanStore lean_store = SpireRunMagLeanStore::NONE;
+  bool shell = false; // the Shell column answered
+  bool shell_fell_back = false; // the ledger's lean is Shell, but the line has no usable ShellSteps
 };
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus);
+    uint32_t start_bonus, uint8_t lean_bits);
 // The ledger step of a 'V' (savestate write): the ledger follows the overlay's fed mag (spire_run_mag_follow_mirror)
 // unless an in-game 61 refreshed the overlay in this game (amendment 3: it may hold the real mag then). False without
 // a ledger or when it did not follow.
@@ -187,7 +230,8 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag grows next room";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
-std::string spire_run_mag_evolve_text(const std::string& sega_name);
+// F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
+std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false);
 
 // Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
 // the START answer carries an hp_mat or atp_grind level above 0 (the kit creates 2 x level HP Materials / Monogrinders,
