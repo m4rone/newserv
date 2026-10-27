@@ -3050,6 +3050,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
   }
 
   if (rec.should_drop) {
+    spire_drops_prepare_item_creator(c, l); // B-BEL-4: Spire rules also for the first drop after a new item creator
     auto generate_item_unfiltered = [&](std::shared_ptr<Client> c) -> ItemCreator::DropResult {
       bool force_rare = c->check_flag(Client::Flag::ALL_RARES_ENABLED);
       if (rec.obj_st) {

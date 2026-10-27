@@ -389,17 +389,31 @@ bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
 }
 
 std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules) {
-  if (!quest_rules || (quest_rules->meseta_mode != BattleRules::MesetaMode::FORBID_ALL)) {
+  if (!quest_rules ||
+      ((quest_rules->meseta_mode != BattleRules::MesetaMode::FORBID_ALL) && (quest_rules->box_drop_area == 0))) {
     return quest_rules;
   }
   auto ret = std::make_shared<BattleRules>(*quest_rules);
-  ret->meseta_mode = BattleRules::MesetaMode::ALLOW; // ItemCreator::clear_item_if_restricted clears only FORBID_ALL
+  if (ret->meseta_mode == BattleRules::MesetaMode::FORBID_ALL) {
+    ret->meseta_mode = BattleRules::MesetaMode::ALLOW; // ItemCreator::clear_item_if_restricted clears only FORBID_ALL
+  }
+  // B-BEL-4: every drop from its own floor's Sega column (ItemCreator::table_index_for_area), not the rule block's one
+  // area (spire.json box_drop_area 3 = Cave 1 on every floor); the client's rule block stays as the quest sends it
+  ret->box_drop_area = 0;
   return ret;
 }
 
 static void spire_drops_apply_item_rules(std::shared_ptr<Lobby> l) {
   if (l->item_creator && l->quest) {
     l->item_creator->set_restrictions(spire_drops_item_rules(l->quest->meta.battle_rules));
+  }
+}
+
+static const SpireDropsConfig* spire_drops_config_for(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l);
+
+void spire_drops_prepare_item_creator(std::shared_ptr<const Client> c, std::shared_ptr<Lobby> l) {
+  if (spire_drops_config_for(c, l)) {
+    spire_drops_apply_item_rules(l); // B-BEL-4: before the drop is made, also the first after a new item creator
   }
 }
 

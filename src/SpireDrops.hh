@@ -150,6 +150,8 @@ bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index = 0);
 // enemies and boxes again. Every other rule stays the quest's. Returns quest_rules itself when it forbids no meseta
 // (or is null).
 std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules);
+// B-BEL-4: give a Spire game's item creator spire_drops_item_rules before a drop is made (ReceiveSubcommands)
+void spire_drops_prepare_item_creator(std::shared_ptr<const Client> c, std::shared_ptr<Lobby> l);
 
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
 // counter, and give the lobby's item creator spire_drops_item_rules (again at every filtered drop, because the

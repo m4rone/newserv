@@ -3587,10 +3587,16 @@ void run_static_tests() {
     expect(spire_rules && (spire_rules != quest_rules));
     expect(spire_rules->meseta_mode == BattleRules::MesetaMode::ALLOW);
     expect_eq(3u, spire_rules->lives.load()); // every other rule stays the quest's
-    expect_eq(3u, spire_rules->box_drop_area.load());
+    expect_eq(0u, spire_rules->box_drop_area.load()); // every drop from its own floor's column, not Cave 1
     expect(quest_rules->meseta_mode == BattleRules::MesetaMode::FORBID_ALL); // the quest's own rules unchanged
+    expect_eq(3u, quest_rules->box_drop_area.load());
     auto allowing = std::make_shared<BattleRules>();
     expect(spire_drops_item_rules(allowing) == allowing);
+    auto one_area = std::make_shared<BattleRules>();
+    one_area->box_drop_area = 3;
+    auto one_area_spire = spire_drops_item_rules(one_area);
+    expect(one_area_spire && (one_area_spire != one_area) && (one_area_spire->box_drop_area == 0));
+    expect(one_area_spire->meseta_mode == one_area->meseta_mode);
     expect(spire_drops_item_rules(nullptr) == nullptr);
     // Count the meseta among 1000 box drops and 1000 Booma drops on Forest 1 (area 01) with either rules
     auto count_meseta = [&](std::shared_ptr<const BattleRules> rules, bool box) -> size_t {
