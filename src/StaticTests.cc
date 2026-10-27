@@ -5776,6 +5776,61 @@ void run_static_tests() {
           spire_bridge_message_text(0x43810AE1, long_ctx));
     });
 
+    // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 1, 8.1 critic NB-1): 'C' 12 has the fixtures of 'C' 10, so it runs here
+    b8_case("B9 'C' 12 the exam reward while an older rare waits", [&]() {
+      // waiting rare 2 + 1 = 3 (Lavis Cannon), bit 23 set, extra 0 + 1 = 1, n = 1
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. Still waiting: Lavis Cannon. Make room."),
+          spire_bridge_message_text(0x43830C21, with_names));
+      expect_eq(std::string("Exam reward: 500 meseta. Still waiting: Lavis Cannon. Make room."),
+          spire_bridge_message_text(0x43830C00, with_names)); // no extra
+      SpireBridgeTextContext ra_ctx = with_names;
+      ra_ctx.archetype = 1;
+      expect_eq(std::string("Exam reward: 700 meseta, Star Atomizer. Still waiting: Spread Needle. Make room."),
+          spire_bridge_message_text(0x43830C42, ra_ctx));
+      // the waiting rare not known (index 0, past the table, no class, no names): the words of the last form
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43800C21, with_names));
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43890C21, with_names));
+      SpireBridgeTextContext unknown = with_names;
+      unknown.archetype = -1;
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43830C21, unknown));
+      expect_eq(std::string("Exam reward: 600 meseta. A rare still waits: make room."), spire_bridge_message_text(0x43830C21));
+      // too long: the extra goes first
+      const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
+          {"\"Twenty-two chars nam4\"", true}};
+      auto t = b8_load(b8_table_json({longest, longest, longest}, ",\"exam_extras\":[\"Twenty-four characters!!\"]"));
+      SpireBridgeTextContext long_ctx;
+      long_ctx.draw = &t;
+      long_ctx.archetype = 2;
+      std::string full = "Exam reward: 1200 meseta, Twenty-four characters!!. Still waiting: Twenty-two chars nam1. Make room.";
+      expect(full.size() > SPIRE_BRIDGE_TEXT_MAX); // the form the first fallback replaces
+      expect_eq(std::string("Exam reward: 1200 meseta. Still waiting: Twenty-two chars nam1. Make room."),
+          spire_bridge_message_text(0x43810CE1, long_ctx));
+      // still too long: no rare name either. The loader caps a name at 22 characters (the form without the extra is
+      // then at most 75), so a name set past the loader stands in for a longer cap later
+      auto v = t;
+      v.archetypes[0].entries[0].name = "A rare name that is long enough to need the last form!";
+      SpireBridgeTextContext very_long_ctx{&v, 0, ""};
+      std::string no_extra = "Exam reward: 1200 meseta. Still waiting: A rare name that is long enough to need the last form!. Make room.";
+      expect(no_extra.size() > SPIRE_BRIDGE_TEXT_MAX);
+      expect_eq(std::string("Exam reward: 1200 meseta. A rare still waits: make room."),
+          spire_bridge_message_text(0x43810CE1, very_long_ctx));
+      // every 'C' 12: one line of at most 90 characters, never empty
+      size_t checked = 0;
+      for (const SpireBridgeTextContext* ctx : {&none, &with_names, &ra_ctx, &unknown, &long_ctx, &very_long_ctx}) {
+        for (uint32_t bits = 0; bits < 0x100; bits++) {
+          for (uint32_t low = 0; low < 0x100; low++) {
+            std::string text = spire_bridge_message_text(0x43000C00 | (bits << 16) | low, *ctx);
+            expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+            checked++;
+          }
+        }
+      }
+      phosg::log_info_f("   B9: {} 'C' 12 texts checked", checked);
+    });
+
     b8_case("every text one line of at most 90 characters", [&]() {
       const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
           {"\"Twenty-two chars nam4\"", true}};
@@ -5935,6 +5990,131 @@ void run_static_tests() {
     });
 
     expect_eq(0u, bel_failed);
+  }
+
+  phosg::log_info_f("-- Spire bundle 9 (ux-pass): the save point notice at a game join (ROUTEB9-PROTOCOL.md § 2)");
+  {
+    size_t b9_failed = 0;
+    auto b9_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   B9 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        b9_failed++;
+        phosg::log_error_f("   B9 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    auto b9_savestate = [](uint32_t k, uint32_t variant, uint32_t lives, uint32_t seconds) {
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = 0xA1;
+      ss.episode = 1;
+      ss.quest_number = 921;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = k;
+      ss.values[SPIRE_SS_VARIANT] = variant;
+      ss.values[SPIRE_SS_LIVES] = lives;
+      ss.values[SPIRE_SS_ELAPSED] = seconds;
+      return ss;
+    };
+    const std::string category = "PSO Spire: losse kamers";
+
+    b9_case("the room quest name the build gives", [&]() {
+      expect_eq(std::string("Spire room 1"), spire_savestate_room_quest_name(b9_savestate(1, 0, 3, 0)));
+      expect_eq(std::string("Spire room 5 elite"), spire_savestate_room_quest_name(b9_savestate(5, 1, 3, 0)));
+      expect_eq(std::string("Spire room 3 rest"), spire_savestate_room_quest_name(b9_savestate(3, 2, 3, 0)));
+      expect(spire_savestate_room_quest_name(b9_savestate(5, 3, 3, 0)).empty()); // unknown variant
+      expect(spire_savestate_room_quest_name(b9_savestate(0, 0, 3, 0)).empty()); // no room
+      expect(spire_savestate_room_quest_name(SpireSavestate()).empty()); // no values
+    });
+
+    b9_case("normal, elite and rest: both lines", [&]() {
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, b9_savestate(1, 0, 3, 125), category, "Spire room 1");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 1, 3 lives, 2:05."), lines.at(0));
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 1."), lines.at(1));
+      expect(told);
+      told = false;
+      lines = spire_savestate_notice_take(&told, b9_savestate(5, 1, 2, 725), category, "Spire room 5 elite");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 5 elite, 2 lives, 12:05."), lines.at(0));
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 5 elite."), lines.at(1));
+      told = false;
+      lines = spire_savestate_notice_take(&told, b9_savestate(3, 2, 0, 3725), category, "Spire room 3 rest");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 3 rest, 0 lives, 1:02:05."), lines.at(0)); // h:mm:ss from an hour on
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 3 rest."), lines.at(1));
+      expect_eq(std::string("Saved run: Room 7, 1 lives, 59:59."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3599)));
+      expect_eq(std::string("Saved run: Room 7, 1 lives, 1:00:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3600)));
+      expect_eq(std::string("Saved run: Room 7, 1 lives, 0:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 0)));
+    });
+
+    b9_case("a missing field is left out", [&]() {
+      auto ss = b9_savestate(5, 1, 2, 725);
+      ss.values.resize(SPIRE_SS_ELAPSED); // no run time
+      expect_eq(std::string("Saved run: Room 5 elite, 2 lives."), spire_savestate_notice_saved_line(ss));
+      ss.values.resize(SPIRE_SS_LIVES); // no lives either
+      expect_eq(std::string("Saved run: Room 5 elite."), spire_savestate_notice_saved_line(ss));
+      auto unknown_variant = b9_savestate(5, 7, 2, 725);
+      expect_eq(std::string("Saved run: Room 5, 2 lives, 12:05."), spire_savestate_notice_saved_line(unknown_variant));
+      auto no_room = b9_savestate(0, 0, 2, 725);
+      expect_eq(std::string("Saved run: 2 lives, 12:05."), spire_savestate_notice_saved_line(no_room));
+      // no room quest name, so no quest to find: the $spire continue line
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, no_room, "", "");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("To continue: type $spire continue."), lines.at(1));
+    });
+
+    b9_case("the room quest not found: the $spire continue line", [&]() {
+      expect_eq(std::string(SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT), spire_savestate_notice_continue_line("", ""));
+      expect_eq(std::string("To continue: type $spire continue."), spire_savestate_notice_continue_line(category, ""));
+      expect_eq(std::string("To continue: type $spire continue."), spire_savestate_notice_continue_line("", "Spire room 1"));
+      // over the limit: the $spire continue line too
+      expect_eq(std::string("To continue: type $spire continue."),
+          spire_savestate_notice_continue_line(category, "A quest name so long that the whole line runs over its ninety"));
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, b9_savestate(9, 0, 3, 61), category, "");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 9, 3 lives, 1:01."), lines.at(0));
+      expect_eq(std::string("To continue: type $spire continue."), lines.at(1));
+    });
+
+    b9_case("once per session, and nothing without a savestate", [&]() {
+      bool told = false;
+      expect(spire_savestate_notice_take(&told, SpireSavestate(), category, "Spire room 1").empty()); // none (or unreadable)
+      expect(!told); // a later join in the session can still tell a savestate written since
+      expect_eq(size_t(2), spire_savestate_notice_take(&told, b9_savestate(2, 0, 3, 90), category, "Spire room 2").size());
+      expect(told);
+      // a second 6F in the same session sends nothing
+      expect(spire_savestate_notice_take(&told, b9_savestate(2, 0, 3, 90), category, "Spire room 2").empty());
+      expect(spire_savestate_notice_take(&told, b9_savestate(3, 0, 3, 95), category, "Spire room 3").empty());
+      expect(told);
+    });
+
+    b9_case("every notice line one line of at most 90 characters", [&]() {
+      size_t checked = 0, longest_seen = 0;
+      for (uint32_t k : {1u, 9u, 15u, 26u, 255u, 0xFFFFFFFFu}) {
+        for (uint32_t variant : {0u, 1u, 2u, 3u}) {
+          for (uint32_t lives : {0u, 3u, 99u, 0xFFFFFFFFu}) {
+            for (uint32_t seconds : {0u, 59u, 3599u, 3600u, 359999u, 0xFFFFFFFFu}) {
+              auto ss = b9_savestate(k, variant, lives, seconds);
+              std::string quest = spire_savestate_room_quest_name(ss);
+              for (const std::string& line : {spire_savestate_notice_saved_line(ss),
+                       spire_savestate_notice_continue_line(category, quest), spire_savestate_notice_continue_line("", "")}) {
+                expect(!line.empty() && (line.size() <= SPIRE_BRIDGE_TEXT_MAX) && (line == spire_ticker_line(line)));
+                longest_seen = std::max(longest_seen, line.size());
+                checked++;
+              }
+            }
+          }
+        }
+      }
+      phosg::log_info_f("   B9: {} notice lines checked, longest {} characters", checked, longest_seen);
+    });
+
+    expect_eq(0u, b9_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");
