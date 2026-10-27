@@ -463,8 +463,18 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
   return ret;
 }
 
-std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell) {
-  return std::format("Your mag evolves: {}{}. Equip it: Item Pack > Mag.", sega_name, shell ? " (Shell)" : "");
+std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell, bool server_equips) {
+  return std::format("Your mag evolves: {}{}.{}", sega_name, shell ? " (Shell)" : "",
+      server_equips ? "" : " Equip it: Item Pack > Mag.");
+}
+
+std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level) {
+  if (!server_equips) {
+    return SPIRE_KIT_USE_TEXT;
+  }
+  std::string ground = grind ? std::format("Your kit weapon is ground +{}.", grind) : "";
+  std::string materials = hp_mat_level ? "Use your HP Materials now (Item Pack)." : "";
+  return (ground.empty() || materials.empty()) ? (ground + materials) : (ground + " " + materials);
 }
 
 std::string spire_run_mag_reminder_text(bool shell) {

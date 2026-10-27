@@ -98,7 +98,7 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   v36 (quest spike/stadstart b29f310), each to the writer only: 'G' pause B (0: Continue, 1: Ready) · 'U' down
 //   (1: down, 0: back on its feet) · 'H' hint: take a step · 'A' pipe approach (extra << 16 | type << 8 | room
 //   number; type 0 normal, 1 elite, 2 rest, v62 3 exam) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
-//   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
+//   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line; 13-14 below)
 // v62 (B-REGIE-16-13, bundle 8 ux-pass; the contract is the quest's quests/spire/ROUTEB8-PROTOCOL.md § 3). Every text
 // stays one line of at most SPIRE_BRIDGE_TEXT_MAX characters; bits 16-23 = 0 (an older quest) give the text of before
 // for 'C' 6 and for 'A' types 0 and 1. Names come from the quest's draw.json (SpireDraw.hh); without one a text names
@@ -117,6 +117,12 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     byte bits 0-4 exam_extras index + 1 and bits 5-7 n (meseta 500 + 100 n): "Exam reward: <meseta> meseta, <rare>,
 //     <extra>." and when full " Inventory full: make room, it waits."
 //   'C' 11 start hint at the Forest 1 arrival: "Take a step: your run starts."
+// Route B bundle 9 (quests/spire/ROUTEB9-PROTOCOL.md § 1 and § 3; SpireEquipItem.hh), from the writer, no text of their
+// own: 'C' 13 the kit weapon was made with grind G (low byte), not equipped · 'C' 14 the run mag was replaced after an
+// evolution. With r15 = 1 for the writer newserv sends it SpireEquipItem with the item id of the newest unequipped
+// weapon with grind G ('C' 13) or of the one run mag ('C' 14) in its copy of the inventory; r15 = 0 or no such item:
+// one log line, nothing sent. r15 (SPIRE_EQUIP_REGISTER) goes out in every 'M' answer, before DONE. With r15 = 1 the
+// kit ticker names the grind and only the HP Materials, and the evolution text drops "Equip it: Item Pack > Mag."
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v48), the
 // run again ('I', v49) and the base shop ('M', v50).
