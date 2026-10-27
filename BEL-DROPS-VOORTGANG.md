@@ -5,3 +5,4 @@
 - C armour: spire_drops_fit_armor (frame/barrier die de klasse niet draagt -> sterkste gewone draagbare, niet sterker, anders basis); groen, rood met stub (StaticTests.cc:3645 wears)
 - D terugvalwapen: eerst de wapengroepen van de rol (spire_drops_role_groups), dan alles; RAmar Lv1 krijgt 0600 Handgun; groen, rood met stub (StaticTests.cc:3701)
 - E specials: spire_drops_identify_weapon in spire_drops_filter na filter_item; groen, rood met stub (StaticTests.cc:3733)
+- rapport BEL-DROPS-REPORT.md; eindrun static tests exit 0, All static tests passed; A: geen newserv-code, quest box_drop_area 0 (tabel in rapport)
