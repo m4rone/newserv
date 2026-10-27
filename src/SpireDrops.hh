@@ -76,8 +76,12 @@ enum class SpireWeaponFit {
   NO, // class cannot equip it, or the requirements are above even the stats ahead
 };
 SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemData& item, const SpireDropPlayer& p);
+// B-BEL-4: the weapon groups of a class's role, in Sega's weapon class order (ItemNameIndex): hunter 01-05 (Saber,
+// Sword, Dagger, Partisan, Slicer), ranger 06-09 (Handgun, Rifle, Mechgun, Shot), force 0A-0C (Cane, Rod, Wand)
+std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class);
 // The weapon to give: see above. random picks the group. If no common weapon fits the player now (Sega's level-1
-// rangers), the common weapons of his class he lacks the least for. Empty only if his class can equip none.
+// rangers), the common weapons of his class he lacks the least for, first only in the groups of his role
+// (spire_drops_role_groups), then in all. Empty only if his class can equip none.
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random);
 
 // B-BEL-4 (armour): a frame or barrier this class cannot wear (Sega's usability bits, as for weapons) becomes one of

@@ -112,6 +112,17 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
   }
 }
 
+std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class) {
+  if (char_class_is_hunter(char_class)) {
+    return {0x01, 0x05}; // Saber, Sword, Dagger, Partisan, Slicer
+  } else if (char_class_is_ranger(char_class)) {
+    return {0x06, 0x09}; // Handgun, Rifle, Mechgun, Shot
+  } else if (char_class_is_force(char_class)) {
+    return {0x0A, 0x0C}; // Cane, Rod, Wand
+  }
+  return {0x01, 0x0C};
+}
+
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random) {
   std::vector<ItemData> best; // per weapon group, its last (strongest) common weapon the player can equip now
   for (uint8_t group = 0x01; (group <= 0x0C) && (group < pmt.num_weapon_classes()); group++) {
@@ -134,33 +145,43 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
     return best[random % best.size()];
   }
   // Nothing fits now (a level-1 ranger in Sega's table: ATA 40, the Handgun asks 68): the common weapons of his class
-  // he lacks the least for (ATP, ATA and MST short, summed), the start weapon of his class among them
-  uint32_t least = 0xFFFFFFFF;
+  // he lacks the least for (ATP, ATA and MST short, summed), the start weapon of his class among them. B-BEL-4: first
+  // only in the weapon groups of his role (a RAmar's Handgun, 28 ATA short, before a Saber, 12 ATP short), then in all
   uint8_t bits = spire_weapon_usability_bits(p.char_class);
-  for (uint8_t group = 0x01; (group <= 0x0C) && (group < pmt.num_weapon_classes()); group++) {
-    size_t count = pmt.num_weapons_in_class(group);
-    for (size_t index = 0; index < count && index < 0x100; index++) {
-      ItemData w;
-      w.data1[1] = group;
-      w.data1[2] = index;
-      if (pmt.is_item_rare(w)) {
-        continue;
-      }
-      const auto& def = pmt.get_weapon(group, index);
-      if ((def.usability_flags & bits) != bits) {
-        continue;
-      }
-      auto short_of = [](uint16_t need, uint16_t have) -> uint32_t { return (need > have) ? (need - have) : 0; };
-      uint32_t lack = short_of(def.atp_required, p.now.atp) + short_of(def.ata_required, p.now.ata) +
-          short_of(def.mst_required, p.now.mst);
-      if (lack < least) {
-        least = lack;
-        best.clear();
-      }
-      if (lack == least) {
-        best.emplace_back(w);
+  auto least_short = [&](uint8_t first_group, uint8_t last_group) {
+    std::vector<ItemData> ret;
+    uint32_t least = 0xFFFFFFFF;
+    for (uint8_t group = first_group; (group <= last_group) && (group < pmt.num_weapon_classes()); group++) {
+      size_t count = pmt.num_weapons_in_class(group);
+      for (size_t index = 0; index < count && index < 0x100; index++) {
+        ItemData w;
+        w.data1[1] = group;
+        w.data1[2] = index;
+        if (pmt.is_item_rare(w)) {
+          continue;
+        }
+        const auto& def = pmt.get_weapon(group, index);
+        if ((def.usability_flags & bits) != bits) {
+          continue;
+        }
+        auto short_of = [](uint16_t need, uint16_t have) -> uint32_t { return (need > have) ? (need - have) : 0; };
+        uint32_t lack = short_of(def.atp_required, p.now.atp) + short_of(def.ata_required, p.now.ata) +
+            short_of(def.mst_required, p.now.mst);
+        if (lack < least) {
+          least = lack;
+          ret.clear();
+        }
+        if (lack == least) {
+          ret.emplace_back(w);
+        }
       }
     }
+    return ret;
+  };
+  auto [role_first, role_last] = spire_drops_role_groups(p.char_class);
+  best = least_short(role_first, role_last);
+  if (best.empty()) {
+    best = least_short(0x01, 0x0C);
   }
   return best.empty() ? ItemData() : best[random % best.size()];
 }

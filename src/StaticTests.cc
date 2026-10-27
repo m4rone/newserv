@@ -3671,6 +3671,47 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire drops B-BEL-4: a level-1 ranger's fallback weapon is a ranger weapon");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto lv1 = [&](uint8_t cls) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, 5);
+      return p;
+    };
+    // Sega's level-1 RAmar: ATP 18, ATA 40; a Saber asks ATP 30 (12 short), the Handgun ATA 68 (28 short)
+    auto ramar = lv1(3);
+    expect_eq(18, ramar.now.atp);
+    expect_eq(40, ramar.now.ata);
+    expect_eq(30, pmt->get_weapon(1, 0).atp_required);
+    expect_eq(68, pmt->get_weapon(6, 0).ata_required);
+    expect((spire_drops_role_groups(0) == std::pair<uint8_t, uint8_t>{0x01, 0x05}));
+    expect((spire_drops_role_groups(3) == std::pair<uint8_t, uint8_t>{0x06, 0x09}));
+    expect((spire_drops_role_groups(8) == std::pair<uint8_t, uint8_t>{0x0A, 0x0C}));
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      if (!char_class_is_ranger(cls)) {
+        continue;
+      }
+      for (uint32_t r = 0; r < 12; r++) {
+        auto w = spire_drops_pick_weapon(*pmt, lv1(cls), r);
+        expect(!w.empty() && !pmt->is_item_rare(w));
+        expect((w.data1[1] >= 0x06) && (w.data1[1] <= 0x09)); // Handgun, Rifle, Mechgun or Shot
+      }
+    }
+    // In the filter: a Sword (no ranger weapon) for a level-1 RAmar becomes a ranger weapon
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    ItemData it;
+    it.data1[0] = 0x00;
+    it.data1[1] = 0x02;
+    uint32_t pity = 0;
+    expect(spire_drops_filter_item(cfg, *pmt, it, ramar, false, pity, 5) != nullptr);
+    expect((it.data1[1] >= 0x06) && (it.data1[1] <= 0x09));
+    phosg::log_info_f("Spire RAmar Lv1 fallback weapon: {:02X}{:02X}", it.data1[1], it.data1[2]);
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();
