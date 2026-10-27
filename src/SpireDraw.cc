@@ -387,14 +387,18 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
   if (list.empty()) {
     return "";
   }
-  for (bool suffixes : {true, false}) {
-    std::string line = "Rewards: ";
-    for (size_t z = 0; z < list.size(); z++) {
-      line += (z ? ", " : "") + *list[z].name + (suffixes ? list[z].suffix : "");
-    }
-    line += ". Walk to choose.";
-    if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
-      return line;
+  // over the limit: first the suffixes go, then the tail "Walk to choose." (critic route-b-8 C4: three names of 22
+  // characters fit that way), and only then the names
+  for (const char* tail : {". Walk to choose.", "."}) {
+    for (bool suffixes : {true, false}) {
+      std::string line = "Rewards: ";
+      for (size_t z = 0; z < list.size(); z++) {
+        line += (z ? ", " : "") + *list[z].name + (suffixes ? list[z].suffix : "");
+      }
+      line += tail;
+      if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
+        return line;
+      }
     }
   }
   return std::format("Rewards: {} ready. Walk to choose.", list.size());

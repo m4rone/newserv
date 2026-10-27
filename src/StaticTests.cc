@@ -4777,7 +4777,7 @@ void run_static_tests() {
 
     f6_case("bundle 2 S: the kit text after 'M' START", [&]() {
       expect(spire_kit_use_text_due(true, 1, 0, false, false)); // hp_mat only
-      // v62: atp_grind alone no longer makes the text due (section "Spire bundle 8")
+      // atp_grind alone makes it due too (the kit holds Monogrinders; B-REGIE-16-15, section "Spire bundle 8")
       expect(spire_kit_use_text_due(true, 3, 3, false, false));
       expect(!spire_kit_use_text_due(true, 0, 0, false, false)); // no kit level (an old meta file): no text
       expect(!spire_kit_use_text_due(false, 1, 1, false, false)); // LIST or BUY: no text
@@ -5342,7 +5342,9 @@ void run_static_tests() {
       auto t = b8_load(b8_table_json({longer, longest, longest}, ""));
       std::string no_suffix = spire_draw_overview_line(t, 0, drawn_of(0, 1, 2, 3, 0, 0));
       expect_eq(std::string("Rewards: Eighteen chars abc, Eighteen chars def, Eighteen chars ghi. Walk to choose."), no_suffix);
-      expect_eq(std::string("Rewards: 3 ready. Walk to choose."), spire_draw_overview_line(t, 1, drawn_of(0, 1, 2, 3, 0, 0)));
+      // over 90 without the suffixes: the tail goes (critic route-b-8 C4: three 22-character names fit that way)
+      expect_eq(std::string("Rewards: Twenty-two chars nam1, Twenty-two chars nam2, Twenty-two chars nam3."),
+          spire_draw_overview_line(t, 1, drawn_of(0, 1, 2, 3, 0, 0)));
       expect_eq(std::string("Rewards: 4 ready. Walk to choose."), spire_draw_overview_line(t, 0, drawn_of(4, 1, 2, 3, 0, 0)));
       for (uint32_t a = 0; a < 3; a++) {
         for (uint32_t drawn : {drawn_of(0, 1, 2, 3, 1, 2), drawn_of(4, 1, 2, 3, 3, 3), drawn_of(0, 4, 0, 0, 0, 0)}) {
@@ -5376,7 +5378,8 @@ void run_static_tests() {
       expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000)); // b = 0 as before
       expect_eq(std::string("Take a step: your run starts."), spire_bridge_message_text(0x43000B01));
       expect_eq(std::string("Take a step: your run starts."), spire_bridge_message_text(0x43000B00, with_names));
-      expect_eq(std::string("Exam passed!"), std::string(spire_bridge_clear_text(true))); // SpireBossClearQuests
+      // SpireBossClearQuests: no ticker of its own; the quest's 'C' 10 names the exam reward of every boss (critic C5)
+      expect_eq(std::string(""), std::string(spire_bridge_clear_text(true)));
       expect_eq(std::string(SPIRE_BRIDGE_ROOM_CLEAR_TEXT), std::string(spire_bridge_clear_text(false)));
       expect_eq(std::string("Room clear! Take a step for your reward."), std::string(spire_bridge_clear_text(false)));
     });

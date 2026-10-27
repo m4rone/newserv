@@ -5607,8 +5607,10 @@ static void spire_bridge_announce_boss_clear(
     for (const auto& lc : l->clients) {
       if (lc) {
         send_command_t(lc, 0x60, 0x00, cmd);
-        // v36: after the r251; v62 (B-REGIE-16-13): a boss clear opens no reward list, so "Exam passed!"
-        spire_send_ticker_later(lc, l, spire_bridge_clear_text(true), SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY);
+        // v62 (B-REGIE-16-13, critic route-b-8 C5): a boss clear sends no ticker; the quest's 'C' 10 names the reward
+        if (*spire_bridge_clear_text(true)) {
+          spire_send_ticker_later(lc, l, spire_bridge_clear_text(true), SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY);
+        }
         sent++;
       }
     }

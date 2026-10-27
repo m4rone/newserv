@@ -81,11 +81,12 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 // text message to every client in the game.
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
 constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear! Take a step for your reward.";
-// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): the r251 text of a server boss clear (SpireBossClearQuests: Vol Opt,
-// Dark Falz). A boss clear opens no reward list, so it does not ask for a step.
-constexpr const char* SPIRE_BRIDGE_BOSS_CLEAR_TEXT = "Exam passed!";
-// v62: the clear text the server sends: SPIRE_BRIDGE_BOSS_CLEAR_TEXT for a server boss clear, else
-// SPIRE_BRIDGE_ROOM_CLEAR_TEXT ('ROOM' and the r251 of a room clear)
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): a server boss clear (SpireBossClearQuests: Vol Opt, Dark Falz) sends
+// no text of its own. A boss clear opens no reward list, and the quest's 'C' 10 names the exam reward of every boss, so
+// a line here would stand twice next to the board's "Exam passed!" (critic route-b-8 C5).
+constexpr const char* SPIRE_BRIDGE_BOSS_CLEAR_TEXT = "";
+// v62: the clear text the server sends: none (empty) for a server boss clear, else SPIRE_BRIDGE_ROOM_CLEAR_TEXT ('ROOM'
+// and the r251 of a room clear)
 const char* spire_bridge_clear_text(bool server_boss_clear);
 // v36: the server's room clear (r251) sends its text this long after the r251, so the board text the quest shows on
 // the r251 does not push the line aside (pc 2026-10-25 09:06:48: B0 sent with r251, nothing seen)
