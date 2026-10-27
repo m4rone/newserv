@@ -4124,6 +4124,76 @@ void run_static_tests() {
     auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
     const auto& hu = table.classes.at("HU");
 
+    f6_case("B-BEL-4: Run II grows at every Episode 2 boss, Run I unchanged (shipped spire-mag.json)", [&]() {
+      // Run I keeps its five steps on the same rooms: step 4 after Dark Falz is still the mag of Run I
+      const std::map<std::string, std::pair<uint8_t, uint8_t>> step4_ids = {
+          {"HU", {0x06, 0x06}}, {"RA", {0x26, 0x26}}, {"FO", {0x1C, 0x24}}}; // Kama, Madhu, Naga (Shell: Bana)
+      for (const char* cls : {"HU", "RA", "FO"}) {
+        const auto& full = table.classes.at(cls);
+        for (uint8_t lean : {SPIRE_RUN_MAG_LEAN_FANG, SPIRE_RUN_MAG_LEAN_SHELL}) {
+          const bool is_shell = (lean == SPIRE_RUN_MAG_LEAN_SHELL);
+          const auto col = spire_mag_column(full, lean).line;
+          expect(col.steps.size() > 4);
+          expect_eq(is_shell ? step4_ids.at(cls).second : step4_ids.at(cls).first, col.steps[4].id);
+          expect_eq(70u, spire_mag_level_of(spire_mag_row_bytes(col.steps[4])));
+          // Run I from room 1: the kit at k1, then one step per Episode 1 boss (after k4 step 1 ... after k15 step 4)
+          SpireRunMagLedger run;
+          run.run_id = 0xB41;
+          auto kit = spire_run_mag_handle(run, table, full, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0, lean);
+          expect(kit.decision.result);
+          expect_eq(0u, kit.decision.expected_step);
+          expect_eq(is_shell, kit.shell);
+          expect(spire_run_mag_result(run, true));
+          Bytes held = kit.decision.bytes;
+          uint32_t want = 0;
+          auto run_bosses = [&](SpireRunMagLedger& led, Bytes& mag, uint32_t& step, std::initializer_list<uint8_t> ks) {
+            for (uint8_t k : ks) {
+              auto e = spire_run_mag_handle(led, table, full, SPIRE_RUN_MAG_EXAM, k, {mag}, {}, 0, 0);
+              expect(e.decision.result);
+              expect_eq(++step, e.decision.expected_step);
+              expect(e.decision.bytes == spire_mag_step_bytes(col, step, 0, mag));
+              expect(e.decision.bytes[1] != mag[1]); // a visible evolve
+              expect(spire_mag_level_of(e.decision.bytes) > spire_mag_level_of(mag));
+              expect(spire_run_mag_result(led, true));
+              mag = e.decision.bytes;
+            }
+          };
+          run_bosses(run, held, want, {4, 8, 11, 15});
+          expect_eq(4u, want);
+          Bytes run1_mag = held;
+          // Run II from k16 (four bosses before it): step 4 at its first ASK, then one step per Episode 2 boss
+          SpireRunMagLedger run2;
+          run2.run_id = 0xB42;
+          auto start = spire_run_mag_handle(run2, table, full, SPIRE_RUN_MAG_ASK, 16, {}, {}, 0, lean);
+          expect_eq(4u, run2.start_step);
+          expect(start.decision.result);
+          expect_eq(4u, start.decision.expected_step);
+          expect(start.decision.bytes == spire_mag_step_bytes(col, 4, 0, std::nullopt));
+          expect(spire_run_mag_result(run2, true));
+          held = start.decision.bytes;
+          uint32_t step2 = 4;
+          run_bosses(run2, held, step2, {18, 21, 24, 27}); // Barba Ray, Gol Dragon, Gal Gryphon, Olga Flow: steps 5-8
+          expect_eq(8u, step2);
+          expect_eq(8, run2.issued_step);
+          // after Olga Flow the last step is the cap: the same EXAM again issues nothing
+          auto again = spire_run_mag_handle(run2, table, full, SPIRE_RUN_MAG_EXAM, 27, {held}, {}, 0, 0);
+          expect(!again.decision.result);
+          expect_eq(8u, again.decision.expected_step);
+          // a single room k19 (five bosses before it) starts at step 5
+          SpireRunMagLedger single;
+          single.run_id = 0xB43;
+          auto s19 = spire_run_mag_handle(single, table, full, SPIRE_RUN_MAG_ASK, 19, {}, {}, 0, lean);
+          expect_eq(5u, single.start_step);
+          expect(s19.decision.result);
+          expect_eq(5u, s19.decision.expected_step);
+          expect(s19.decision.bytes == spire_mag_row_bytes(col.steps[5]));
+          // Run I on into Episode 2 grows the same way: after k27 step 8
+          run_bosses(run, run1_mag, want, {18, 21, 24, 27});
+          expect_eq(8u, want);
+        }
+      }
+    });
+
     f6_case("every row of the shipped spire-mag.json", [&]() {
       auto names = phosg::JSON::parse(phosg::load_file("system/tables/names-v3.json"));
       expect(table.enabled);
@@ -4149,7 +4219,7 @@ void run_static_tests() {
         }
         for (const SpireMagLine* line_p : {&full, &shell.line}) {
           const auto& line = *line_p;
-          expect_eq(5u, line.steps.size());
+          expect_eq(table.boss_rooms.size() + 1, line.steps.size()); // B-BEL-4: the kit and one step per boss
           std::vector<SpireMagRow> rows = line.steps;
           for (const auto& f : line.floors) {
             rows.emplace_back(f.row);
@@ -4273,11 +4343,17 @@ void run_static_tests() {
       auto r = spire_run_mag_decide(resumed, hu, SPIRE_RUN_MAG_ASK, 9, {}, 0);
       expect(!r.result);
       expect_eq(2u, r.expected_step);
-      // the last step is the cap: a boss after Dark Falz adds nothing
+      // B-BEL-4: a boss after Dark Falz grows the mag (Barba Ray: step 5); the last step, after Olga Flow, is the cap
       SpireRunMagLedger full;
       full.boss_rooms = {4, 8, 11, 15};
       full.issued_step = 4;
-      expect(!spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 18, {}, 0).result);
+      auto e18 = spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 18, {}, 0);
+      expect(e18.result);
+      expect_eq(5u, e18.expected_step);
+      full.boss_rooms = {4, 8, 11, 15, 18, 21, 24, 27};
+      full.issued_step = 8;
+      expect(!spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 27, {}, 0).result);
+      expect_eq(8u, spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 27, {}, 0).expected_step);
       expect_eq(4u, spire_mag_expected_step(5, 0, 5, true));
       // a practice run from k9 starts after two bosses
       expect_eq(2u, spire_mag_start_step(table, 9));

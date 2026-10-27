@@ -1,22 +1,30 @@
 {
-  "_comment": "Route B F6: the Spire run mag (SpireMag.hh). Read at every 'Z' request; a missing or broken file answers every 'Z' with no mag. Enabled false is the data-only kill switch: every 'Z' answers 0, no restart needed. Steps: step 0 = the kit, step n = after the n-th boss; stats are levels (DEF/POW/DEX/MIND), the data1 words are levels x 100. Id is data1[1] (decimal), chosen along Sega's evolution rules (Items.cc player_feed_mag) so each step is a Sega mag of that level. Per stat the server keeps max(step, start floor, the run mag as last mirrored), so feeding is never lost. StartFloors: from that start_level bonus on, the mag starts at least at Sega's challenge template mag (PlayerSubordinates.cc v3 templates: HU Varuna L13 and L22, RA Kalki L12 and L20, FO Vritra L13 and L22). BossRooms: the boss rooms k (one room counter: Episode 1 k4-k15, Episode 2 k18-k27; ROUTEB-F6-PROTOCOL.md); after the last step a boss adds nothing (Ep2 steps are data-only later); a run that first asks in room k starts at the number of boss rooms before k (practice runs). ShellSteps (route B F10, optional): the column of a run whose lean is Shell (lean 2 in bits 8-15 of the ASK/EXAM word, ROUTEB-F6-PROTOCOL.md); DEF swapped with the class's main stat (POW for HU/RA, MIND for FO), step 0 the same as Steps. It must be as long as Steps; missing, shorter or unreadable, a Shell run gets Steps (one log line per ASK/EXAM), never no mag. The Id's are hand-derived along Sega's rules (DEF counts only for FO from L50 on), not checked against them: the test checks names-v3, a new Id per step and monotone stats, as for Steps. StartFloors are one list per class for both columns.",
+  "_comment": "Route B F6: the Spire run mag (SpireMag.hh). Read at every 'Z' request; a missing or broken file answers every 'Z' with no mag. Enabled false is the data-only kill switch: every 'Z' answers 0, no restart needed. Steps: step 0 = the kit, step n = after the n-th boss; stats are levels (DEF/POW/DEX/MIND), the data1 words are levels x 100. Id is data1[1] (decimal), chosen along Sega's evolution rules (Items.cc player_feed_mag) so each step is a Sega mag of that level. Per stat the server keeps max(step, start floor, the run mag as last mirrored), so feeding is never lost. StartFloors: from that start_level bonus on, the mag starts at least at Sega's challenge template mag (PlayerSubordinates.cc v3 templates: HU Varuna L13 and L22, RA Kalki L12 and L20, FO Vritra L13 and L22). BossRooms: the boss rooms k (one room counter: Episode 1 k4-k15, Episode 2 k18-k27; ROUTEB-F6-PROTOCOL.md); B-BEL-4: Steps holds the kit and one step per boss room (nine rows: Run I k4-k15 steps 1-4, Run II k18-k27 steps 5-8), and after the last step a boss adds nothing; a run that first asks in room k starts at the number of boss rooms before k (practice runs). ShellSteps (route B F10, optional): the column of a run whose lean is Shell (lean 2 in bits 8-15 of the ASK/EXAM word, ROUTEB-F6-PROTOCOL.md); DEF swapped with the class's main stat (POW for HU/RA, MIND for FO), step 0 the same as Steps. It must be as long as Steps; missing, shorter or unreadable, a Shell run gets Steps (one log line per ASK/EXAM), never no mag. The Id's are hand-derived along Sega's rules (DEF counts only for FO from L50 on), not checked against them: the test checks names-v3, a new Id per step and monotone stats, as for Steps. StartFloors are one list per class for both columns.",
   "Enabled": true,
   "Classes": {
     "HU": {
-      "_what": "Steps: Fang (attack). Mag 0, Varuna 1, Rudra 14, Varaha 5, Kama 6. Step 4 is not Sega's Sato L70 (POW 30): that would lower POW. ShellSteps: Shell (defense), DEF and POW swapped; the same Id's (Sega's HU evolution reads no DEF).",
+      "_what": "Steps: Fang (attack). Mag 0, Varuna 1, Rudra 14, Varaha 5, Kama 6. Step 4 is not Sega's Sato L70 (POW 30): that would lower POW. B-BEL-4, steps 5-8 (Run II, after Barba Ray, Gol Dragon, Gal Gryphon, Olga Flow): Bhirava 12 L75, Varaha 5 L85, Apsaras 8 L90, Kama 6 L100. From L50 on Sega re-evolves a mag every 5 levels (Items.cc:410-411); for a hunter with POW highest the only mags are Varaha 5 and Bhirava 12 (even section id) and Kama 6 and Apsaras 8 (odd), DEX below MIND picking Bhirava/Apsaras (Items.cc:465-467). The steps alternate DEX below and above MIND so each step is another of these four, at levels that are multiples of 5 (75, 85, 90, 100), POW the largest gain each step. Sega's 4th evolution (L100 rare mags, Items.cc:413-447) needs two stats summing to the other two, 50/50 at L100: not reachable with POW above 50. ShellSteps: Shell (defense), DEF and POW swapped; the same Id's (Sega's HU evolution reads no DEF).",
       "Steps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 1, "Def": 7, "Pow": 18, "Dex": 0, "Mind": 0},
         {"Id": 14, "Def": 9, "Pow": 30, "Dex": 1, "Mind": 0},
         {"Id": 5, "Def": 12, "Pow": 42, "Dex": 1, "Mind": 0},
-        {"Id": 6, "Def": 14, "Pow": 46, "Dex": 5, "Mind": 5}
+        {"Id": 6, "Def": 14, "Pow": 46, "Dex": 5, "Mind": 5},
+        {"Id": 12, "Def": 15, "Pow": 49, "Dex": 5, "Mind": 6},
+        {"Id": 5, "Def": 16, "Pow": 54, "Dex": 8, "Mind": 7},
+        {"Id": 8, "Def": 16, "Pow": 57, "Dex": 8, "Mind": 9},
+        {"Id": 6, "Def": 17, "Pow": 62, "Dex": 11, "Mind": 10}
       ],
       "ShellSteps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 1, "Def": 18, "Pow": 7, "Dex": 0, "Mind": 0},
         {"Id": 14, "Def": 30, "Pow": 9, "Dex": 1, "Mind": 0},
         {"Id": 5, "Def": 42, "Pow": 12, "Dex": 1, "Mind": 0},
-        {"Id": 6, "Def": 46, "Pow": 14, "Dex": 5, "Mind": 5}
+        {"Id": 6, "Def": 46, "Pow": 14, "Dex": 5, "Mind": 5},
+        {"Id": 12, "Def": 49, "Pow": 15, "Dex": 5, "Mind": 6},
+        {"Id": 5, "Def": 54, "Pow": 16, "Dex": 8, "Mind": 7},
+        {"Id": 8, "Def": 57, "Pow": 16, "Dex": 8, "Mind": 9},
+        {"Id": 6, "Def": 62, "Pow": 17, "Dex": 11, "Mind": 10}
       ],
       "StartFloors": [
         {"MinBonus": 5, "Id": 1, "Def": 8, "Pow": 5, "Dex": 0, "Mind": 0},
@@ -24,20 +32,28 @@
       ]
     },
     "RA": {
-      "_what": "Steps: Fang (attack). Mag 0, Kalki 13, Surya 3, Kama 6, Madhu 38. ShellSteps: Shell (defense), DEF and POW swapped; the same Id's (Sega's RA evolution reads no DEF).",
+      "_what": "Steps: Fang (attack). Mag 0, Kalki 13, Surya 3, Kama 6, Madhu 38. B-BEL-4, steps 5-8: Kama 6 L75, Bhirava 12 L85, Madhu 38 L90, Bhirava 12 L100. A ranger with POW highest from L50 on: Kama 6 and Bhirava 12 (even section id), Madhu 38 and Kaitabha 10 (odd), DEX below MIND picking Bhirava/Kaitabha (Items.cc:476-477); Kaitabha is left out because its evolve text in Shell would be 62 characters, above SPIRE_RUN_MAG_TICKER_MAX 61. Levels 75, 85, 90, 100, POW the largest gain each step. ShellSteps: Shell (defense), DEF and POW swapped; the same Id's (Sega's RA evolution reads no DEF).",
       "Steps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 13, "Def": 6, "Pow": 16, "Dex": 3, "Mind": 0},
         {"Id": 3, "Def": 8, "Pow": 27, "Dex": 5, "Mind": 0},
         {"Id": 6, "Def": 10, "Pow": 38, "Dex": 7, "Mind": 0},
-        {"Id": 38, "Def": 12, "Pow": 46, "Dex": 7, "Mind": 5}
+        {"Id": 38, "Def": 12, "Pow": 46, "Dex": 7, "Mind": 5},
+        {"Id": 6, "Def": 13, "Pow": 49, "Dex": 8, "Mind": 5},
+        {"Id": 12, "Def": 14, "Pow": 54, "Dex": 8, "Mind": 9},
+        {"Id": 38, "Def": 15, "Pow": 57, "Dex": 9, "Mind": 9},
+        {"Id": 12, "Def": 16, "Pow": 62, "Dex": 10, "Mind": 12}
       ],
       "ShellSteps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 13, "Def": 16, "Pow": 6, "Dex": 3, "Mind": 0},
         {"Id": 3, "Def": 27, "Pow": 8, "Dex": 5, "Mind": 0},
         {"Id": 6, "Def": 38, "Pow": 10, "Dex": 7, "Mind": 0},
-        {"Id": 38, "Def": 46, "Pow": 12, "Dex": 7, "Mind": 5}
+        {"Id": 38, "Def": 46, "Pow": 12, "Dex": 7, "Mind": 5},
+        {"Id": 6, "Def": 49, "Pow": 13, "Dex": 8, "Mind": 5},
+        {"Id": 12, "Def": 54, "Pow": 14, "Dex": 8, "Mind": 9},
+        {"Id": 38, "Def": 57, "Pow": 15, "Dex": 9, "Mind": 9},
+        {"Id": 12, "Def": 62, "Pow": 16, "Dex": 10, "Mind": 12}
       ],
       "StartFloors": [
         {"MinBonus": 5, "Id": 13, "Def": 5, "Pow": 2, "Dex": 5, "Mind": 0},
@@ -45,20 +61,28 @@
       ]
     },
     "FO": {
-      "_what": "Steps: Mind (techs), the HU line with POW and MIND swapped. Mag 0, Vritra 25, Namuci 26, Kabanda 30, Naga 28. ShellSteps: Shell (defense), DEF and MIND swapped; the Id's of Steps except step 4: Bana 36 (Sega's FO rule from L50 on: MIND highest with DEF 45 or more, Items.cc:483-498).",
+      "_what": "Steps: Mind (techs), the HU line with POW and MIND swapped. Mag 0, Vritra 25, Namuci 26, Kabanda 30, Naga 28. B-BEL-4, steps 5-8: Kumara 9 L75, Kabanda 30 L85, Naga 28 L90, Ila 23 L100: a force with MIND highest and DEF below 45 gets Naga 28 or Kabanda 30 (even section id), Kumara 9 or Ila 23 (odd), POW below DEX picking Kabanda/Ila (Items.cc:482-487); the HU line's DEX against MIND becomes POW against DEX here, so each step is another of the four. ShellSteps: Shell (defense), DEF and MIND swapped; the Id's of Steps except from step 4: Bana 36 (Sega's FO rule from L50 on: MIND highest with DEF 45 or more, Items.cc:483-498). B-BEL-4, Shell steps 5-8: Andhaka 35, Bana 36, Andhaka 35, Bana 36. With DEF 45 or more Sega's force mags are only Bana 36 and Andhaka 35 (Items.cc:481-500); Sega would keep Bana (MIND stays highest of POW/DEX/MIND), Andhaka alternates with it so every step is a visible evolve, as every other step is.",
       "Steps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 25, "Def": 7, "Pow": 0, "Dex": 0, "Mind": 18},
         {"Id": 26, "Def": 9, "Pow": 0, "Dex": 1, "Mind": 30},
         {"Id": 30, "Def": 12, "Pow": 0, "Dex": 1, "Mind": 42},
-        {"Id": 28, "Def": 14, "Pow": 5, "Dex": 5, "Mind": 46}
+        {"Id": 28, "Def": 14, "Pow": 5, "Dex": 5, "Mind": 46},
+        {"Id": 9, "Def": 15, "Pow": 6, "Dex": 5, "Mind": 49},
+        {"Id": 30, "Def": 16, "Pow": 7, "Dex": 8, "Mind": 54},
+        {"Id": 28, "Def": 16, "Pow": 9, "Dex": 8, "Mind": 57},
+        {"Id": 23, "Def": 17, "Pow": 10, "Dex": 11, "Mind": 62}
       ],
       "ShellSteps": [
         {"Id": 0, "Def": 5, "Pow": 0, "Dex": 0, "Mind": 0},
         {"Id": 25, "Def": 18, "Pow": 0, "Dex": 0, "Mind": 7},
         {"Id": 26, "Def": 30, "Pow": 0, "Dex": 1, "Mind": 9},
         {"Id": 30, "Def": 42, "Pow": 0, "Dex": 1, "Mind": 12},
-        {"Id": 36, "Def": 46, "Pow": 5, "Dex": 5, "Mind": 14}
+        {"Id": 36, "Def": 46, "Pow": 5, "Dex": 5, "Mind": 14},
+        {"Id": 35, "Def": 49, "Pow": 6, "Dex": 5, "Mind": 15},
+        {"Id": 36, "Def": 54, "Pow": 7, "Dex": 8, "Mind": 16},
+        {"Id": 35, "Def": 57, "Pow": 9, "Dex": 8, "Mind": 16},
+        {"Id": 36, "Def": 62, "Pow": 10, "Dex": 11, "Mind": 17}
       ],
       "StartFloors": [
         {"MinBonus": 5, "Id": 25, "Def": 8, "Pow": 1, "Dex": 0, "Mind": 4},

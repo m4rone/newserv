@@ -1,0 +1,6 @@
+- start: pre-flight ok op spike/bel-mag 695844f
+- vondst hermeten: SpireMag.cc:158-164 min(start+bazen, steps-1), :166-168 startstap = bazen voor k; json 5 stappen; code zet geen vast aantal, wel StaticTests.cc:4131 (5u) en :4255-4259 (cap na Dark Falz)
+- check_mag_swap.py leest spire-mag.json niet (kent geen --help: leest het als bestandsnaam); alleen pc-build.sh:80 en apply-on-pc.sh:91,175 kopieren de tabel
+- tests: nieuwe case "B-BEL-4: Run II grows..." + StaticTests 5u -> boss_rooms+1, cap-case naar na Olga Flow; build exit 0; oude data: exit 134 op StaticTests.cc:4131 !(e.decision.result)
+- data: stappen 5-8 per klasse en kolom in system/spire-mag.json; static tests exit 0, "All static tests passed"
+- rapport BEL-MAG-REPORT.md geschreven
