@@ -112,6 +112,17 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
   }
 }
 
+std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class) {
+  if (char_class_is_hunter(char_class)) {
+    return {0x01, 0x05}; // Saber, Sword, Dagger, Partisan, Slicer
+  } else if (char_class_is_ranger(char_class)) {
+    return {0x06, 0x09}; // Handgun, Rifle, Mechgun, Shot
+  } else if (char_class_is_force(char_class)) {
+    return {0x0A, 0x0C}; // Cane, Rod, Wand
+  }
+  return {0x01, 0x0C};
+}
+
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random) {
   std::vector<ItemData> best; // per weapon group, its last (strongest) common weapon the player can equip now
   for (uint8_t group = 0x01; (group <= 0x0C) && (group < pmt.num_weapon_classes()); group++) {
@@ -134,35 +145,87 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
     return best[random % best.size()];
   }
   // Nothing fits now (a level-1 ranger in Sega's table: ATA 40, the Handgun asks 68): the common weapons of his class
-  // he lacks the least for (ATP, ATA and MST short, summed), the start weapon of his class among them
-  uint32_t least = 0xFFFFFFFF;
+  // he lacks the least for (ATP, ATA and MST short, summed), the start weapon of his class among them. B-BEL-4: first
+  // only in the weapon groups of his role (a RAmar's Handgun, 28 ATA short, before a Saber, 12 ATP short), then in all
   uint8_t bits = spire_weapon_usability_bits(p.char_class);
-  for (uint8_t group = 0x01; (group <= 0x0C) && (group < pmt.num_weapon_classes()); group++) {
-    size_t count = pmt.num_weapons_in_class(group);
-    for (size_t index = 0; index < count && index < 0x100; index++) {
-      ItemData w;
-      w.data1[1] = group;
-      w.data1[2] = index;
-      if (pmt.is_item_rare(w)) {
-        continue;
-      }
-      const auto& def = pmt.get_weapon(group, index);
-      if ((def.usability_flags & bits) != bits) {
-        continue;
-      }
-      auto short_of = [](uint16_t need, uint16_t have) -> uint32_t { return (need > have) ? (need - have) : 0; };
-      uint32_t lack = short_of(def.atp_required, p.now.atp) + short_of(def.ata_required, p.now.ata) +
-          short_of(def.mst_required, p.now.mst);
-      if (lack < least) {
-        least = lack;
-        best.clear();
-      }
-      if (lack == least) {
-        best.emplace_back(w);
+  auto least_short = [&](uint8_t first_group, uint8_t last_group) {
+    std::vector<ItemData> ret;
+    uint32_t least = 0xFFFFFFFF;
+    for (uint8_t group = first_group; (group <= last_group) && (group < pmt.num_weapon_classes()); group++) {
+      size_t count = pmt.num_weapons_in_class(group);
+      for (size_t index = 0; index < count && index < 0x100; index++) {
+        ItemData w;
+        w.data1[1] = group;
+        w.data1[2] = index;
+        if (pmt.is_item_rare(w)) {
+          continue;
+        }
+        const auto& def = pmt.get_weapon(group, index);
+        if ((def.usability_flags & bits) != bits) {
+          continue;
+        }
+        auto short_of = [](uint16_t need, uint16_t have) -> uint32_t { return (need > have) ? (need - have) : 0; };
+        uint32_t lack = short_of(def.atp_required, p.now.atp) + short_of(def.ata_required, p.now.ata) +
+            short_of(def.mst_required, p.now.mst);
+        if (lack < least) {
+          least = lack;
+          ret.clear();
+        }
+        if (lack == least) {
+          ret.emplace_back(w);
+        }
       }
     }
+    return ret;
+  };
+  auto [role_first, role_last] = spire_drops_role_groups(p.char_class);
+  best = least_short(role_first, role_last);
+  if (best.empty()) {
+    best = least_short(0x01, 0x0C);
   }
   return best.empty() ? ItemData() : best[random % best.size()];
+}
+
+bool spire_drops_fit_armor(const ItemParameterTable& pmt, ItemData& item, uint8_t char_class) {
+  if (item.empty() || (item.data1[0] != 0x01) || ((item.data1[1] != 0x01) && (item.data1[1] != 0x02))) {
+    return false;
+  }
+  uint8_t bits = spire_weapon_usability_bits(char_class); // armour carries the same usability bits as a weapon
+  uint32_t strength;
+  try {
+    const auto& def = pmt.get_armor_or_shield(item.data1[1], item.data1[2]);
+    if ((def.usability_flags & bits) == bits) {
+      return false;
+    }
+    strength = def.dfp + def.evp;
+  } catch (const std::exception&) {
+    return false; // not in Sega's table: left as it is
+  }
+  uint8_t best_index = 0; // the base Frame or Barrier when nothing else fits
+  uint32_t best_strength = 0;
+  bool found = false;
+  size_t count = pmt.num_armors_or_shields_in_class(item.data1[1]);
+  for (size_t index = 0; (index < count) && (index < 0x100); index++) {
+    ItemData a;
+    a.data1[0] = 0x01;
+    a.data1[1] = item.data1[1];
+    a.data1[2] = index;
+    if (pmt.is_item_rare(a)) {
+      continue;
+    }
+    const auto& def = pmt.get_armor_or_shield(a.data1[1], index);
+    uint32_t s = def.dfp + def.evp;
+    if (((def.usability_flags & bits) == bits) && (s <= strength) && (!found || (s >= best_strength))) {
+      best_index = index;
+      best_strength = s;
+      found = true;
+    }
+  }
+  const auto& def = pmt.get_armor_or_shield(item.data1[1], best_index);
+  item.data1[2] = best_index;
+  item.set_armor_or_shield_defense_bonus(std::min<int16_t>(item.get_armor_or_shield_defense_bonus(), def.dfp_range));
+  item.set_common_armor_evasion_bonus(std::min<int16_t>(item.get_common_armor_evasion_bonus(), def.evp_range));
+  return true;
 }
 
 SpireWeaponBoost spire_drops_boss_boost(const SpireDropsConfig& cfg, uint32_t k) {
@@ -273,6 +336,10 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
     item.clear();
     return "not a run item (rule book item 30)";
   }
+  // B-BEL-4: a frame or barrier he cannot wear becomes one he can; the pity count below sees it as before
+  const char* armor_why = spire_drops_fit_armor(pmt, item, p.char_class)
+      ? "frame or barrier this player cannot wear, replaced"
+      : nullptr;
   if (fit == SpireWeaponFit::NOW) {
     pity = 0;
     return nullptr;
@@ -292,7 +359,15 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
     }
   }
   pity++;
-  return nullptr;
+  return armor_why;
+}
+
+bool spire_drops_identify_weapon(ItemData& item) {
+  if (item.empty() || (item.data1[0] != 0x00) || !(item.data1[4] & 0x80)) {
+    return false;
+  }
+  item.data1[4] &= 0x7F;
+  return true;
 }
 
 bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
@@ -310,6 +385,21 @@ bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
       return false;
     default:
       return type_definition_for_enemy(type).is_boss();
+  }
+}
+
+std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules) {
+  if (!quest_rules || (quest_rules->meseta_mode != BattleRules::MesetaMode::FORBID_ALL)) {
+    return quest_rules;
+  }
+  auto ret = std::make_shared<BattleRules>(*quest_rules);
+  ret->meseta_mode = BattleRules::MesetaMode::ALLOW; // ItemCreator::clear_item_if_restricted clears only FORBID_ALL
+  return ret;
+}
+
+static void spire_drops_apply_item_rules(std::shared_ptr<Lobby> l) {
+  if (l->item_creator && l->quest) {
+    l->item_creator->set_restrictions(spire_drops_item_rules(l->quest->meta.battle_rules));
   }
 }
 
@@ -339,6 +429,7 @@ void spire_drops_quest_loaded(std::shared_ptr<Lobby> l, std::shared_ptr<const Cl
   }
   l->allowed_drop_modes |= (1 << static_cast<size_t>(cfg->drop_mode));
   l->drop_mode = cfg->drop_mode;
+  spire_drops_apply_item_rules(l); // B-BEL-4: Sega's meseta drops
   l->log.info_f("Spire drops: q{} uses the server's drops ({})", l->quest->meta.quest_number, cfg->str());
 }
 
@@ -357,6 +448,7 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
     return false;
   }
   try {
+    spire_drops_apply_item_rules(l); // B-BEL-4: also after a new item creator (leader change)
     auto s = c->require_server_state();
     auto p = c->character_file();
     auto pmt = s->data->item_parameter_table(c->version());
@@ -374,6 +466,9 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
       l->log.warning_f("{} (for {})", warning, c->channel->name);
     }
     const char* why = spire_drops_filter_item(*cfg, *pmt, item, player, is_boss, pity, l->rand_crypt->next(), k);
+    if (spire_drops_identify_weapon(item) && !why) { // B-BEL-4: no Tekker in a run
+      why = "weapon identified (no Tekker in a run)";
+    }
     if (why) {
       l->log.info_f("Spire drops: {} for {} (Lv{}, room {}, pity {}->{}): {} -> {}", why, c->channel->name,
           p->disp.stats.level + 1, k, pity_before, pity, before.empty() ? "nothing" : s->data->describe_item(c->version(), before),

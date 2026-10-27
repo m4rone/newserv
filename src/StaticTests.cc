@@ -3567,6 +3567,205 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire drops B-BEL-4: Sega's meseta drops of enemies and boxes in a Spire game");
+  {
+    // The quest's rule block forbids meseta drops (spire.json meseta_drop_mode 1 = FORBID_ALL); in a Spire game with
+    // SpireDrops the server's item creator gets spire_drops_item_rules: the same rules with meseta allowed
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    auto common = std::make_shared<JSONCommonItemSet>(phosg::JSON::parse(phosg::load_file("system/tables/common-table-v3-v4.json")));
+    auto rare = std::make_shared<RareItemSet>(phosg::JSON::dict()); // no rares: only the common drops count
+    auto armor_set = std::make_shared<ArmorShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/armor-shop-random-set.json")));
+    auto tool_set = std::make_shared<ToolShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/tool-shop-random-set.json")));
+    auto weapon_set = std::make_shared<WeaponShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/weapon-shop-random-set-normal.json")));
+    auto tekker = std::make_shared<TekkerAdjustmentSet>(phosg::JSON::parse(phosg::load_file("system/tables/tekker-adjustment-set.json")));
+    auto limits = std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+    auto quest_rules = std::make_shared<BattleRules>();
+    quest_rules->meseta_mode = BattleRules::MesetaMode::FORBID_ALL;
+    quest_rules->lives = 3;
+    quest_rules->box_drop_area = 3;
+    auto spire_rules = spire_drops_item_rules(quest_rules);
+    expect(spire_rules && (spire_rules != quest_rules));
+    expect(spire_rules->meseta_mode == BattleRules::MesetaMode::ALLOW);
+    expect_eq(3u, spire_rules->lives.load()); // every other rule stays the quest's
+    expect_eq(3u, spire_rules->box_drop_area.load());
+    expect(quest_rules->meseta_mode == BattleRules::MesetaMode::FORBID_ALL); // the quest's own rules unchanged
+    auto allowing = std::make_shared<BattleRules>();
+    expect(spire_drops_item_rules(allowing) == allowing);
+    expect(spire_drops_item_rules(nullptr) == nullptr);
+    // Count the meseta among 1000 box drops and 1000 Booma drops on Forest 1 (area 01) with either rules
+    auto count_meseta = [&](std::shared_ptr<const BattleRules> rules, bool box) -> size_t {
+      ItemCreator ic(common, rare, armor_set, tool_set, weapon_set, tekker, pmt, limits, GameMode::BATTLE,
+          Difficulty::NORMAL, 0, std::make_shared<MT19937Generator>(0x5E6A), rules);
+      size_t ret = 0;
+      for (size_t z = 0; z < 1000; z++) {
+        auto res = box ? ic.on_box_item_drop(0x01, false) : ic.on_monster_item_drop(EnemyType::BOOMA, 0x01, false);
+        ret += (!res.item.empty() && (res.item.data1[0] == 0x04)) ? 1 : 0;
+      }
+      return ret;
+    };
+    size_t box_quest = count_meseta(quest_rules, true), box_spire = count_meseta(spire_rules, true);
+    size_t enemy_quest = count_meseta(quest_rules, false), enemy_spire = count_meseta(spire_rules, false);
+    phosg::log_info_f("Spire meseta of 1000 drops: boxes {} (quest rules) -> {} (Spire), Boomas {} -> {}",
+        box_quest, box_spire, enemy_quest, enemy_spire);
+    expect_eq(0u, box_quest); // what the quest's rule block does to a box's meseta
+    expect(box_spire > 0);
+    expect(enemy_spire > 0);
+    // Picking it up: the server adds a meseta drop to the character's meseta, never into the inventory
+    PSOBBCharacterFile ch;
+    ch.disp.stats.meseta = 300;
+    ItemData meseta;
+    meseta.data1[0] = 0x04;
+    meseta.data2d = 25;
+    ch.add_item(meseta, *limits);
+    expect_eq(325u, ch.disp.stats.meseta.load());
+    expect_eq(0, ch.inventory.num_items);
+  }
+
+  phosg::log_info_f("-- Spire drops B-BEL-4: a force gets no frame or barrier it cannot wear");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto lv1 = [&](uint8_t cls) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, 5);
+      return p;
+    };
+    auto armor = [](uint8_t kind, uint8_t index) {
+      ItemData ret;
+      ret.data1[0] = 0x01;
+      ret.data1[1] = kind;
+      ret.data1[2] = index;
+      return ret;
+    };
+    auto wears = [&](const ItemData& it, uint8_t cls) {
+      uint8_t bits = spire_weapon_usability_bits(cls);
+      return (pmt->get_armor_or_shield(it.data1[1], it.data1[2]).usability_flags & bits) == bits;
+    };
+    auto strength = [&](const ItemData& it) {
+      const auto& def = pmt->get_armor_or_shield(it.data1[1], it.data1[2]);
+      return def.dfp + def.evp;
+    };
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    // Sega's table: the Armor (01 01 01) is not for forces (usability FB), the Frame (01 01 00) is for everyone
+    expect_eq(0xFB, pmt->get_armor_or_shield(1, 1).usability_flags);
+    expect_eq(0xFF, pmt->get_armor_or_shield(1, 0).usability_flags);
+    size_t replaced = 0;
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      for (uint8_t kind : {1, 2}) {
+        for (size_t index = 0; index < pmt->num_armors_or_shields_in_class(kind); index++) {
+          ItemData dropped = armor(kind, index);
+          ItemData it = dropped;
+          it.data1[5] = 3; // slots of a frame
+          uint32_t pity = 2;
+          spire_drops_filter_item(cfg, *pmt, it, lv1(cls), false, pity, 0);
+          expect_eq(3u, pity); // the pity count as before: one more drop without a usable weapon
+          expect_eq(0x01, it.data1[0]);
+          expect_eq(kind, it.data1[1]); // a frame stays a frame, a barrier a barrier
+          expect(wears(it, cls));
+          if (wears(dropped, cls)) {
+            expect_eq(index, it.data1[2]); // one he can wear stays as it is
+          } else {
+            replaced++;
+            expect((it.data1[2] == 0) || (strength(it) <= strength(dropped)));
+            expect(!pmt->is_item_rare(it));
+            expect_eq(3, it.data1[5]); // its slots stay
+          }
+        }
+      }
+    }
+    phosg::log_info_f("Spire armour: {} of the 12 classes' frame and barrier drops replaced", replaced);
+    expect(replaced > 0);
+    // A FOnewearl's drop: the Armor becomes the Frame; the Plate armour 01 01 05 (DFP 25, EVP 17) becomes the
+    // strongest common frame a force wears that is not stronger, 01 01 04 (DFP 20, EVP 15)
+    for (auto [index, want] : std::vector<std::pair<uint8_t, uint8_t>>{{1, 0}, {2, 0}, {5, 4}}) {
+      ItemData it = armor(1, index);
+      it.set_armor_or_shield_defense_bonus(9); // above the new frame's DFP range: capped
+      uint32_t pity = 0;
+      expect(spire_drops_filter_item(cfg, *pmt, it, lv1(8), false, pity, 0) != nullptr);
+      expect_eq(want, it.data1[2]);
+      expect(it.get_armor_or_shield_defense_bonus() <= pmt->get_armor_or_shield(1, want).dfp_range);
+      ItemData hu = armor(1, index); // a HUmar keeps it
+      expect(spire_drops_filter_item(cfg, *pmt, hu, lv1(0), false, pity, 0) == nullptr);
+      expect_eq(index, hu.data1[2]);
+    }
+  }
+
+  phosg::log_info_f("-- Spire drops B-BEL-4: a level-1 ranger's fallback weapon is a ranger weapon");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto lv1 = [&](uint8_t cls) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.ahead = spire_drops_stats_ahead(level_table, cls, 0, p.now, 5);
+      return p;
+    };
+    // Sega's level-1 RAmar: ATP 18, ATA 40; a Saber asks ATP 30 (12 short), the Handgun ATA 68 (28 short)
+    auto ramar = lv1(3);
+    expect_eq(18, ramar.now.atp);
+    expect_eq(40, ramar.now.ata);
+    expect_eq(30, pmt->get_weapon(1, 0).atp_required);
+    expect_eq(68, pmt->get_weapon(6, 0).ata_required);
+    expect((spire_drops_role_groups(0) == std::pair<uint8_t, uint8_t>{0x01, 0x05}));
+    expect((spire_drops_role_groups(3) == std::pair<uint8_t, uint8_t>{0x06, 0x09}));
+    expect((spire_drops_role_groups(8) == std::pair<uint8_t, uint8_t>{0x0A, 0x0C}));
+    for (uint8_t cls = 0; cls < 12; cls++) {
+      if (!char_class_is_ranger(cls)) {
+        continue;
+      }
+      for (uint32_t r = 0; r < 12; r++) {
+        auto w = spire_drops_pick_weapon(*pmt, lv1(cls), r);
+        expect(!w.empty() && !pmt->is_item_rare(w));
+        expect((w.data1[1] >= 0x06) && (w.data1[1] <= 0x09)); // Handgun, Rifle, Mechgun or Shot
+      }
+    }
+    // In the filter: a Sword (no ranger weapon) for a level-1 RAmar becomes a ranger weapon
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    ItemData it;
+    it.data1[0] = 0x00;
+    it.data1[1] = 0x02;
+    uint32_t pity = 0;
+    expect(spire_drops_filter_item(cfg, *pmt, it, ramar, false, pity, 5) != nullptr);
+    expect((it.data1[1] >= 0x06) && (it.data1[1] <= 0x09));
+    phosg::log_info_f("Spire RAmar Lv1 fallback weapon: {:02X}{:02X}", it.data1[1], it.data1[2]);
+  }
+
+  phosg::log_info_f("-- Spire drops B-BEL-4: a kept weapon with a special comes identified (no Tekker in a run)");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    SpireDropPlayer strong;
+    strong.char_class = 0; // HUmar who can equip a Saber now
+    strong.now = level_table.base_stats_for_class(0);
+    strong.now.atp = 999;
+    strong.ahead = strong.now;
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    // Sega's drop: a Saber with special 05, unidentified (bit 80, as ItemCreator makes it)
+    ItemData it;
+    it.data1[0] = 0x00;
+    it.data1[1] = 0x01;
+    it.data1[4] = 0x85;
+    uint32_t pity = 0;
+    expect(spire_drops_filter_item(cfg, *pmt, it, strong, false, pity, 0) == nullptr); // kept as it is
+    expect(spire_drops_identify_weapon(it));
+    expect_eq(0x05, it.data1[4]); // identified, the special stays
+    expect(!spire_drops_identify_weapon(it)); // already identified: unchanged
+    expect_eq(0x05, it.data1[4]);
+    ItemData plain = it;
+    plain.data1[4] = 0x00;
+    expect(!spire_drops_identify_weapon(plain));
+    expect_eq(0x00, plain.data1[4]);
+    ItemData frame; // not a weapon: never touched
+    frame.data1[0] = 0x01;
+    frame.data1[1] = 0x01;
+    frame.data1[4] = 0x80;
+    expect(!spire_drops_identify_weapon(frame));
+    expect_eq(0x80, frame.data1[4]);
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();

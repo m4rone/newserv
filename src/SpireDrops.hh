@@ -11,6 +11,7 @@
 #include "ItemData.hh"
 #include "ItemParameterTable.hh"
 #include "LevelTable.hh"
+#include "PlayerSubordinates.hh"
 
 class Client;
 class Lobby;
@@ -75,9 +76,20 @@ enum class SpireWeaponFit {
   NO, // class cannot equip it, or the requirements are above even the stats ahead
 };
 SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemData& item, const SpireDropPlayer& p);
+// B-BEL-4: the weapon groups of a class's role, in Sega's weapon class order (ItemNameIndex): hunter 01-05 (Saber,
+// Sword, Dagger, Partisan, Slicer), ranger 06-09 (Handgun, Rifle, Mechgun, Shot), force 0A-0C (Cane, Rod, Wand)
+std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class);
 // The weapon to give: see above. random picks the group. If no common weapon fits the player now (Sega's level-1
-// rangers), the common weapons of his class he lacks the least for. Empty only if his class can equip none.
+// rangers), the common weapons of his class he lacks the least for, first only in the groups of his role
+// (spire_drops_role_groups), then in all. Empty only if his class can equip none.
 ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random);
+
+// B-BEL-4 (armour): a frame or barrier this class cannot wear (Sega's usability bits, as for weapons) becomes one of
+// the same kind it can wear: the strongest common one (DFP + EVP of Sega's table, the later one on a tie) that is not
+// stronger than the dropped one, else the base Frame or Barrier (index 0). Its slots stay, its DFP and EVP bonus are
+// capped at the new item's ranges. Returns true if the item changed. Any other item, one the class can wear, or one
+// not in Sega's table: unchanged. Pity does not see this (the item stays a non-weapon run item).
+bool spire_drops_fit_armor(const ItemParameterTable& pmt, ItemData& item, uint8_t char_class);
 
 // F8: the grind and Hit a weapon gets (0 = none)
 struct SpireWeaponBoost {
@@ -116,6 +128,11 @@ std::string spire_drops_boss_k_warning(bool is_boss, uint8_t k, Episode episode,
 const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParameterTable& pmt, ItemData& item,
     const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random, uint32_t k = 0);
 
+// B-BEL-4 (specials): a run has no Tekker, so a weapon the Spire filter keeps comes identified: clears the unidentified
+// bit (data1[4] 0x80, which ItemCreator::set_item_unidentified_flag_if_not_challenge sets on a weapon with a special
+// and on a rare one); the special itself stays. Returns true if the item changed. Any other item: unchanged.
+bool spire_drops_identify_weapon(ItemData& item);
+
 // Item 28 applies to the drop of this enemy: a boss (EnemyType BOSS flag), except the Vol Opt parts before its end.
 // Vol Opt's monitors, pillars, amp, core and phase 1 carry the BOSS flag too, but only VOL_OPT_2 falling ends the fight
 // (k11, plan-mines-volopt-2026-10-25 section 5), so only VOL_OPT_2 gives each player his boss weapon. Dragon, De Rol Le
@@ -127,8 +144,16 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
 // boss drop. Dark Falz and Olga Flow children alias their head, which keeps child_index 0 as the target.
 bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index = 0);
 
+// B-BEL-4 (meseta): the rules the server's item creator uses in a Spire game with SpireDrops: the quest's rule block
+// with meseta allowed. The quest forbids meseta drops (ba_set_meseta_drop_mode 1, which also goes to the client and
+// stays), but the server makes the drops and the Spire filter keeps meseta, so the server gives Sega's meseta drops of
+// enemies and boxes again. Every other rule stays the quest's. Returns quest_rules itself when it forbids no meseta
+// (or is null).
+std::shared_ptr<const BattleRules> spire_drops_item_rules(std::shared_ptr<const BattleRules> quest_rules);
+
 // Server glue. At quest load: in a Spire game with SpireDrops, set the lobby's drop mode and forget every client's pity
-// counter. Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a
+// counter, and give the lobby's item creator spire_drops_item_rules (again at every filtered drop, because the
+// lobby makes a new item creator with the quest's rules when its leader changes). Per item made for client c (the receiving player; the requester in SERVER_SHARED): apply the filter, log a
 // change. Both no-ops outside a Spire game or without SpireDrops; the filter never throws (a missing table or
 // character keeps the item as it is). floor: the floor the item drops on (the drop request's), which gives the room
 // k; never the receiver's floor (critic M1: a SERVER_PRIVATE box drop reaches players on other floors, and a client's
