@@ -798,6 +798,9 @@ struct SpireRunMagStore {
   uint32_t latest_run_id = 0;
 };
 static std::unordered_map<std::string, SpireRunMagStore> spire_run_mag_store; // "<serial>.<character id>"
+// Hotfix 1: the pack-full notices told, per spire_run_mag_key (in memory only; apart from the ledger, which they never
+// change)
+static std::unordered_map<std::string, SpireRunMagPackFullNotices> spire_run_mag_pack_full_told;
 
 static std::string spire_run_mag_key(std::shared_ptr<const Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
@@ -2326,9 +2329,21 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
         c->log.warning_f("Spire run mag: RESULT {} for serial {:010} in q{} without an offered mag; ignored", created,
             serial_number, quest_number);
       } else if (!created) {
-        spire_send_ticker(c, SPIRE_RUN_MAG_PACK_FULL_TEXT);
-        c->log.info_f("Spire run mag: RESULT 0 (pack full) for serial {:010} in q{}; step {} given back, owed again (issued step {})",
-            serial_number, quest_number, offered_step, led->issued_step);
+        // hotfix 1: one notice per given-back step per run (the ledger is settled above and not touched here)
+        bool tell = false;
+        std::string key = spire_run_mag_key(c);
+        if (!key.empty()) {
+          if ((spire_run_mag_pack_full_told.size() > 1024) && !spire_run_mag_pack_full_told.count(key)) {
+            spire_run_mag_pack_full_told.clear();
+          }
+          tell = spire_run_mag_pack_full_notice(spire_run_mag_pack_full_told[key], run->run_id, known, created, offered_step);
+        }
+        if (tell) {
+          spire_send_ticker(c, SPIRE_RUN_MAG_PACK_FULL_TEXT);
+        }
+        c->log.info_f("Spire run mag: RESULT 0 (pack full) for serial {:010} in q{}; step {} given back, owed again (issued step {}){}",
+            serial_number, quest_number, offered_step, led->issued_step,
+            tell ? "; pack-full notice sent" : "; pack-full notice for this step already sent in this run");
       } else {
         std::string name = std::format("Mag {:02X}", (*offered)[1]);
         try {

@@ -4806,6 +4806,37 @@ void run_static_tests() {
       expect(!spire_run_mag_command_refreshes(0x00));
     });
 
+    f6_case("pack-full notice: once per given-back step per run (hotfix 1)", [&]() {
+      SpireRunMagPackFullNotices told;
+      expect(spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 1)); // first RESULT 0 for step 1
+      expect(!spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 1)); // the same step again: silent
+      expect(spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 2)); // a later step: told
+      expect(!spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 2));
+      expect(spire_run_mag_pack_full_notice(told, 0x11111111, true, false, 1)); // a new run: told again
+      expect(!spire_run_mag_pack_full_notice(told, 0x11111111, true, true, 3)); // RESULT 1: never
+      expect(!spire_run_mag_pack_full_notice(told, 0x11111111, false, false, 4)); // no offer settled: never
+      expect(spire_run_mag_pack_full_notice(told, 0x11111111, true, false, 3)); // RESULT 1 recorded nothing
+      // the notice leaves the ledger as spire_run_mag_result left it
+      SpireRunMagLedger led;
+      led.run_id = 0x22222222;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto e = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e.result && (led.offered_step == 1));
+      int32_t offered_step = led.offered_step;
+      expect(spire_run_mag_result(led, false));
+      expect_eq(0, led.issued_step);
+      auto before = led;
+      expect(spire_run_mag_pack_full_notice(told, led.run_id, true, false, offered_step));
+      expect_eq(before.issued_step, led.issued_step);
+      expect(before.offered == led.offered);
+      expect(before.last_mirrored == led.last_mirrored);
+      expect(before.boss_rooms == led.boss_rooms);
+      expect_eq(std::string("Pack full: mag did not grow. Free slots; next clear retries"),
+          std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT));
+      expect(std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT).size() <= 61);
+    });
+
     f6_case("hex round trip", [&]() {
       Bytes b = {0x02, 0x01, 0x16, 0x00, 0x4C, 0x04, 0xE8, 0x03, 0x00, 0x00, 0x64, 0x00};
       expect_eq(std::string("020116004C04E80300006400"), spire_run_mag_bytes_hex(b));

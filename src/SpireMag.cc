@@ -385,6 +385,18 @@ bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
   return true;
 }
 
+bool spire_run_mag_pack_full_notice(
+    SpireRunMagPackFullNotices& told, uint32_t run_id, bool known, bool created, int32_t offered_step) {
+  if (!known || created) {
+    return false;
+  }
+  if (told.run_id != run_id) {
+    told.run_id = run_id;
+    told.steps.clear();
+  }
+  return told.steps.emplace(offered_step).second;
+}
+
 bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<SpireMagBytes>& overlay_mags) {
   if ((overlay_mags.size() == 1) && ledger.offered && (overlay_mags[0] == *ledger.offered)) {
     // the offered mag was created and its RESULT lost: confirmed as by a RESULT 1

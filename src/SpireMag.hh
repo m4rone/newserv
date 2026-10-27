@@ -219,6 +219,15 @@ bool spire_run_mag_savestate_follow(
 // (issued_step = step_before_offer: the step is owed again, the quest asks at the next non-boss room clear). Returns
 // false if nothing was offered.
 bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created);
+// Hotfix 1: the pack-full notice. A RESULT 0 that settled an offer (known) tells the player once per given-back step
+// per run; a second RESULT 0 for the same step in the same run stays silent, a later step or a new run tells again.
+// Only this record changes: never the ledger, the r41 answer or the item handling.
+struct SpireRunMagPackFullNotices {
+  uint32_t run_id = 0;
+  std::set<int32_t> steps; // the steps of run_id whose RESULT 0 was told
+};
+bool spire_run_mag_pack_full_notice(
+    SpireRunMagPackFullNotices& told, uint32_t run_id, bool known, bool created, int32_t offered_step);
 
 // The run mag in an overlay's items (data1 of every type-02 item): the ledger follows the mirror (feeding) only when
 // exactly one type-02 item is there and the ledger has issued a mag; its level must not be below the ledger's (feeding
@@ -231,7 +240,8 @@ std::string spire_run_mag_bytes_hex(const SpireMagBytes& bytes);
 SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on a bad string
 
 // Ticker texts (C4_SRVMSG path, spire_send_ticker); the evolve text carries the Sega name
-constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag grows next room";
+// The quest asks again at the next clear (room clear or boss exam) while the run goes on; it grows if a slot is free
+constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: mag did not grow. Free slots; next clear retries";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
