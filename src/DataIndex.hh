@@ -177,6 +177,10 @@ struct DataIndex {
   // Spire BBA TX guard (SpireBBATxGuardPatch, default true): send the client patch of SpireBBATxGuard.hh to GC EU v1.0
   // clients at login; false turns it off without a rebuild
   bool spire_bba_tx_guard_patch = true;
+  // Route B bundle 9 server equip (SpireEquipItemPatch, default true; SpireEquipItem.hh): r15 = 1 and the client
+  // function SpireEquipItem at 'C' 13/14 for GC EU v1.0 clients; false gives every client r15 = 0 (the quest's bundle 8
+  // kit path) without a rebuild
+  bool spire_equip_item_patch = true;
   // v19 lab: SpireRunTimerLab {"LimitSeconds": n, "WarningSeconds": m} replaces the time limit and warning the quest
   // sends with 'S', so a lab round reaches the warning and "Time is up." in minutes. Missing (the pc): the quest's values.
   std::optional<std::pair<uint32_t, uint32_t>> spire_run_timer_lab;

@@ -20,6 +20,7 @@
 #include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
+#include "SpireEquipItem.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMag.hh"
 #include "SpireMeta.hh"
@@ -5689,6 +5690,111 @@ void run_static_tests() {
         }
       }
       phosg::log_info_f("   B9: {} notice lines checked, longest {} characters", checked, longest_seen);
+    });
+
+    expect_eq(0u, b9_failed);
+  }
+
+  phosg::log_info_f("-- Spire bundle 9 (ux-pass): server equip, r15, 'C' 13/14, the kit and evolution texts");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did
+    size_t b9_failed = 0;
+    auto b9_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   B9 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        b9_failed++;
+        phosg::log_error_f("   B9 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // an inventory of (data1 bytes 0-7, id, equipped, flags) items
+    struct B9Item {
+      uint64_t first;
+      uint32_t id;
+      bool equipped;
+      uint32_t extra_flags = 0;
+    };
+    auto b9_inventory = [](const std::vector<B9Item>& items) {
+      PlayerInventory inv;
+      for (const auto& it : items) {
+        ItemData data(it.first, 0);
+        data.id = it.id;
+        auto& slot = inv.items[inv.num_items++];
+        slot = PlayerInventoryItem(data, it.equipped);
+        slot.state = it.equipped ? 2 : 1;
+        slot.flags = slot.flags | it.extra_flags;
+      }
+      return inv;
+    };
+
+    b9_case("r15: 1 only for 3OP0 with the switch on, function calls that run code and the function loaded", [&]() {
+      expect(SPIRE_EQUIP_REGISTER == 15);
+      // r15 is free: the 'M' levels are r1-r7 and the prices r8-r14
+      expect(SPIRE_SHOP_PRICE_FIRST_REGISTER + SPIRE_SHOP_NUM_ITEMS - 1 < SPIRE_EQUIP_REGISTER);
+      expect(spire_equip_item_available(0x334F5030, true, true, true)); // 3OP0: r15 = 1
+      expect(!spire_equip_item_available(0x334F5030, false, true, true)); // SpireEquipItemPatch false: r15 = 0
+      expect(!spire_equip_item_available(0x334F5030, true, false, true)); // no function calls that run code
+      expect(!spire_equip_item_available(0x334F5030, true, true, false)); // no SpireEquipItemGC.s (bundle 9 today)
+      for (uint32_t other : {0x334F4532u /* 3OE2 */, 0x334F4A35u /* 3OJ5 */, 0x344F5055u /* 4OPU */, 0u}) {
+        expect(!spire_equip_item_available(other, true, true, true));
+      }
+      expect_eq(std::string("SpireEquipItem"), std::string(SPIRE_EQUIP_ITEM_FUNCTION_KEY));
+    });
+
+    b9_case("'C' 13: the newest unequipped weapon with grind G", [&]() {
+      auto inv = b9_inventory({
+          {0x0001000A00000000ULL, 0x00210010, false}, // an older unequipped Saber +10
+          {0x0006000A00000000ULL, 0x00210011, true}, // the equipped Handgun +10: not it
+          {0x0101000000000000ULL, 0x00210012, true}, // Frame
+          {0x030B030000000000ULL, 0x00210013, false}, // HP Material
+          {0x0001000A00000000ULL, 0x00210017, false}, // the kit Saber +10, made last
+          {0x0001000A00000000ULL, 0x00210018, false, 0x400}, // a wrapped Saber +10: not equippable
+      });
+      auto id = spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, true, inv);
+      expect(id.has_value());
+      expect_eq(0x00210017u, id.value_or(0));
+      // not found: no weapon with that grind, or only equipped ones
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 6, true, inv).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 0, true, b9_inventory({{0x0001000000000000ULL, 1, true}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, true, PlayerInventory()).has_value());
+      // r15 = 0 for this client: nothing, even with the weapon there
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, false, inv).has_value());
+      // another 'C' point sends nothing
+      expect(!spire_equip_target(12, 10, true, inv).has_value());
+    });
+
+    b9_case("'C' 14: the one run mag", [&]() {
+      auto inv = b9_inventory({
+          {0x0001000000000000ULL, 0x00210017, true}, // Saber
+          {0x0215190700000000ULL, 0x00210034, false}, // Varuna LV25, the new mag
+      });
+      expect_eq(0x00210034u, spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, inv).value_or(0));
+      // not found: no mag, two mags (not the one run mag), the one mag already equipped
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, b9_inventory({{0x0001000000000000ULL, 1, true}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true,
+          b9_inventory({{0x0200050000000000ULL, 1, false}, {0x0215190700000000ULL, 2, false}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, b9_inventory({{0x0215190700000000ULL, 2, true}})).has_value());
+      // r15 = 0
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, false, inv).has_value());
+    });
+
+    b9_case("kit ticker and evolution text in both r15 states, one line within 90 characters", [&]() {
+      // r15 = 0: both as today
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_use_text(false, 10, 5));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false, false));
+      // r15 = 1
+      expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 10, 5));
+      expect_eq(std::string("Your kit weapon is ground +4."), spire_kit_use_text(true, 4, 0)); // no HP Materials
+      expect_eq(std::string("Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 0, 2)); // no grind
+      expect_eq(std::string("Your mag evolves: Varuna."), spire_run_mag_evolve_text("Varuna", false, true));
+      expect_eq(std::string("Your mag evolves: Kabanda (Shell)."), spire_run_mag_evolve_text("Kabanda", true, true));
+      for (bool equips : {false, true}) {
+        for (const std::string& t : {spire_kit_use_text(equips, 255, 5), spire_kit_use_text(equips, 10, 5),
+                 spire_run_mag_evolve_text("Kabanda", true, equips), spire_run_mag_evolve_text("Varuna", false, equips)}) {
+          expect(!t.empty() && (t.size() <= SPIRE_BRIDGE_TEXT_MAX) && (t == spire_ticker_line(t)));
+        }
+      }
     });
 
     expect_eq(0u, b9_failed);

@@ -24,6 +24,7 @@
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireBBATxGuard.hh"
+#include "SpireEquipItem.hh"
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
 #include "SpireMeta.hh"
@@ -774,9 +775,27 @@ struct SpireClientRun {
   uint8_t start_room = 0;
   std::map<uint32_t, uint32_t> draws_per_room; // n-th draw per room (seed)
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
+  int kit_grind = -1; // route B bundle 9: the grind G of this client's 'C' 13 in this run, -1 = none came
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
+
+// Route B bundle 9 (SpireEquipItem.hh): r15 for this client, the same answer in every 'M' answer, at 'C' 13/14 and for
+// the kit and evolution texts
+static bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
+  auto s = c->require_server_state();
+  bool loaded = false;
+  if (spire_equip_item_applies(c->specific_version) && s->data->client_functions) {
+    try {
+      s->data->client_functions->get(SPIRE_EQUIP_ITEM_FUNCTION_KEY, c->specific_version);
+      loaded = true;
+    } catch (const std::out_of_range&) {
+    }
+  }
+  return spire_equip_item_available(c->specific_version, s->data->spire_equip_item_patch,
+      c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE),
+      loaded);
+}
 
 static SpireClientRun* spire_client_run_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool create) {
   auto it = spire_client_runs.find(c.get());
@@ -2431,8 +2450,16 @@ static asio::awaitable<void> spire_kit_use_text_later(
   auto* cr = spire_client_run_for(c, l, true);
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     cr->kit_text_sent = true;
-    spire_send_ticker(c, SPIRE_KIT_USE_TEXT);
-    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; sent \"{}\"", hp_mat, atp_grind, SPIRE_KIT_USE_TEXT);
+    // route B bundle 9: with r15 = 1 the kit weapon carries the grind G of the client's 'C' 13 (not come yet: the
+    // quest's G, 2 Monogrinders per atp_grind level, which no kit weapon's MaxGrind caps) and no Monogrinders
+    bool server_equips = spire_equip_item_available_for(c);
+    uint32_t grind = (cr->kit_grind >= 0) ? static_cast<uint32_t>(cr->kit_grind) : 2 * atp_grind;
+    std::string text = spire_kit_use_text(server_equips, grind, hp_mat);
+    if (!text.empty()) {
+      spire_send_ticker(c, text);
+    }
+    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {} r{} {}; sent \"{}\"", hp_mat, atp_grind, SPIRE_EQUIP_REGISTER,
+        server_equips ? 1 : 0, text);
   } else {
     c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; no kit text ({})", hp_mat, atp_grind,
         cr->answered_resume ? "resumed: no kit" : "already sent in this run");
@@ -2550,6 +2577,10 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     detail = std::format(" ({})", e.what());
   }
   uint32_t answer = spire_shop_answer(sub, refusal);
+  // route B bundle 9 (ROUTEB9-PROTOCOL.md § 1): r15 in every 'M' answer, before DONE, refused or not
+  uint32_t equip_reg = spire_equip_item_available_for(c) ? 1 : 0;
+  spire_send_register(c, SPIRE_EQUIP_REGISTER, equip_reg);
+  detail += std::format("; r{}={}", SPIRE_EQUIP_REGISTER, equip_reg);
   spire_send_register(c, SPIRE_SHOP_ANSWER_REGISTER, answer);
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
   // route B F5/F6: the kit hands out the HP Materials and Monogrinders right after this answer
@@ -2563,6 +2594,57 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   c->log.info_f("Spire shop: {} {:08X} for serial {:010} in q{}: {} ({}){}; r{}={:08X}", what, value, serial_number,
       quest_number, (refusal == SpireShopRefusal::NONE) ? "OK" : "FAIL", spire_shop_refusal_name(refusal), detail,
       SPIRE_SHOP_ANSWER_REGISTER, answer);
+}
+
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only. Never throws; the
+// client's B3 answer is logged.
+static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what) {
+  try {
+    auto s = c->require_server_state();
+    auto fn = s->data->client_functions->get(SPIRE_EQUIP_ITEM_FUNCTION_KEY, c->specific_version);
+    co_await prepare_client_for_patches(c);
+    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
+    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_ITEM_FUNCTION_KEY,
+        e.what());
+  }
+}
+
+// Route B bundle 9: 'C' 13 (the kit weapon with grind G in the low byte) and 'C' 14 (the run mag replaced after an
+// evolution) from the writer: with r15 = 1 for it, send SpireEquipItem for the item in newserv's copy of its inventory
+// (the run copy during a run). r15 = 0 or no such item: one log line, nothing sent. False for every other value.
+static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t point = (value >> 8) & 0xFF;
+  if (((value >> 24) != SPIRE_BRIDGE_MSG_PROMPT) || ((value >> 16) & 0xFF) ||
+      ((point != SPIRE_PROMPT_KIT_GROUND) && (point != SPIRE_PROMPT_RUN_MAG_REPLACED))) {
+    return false;
+  }
+  uint8_t low = value & 0xFF;
+  const char* what = (point == SPIRE_PROMPT_KIT_GROUND) ? "kit weapon" : "run mag";
+  if (point == SPIRE_PROMPT_KIT_GROUND) {
+    spire_client_run_for(c, l, true)->kit_grind = low;
+  }
+  bool available = spire_equip_item_available_for(c);
+  std::optional<uint32_t> item_id;
+  if (available) {
+    if (auto character = c->character_file(false, true)) {
+      item_id = spire_equip_target(point, low, true, character->inventory);
+    }
+  }
+  if (!available) {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; r{} = 0 for this client, nothing sent",
+        point, what, low, serial_number, quest_number, SPIRE_EQUIP_REGISTER);
+  } else if (!item_id) {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; no such item in the inventory copy, nothing sent",
+        point, what, low, serial_number, quest_number);
+  } else {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for item {:08X}", point,
+        what, low, serial_number, quest_number, SPIRE_EQUIP_ITEM_FUNCTION_KEY, *item_id);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what), asio::detached);
+  }
+  return true;
 }
 
 // v48: the return to base ('O'), below with the guard's restore
@@ -2632,7 +2714,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
-        spire_send_ticker(c, (before < 0) ? spire_run_mag_reminder_text(offered_shell) : spire_run_mag_evolve_text(name, offered_shell));
+        spire_send_ticker(c, (before < 0) ? spire_run_mag_reminder_text(offered_shell) : spire_run_mag_evolve_text(name, offered_shell, spire_equip_item_available_for(c)));
         c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {}{} {} (run {:08X})",
             serial_number, quest_number, led->issued_step, name, offered_shell ? " (Shell)" : "",
             spire_run_mag_bytes_hex(*offered), run->run_id);
@@ -2846,6 +2928,9 @@ bool spire_bridge_handle_register(
       if ((value >> 24) == SPIRE_BRIDGE_MSG_RUN_OVER) {
         spire_run_over(c, l, serial_number, quest_number, value);
         return true;
+      }
+      if (spire_equip_prompt_handle(c, l, serial_number, quest_number, value)) {
+        return true; // route B bundle 9: 'C' 13 and 'C' 14 have no text of their own
       }
       // v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the
       // writer's archetype for 'C' 10 and its kept overview line for 'C' 2; bundle 9: 'C' 12 as 'C' 10
