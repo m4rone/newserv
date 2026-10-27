@@ -4832,9 +4832,26 @@ void run_static_tests() {
       expect(before.offered == led.offered);
       expect(before.last_mirrored == led.last_mirrored);
       expect(before.boss_rooms == led.boss_rooms);
+      expect(before.offered_shell == led.offered_shell);
+      // a Shell run: the same step is given back and offered again at the next ASK (the text names no column)
+      SpireRunMagLedger sl;
+      sl.run_id = 0x33333333;
+      sl.issued_step = 0;
+      sl.lean = SPIRE_RUN_MAG_LEAN_SHELL;
+      auto col = spire_mag_column(hu, sl.lean);
+      expect(col.shell);
+      sl.last_mirrored = spire_mag_step_bytes(col.line, 0, 0, std::nullopt);
+      expect(spire_run_mag_decide(sl, col.line, SPIRE_RUN_MAG_EXAM, 4, {}, 0).result);
+      int32_t shell_step = sl.offered_step;
+      expect(spire_run_mag_result(sl, false));
+      expect(spire_run_mag_pack_full_notice(told, sl.run_id, true, false, shell_step));
+      expect(spire_run_mag_decide(sl, col.line, SPIRE_RUN_MAG_ASK, 5, {}, 0).result);
+      expect_eq(shell_step, sl.offered_step); // the retry offers the given-back step
+      expect(spire_run_mag_result(sl, false));
+      expect(!spire_run_mag_pack_full_notice(told, sl.run_id, true, false, shell_step)); // still full: silent
       expect_eq(std::string("Pack full: mag did not grow. Free slots; next clear retries"),
           std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT));
-      expect(std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT).size() <= 61);
+      expect(std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT).size() <= SPIRE_RUN_MAG_TICKER_MAX);
     });
 
     f6_case("hex round trip", [&]() {
