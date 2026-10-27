@@ -4849,9 +4849,56 @@ void run_static_tests() {
       expect_eq(shell_step, sl.offered_step); // the retry offers the given-back step
       expect(spire_run_mag_result(sl, false));
       expect(!spire_run_mag_pack_full_notice(told, sl.run_id, true, false, shell_step)); // still full: silent
-      expect_eq(std::string("Pack full: your mag did not grow. Keep a slot free"),
+      expect_eq(std::string("Pack full: your mag did not grow. Keep slots free"),
           std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT));
-      expect(std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT).size() <= SPIRE_RUN_MAG_TICKER_MAX);
+      expect_eq(std::string("Pack full: no room for your mag. Keep slots free"),
+          std::string(SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT));
+      for (const char* t : {SPIRE_RUN_MAG_PACK_FULL_TEXT, SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT}) {
+        expect(std::string(t).size() <= SPIRE_RUN_MAG_TICKER_MAX);
+        expect_eq(std::string(t), spire_ticker_line(t));
+      }
+    });
+
+    f6_case("pack-full decision per client key, run and step (hotfix 1, critic N3)", [&]() {
+      SpireRunMagPackFullTold told;
+      const std::string a = "3117539661.A", b = "3117539662.B";
+      const uint32_t run = 0x64D5C0EF;
+      // the lab case: two players of one run, both RESULT 0 for step 1 (newserv.log:183897, :184006): each told once
+      auto da = spire_run_mag_pack_full_decide(told, a, run, true, false, 1, 0);
+      expect(da.tell && (std::string(da.text) == SPIRE_RUN_MAG_PACK_FULL_TEXT));
+      auto db = spire_run_mag_pack_full_decide(told, b, run, true, false, 1, 0);
+      expect(db.tell && (std::string(db.text) == SPIRE_RUN_MAG_PACK_FULL_TEXT));
+      expect(!spire_run_mag_pack_full_decide(told, a, run, true, false, 1, 0).tell);
+      expect(!spire_run_mag_pack_full_decide(told, b, run, true, false, 1, 0).tell);
+      expect(spire_run_mag_pack_full_decide(told, a, run, true, false, 2, 1).tell); // a later step
+      expect(spire_run_mag_pack_full_decide(told, a, run + 1, true, false, 1, 0).tell); // a new run
+      expect(!spire_run_mag_pack_full_decide(told, a, run + 1, true, false, 1, 0).tell);
+      // no notice and nothing recorded: RESULT 1, nothing settled, no key, run id 0
+      expect(!spire_run_mag_pack_full_decide(told, a, run, true, true, 3, 2).tell);
+      expect(!spire_run_mag_pack_full_decide(told, a, run, false, false, 3, 2).tell);
+      expect(!spire_run_mag_pack_full_decide(told, "", run, true, false, 3, 2).tell);
+      expect(!spire_run_mag_pack_full_decide(told, a, 0, true, false, 3, 2).tell);
+      expect(!spire_run_mag_pack_full_decide(told, a, 0, true, false, 3, 2).tell);
+      expect_eq(2u, told.size());
+      // the first mag of a run (nothing issued before the offer): its own text
+      auto first = spire_run_mag_pack_full_decide(told, b, run, true, false, 0, -1);
+      expect(first.tell && (std::string(first.text) == SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT));
+      // a third player below the key limit wipes nothing: a and b stay silent for their told steps
+      expect(spire_run_mag_pack_full_decide(told, "c", run, true, false, 1, 0).tell);
+      expect(!spire_run_mag_pack_full_decide(told, a, run + 1, true, false, 1, 0).tell);
+      expect(!spire_run_mag_pack_full_decide(told, b, run, true, false, 1, 0).tell);
+      // the key limit: a new key at SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX records wipes every record (told once more)
+      SpireRunMagPackFullTold full;
+      for (size_t i = 0; i < SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX; i++) {
+        expect(spire_run_mag_pack_full_decide(full, std::format("k{}", i), run, true, false, 1, 0).tell);
+      }
+      expect_eq(SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX, full.size());
+      auto old_key = spire_run_mag_pack_full_decide(full, "k0", run, true, false, 1, 0);
+      expect(!old_key.tell && !old_key.wiped); // a known key: no wipe
+      auto new_key = spire_run_mag_pack_full_decide(full, "new", run, true, false, 1, 0);
+      expect(new_key.tell && new_key.wiped);
+      expect_eq(1u, full.size());
+      expect(spire_run_mag_pack_full_decide(full, "k0", run, true, false, 1, 0).tell); // told once more after the wipe
     });
 
     f6_case("hex round trip", [&]() {

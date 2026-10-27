@@ -397,6 +397,32 @@ bool spire_run_mag_pack_full_notice(
   return told.steps.emplace(offered_step).second;
 }
 
+SpireRunMagPackFullDecision spire_run_mag_pack_full_decide(SpireRunMagPackFullTold& told, const std::string& key,
+    uint32_t run_id, bool known, bool created, int32_t offered_step, int32_t step_before_offer) {
+  SpireRunMagPackFullDecision ret;
+  if (!known || created) {
+    ret.note = "; not a settled pack-full result, no notice";
+    return ret;
+  }
+  if (key.empty() || !run_id) {
+    ret.note = "; no client key or run id, no notice";
+    return ret;
+  }
+  if ((told.size() >= SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX) && !told.count(key)) {
+    told.clear();
+    ret.wiped = true;
+  }
+  bool tell = spire_run_mag_pack_full_notice(told[key], run_id, known, created, offered_step);
+  if (!tell) {
+    ret.note = "; pack-full notice for this step already sent in this run";
+    return ret;
+  }
+  ret.tell = true;
+  ret.text = (step_before_offer < 0) ? SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT : SPIRE_RUN_MAG_PACK_FULL_TEXT;
+  ret.note = ret.wiped ? "; pack-full notice sent (notice records wiped at the key limit)" : "; pack-full notice sent";
+  return ret;
+}
+
 bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<SpireMagBytes>& overlay_mags) {
   if ((overlay_mags.size() == 1) && ledger.offered && (overlay_mags[0] == *ledger.offered)) {
     // the offered mag was created and its RESULT lost: confirmed as by a RESULT 1

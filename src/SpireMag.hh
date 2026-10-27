@@ -228,6 +228,21 @@ struct SpireRunMagPackFullNotices {
 };
 bool spire_run_mag_pack_full_notice(
     SpireRunMagPackFullNotices& told, uint32_t run_id, bool known, bool created, int32_t offered_step);
+// The 'Z' handler's whole decision at a RESULT (critic N3): the record per client key (spire_run_mag_key: serial and
+// character id, so two players of one run each get their own notice), no notice without a key or a run id, the wipe of
+// every record when a new key would make it more than SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX (as the ledger store: anyone can
+// be told once more after it, never less), and the text: SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT when nothing was issued
+// before this offer (step_before_offer < 0: the kit or a practice run's first ASK), else SPIRE_RUN_MAG_PACK_FULL_TEXT.
+constexpr size_t SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX = 1024;
+using SpireRunMagPackFullTold = std::map<std::string, SpireRunMagPackFullNotices>;
+struct SpireRunMagPackFullDecision {
+  bool tell = false;
+  const char* text = nullptr; // set only with tell
+  bool wiped = false;
+  const char* note = ""; // for the log line
+};
+SpireRunMagPackFullDecision spire_run_mag_pack_full_decide(SpireRunMagPackFullTold& told, const std::string& key,
+    uint32_t run_id, bool known, bool created, int32_t offered_step, int32_t step_before_offer);
 
 // The run mag in an overlay's items (data1 of every type-02 item): the ledger follows the mirror (feeding) only when
 // exactly one type-02 item is there and the ledger has issued a mag; its level must not be below the ledger's (feeding
@@ -242,8 +257,10 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 // Ticker texts (C4_SRVMSG path, spire_send_ticker); the evolve text carries the Sega name
 // No promise of a retry: the quest asks again at the next clear while the run goes on, but the server cannot tell
 // whether one comes (the RESULT word has no k, no config names a quest's last room, and time up, a death or 'O' end
-// a run too); the retry needs a free slot after that clear's own rewards
-constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep a slot free";
+// a run too); the retry needs free slots after that clear's own rewards, which come first (the exam rare, up to five
+// room clear rewards). FIRST: no mag was issued before this offer, so there is no mag that could grow.
+constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep slots free";
+constexpr const char* SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT = "Pack full: no room for your mag. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
