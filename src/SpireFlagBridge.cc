@@ -787,7 +787,7 @@ static bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
   bool loaded = false;
   if (spire_equip_item_applies(c->specific_version) && s->data->client_functions) {
     try {
-      s->data->client_functions->get(SPIRE_EQUIP_ITEM_FUNCTION_KEY, c->specific_version);
+      s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
       loaded = true;
     } catch (const std::out_of_range&) {
     }
@@ -2601,12 +2601,12 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
 static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what) {
   try {
     auto s = c->require_server_state();
-    auto fn = s->data->client_functions->get(SPIRE_EQUIP_ITEM_FUNCTION_KEY, c->specific_version);
+    auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
     co_await prepare_client_for_patches(c);
     auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
     c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_ITEM_FUNCTION_KEY,
+    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
         e.what());
   }
 }
@@ -2641,7 +2641,7 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
         point, what, low, serial_number, quest_number);
   } else {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for item {:08X}", point,
-        what, low, serial_number, quest_number, SPIRE_EQUIP_ITEM_FUNCTION_KEY, *item_id);
+        what, low, serial_number, quest_number, SPIRE_EQUIP_FUNCTION_NAME, *item_id);
     asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what), asio::detached);
   }
   return true;

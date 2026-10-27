@@ -5735,11 +5735,55 @@ void run_static_tests() {
       expect(spire_equip_item_available(0x334F5030, true, true, true)); // 3OP0: r15 = 1
       expect(!spire_equip_item_available(0x334F5030, false, true, true)); // SpireEquipItemPatch false: r15 = 0
       expect(!spire_equip_item_available(0x334F5030, true, false, true)); // no function calls that run code
-      expect(!spire_equip_item_available(0x334F5030, true, true, false)); // no SpireEquipItemGC.s (bundle 9 today)
+      expect(!spire_equip_item_available(0x334F5030, true, true, false)); // the function not in the index
       for (uint32_t other : {0x334F4532u /* 3OE2 */, 0x334F4A35u /* 3OJ5 */, 0x344F5055u /* 4OPU */, 0u}) {
         expect(!spire_equip_item_available(other, true, true, true));
       }
-      expect_eq(std::string("SpireEquipItem"), std::string(SPIRE_EQUIP_ITEM_FUNCTION_KEY));
+      expect_eq(std::string("SpireEquipItem"), std::string(SPIRE_EQUIP_FUNCTION_NAME));
+    });
+
+    // Part F3: SpireEquipItemGC.s assembles for 3OP0 only, so with the switch on r15 = 1 for a 3OP0 client
+    b9_case("SpireEquipItem assembles for 3OP0, is in the function index, and r15 = 1 for 3OP0", [&]() {
+      ClientFunctionIndex index("system/client-functions", true);
+      auto fn = index.get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);
+      expect(fn != nullptr);
+      expect_eq(static_cast<int>(ClientFunctionIndex::Function::Architecture::POWERPC), static_cast<int>(fn->arch));
+      expect_eq(SPIRE_EQUIP_ITEM_SPECIFIC_VERSION, fn->specific_version);
+      expect(!fn->appears_in_patches_menu());
+      // the argument newserv writes (spire_equip_item_send) is a label of the function
+      expect(fn->label_offsets.count(SPIRE_EQUIP_ITEM_ID_LABEL) == 1);
+      expect(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4 <= fn->code.size());
+      expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}}).empty());
+      // the game functions it calls are the six of ROUTEB9-NEWSERV-F2-REPORT.md, each loaded as lis r0 / ori r0
+      auto has_call_to = [&](uint32_t addr) {
+        uint32_t lis = 0x3C000000 | (addr >> 16);
+        uint32_t ori = 0x60000000 | (addr & 0xFFFF);
+        std::string be;
+        for (uint32_t w : {lis, ori}) {
+          be.push_back((w >> 24) & 0xFF);
+          be.push_back((w >> 16) & 0xFF);
+          be.push_back((w >> 8) & 0xFF);
+          be.push_back(w & 0xFF);
+        }
+        return fn->code.find(be) != std::string::npos;
+      };
+      for (uint32_t addr : {0x801BAC08u /* TObjPlayer_for_client_id */, 0x801D53D0u /* find_pack_node_by_id */,
+               0x801D5C20u /* pack_node_item */, 0x801C6C18u /* slot get */, 0x801BA398u /* send_unequip_item_6x26 */,
+               0x801BA5ACu /* send_equip_item_6x25 */}) {
+        expect(has_call_to(addr));
+      }
+      // never TObjPlayer_equip_item directly: the game's own send path equips locally
+      expect(!has_call_to(0x801BA3FCu));
+      expect(spire_equip_item_available(fn->specific_version, true, true, true));
+      for (uint32_t other : {0x334F4530u, 0x334F4531u, 0x334F4532u, 0x334F4A35u, 0x33535030u}) {
+        bool threw = false;
+        try {
+          index.get(SPIRE_EQUIP_FUNCTION_NAME, other);
+        } catch (const std::out_of_range&) {
+          threw = true;
+        }
+        expect(threw);
+      }
     });
 
     b9_case("'C' 13: the newest unequipped weapon with grind G", [&]() {

@@ -14,17 +14,16 @@
 // 'C' 13 (low byte = grind G), and after a run mag evolution 'C' 14; newserv answers each by sending the function with
 // the item id of the kit weapon or of the one run mag in its own copy of the inventory.
 //
-// Bundle 9 state (2026-10-27, ROUTEB9-NEWSERV-F-REPORT.md): system/client-functions/SpireEquipItemGC.s is NOT written.
-// No source in this tree gives the 3OP0 address of the equip routine behind Item Pack > Equip (the one that sends
-// 6x25) or a 3OP0 way from the local player to its live TItem objects, and a guessed address freezes the Wii. Without
-// the .s the function index has no SpireEquipItem, spire_equip_item_available is false for every client, r15 stays 0
-// and the quest keeps the bundle 8 kit path. The server side below is complete for the day the .s lands.
+// Bundle 9 state (2026-10-27, ROUTEB9-NEWSERV-F3-REPORT.md): system/client-functions/SpireEquipItemGC.s exists for
+// 3OP0, built only from the addresses proven statically in ROUTEB9-NEWSERV-F2-REPORT.md. With the switch on, r15 is 1
+// for a 3OP0 client that runs function calls. Whether the client handles the call correctly at run time is decided by
+// the lab check, not by this tree.
 
 constexpr uint32_t SPIRE_EQUIP_ITEM_SPECIFIC_VERSION = 0x334F5030; // "3OP0"
-// The function's .meta key. Deliberately not spelled SPIRE_<X>_FUNCTION_NAME: pso-roguelike's quests/spire/pc-build.sh
-// puts every name of that form into client-functions/required.txt and refuses the build when no Spire*.s carries it.
-// Rename it to SPIRE_EQUIP_FUNCTION_NAME (the contract's name) in the commit that adds SpireEquipItemGC.s.
-constexpr const char* SPIRE_EQUIP_ITEM_FUNCTION_KEY = "SpireEquipItem";
+// The function's .meta key, in the form pso-roguelike's quests/spire/pc-build.sh reads: it puts every
+// SPIRE_<X>_FUNCTION_NAME = "<name>" into client-functions/required.txt and refuses the build when no Spire*.s carries
+// that key (contract ROUTEB9-PROTOCOL.md § 3).
+constexpr const char* SPIRE_EQUIP_FUNCTION_NAME = "SpireEquipItem";
 // The label of the .s that receives the item id (send_function_call label_writes)
 constexpr const char* SPIRE_EQUIP_ITEM_ID_LABEL = "item_id";
 constexpr uint8_t SPIRE_EQUIP_REGISTER = 15; // r15: 1 = this client can have an item equipped by the server, else 0
