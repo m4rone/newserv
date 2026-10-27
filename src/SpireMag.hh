@@ -262,7 +262,9 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT = "Pack full: no room for your mag. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
-constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): the grinders come as grind on the kit weapon, so only the HP
+// Materials are left to use
+constexpr const char* SPIRE_KIT_USE_TEXT = "Use your HP Materials now (Item Pack).";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
@@ -274,9 +276,10 @@ std::string spire_run_mag_reminder_text(bool shell);
 constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 61;
 
 // Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
-// the START answer carries an hp_mat or atp_grind level above 0 (the kit creates 2 x level HP Materials / Monogrinders,
-// rewards.py kit_meta) and the client's start answer ('J') did not resume it (a resumed run gets no kit: its items come
-// from the savestate). already_sent: this client had the text in this run.
+// the START answer carries an hp_mat level above 0 (the kit creates 2 x level HP Materials, rewards.py kit_meta) and the
+// client's start answer ('J') did not resume it (a resumed run gets no kit: its items come from the savestate).
+// already_sent: this client had the text in this run. v62 (B-REGIE-16-13): atp_grind no longer makes it due (the
+// grinders are a grind on the kit weapon); the level stays an argument for the callers' log lines.
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent);
 
 // Route B bundle 2 S: the boss burst text. The quest (F7, make_spire.py boss_burst) casts Shifta, and Deband unless

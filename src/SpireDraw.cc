@@ -19,6 +19,36 @@ static constexpr uint32_t ARCHETYPE_FO = 2;
 static constexpr uint32_t RACE_ANDROID = 2;
 static constexpr uint32_t BONUS_SHIFT = 8;
 
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 1): an optional name for the server texts. "" (no name known) unless
+// the value is a string of 1 to max_length printable ASCII characters without '$' (a $C colour escape in a B0 text)
+static std::string spire_draw_optional_name(const phosg::JSON* value, size_t max_length) {
+  if (!value || !value->is_string()) {
+    return "";
+  }
+  const std::string& s = value->as_string();
+  if (s.empty() || (s.size() > max_length)) {
+    return "";
+  }
+  for (char ch : s) {
+    if ((ch < 0x20) || (ch > 0x7E) || (ch == '$')) {
+      return "";
+    }
+  }
+  return s;
+}
+
+static const phosg::JSON* spire_draw_optional_key(const phosg::JSON& dict, const char* key) {
+  if (!dict.is_dict() || !dict.contains(key)) {
+    return nullptr;
+  }
+  return &dict.at(key);
+}
+
+static constexpr size_t ENTRY_NAME_MAX = 22;
+static constexpr size_t TAG_NAME_MAX = 10;
+static constexpr size_t EXAM_EXTRA_MAX = 24;
+static constexpr size_t EXAM_TEXT_MAX = 90; // boss and modifier: no limit in the contract but the one of a text line
+
 SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
   auto json = phosg::JSON::parse(phosg::load_file(filename));
   SpireDrawTable t;
@@ -43,6 +73,7 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
       e.rare = e_json->get_bool("rare");
       e.own_curse = e_json->get_bool("own_curse");
       e.glass_ok = e_json->get_bool("glass_ok");
+      e.name = spire_draw_optional_name(spire_draw_optional_key(*e_json, "name"), ENTRY_NAME_MAX); // v62
       a.entries.emplace_back(e);
     }
     for (const auto& b : a_json->get_list("kbands")) {
@@ -93,6 +124,43 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
   }
   if (t.archetypes.size() != 3 || t.num_tags == 0 || t.num_tags > 10) {
     throw std::runtime_error("invalid draw table");
+  }
+  // v62 (B-REGIE-16-13): the names for the server texts; none of them can fail the table
+  if (const auto* tags = spire_draw_optional_key(json, "tag_names"); tags && tags->is_list()) {
+    for (const auto& name : tags->as_list()) {
+      t.tag_names.emplace_back(spire_draw_optional_name(name.get(), TAG_NAME_MAX));
+    }
+  }
+  if (const auto* exams = spire_draw_optional_key(json, "exams"); exams && exams->is_dict()) {
+    for (const auto& [k_str, exam_json] : exams->as_dict()) {
+      uint8_t k = 0;
+      try {
+        size_t used = 0;
+        unsigned long v = std::stoul(k_str, &used);
+        if ((used != k_str.size()) || (v == 0) || (v > 0xFF)) {
+          continue;
+        }
+        k = v;
+      } catch (const std::exception&) {
+        continue; // no room number
+      }
+      if (!exam_json->is_dict()) {
+        continue;
+      }
+      SpireDrawExam exam;
+      exam.boss = spire_draw_optional_name(spire_draw_optional_key(*exam_json, "boss"), EXAM_TEXT_MAX);
+      if (const auto* mods = spire_draw_optional_key(*exam_json, "modifiers"); mods && mods->is_list()) {
+        for (const auto& m : mods->as_list()) {
+          exam.modifiers.emplace_back(spire_draw_optional_name(m.get(), EXAM_TEXT_MAX));
+        }
+      }
+      t.exams.emplace(k, std::move(exam));
+    }
+  }
+  if (const auto* extras = spire_draw_optional_key(json, "exam_extras"); extras && extras->is_list()) {
+    for (const auto& name : extras->as_list()) {
+      t.exam_extras.emplace_back(spire_draw_optional_name(name.get(), EXAM_EXTRA_MAX));
+    }
   }
   return t;
 }
@@ -292,6 +360,39 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
   return d.drawn;
 }
 
-std::string spire_draw_overview_line(const SpireDrawTable&, uint32_t, uint32_t) {
-  return ""; // RED STUB
+std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn) {
+  if (archetype >= table.archetypes.size()) {
+    return "";
+  }
+  const auto& entries = table.archetypes[archetype].entries;
+  struct Drawn {
+    const std::string* name;
+    const char* suffix;
+  };
+  std::vector<Drawn> list;
+  for (uint32_t slot : {3, 4, 5, 2}) { // the order of the reward pages: "Reward n of N" is slot 3, 4, 5, then 2 (R14)
+    uint32_t id = (drawn >> ((slot - 2) * ID_BITS)) & ID_MASK;
+    if (id == 0) {
+      continue;
+    }
+    if ((id > entries.size()) || entries[id - 1].name.empty()) {
+      return ""; // a drawn entry without a name: no overview
+    }
+    uint32_t curse = (drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3;
+    list.emplace_back(Drawn{&entries[id - 1].name, curse ? " (cursed)" : entries[id - 1].rare ? " (rare)" : ""});
+  }
+  if (list.empty()) {
+    return "";
+  }
+  for (bool suffixes : {true, false}) {
+    std::string line = "Rewards: ";
+    for (size_t z = 0; z < list.size(); z++) {
+      line += (z ? ", " : "") + *list[z].name + (suffixes ? list[z].suffix : "");
+    }
+    line += ". Walk to choose.";
+    if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
+      return line;
+    }
+  }
+  return std::format("Rewards: {} ready. Walk to choose.", list.size());
 }

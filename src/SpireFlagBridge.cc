@@ -1358,10 +1358,47 @@ static uint64_t spire_splitmix_next(uint64_t& state) {
   return z ^ (z >> 31);
 }
 
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 2): each client's overview line of its last 'Q', for its 'C' 2. Replaced
+// (or dropped) at its next 'Q', dropped at a floor change (spire_replay_after_floor_load) and at the quest start; the
+// weak_ptr tells a reused Client address from the one that wrote it.
+struct SpireOverviewEntry {
+  std::weak_ptr<const Client> client;
+  SpireOverviewKept kept;
+};
+static std::unordered_map<const Client*, SpireOverviewEntry> spire_overview_entries;
+
+static const SpireOverviewKept* spire_overview_kept_for(std::shared_ptr<const Client> c) {
+  auto it = spire_overview_entries.find(c.get());
+  if ((it == spire_overview_entries.end()) || (it->second.client.lock() != c)) {
+    return nullptr;
+  }
+  return &it->second.kept;
+}
+
+static void spire_overview_floor_changed(std::shared_ptr<const Client> c) {
+  const auto* kept = spire_overview_kept_for(c);
+  if (kept && (kept->floor != c->floor)) {
+    spire_overview_entries.erase(c.get());
+  }
+}
+
+// v62: the quest's draw table for the names in a server text (SpireBridgeTextContext); std::nullopt if it cannot be
+// read (the text then names nothing, as for an older draw.json)
+static std::optional<SpireDrawTable> spire_draw_table_for_text(std::shared_ptr<const Client> c, uint32_t quest_number) {
+  std::string filename = std::format("{}/q{}.json", SPIRE_BRIDGE_DRAW_DIRECTORY, quest_number);
+  try {
+    return SpireDrawTable::from_json_file(filename);
+  } catch (const std::exception& e) {
+    c->log.info_f("Spire bridge: text names from {}: {}; the text names nothing", filename, e.what());
+    return std::nullopt;
+  }
+}
+
 static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
   spire_draw_inputs.erase(c.get());
+  spire_overview_entries.erase(c.get()); // v62: a 'Q' ends the last overview, also one that gets no answer
   if (values.size() != (value & 0xFFFF)) {
     c->log.warning_f("Spire bridge: draw for serial {:010} in q{}: {} inputs announced, {} received; no answer",
         serial_number, quest_number, value & 0xFFFF, values.size());
@@ -1408,6 +1445,20 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
   c->log.info_f("Spire bridge: draw for serial {:010} in q{} (arch {} k {} path {} choice {} relics {:08X}): r{}={:08X}, "
       "r{}=DONE", serial_number, quest_number, in.archetype, in.k, in.path, in.choice, in.relics,
       SPIRE_BRIDGE_DRAW_RESULT_REGISTER, drawn, SPIRE_BRIDGE_REQUEST_REGISTER);
+
+  // v62 (ROUTEB8-PROTOCOL.md § 2): the overview of the three rewards, to this client only, kept for its 'C' 2
+  std::string overview = spire_draw_overview_line(table, in.archetype, drawn);
+  if (overview.empty()) {
+    c->log.info_f("Spire bridge: draw for serial {:010} in q{}: no overview line (not every drawn entry has a name)",
+        serial_number, quest_number);
+  } else {
+    if (spire_overview_entries.size() > 256) {
+      std::erase_if(spire_overview_entries, [](const auto& e) { return e.second.client.expired(); });
+    }
+    spire_overview_entries[c.get()] = SpireOverviewEntry{c, SpireOverviewKept{overview, l->lobby_id, c->floor}};
+    spire_send_ticker(c, overview);
+    c->log.info_f("Spire bridge: draw for serial {:010} in q{}: sent \"{}\"", serial_number, quest_number, overview);
+  }
 }
 
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
@@ -1558,13 +1609,125 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
 }
 
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): the bundle 8 texts that name something from the quest's draw.json
+// (SpireDraw.hh). Each returns "" when it has nothing to say, so the caller keeps the text of before.
+
+static const std::string SPIRE_TEXT_NO_NAME;
+
+// a name from a list by a code's "index + 1" (0 = none); "" when not known
+static const std::string& spire_text_name_at(const std::vector<std::string>* names, uint32_t index_plus_1) {
+  return (!names || (index_plus_1 == 0) || (index_plus_1 > names->size())) ? SPIRE_TEXT_NO_NAME : (*names)[index_plus_1 - 1];
+}
+
+static const SpireDrawExam* spire_text_exam(const SpireBridgeTextContext& ctx, uint32_t k) {
+  if (!ctx.draw) {
+    return nullptr;
+  }
+  auto it = ctx.draw->exams.find(k);
+  return ((it == ctx.draw->exams.end()) || it->second.boss.empty()) ? nullptr : &it->second;
+}
+
+// the first of the forms that fits in a ticker line
+static std::string spire_text_first_fitting(std::initializer_list<std::string> forms) {
+  for (const auto& form : forms) {
+    if (!form.empty() && (form.size() <= SPIRE_BRIDGE_TEXT_MAX)) {
+      return form;
+    }
+  }
+  return "";
+}
+
+// 'C' 6 with bits 16-23 = typeB << 4 | typeA (0 normal, 1 elite, 2 rest, 3 exam; typeB 0xF one pipe); "" for 0 (an
+// older quest) or a type it does not know
+static std::string spire_text_way_open(uint32_t bits, uint32_t k, const SpireBridgeTextContext& ctx) {
+  static const char* const TYPE_WORDS[4] = {"normal", "ELITE", "REST", "EXAM"};
+  uint32_t type_a = bits & 0x0F, type_b = (bits >> 4) & 0x0F;
+  if ((bits == 0) || (type_a > 3) || ((type_b > 3) && (type_b != 0x0F))) {
+    return "";
+  }
+  if (type_b == 0x0F) {
+    if (type_a == 3) {
+      // contract: the boss from exams[k]; unknown, or a line over the limit: "Room k" in its place
+      const auto* exam = spire_text_exam(ctx, k);
+      return spire_text_first_fitting({exam ? std::format("The way is open. Walk to the warp: Exam {}.", exam->boss) : "",
+          std::format("The way is open. Walk to the warp: Exam Room {}.", k)});
+    }
+    // one pipe that is no exam: not in the contract; the two-pipe words for it (route-b-8 report, deviation 2)
+    return std::format("The way is open. Walk to the warp: Room {} {}.", k, TYPE_WORDS[type_a]);
+  }
+  return spire_text_first_fitting({std::format("The way is open: Room {} {} or Room {} {}. Walk close to a warp to read it.",
+      k, TYPE_WORDS[type_a], k, TYPE_WORDS[type_b])});
+}
+
+// 'A' pipe approach: type 0/1 with extra 0 (an older quest, or no tag) and any type above 3 get the text of before
+static std::string spire_text_approach(uint32_t type, uint32_t extra, uint32_t k, const SpireBridgeTextContext& ctx) {
+  switch (type) {
+    case 0:
+    case 1: {
+      if (extra == 0) {
+        return "";
+      }
+      std::string head = (type == 1) ? std::format("Room {} - Elite: harder foes, rare reward.", k) : std::format("Room {}.", k);
+      const std::string& tag = spire_text_name_at(ctx.draw ? &ctx.draw->tag_names : nullptr, extra);
+      return spire_text_first_fitting({tag.empty() ? "" : std::format("{} Next reward: {}.", head, tag), head});
+    }
+    case 2:
+      // spire.json texts.sign_rest ("No enemies: full HP, then the shop."), the same in every quest version so far, so
+      // also for an older quest (whose rest code has extra 0 like the new one)
+      return std::format("Room {} - Rest: no enemies, full HP, then the shop.", k);
+    case 3: {
+      const auto* exam = spire_text_exam(ctx, k);
+      if (!exam) {
+        return std::format("Room {} - Exam.", k);
+      }
+      const std::string& modifier = spire_text_name_at(&exam->modifiers, extra);
+      return spire_text_first_fitting({modifier.empty() ? "" : std::format("Room {} - Exam: {} ({}).", k, exam->boss, modifier),
+          std::format("Room {} - Exam: {}.", k, exam->boss), std::format("Room {} - Exam.", k)});
+    }
+    default:
+      return "";
+  }
+}
+
+// 'C' 10 exam reward: bits 16-22 rare entry index + 1 of the writer's archetype, bit 23 the rare did not fit; low byte
+// bits 0-4 exam_extras index + 1, bits 5-7 n (meseta 500 + 100 n). A part without a name is left out; over the limit
+// the extra goes first, then the rare name (the full note is about the rare, so it stays)
+static std::string spire_text_exam_reward(uint32_t value, const SpireBridgeTextContext& ctx) {
+  uint32_t rare = (value >> 16) & 0x7F, extra = value & 0x1F, n = (value >> 5) & 0x07;
+  bool full = (value >> 23) & 1;
+  const std::string* rare_name = &SPIRE_TEXT_NO_NAME;
+  if (ctx.draw && (ctx.archetype >= 0) && (static_cast<size_t>(ctx.archetype) < ctx.draw->archetypes.size())) {
+    const auto& entries = ctx.draw->archetypes[ctx.archetype].entries;
+    if ((rare != 0) && (rare <= entries.size())) {
+      rare_name = &entries[rare - 1].name;
+    }
+  }
+  const std::string& extra_name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, extra);
+  auto form = [&](bool with_rare, bool with_extra) {
+    std::string ret = std::format("Exam reward: {} meseta", 500 + 100 * n);
+    if (with_rare && !rare_name->empty()) {
+      ret += ", " + *rare_name;
+    }
+    if (with_extra && !extra_name.empty()) {
+      ret += ", " + extra_name;
+    }
+    ret += ".";
+    if (full) {
+      ret += " Inventory full: make room, it waits.";
+    }
+    return ret;
+  };
+  return spire_text_first_fitting({form(true, true), form(true, false), form(false, false)});
+}
+
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
 // texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code. v35: one line each, the form of
 // "Waiting for your partner..." (no window during a run, see spire_ticker_line); v49: the run-over text names no
-// place, since the player may go back to base ('O') or to the lobby (spire_run_over).
-std::string spire_bridge_message_text(uint32_t value) {
+// place, since the player may go back to base ('O') or to the lobby (spire_run_over). v62 (B-REGIE-16-13): the bundle 8
+// texts (SpireFlagBridge.hh); bits 16-23 = 0 give the text of before for 'C' 6 and 'A' types 0 and 1.
+std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx) {
   uint8_t kind = value >> 24;
-  uint32_t a = (value >> 8) & 0xFF, b = value & 0xFF;
+  uint32_t a = (value >> 8) & 0xFF, b = value & 0xFF, bits = (value >> 16) & 0xFF;
   switch (kind) {
     case SPIRE_BRIDGE_MSG_WAVE:
       return std::format("Wave {}/{}", a, b);
@@ -1574,7 +1737,7 @@ std::string spire_bridge_message_text(uint32_t value) {
     case SPIRE_BRIDGE_MSG_TIME:
       return std::format("$C4{} minutes left$C7 - the timer ends the run.", value & 0xFFFF);
     case SPIRE_BRIDGE_MSG_PARTNER:
-      return b ? "$C4Your partner is waiting.$C7 Open the quest board and make your choice." : "Waiting for your partner...";
+      return b ? "Your partner is ready. Walk to choose your reward." : "Waiting for your partner..."; // v62
     case SPIRE_BRIDGE_MSG_RUN_OVER:
       // v49 (B-BASIS-12): true for both outcomes, the return to base ('O' OK) and the 6x73 to the lobby
       return std::format("Run over. Rooms cleared: {}, {} s.", (value >> 16) & 0xFF, value & 0xFFFF);
@@ -1584,25 +1747,35 @@ std::string spire_bridge_message_text(uint32_t value) {
     case SPIRE_BRIDGE_MSG_DOWN:
       return b ? "You are down - you get up when the room is clear." : "You are back on your feet.";
     case SPIRE_BRIDGE_MSG_HINT:
-      return "Close the board and take a step.";
+      return "Take a step: the menu opens."; // v62
     case SPIRE_BRIDGE_MSG_PROMPT:
       switch (a) {
         case 1:
           return "Take your reward: Quest Board, slot Reward.";
-        case 2:
-          return "Take a step: your reward pages open.";
-        case 6:
-          return "The way is open. Walk to a warp.";
+        case 2: // v62: the writer's overview line of its last 'Q' (spire_overview_kept_line)
+          return ctx.overview.empty() ? "Take a step: your reward list opens." : ctx.overview;
+        case 6: { // v62: both pipes, or the exam pipe's boss
+          std::string text = spire_text_way_open(bits, b, ctx);
+          return text.empty() ? "The way is open. Walk to a warp." : text;
+        }
         case 7:
           return "Partner has not taken a reward. The way is open.";
         case 8:
           return "Partner is in the shop. The warp waits for him.";
         case 9: // v38: the low byte is 1 on the leader, 0 on the follower; same text
           return "Waiting for your partner at Forest 1.";
+        case 10: // v62: the exam reward
+          return spire_text_exam_reward(value, ctx);
+        case 11: // v62: the start hint at the Forest 1 arrival
+          return "Take a step: your run starts.";
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
-    case SPIRE_BRIDGE_MSG_APPROACH:
+    case SPIRE_BRIDGE_MSG_APPROACH: {
+      std::string text = spire_text_approach(a, bits, b, ctx); // v62
+      if (!text.empty()) {
+        return text;
+      }
       switch (a) {
         case 1:
           return std::format("Room {} - Elite (harder, better reward)", b);
@@ -1611,25 +1784,38 @@ std::string spire_bridge_message_text(uint32_t value) {
         default:
           return std::format("Room {}", b);
       }
+    }
     default:
       return "";
   }
 }
 
-std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext&) {
-  return spire_bridge_message_text(value); // RED STUB
+std::string spire_bridge_message_text(uint32_t value) {
+  return spire_bridge_message_text(value, SpireBridgeTextContext());
 }
 
-std::string spire_overview_kept_line(const SpireOverviewKept*, uint32_t, uint32_t) {
-  return ""; // RED STUB
+std::string spire_overview_kept_line(const SpireOverviewKept* kept, uint32_t lobby_id, uint32_t floor) {
+  return (kept && (kept->lobby_id == lobby_id) && (kept->floor == floor)) ? kept->line : "";
 }
 
-int spire_draw_archetype_for_class(uint8_t) {
-  return -1; // RED STUB
+int spire_draw_archetype_for_class(uint8_t char_class) {
+  if (char_class >= 12) {
+    return -1; // the 12 classes of v3 (char_class_is_* throws past them)
+  }
+  if (char_class_is_hunter(char_class)) {
+    return 0;
+  }
+  if (char_class_is_ranger(char_class)) {
+    return 1;
+  }
+  if (char_class_is_force(char_class)) {
+    return 2;
+  }
+  return -1;
 }
 
-const char* spire_bridge_clear_text(bool) {
-  return SPIRE_BRIDGE_ROOM_CLEAR_TEXT; // RED STUB
+const char* spire_bridge_clear_text(bool server_boss_clear) {
+  return server_boss_clear ? SPIRE_BRIDGE_BOSS_CLEAR_TEXT : SPIRE_BRIDGE_ROOM_CLEAR_TEXT;
 }
 
 // v41 (B-E01-96): lives are the quest's counter r172, never a Scape Doll, and the Battle respawn to the city is always
@@ -1716,6 +1902,7 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_base_returned.erase(c.get()); // v49: an 'O' OK of an earlier quest never allows an 'I'
   spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
   spire_run_rooms.erase(c.get()); // v48
+  spire_overview_entries.erase(c.get()); // v62
   spire_overlay_refreshed.erase(c.get()); // F6: the quest load makes the overlay anew
   if (auto l = c->lobby.lock()) {
     spire_run_again_games.erase(l->lobby_id); // F6
@@ -2580,7 +2767,25 @@ bool spire_bridge_handle_register(
         spire_run_over(c, l, serial_number, quest_number, value);
         return true;
       }
-      std::string msg = spire_bridge_message_text(value);
+      // v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the
+      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2
+      SpireBridgeTextContext text_ctx;
+      std::optional<SpireDrawTable> text_table;
+      uint8_t text_kind = value >> 24;
+      uint32_t text_point = (value >> 8) & 0xFF;
+      if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
+          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10)))) {
+        text_table = spire_draw_table_for_text(c, quest_number);
+        text_ctx.draw = text_table ? &*text_table : nullptr;
+      }
+      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 10)) {
+        auto character = c->character_file(false, false);
+        text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
+      }
+      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 2)) {
+        text_ctx.overview = spire_overview_kept_line(spire_overview_kept_for(c), l->lobby_id, c->floor);
+      }
+      std::string msg = spire_bridge_message_text(value, text_ctx);
       if (msg.empty() && ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT)) {
         return true; // v37: a retired wait point (3-5): no text, no log line
       }
@@ -5402,12 +5607,13 @@ static void spire_bridge_announce_boss_clear(
     for (const auto& lc : l->clients) {
       if (lc) {
         send_command_t(lc, 0x60, 0x00, cmd);
-        spire_send_ticker_later(lc, l, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY); // v36: after the r251
+        // v36: after the r251; v62 (B-REGIE-16-13): a boss clear opens no reward list, so "Exam passed!"
+        spire_send_ticker_later(lc, l, spire_bridge_clear_text(true), SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY);
         sent++;
       }
     }
     l->log.info_f("Spire bridge: {} defeated (room {} on floor {:02X}) in q{}; sent \"{}\" and r{} = {:08X} to {} client(s)",
-        phosg::name_for_enum(type), room, floor, quest_number, SPIRE_BRIDGE_ROOM_CLEAR_TEXT,
+        phosg::name_for_enum(type), room, floor, quest_number, spire_bridge_clear_text(true),
         SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, cmd.value.as_int.load(), sent);
     spire_replay_note_room_cleared(l, floor, cmd.value.as_int);
     spire_checkpoint_record_room(l, floor, room, true);
@@ -5746,6 +5952,7 @@ static void spire_follow_leader(std::shared_ptr<Client> c, std::shared_ptr<Lobby
 
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   try {
+    spire_overview_floor_changed(c); // v62: a floor change ends the kept overview line
     if (!spire_replay_applies(c, l)) {
       return;
     }

@@ -472,7 +472,8 @@ std::string spire_run_mag_reminder_text(bool shell) {
 }
 
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent) {
-  return start && (hp_mat_level || atp_grind_level) && !resumed && !already_sent;
+  (void)atp_grind_level; // v62: the grind is on the kit weapon, nothing to use
+  return start && hp_mat_level && !resumed && !already_sent;
 }
 
 bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms) {
