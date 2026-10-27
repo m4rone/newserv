@@ -673,6 +673,55 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss) {
       ss.practice ? " (practice run)" : "");
 }
 
+std::string spire_savestate_room_quest_name(const SpireSavestate& ss) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = ss.values;
+  if ((v.size() <= SPIRE_SS_VARIANT) || (v[SPIRE_SS_K] == 0) || (v[SPIRE_SS_VARIANT] >= 3)) {
+    return "";
+  }
+  return std::format("Spire room {}{}", v[SPIRE_SS_K], variants[v[SPIRE_SS_VARIANT]]);
+}
+
+std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = ss.values;
+  std::vector<std::string> parts;
+  if ((v.size() > SPIRE_SS_K) && (v[SPIRE_SS_K] != 0)) {
+    bool has_variant = (v.size() > SPIRE_SS_VARIANT) && (v[SPIRE_SS_VARIANT] < 3);
+    parts.emplace_back(std::format("Room {}{}", v[SPIRE_SS_K], has_variant ? variants[v[SPIRE_SS_VARIANT]] : ""));
+  }
+  if (v.size() > SPIRE_SS_LIVES) {
+    parts.emplace_back(std::format("{} lives", v[SPIRE_SS_LIVES]));
+  }
+  if (v.size() > SPIRE_SS_ELAPSED) {
+    uint32_t t = v[SPIRE_SS_ELAPSED];
+    parts.emplace_back((t >= 3600) ? std::format("{}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60)
+                                   : std::format("{}:{:02}", t / 60, t % 60));
+  }
+  std::string ret = "Saved run";
+  for (size_t z = 0; z < parts.size(); z++) {
+    ret += (z ? ", " : ": ") + parts[z];
+  }
+  return ret + ".";
+}
+
+std::string spire_savestate_notice_continue_line(const std::string& category_name, const std::string& quest_name) {
+  if (category_name.empty() || quest_name.empty()) {
+    return SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
+  }
+  std::string ret = spire_ticker_line(std::format("To continue: Quest > {} > {}.", category_name, quest_name));
+  return (ret.size() <= SPIRE_BRIDGE_TEXT_MAX) ? ret : SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
+}
+
+std::vector<std::string> spire_savestate_notice_take(
+    bool* told, const SpireSavestate& ss, const std::string& category_name, const std::string& quest_name) {
+  if (*told || !ss.exists) {
+    return {};
+  }
+  *told = true;
+  return {spire_savestate_notice_saved_line(ss), spire_savestate_notice_continue_line(category_name, quest_name)};
+}
+
 // The run of a game (lobby id; a game's id is never reused while the server runs): set by the first 'J' or 'B' in the
 // game, forgotten at its next quest start.
 struct SpireGameRun {
@@ -1692,16 +1741,21 @@ static std::string spire_text_approach(uint32_t type, uint32_t extra, uint32_t k
 // 'C' 10 exam reward: bits 16-22 rare entry index + 1 of the writer's archetype, bit 23 the rare did not fit; low byte
 // bits 0-4 exam_extras index + 1, bits 5-7 n (meseta 500 + 100 n). A part without a name is left out; over the limit
 // the extra goes first, then the rare name (the full note is about the rare, so it stays)
+// the name of entry "index + 1" (0 = none) of the writer's archetype; "" when not known
+static const std::string& spire_text_archetype_entry_name(const SpireBridgeTextContext& ctx, uint32_t index_plus_1) {
+  if (ctx.draw && (ctx.archetype >= 0) && (static_cast<size_t>(ctx.archetype) < ctx.draw->archetypes.size())) {
+    const auto& entries = ctx.draw->archetypes[ctx.archetype].entries;
+    if ((index_plus_1 != 0) && (index_plus_1 <= entries.size())) {
+      return entries[index_plus_1 - 1].name;
+    }
+  }
+  return SPIRE_TEXT_NO_NAME;
+}
+
 static std::string spire_text_exam_reward(uint32_t value, const SpireBridgeTextContext& ctx) {
   uint32_t rare = (value >> 16) & 0x7F, extra = value & 0x1F, n = (value >> 5) & 0x07;
   bool full = (value >> 23) & 1;
-  const std::string* rare_name = &SPIRE_TEXT_NO_NAME;
-  if (ctx.draw && (ctx.archetype >= 0) && (static_cast<size_t>(ctx.archetype) < ctx.draw->archetypes.size())) {
-    const auto& entries = ctx.draw->archetypes[ctx.archetype].entries;
-    if ((rare != 0) && (rare <= entries.size())) {
-      rare_name = &entries[rare - 1].name;
-    }
-  }
+  const std::string* rare_name = &spire_text_archetype_entry_name(ctx, rare);
   const std::string& extra_name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, extra);
   auto form = [&](bool with_rare, bool with_extra) {
     std::string ret = std::format("Exam reward: {} meseta", 500 + 100 * n);
@@ -1718,6 +1772,30 @@ static std::string spire_text_exam_reward(uint32_t value, const SpireBridgeTextC
     return ret;
   };
   return spire_text_first_fitting({form(true, true), form(true, false), form(false, false)});
+}
+
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 1, 8.1 critic NB-1): 'C' 12, an exam reward while an older exam rare still
+// waits. The layout of 'C' 10, but bits 16-22 name the WAITING rare (entry index + 1 of the writer's archetype, 0 = not
+// known) and bit 23 is always set (the inventory is full by definition, so the bit says nothing more). A part without a
+// name is left out; a waiting rare without a name keeps the "a rare still waits" words of the last form. Over the limit
+// the extra goes first, then the rare name.
+static std::string spire_text_exam_reward_waiting(uint32_t value, const SpireBridgeTextContext& ctx) {
+  uint32_t rare = (value >> 16) & 0x7F, extra = value & 0x1F, n = (value >> 5) & 0x07;
+  const std::string& rare_name = spire_text_archetype_entry_name(ctx, rare);
+  const std::string& extra_name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, extra);
+  auto form = [&](bool with_extra, bool with_rare) {
+    std::string ret = std::format("Exam reward: {} meseta", 500 + 100 * n);
+    if (with_extra && !extra_name.empty()) {
+      ret += ", " + extra_name;
+    }
+    if (with_rare && !rare_name.empty()) {
+      ret += ". Still waiting: " + rare_name + ". Make room.";
+    } else {
+      ret += ". A rare still waits: make room.";
+    }
+    return ret;
+  };
+  return spire_text_first_fitting({form(true, true), form(false, true), form(false, false)});
 }
 
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
@@ -1768,6 +1846,8 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return spire_text_exam_reward(value, ctx);
         case 11: // v62: the start hint at the Forest 1 arrival
           return "Take a step: your run starts.";
+        case 12: // bundle 9: an exam reward while an older exam rare still waits
+          return spire_text_exam_reward_waiting(value, ctx);
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
@@ -2768,17 +2848,17 @@ bool spire_bridge_handle_register(
         return true;
       }
       // v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the
-      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2
+      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2; bundle 9: 'C' 12 as 'C' 10
       SpireBridgeTextContext text_ctx;
       std::optional<SpireDrawTable> text_table;
       uint8_t text_kind = value >> 24;
       uint32_t text_point = (value >> 8) & 0xFF;
       if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
-          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10)))) {
+          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12)))) {
         text_table = spire_draw_table_for_text(c, quest_number);
         text_ctx.draw = text_table ? &*text_table : nullptr;
       }
-      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 10)) {
+      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12))) {
         auto character = c->character_file(false, false);
         text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
       }
@@ -6012,6 +6092,43 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
                          : std::format("Continue at room {}", cp.last_room + 1);
   }
   throw std::runtime_error("Use: $spire status or $spire continue");
+}
+
+void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    if (c->spire_savestate_told || !l || !l->is_game() || !spire_bridge_serial_for_client(c)) {
+      return;
+    }
+    SpireSavestate ss = spire_savestate_load_logged(c); // unreadable: logged there, read as none
+    if (!ss.exists) {
+      return;
+    }
+    // the room quest by the name the quest build gives it, of the savestate's episode, for this client's version
+    std::string category_name, quest_name = spire_savestate_room_quest_name(ss);
+    auto s = c->require_server_state();
+    auto q = (quest_name.empty() || !s->data->quest_index) ? nullptr : s->data->quest_index->get(quest_name);
+    if (q && (static_cast<uint8_t>(q->meta.episode) == ss.episode) && q->has_version_any_language(c->version()) &&
+        s->data->quest_index->category_index) {
+      try {
+        auto cat = s->data->quest_index->category_index->at(q->meta.category_id);
+        category_name = cat ? cat->name : "";
+      } catch (const std::out_of_range&) {
+      }
+    }
+    if (category_name.empty()) {
+      quest_name.clear();
+    }
+    auto lines = spire_savestate_notice_take(&c->spire_savestate_told, ss, category_name, quest_name);
+    if (lines.size() != 2) {
+      return;
+    }
+    spire_send_ticker(c, lines[0]);
+    spire_send_ticker_later(c, l, lines[1], SPIRE_SAVESTATE_NOTICE_SECOND_DELAY);
+    c->log.info_f("Spire savestate: notice at game join ({}): \"{}\" and \"{}\"", spire_savestate_describe(ss),
+        lines[0], lines[1]);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire savestate: notice at game join failed: {}", e.what());
+  }
 }
 
 asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c) {
