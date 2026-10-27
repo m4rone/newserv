@@ -262,9 +262,9 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT = "Pack full: no room for your mag. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
-// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): the grinders come as grind on the kit weapon, so only the HP
-// Materials are left to use
-constexpr const char* SPIRE_KIT_USE_TEXT = "Use your HP Materials now (Item Pack).";
+// v62: unchanged in bundle 8. The grind on the kit weapon moved to bundle 9 (B-REGIE-16-15: equip_item cannot set a
+// grind), so the kit still holds Monogrinders to use next to the HP Materials
+constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix

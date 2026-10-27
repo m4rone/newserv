@@ -5487,11 +5487,12 @@ void run_static_tests() {
       }
     });
 
-    b8_case("kit ticker: HP Materials only, grinders are a grind on the kit weapon", [&]() {
-      expect_eq(std::string("Use your HP Materials now (Item Pack)."), std::string(SPIRE_KIT_USE_TEXT));
+    // B-REGIE-16-15: bundle 8 keeps the Monogrinders (equip_item cannot set a grind), so the ticker names both again
+    b8_case("kit ticker: materials and grinders, as before bundle 8", [&]() {
+      expect_eq(std::string("Use your materials and grinders now (Item Pack)"), std::string(SPIRE_KIT_USE_TEXT));
       expect(spire_kit_use_text_due(true, 1, 0, false, false));
       expect(spire_kit_use_text_due(true, 2, 3, false, false));
-      expect(!spire_kit_use_text_due(true, 0, 2, false, false)); // atp_grind only: no ticker
+      expect(spire_kit_use_text_due(true, 0, 2, false, false)); // atp_grind only: the grinders are items to use
       expect(!spire_kit_use_text_due(true, 0, 0, false, false));
       expect(!spire_kit_use_text_due(true, 1, 0, true, false)); // resumed: the kit is not given
       expect(!spire_kit_use_text_due(true, 1, 0, false, true)); // already sent in this run
