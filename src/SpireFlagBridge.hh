@@ -117,6 +117,13 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     byte bits 0-4 exam_extras index + 1 and bits 5-7 n (meseta 500 + 100 n): "Exam reward: <meseta> meseta, <rare>,
 //     <extra>." and when full " Inventory full: make room, it waits."
 //   'C' 11 start hint at the Forest 1 arrival: "Take a step: your run starts."
+// Route B bundle 9 (the quest's quests/spire/ROUTEB9-PROTOCOL.md § 1; to the writer only, one line of at most
+// SPIRE_BRIDGE_TEXT_MAX characters like the bundle 8 texts):
+//   'C' 12 exam reward while an OLDER exam rare still waits: the layout of 'C' 10, but bits 16-22 = entry index + 1 of
+//     the WAITING rare in the writer's archetype (0 = not known) and bit 23 always set: "Exam reward: <meseta> meseta,
+//     <extra>. Still waiting: <rare>. Make room." (a part without a name left out; no rare name: "... A rare still
+//     waits: make room."). Too long: without ", <extra>"; still too long: "Exam reward: <meseta> meseta. A rare still
+//     waits: make room." A newserv from before bundle 9 takes 'C' 12 as an unknown point: no text, no log line.
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v48), the
 // run again ('I', v49) and the base shop ('M', v50).
@@ -390,6 +397,34 @@ constexpr auto SPIRE_KIT_USE_TEXT_DELAY = std::chrono::milliseconds(3000);
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
 std::string spire_savestate_continue_text(const SpireSavestate& ss);
+// Route B bundle 9 (the quest's quests/spire/ROUTEB9-PROTOCOL.md § 2, B-REGIE-17-2): the save point notice. When a
+// client with a readable savestate finishes loading into a game (6F), the server sends it two ticker lines, once per
+// client session (Client::spire_savestate_told; set only when the lines go out, so a session without a savestate at
+// its first game join still gets them at a later join):
+//   1. "Saved run: Room <k><variant>, <lives> lives, <time>." (variant "" / " elite" / " rest", time the run time as
+//      m:ss, h:mm:ss from an hour on; a missing field is left out)
+//   2. "To continue: Quest > <category> > <quest name>." for the room quest the quest index has under the name the
+//      quest build gives it (spire_savestate_room_quest_name), of the savestate's episode and for this client's
+//      version; not found (or over the limit): SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT.
+// The second line follows the first after SPIRE_SAVESTATE_NOTICE_SECOND_DELAY, so it does not push it aside (as the
+// resume mag line, F6). Nothing is sent without a savestate or for an unreadable one. '$spire continue' and the resume
+// ticker are unchanged.
+constexpr const char* SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT = "To continue: type $spire continue.";
+constexpr auto SPIRE_SAVESTATE_NOTICE_SECOND_DELAY = std::chrono::milliseconds(4000);
+// The name of the room quest of a savestate's room, as the quest's build.sh names it: "Spire room <k>[ elite| rest]";
+// "" when the room or the variant is missing or unknown
+std::string spire_savestate_room_quest_name(const SpireSavestate& ss);
+// Line 1 of the notice
+std::string spire_savestate_notice_saved_line(const SpireSavestate& ss);
+// Line 2 of the notice; category_name and quest_name "" = the room quest was not found
+std::string spire_savestate_notice_continue_line(const std::string& category_name, const std::string& quest_name);
+// The lines to send at a game join: none when *told (already sent in this session) or the savestate does not exist;
+// else both lines, and *told is set
+std::vector<std::string> spire_savestate_notice_take(
+    bool* told, const SpireSavestate& ss, const std::string& category_name, const std::string& quest_name);
+// Called from on_6F after the other Spire join hooks: sends the notice above. A no-op for a client the bridge does not
+// apply to (no GC V3 license serial, no character data). Never throws.
+void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
 // a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client
@@ -777,7 +812,7 @@ struct SpireDrawTable;
 constexpr size_t SPIRE_BRIDGE_TEXT_MAX = 90; // B-E01-90: one ticker line
 struct SpireBridgeTextContext {
   const SpireDrawTable* draw = nullptr; // the quest's draw table, for the names; nullptr = no names known
-  int archetype = -1; // 'C' 10: the writer's archetype (0 HU, 1 RA, 2 FO), -1 = not known
+  int archetype = -1; // 'C' 10 and 'C' 12: the writer's archetype (0 HU, 1 RA, 2 FO), -1 = not known
   std::string overview; // 'C' 2: the writer's kept overview line (spire_overview_kept_line), "" = none
 };
 std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);

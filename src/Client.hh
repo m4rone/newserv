@@ -224,6 +224,9 @@ public:
   // The Spire guard took its snapshot for this client in its current game; the login hard-end text went out already
   bool inventory_backup_guarded = false;
   bool inventory_loss_told = false;
+  // Route B bundle 9 (SpireFlagBridge.hh, spire_savestate_notice_on_game_join): the save point notice went out in
+  // this session
+  bool spire_savestate_told = false;
 
   // File loading state
   std::unordered_map<std::string, std::shared_ptr<const std::string>> sending_files;
