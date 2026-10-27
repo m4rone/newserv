@@ -2800,6 +2800,27 @@ void run_static_tests() {
     expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_FIRST_FLAG - 1)); // a quest's own flags: shared as before
     expect(spire_meta_flag_is_shared(true, SPIRE_BRIDGE_LAST_FLAG + 1));
     expect(spire_meta_flag_is_shared(false, SPIRE_META_FLAG_PAY_WIN));    // a normal game: unchanged
+    // B-BEL-4: after a Hard run the base game is a Hard game. The payout flags, stored on Normal, go to the game's
+    // difficulty, where q925's Collect reads them, and no clear of the same flag follows there; other flags as stored
+    SpireMetaFlags pay_flags;
+    pay_flags[std::make_pair(static_cast<uint8_t>(0), SPIRE_META_FLAG_PAY_WIN)] = true;
+    pay_flags[std::make_pair(static_cast<uint8_t>(1), static_cast<uint16_t>(0x0384))] = true;
+    SpireMetaFile pay_file{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = pay_flags, .base_rung = {}, .upgrades = {}};
+    for (uint8_t d : {0, 1, 3}) {
+      size_t pay_set = 0, pay_cleared = 0, unlock_set = 0;
+      for (const auto& e : spire_meta_delivery_entries(pay_file, d, false)) {
+        if (e.flag == SPIRE_META_FLAG_PAY_WIN) {
+          expect_eq(d, e.difficulty);
+          (e.set ? pay_set : pay_cleared)++;
+        } else if ((e.flag == 0x0384) && e.set) {
+          expect_eq(1, e.difficulty);
+          unlock_set++;
+        }
+      }
+      expect_eq(1u, pay_set);
+      expect_eq(0u, pay_cleared);
+      expect_eq(1u, unlock_set);
+    }
     std::filesystem::remove_all(dir);
   }
 

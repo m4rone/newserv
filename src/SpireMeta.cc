@@ -31,7 +31,11 @@ std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFile& 
     bool just_adopted) {
   std::vector<SpireMetaDelivery> ret;
   for (const auto& [key, is_set] : file.flags) {
-    ret.emplace_back(SpireMetaDelivery{key.first, key.second, is_set});
+    // B-BEL-4: the server stores the payout flags on Normal but sends them to the game's difficulty: the base game
+    // after a Hard run is a Hard game, and q925's Collect reads its flags there ("the same difficulty as here"). A
+    // payout flag adopted from the card on another difficulty goes where it was.
+    bool payout = (key.first == 0) && (spire_meta_flag_difficulty(key.second, 1) == 0);
+    ret.emplace_back(SpireMetaDelivery{payout ? difficulty : key.first, key.second, is_set});
   }
   // B-REGIE-10-2: the delivery that adopted the file clears nothing (the character keeps what it has), and an UNKNOWN
   // file never clears a flag without an entry: the server never saw it, so it may be the character's own
@@ -41,7 +45,8 @@ std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFile& 
   // Audit S-6: what the server owns but this character never wrote is cleared on the game's difficulty, so a flag the
   // leader's join sync or an earlier character put into the client's game is not taken over
   for (uint16_t flag_num = SPIRE_BRIDGE_FIRST_FLAG; flag_num <= SPIRE_META_SERVER_LAST_FLAG; flag_num++) {
-    if (!file.flags.count(std::make_pair(difficulty, flag_num))) {
+    if (!file.flags.count(std::make_pair(difficulty, flag_num)) &&
+        !file.flags.count(std::make_pair(spire_meta_flag_difficulty(flag_num, difficulty), flag_num))) {
       ret.emplace_back(SpireMetaDelivery{difficulty, flag_num, false});
     }
   }
@@ -165,10 +170,12 @@ bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, u
   bool adopted;
   auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
   auto& flags = file.flags;
-  flags[std::make_pair(difficulty, flag_num)] = is_set;
+  // B-BEL-4: a payout flag lives on Normal (spire_meta_apply_finish), so a Collect in a Hard base game clears that one
+  uint8_t stored_difficulty = spire_meta_flag_difficulty(flag_num, difficulty);
+  flags[std::make_pair(stored_difficulty, flag_num)] = is_set;
   spire_meta_save(filename, serial_number, file);
   c->log.info_f("Spire meta: recorded {} quest flag {}:{:04X} in {} ({} stored)", is_set ? "set" : "cleared",
-      name_for_difficulty(static_cast<Difficulty>(difficulty)), flag_num, filename, flags.size());
+      name_for_difficulty(static_cast<Difficulty>(stored_difficulty)), flag_num, filename, flags.size());
   return true;
 }
 
@@ -450,7 +457,7 @@ std::string spire_meta_on_finish(std::shared_ptr<Client> c, std::shared_ptr<cons
     text += std::format("\nUnlocked: {}.", unlocked);
   }
   if (payout) {
-    text += difficulty ? "\nReward waiting on Normal: see the Quartermaster." : "\nReward waiting: see the Quartermaster.";
+    text += "\nReward waiting: see the Quartermaster."; // B-BEL-4: Collect finds it on every difficulty
   }
   return text;
 }
