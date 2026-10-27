@@ -5695,7 +5695,7 @@ void run_static_tests() {
     expect_eq(0u, b9_failed);
   }
 
-  phosg::log_info_f("-- Spire bundle 9 (ux-pass): server equip, r15, 'C' 13/14, the kit and evolution texts");
+  phosg::log_info_f("-- Spire bundle 9 (ux-pass): server equip, r143, 'C' 13/14, the kit and evolution texts");
   {
     // every case runs, a failed one is logged, and the section fails at its end if any did
     size_t b9_failed = 0;
@@ -5728,12 +5728,23 @@ void run_static_tests() {
       return inv;
     };
 
-    b9_case("r15: 1 only for 3OP0 with the switch on, function calls that run code and the function loaded", [&]() {
-      expect(SPIRE_EQUIP_REGISTER == 15);
-      // r15 is free: the 'M' levels are r1-r7 and the prices r8-r14
+    b9_case("r143: 1 only for 3OP0 with the switch on, function calls that run code and the function loaded", [&]() {
+      expect(SPIRE_EQUIP_REGISTER == 143);
+      // r143 is no register newserv writes otherwise: past the 'M' levels r1-r7 and prices r8-r14, the resume items
+      // r20-r31 and header r32-r58, the shop r105-r107 and the draw result r181; below the stored r232-r247
       expect(SPIRE_SHOP_PRICE_FIRST_REGISTER + SPIRE_SHOP_NUM_ITEMS - 1 < SPIRE_EQUIP_REGISTER);
-      expect(spire_equip_item_available(0x334F5030, true, true, true)); // 3OP0: r15 = 1
-      expect(!spire_equip_item_available(0x334F5030, false, true, true)); // SpireEquipItemPatch false: r15 = 0
+      expect(SPIRE_EQUIP_REGISTER != 15); // r15 is every quest version's resume "asked" flag
+      for (uint8_t reg : {SPIRE_SHOP_BALANCE_REGISTER, SPIRE_SHOP_STRENGTH_REGISTER, SPIRE_SHOP_HEAT_REGISTER,
+               SPIRE_BRIDGE_DRAW_RESULT_REGISTER, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ITEM_ACK_REGISTER}) {
+        expect(reg != SPIRE_EQUIP_REGISTER);
+      }
+      expect(SPIRE_EQUIP_REGISTER >= SPIRE_RESUME_ITEM_FIRST_REGISTER + 12);
+      expect(SPIRE_EQUIP_REGISTER < SPIRE_BRIDGE_FIRST_REGISTER);
+      for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
+        expect(reg != SPIRE_EQUIP_REGISTER);
+      }
+      expect(spire_equip_item_available(0x334F5030, true, true, true)); // 3OP0: r143 = 1
+      expect(!spire_equip_item_available(0x334F5030, false, true, true)); // SpireEquipItemPatch false: r143 = 0
       expect(!spire_equip_item_available(0x334F5030, true, false, true)); // no function calls that run code
       expect(!spire_equip_item_available(0x334F5030, true, true, false)); // the function not in the index
       for (uint32_t other : {0x334F4532u /* 3OE2 */, 0x334F4A35u /* 3OJ5 */, 0x344F5055u /* 4OPU */, 0u}) {
@@ -5742,8 +5753,8 @@ void run_static_tests() {
       expect_eq(std::string("SpireEquipItem"), std::string(SPIRE_EQUIP_FUNCTION_NAME));
     });
 
-    // Part F3: SpireEquipItemGC.s assembles for 3OP0 only, so with the switch on r15 = 1 for a 3OP0 client
-    b9_case("SpireEquipItem assembles for 3OP0, is in the function index, and r15 = 1 for 3OP0", [&]() {
+    // Part F3: SpireEquipItemGC.s assembles for 3OP0 only, so with the switch on r143 = 1 for a 3OP0 client
+    b9_case("SpireEquipItem assembles for 3OP0, is in the function index, and r143 = 1 for 3OP0", [&]() {
       ClientFunctionIndex index("system/client-functions", true);
       auto fn = index.get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);
       expect(fn != nullptr);
@@ -5802,7 +5813,7 @@ void run_static_tests() {
       expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 6, true, inv).has_value());
       expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 0, true, b9_inventory({{0x0001000000000000ULL, 1, true}})).has_value());
       expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, true, PlayerInventory()).has_value());
-      // r15 = 0 for this client: nothing, even with the weapon there
+      // r143 = 0 for this client: nothing, even with the weapon there
       expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, false, inv).has_value());
       // another 'C' point sends nothing
       expect(!spire_equip_target(12, 10, true, inv).has_value());
@@ -5819,15 +5830,15 @@ void run_static_tests() {
       expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true,
           b9_inventory({{0x0200050000000000ULL, 1, false}, {0x0215190700000000ULL, 2, false}})).has_value());
       expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, b9_inventory({{0x0215190700000000ULL, 2, true}})).has_value());
-      // r15 = 0
+      // r143 = 0
       expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, false, inv).has_value());
     });
 
-    b9_case("kit ticker and evolution text in both r15 states, one line within 90 characters", [&]() {
-      // r15 = 0: both as today
+    b9_case("kit ticker and evolution text in both r143 states, one line within 90 characters", [&]() {
+      // r143 = 0: both as today
       expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_use_text(false, 10, 5));
       expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false, false));
-      // r15 = 1
+      // r143 = 1
       expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 10, 5));
       expect_eq(std::string("Your kit weapon is ground +4."), spire_kit_use_text(true, 4, 0)); // no HP Materials
       expect_eq(std::string("Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 0, 2)); // no grind

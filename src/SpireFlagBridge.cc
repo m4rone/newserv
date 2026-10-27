@@ -780,7 +780,7 @@ struct SpireClientRun {
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
-// Route B bundle 9 (SpireEquipItem.hh): r15 for this client, the same answer in every 'M' answer, at 'C' 13/14 and for
+// Route B bundle 9 (SpireEquipItem.hh): r143 for this client, the same answer in every 'M' answer, at 'C' 13/14 and for
 // the kit and evolution texts
 static bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
   auto s = c->require_server_state();
@@ -2450,7 +2450,7 @@ static asio::awaitable<void> spire_kit_use_text_later(
   auto* cr = spire_client_run_for(c, l, true);
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     cr->kit_text_sent = true;
-    // route B bundle 9: with r15 = 1 the kit weapon carries the grind G of the client's 'C' 13 (not come yet: the
+    // route B bundle 9: with r143 = 1 the kit weapon carries the grind G of the client's 'C' 13 (not come yet: the
     // quest's G, 2 Monogrinders per atp_grind level, which no kit weapon's MaxGrind caps) and no Monogrinders
     bool server_equips = spire_equip_item_available_for(c);
     uint32_t grind = (cr->kit_grind >= 0) ? static_cast<uint32_t>(cr->kit_grind) : 2 * atp_grind;
@@ -2577,7 +2577,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     detail = std::format(" ({})", e.what());
   }
   uint32_t answer = spire_shop_answer(sub, refusal);
-  // route B bundle 9 (ROUTEB9-PROTOCOL.md § 1): r15 in every 'M' answer, before DONE, refused or not
+  // route B bundle 9 (ROUTEB9-PROTOCOL.md § 1): r143 in every 'M' answer, before DONE, refused or not
   uint32_t equip_reg = spire_equip_item_available_for(c) ? 1 : 0;
   spire_send_register(c, SPIRE_EQUIP_REGISTER, equip_reg);
   detail += std::format("; r{}={}", SPIRE_EQUIP_REGISTER, equip_reg);
@@ -2612,8 +2612,8 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, ui
 }
 
 // Route B bundle 9: 'C' 13 (the kit weapon with grind G in the low byte) and 'C' 14 (the run mag replaced after an
-// evolution) from the writer: with r15 = 1 for it, send SpireEquipItem for the item in newserv's copy of its inventory
-// (the run copy during a run). r15 = 0 or no such item: one log line, nothing sent. False for every other value.
+// evolution) from the writer: with r143 = 1 for it, send SpireEquipItem for the item in newserv's copy of its inventory
+// (the run copy during a run). r143 = 0 or no such item: one log line, nothing sent. False for every other value.
 static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t point = (value >> 8) & 0xFF;
