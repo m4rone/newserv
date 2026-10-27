@@ -1002,6 +1002,11 @@
   // Other versions never get it, and the function writes nothing unless the code at 0x80429A78 is the original.
   // false turns the sending off without a rebuild (the key missing means true).
   "SpireBBATxGuardPatch": true,
+  // Spire server equip (route B bundle 9, src/SpireEquipItem.hh): tell GC EU v1.0 (3OP0) clients in r15 that the server
+  // can equip an item for them, and send them the client function SpireEquipItem for the kit weapon ('C' 13) and the
+  // run mag after an evolution ('C' 14). Only when the function exists for 3OP0; false turns it off without a rebuild
+  // (the key missing means true; every client then gets r15 = 0 and the quest keeps its bundle 8 kit path).
+  "SpireEquipItemPatch": true,
   // Spire run (pso-roguelike quests/spire/build.sh writes the full set into the pc config; shown here for rooms k9-k11).
   // SpireBossClearQuests: quests in which Vol Opt phase 2 falling is the room clear (Vol Opt has no if_zone_clear):
   // the run q929 and every room quest that plays on into Vol Opt (q953 Mines 1, q954 Mines 2, q955 Vol Opt).
