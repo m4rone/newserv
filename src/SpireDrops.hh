@@ -128,6 +128,11 @@ std::string spire_drops_boss_k_warning(bool is_boss, uint8_t k, Episode episode,
 const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParameterTable& pmt, ItemData& item,
     const SpireDropPlayer& p, bool is_boss, uint32_t& pity, uint32_t random, uint32_t k = 0);
 
+// B-BEL-4 (specials): a run has no Tekker, so a weapon the Spire filter keeps comes identified: clears the unidentified
+// bit (data1[4] 0x80, which ItemCreator::set_item_unidentified_flag_if_not_challenge sets on a weapon with a special
+// and on a rare one); the special itself stays. Returns true if the item changed. Any other item: unchanged.
+bool spire_drops_identify_weapon(ItemData& item);
+
 // Item 28 applies to the drop of this enemy: a boss (EnemyType BOSS flag), except the Vol Opt parts before its end.
 // Vol Opt's monitors, pillars, amp, core and phase 1 carry the BOSS flag too, but only VOL_OPT_2 falling ends the fight
 // (k11, plan-mines-volopt-2026-10-25 section 5), so only VOL_OPT_2 gives each player his boss weapon. Dragon, De Rol Le

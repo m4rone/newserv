@@ -3712,6 +3712,39 @@ void run_static_tests() {
     phosg::log_info_f("Spire RAmar Lv1 fallback weapon: {:02X}{:02X}", it.data1[1], it.data1[2]);
   }
 
+  phosg::log_info_f("-- Spire drops B-BEL-4: a kept weapon with a special comes identified (no Tekker in a run)");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    SpireDropPlayer strong;
+    strong.char_class = 0; // HUmar who can equip a Saber now
+    strong.now = level_table.base_stats_for_class(0);
+    strong.now.atp = 999;
+    strong.ahead = strong.now;
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+    // Sega's drop: a Saber with special 05, unidentified (bit 80, as ItemCreator makes it)
+    ItemData it;
+    it.data1[0] = 0x00;
+    it.data1[1] = 0x01;
+    it.data1[4] = 0x85;
+    uint32_t pity = 0;
+    expect(spire_drops_filter_item(cfg, *pmt, it, strong, false, pity, 0) == nullptr); // kept as it is
+    expect(spire_drops_identify_weapon(it));
+    expect_eq(0x05, it.data1[4]); // identified, the special stays
+    expect(!spire_drops_identify_weapon(it)); // already identified: unchanged
+    expect_eq(0x05, it.data1[4]);
+    ItemData plain = it;
+    plain.data1[4] = 0x00;
+    expect(!spire_drops_identify_weapon(plain));
+    expect_eq(0x00, plain.data1[4]);
+    ItemData frame; // not a weapon: never touched
+    frame.data1[0] = 0x01;
+    frame.data1[1] = 0x01;
+    frame.data1[4] = 0x80;
+    expect(!spire_drops_identify_weapon(frame));
+    expect_eq(0x80, frame.data1[4]);
+  }
+
   phosg::log_info_f("-- Security: 6x69 with npc_entity_id >= 4 refused, not forwarded (regie pso-regie-10)");
   {
     const auto& rules = crash_value_rules();

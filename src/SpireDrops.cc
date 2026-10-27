@@ -362,6 +362,14 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
   return armor_why;
 }
 
+bool spire_drops_identify_weapon(ItemData& item) {
+  if (item.empty() || (item.data1[0] != 0x00) || !(item.data1[4] & 0x80)) {
+    return false;
+  }
+  item.data1[4] &= 0x7F;
+  return true;
+}
+
 bool spire_drops_is_boss_drop(EnemyType type, uint16_t child_index) {
   if (child_index != 0) { // a child of a boss set (Gol Dragon's 5, Barba Ray's trailing BARBA_RAY): the head drops
     return false;
@@ -458,6 +466,9 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
       l->log.warning_f("{} (for {})", warning, c->channel->name);
     }
     const char* why = spire_drops_filter_item(*cfg, *pmt, item, player, is_boss, pity, l->rand_crypt->next(), k);
+    if (spire_drops_identify_weapon(item) && !why) { // B-BEL-4: no Tekker in a run
+      why = "weapon identified (no Tekker in a run)";
+    }
     if (why) {
       l->log.info_f("Spire drops: {} for {} (Lv{}, room {}, pity {}->{}): {} -> {}", why, c->channel->name,
           p->disp.stats.level + 1, k, pity_before, pity, before.empty() ? "nothing" : s->data->describe_item(c->version(), before),
