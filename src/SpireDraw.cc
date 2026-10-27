@@ -196,6 +196,7 @@ struct Draw {
   const SpireDrawInput& in;
   const std::function<uint32_t(uint32_t)>& rnd;
   uint32_t drawn = 0;
+  uint32_t moved_tag = 0; // B-BEL-3: the pipe tag (index + 1) slot 3 gave up for a rare of another tag; slot 4 takes it
 
   // valid: 1 when the entry is already on the board or at its cap (r71)
   bool already_or_capped(uint32_t id, uint32_t cap) const {
@@ -224,6 +225,38 @@ struct Draw {
     return ret;
   }
 
+  bool valid(uint32_t id) const {
+    const auto& e = a.entries[id - 1];
+    return (in.k >= e.vanaf_k) && (in.k <= e.tot_k) && (e.android_ok || (in.race != RACE_ANDROID)) &&
+        !already_or_capped(id, e.cap);
+  }
+
+  // B-BEL-3 (#8): an elite room promises a rare in slot A. When the pipe tag has no valid rare in this k band, the draw
+  // above lands on a plain entry; then slot 3 takes a rare of any tag instead, uniform over the valid rares of the
+  // archetype (same validity and curse rules), and the pipe tag moves to slot 4. False (nothing changed) if there is no
+  // valid rare at all. Runs after every rnd() call of the unchanged draw, so that draw keeps its order.
+  bool replace_with_rare(uint32_t slot, uint32_t forced_tag, uint32_t curse) {
+    std::vector<uint32_t> rares;
+    for (uint32_t id = 1; id <= a.entries.size(); id++) {
+      if (a.entries[id - 1].rare && valid(id)) {
+        rares.emplace_back(id);
+      }
+    }
+    if (rares.empty()) {
+      return false;
+    }
+    uint32_t id = (rares.size() == 1) ? rares[0] : rares[rnd(rares.size())];
+    const auto& e = a.entries[id - 1];
+    if (e.own_curse) {
+      curse = 0;
+    } else if (!e.glass_ok && (curse == CURSE_GLASS)) {
+      curse = 0;
+    }
+    record(slot, id, curse);
+    moved_tag = forced_tag;
+    return true;
+  }
+
   void draw_one(uint32_t slot, uint32_t direction, bool force_rare) {
     uint32_t row; // r64
     uint32_t forced_tag = 0;
@@ -233,6 +266,8 @@ struct Draw {
       } else if (in.choice == 2) {
         forced_tag = in.tag_b;
       }
+    } else if (slot == 4) {
+      forced_tag = moved_tag; // B-BEL-3: 0 unless slot 3 gave its pipe tag up for a rare
     }
     if (forced_tag != 0) {
       row = (forced_tag - 1) * 3;
@@ -308,9 +343,10 @@ struct Draw {
         return;
       }
       const auto& e = a.entries[index];
-      bool invalid = (in.k < e.vanaf_k) || (in.k > e.tot_k) || (!e.android_ok && (in.race == RACE_ANDROID)) ||
-          already_or_capped(id, e.cap);
-      if (!invalid) {
+      if (valid(id)) {
+        if (force_rare && !e.rare && replace_with_rare(slot, forced_tag, curse)) {
+          return;
+        }
         if (e.rare) {
           if (e.own_curse) {
             curse = 0;

@@ -84,7 +84,9 @@ constexpr size_t SPIRE_DRAW_NUM_INPUTS = 16;
 SpireDrawInput spire_draw_input_from_values(const std::vector<uint32_t>& values);
 
 // Returns r181: entry id (pool index + 1) of board slot 2/3/4/5 at bits 0/6/12/18, curse code at bits 24/26/28/30. rnd(n)
-// must return a uniform value in [0, n).
+// must return a uniform value in [0, n). B-BEL-3 (#8): after an elite pipe (path 1) slot 3 is a rare; when the pipe tag
+// has no valid rare at this k, slot 3 is a valid rare of another tag and slot 4 takes the pipe tag (the quest's own
+// reserve draw in rewards.py does not do this).
 uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const std::function<uint32_t(uint32_t)>& rnd);
 
 // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 2): the one-line overview of a draw (r181 as spire_draw returns it) for

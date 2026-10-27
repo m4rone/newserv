@@ -5535,5 +5535,102 @@ void run_static_tests() {
     expect_eq(0u, b8_failed);
   }
 
+  phosg::log_info_f("-- Spire draw: an elite room gives a rare in slot A, the pipe tag moves to slot B (B-BEL-3, #8)");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did (as section "Spire bundle 8")
+    size_t bel_failed = 0;
+    auto bel_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   BEL ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        bel_failed++;
+        phosg::log_error_f("   BEL ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // the Hunter pool around the first elite (quest data/rewards.json at efe7703): at k2 More Eyes (tempo, cap 1, from
+    // k2) is the only rare, Fire Saber +20 comes at k3. Tag 0 melee, tag 1 tempo; rows per band as rewards.py resolve()
+    // builds them, an empty rare row filled one rarity lower (melee rare at k1 and k2 = the uncommon Gladius)
+    const std::string entries =
+        "{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,\"glass_ok\":true,\"name\":\"Saber +8\"},"
+        "{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,\"glass_ok\":true,\"name\":\"Gladius +18\"},"
+        "{\"cap\":1,\"vanaf_k\":2,\"android_ok\":true,\"rare\":true,\"own_curse\":false,\"glass_ok\":false,\"name\":\"More Eyes\"},"
+        "{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,\"glass_ok\":false,\"name\":\"Monomate x3\"},"
+        "{\"cap\":2,\"vanaf_k\":3,\"android_ok\":true,\"rare\":true,\"own_curse\":false,\"glass_ok\":true,\"name\":\"Fire Saber +20\"}";
+    // rows: melee C/U/R, tempo C/U/R, the band
+    const std::string rows = "{\"1\":[[0],[1],[1],[3],[3],[3],[0,1,3]],"
+                             "\"2\":[[0],[1],[1],[3],[3],[2],[0,1,2,3]],"
+                             "\"3\":[[0],[1],[4],[3],[3],[2],[0,1,2,3,4]]}";
+    const std::string archetype = std::format(
+        "{{\"entries\":[{}],\"kbands\":[1,2,3],\"rows\":{},\"slot_c_zero_tags\":[]}}", entries, rows);
+    const std::string json = std::format(
+        "{{\"num_tags\":2,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,\"max_attempts\":8,"
+        "\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,\"relic_bit_r14\":16,\"archetypes\":[{},{},{}],"
+        "\"tag_names\":[\"Melee\",\"Tempo\"]}}",
+        archetype, archetype, archetype);
+    auto bel_filename = (std::filesystem::temp_directory_path() / std::format("newserv-static-spire-bel-{}.json", getpid())).string();
+    phosg::save_file(bel_filename, json);
+    auto t = SpireDrawTable::from_json_file(bel_filename);
+    std::filesystem::remove(bel_filename);
+    auto rnd_max = [](uint32_t n) -> uint32_t { return n - 1; }; // never a drawn rare, never a drawn curse
+    auto rnd0 = [](uint32_t) -> uint32_t { return 0; };
+    auto slot = [](uint32_t drawn, uint32_t s) -> uint32_t { return (drawn >> ((s - 2) * 6)) & 0x3F; };
+    auto curse_of = [](uint32_t drawn, uint32_t s) -> uint32_t { return (drawn >> ((s - 2) * 2 + 24)) & 3; };
+    SpireDrawInput elite; // Hunter, room 2 (the first elite) entered through elite pipe A with tag melee
+    elite.k = 2;
+    elite.path = 1;
+    elite.choice = 1;
+    elite.tag_a = 1;
+    elite.tag_b = 2;
+
+    bel_case("(a) melee has no rare at k2: slot 3 is More Eyes, slot 4 carries the melee tag", [&]() {
+      uint32_t drawn = spire_draw(t, elite, rnd_max);
+      expect_eq(3u, slot(drawn, 3)); // More Eyes, before this fix the uncommon Gladius +18 (2)
+      expect(t.archetypes.at(0).entries.at(slot(drawn, 3) - 1).rare);
+      expect_eq(1u, slot(drawn, 4)); // Saber +8 from the melee row; without the moved tag rnd_max takes tempo (Monomate)
+      expect_eq(4u, slot(drawn, 5));
+      expect_eq(0u, drawn >> 24);
+      expect_eq(std::string("Rewards: More Eyes (rare), Saber +8, Monomate x3. Walk to choose."),
+          spire_draw_overview_line(t, 0, drawn));
+      // the drawn curse rides on the replacement rare with the rules of before: rnd0 draws R12, kept at 2 lives
+      SpireDrawInput two_lives = elite;
+      two_lives.lives = 2;
+      uint32_t cursed = spire_draw(t, two_lives, rnd0);
+      expect_eq(3u, slot(cursed, 3));
+      expect_eq(1u, curse_of(cursed, 3));
+      expect_eq(2u, slot(cursed, 4)); // rnd0 rolls a rare for slot 4 too: the melee rare row, filled with Gladius +18
+    });
+
+    bel_case("(b) a tag with a rare at this k: the draw of before", [&]() {
+      SpireDrawInput tempo = elite; // pipe B, tag tempo: its rare row is More Eyes
+      tempo.choice = 2;
+      uint32_t drawn = spire_draw(t, tempo, rnd_max);
+      expect_eq(3u, slot(drawn, 3));
+      expect_eq(4u, slot(drawn, 4)); // no moved tag: rnd_max weighs tempo
+      expect_eq(1u, slot(drawn, 5)); // tempo row and band taken, then the walk
+      SpireDrawInput k3 = elite; // k3: melee has Fire Saber +20
+      k3.k = 3;
+      uint32_t drawn3 = spire_draw(t, k3, rnd_max);
+      expect_eq(5u, slot(drawn3, 3));
+      expect_eq(4u, slot(drawn3, 4));
+      expect_eq(1u, slot(drawn3, 5));
+    });
+
+    bel_case("(c) no valid rare (More Eyes at its cap): the draw of before", [&]() {
+      SpireDrawInput capped = elite;
+      capped.picks[0] = 1 << (2 * 3); // pool index 2 (More Eyes) taken once: at cap 1
+      uint32_t drawn = spire_draw(t, capped, rnd_max);
+      expect_eq(2u, slot(drawn, 3)); // Gladius +18, as before
+      expect_eq(4u, slot(drawn, 4)); // no moved tag
+      expect_eq(1u, slot(drawn, 5));
+      expect_eq(std::string("Rewards: Gladius +18, Monomate x3, Saber +8. Walk to choose."), spire_draw_overview_line(t, 0, drawn));
+      SpireDrawInput normal = elite; // a normal pipe (path 0) never forces a rare
+      normal.path = 0;
+      expect_eq(1u, slot(spire_draw(t, normal, rnd_max), 3)); // Saber +8, the common melee
+    });
+
+    expect_eq(0u, bel_failed);
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }
