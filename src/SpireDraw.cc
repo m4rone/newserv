@@ -378,8 +378,11 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
     if ((id > entries.size()) || entries[id - 1].name.empty()) {
       return ""; // a drawn entry without a name: no overview
     }
-    uint32_t curse = (drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3;
-    list.emplace_back(Drawn{&entries[id - 1].name, curse ? " (cursed)" : entries[id - 1].rare ? " (rare)" : ""});
+    // a curse rides only on a rare (rewards.json vloek.pct_van_zeldzaam); the sequential fallback past a rare row keeps
+    // r65 on a plain entry, where the quest never applies it, so the line names no curse there (ux-pass Q1 observation)
+    bool rare = entries[id - 1].rare;
+    uint32_t curse = rare ? ((drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3) : 0;
+    list.emplace_back(Drawn{&entries[id - 1].name, curse ? " (cursed)" : rare ? " (rare)" : ""});
   }
   if (list.empty()) {
     return "";

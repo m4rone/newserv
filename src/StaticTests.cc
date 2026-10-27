@@ -5317,8 +5317,10 @@ void run_static_tests() {
     });
 
     b8_case("overview line: names, (rare), (cursed), page order, fewer slots, the limits", [&]() {
-      // slot 3 Saber, slot 4 Fire Shield cursed, slot 5 Lavis Cannon (rare entry)
-      expect_eq(std::string("Rewards: Saber, Fire Shield (cursed), Lavis Cannon (rare). Walk to choose."),
+      // slot 3 Saber, slot 4 Fire Shield with a curse code, slot 5 Lavis Cannon (rare entry). A curse rides only on a
+      // rare (rewards.json vloek.pct_van_zeldzaam): a code on a plain entry (the sequential fallback past a rare row
+      // keeps r65) is never applied by the quest, so the line names no curse there (ux-pass Q1 observation)
+      expect_eq(std::string("Rewards: Saber, Fire Shield, Lavis Cannon (rare). Walk to choose."),
           spire_draw_overview_line(named, 0, drawn_of(0, 1, 2, 3, 0, 2)));
       // cursed wins over rare
       expect_eq(std::string("Rewards: Lavis Cannon (cursed), Saber, Fire Shield. Walk to choose."),
