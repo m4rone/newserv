@@ -99,3 +99,19 @@ The send itself (`spire_send_ticker` in the handler) is not covered by a static 
 
 - A RESULT 0 at the run's last boss (De Rol Le in bundle 1) can never be retried (phase 9). The text still says
   "next clear retries". Only the quest or a k in the RESULT word could tell; both are outside this hotfix.
+
+## On spike/route-b-2 (newserv worktree route-b-2, base e5f4748)
+
+- Cherry-pick of 701df2d applied without conflicts as 10a0f32: the RESULT 0 branch there (F10 lean, NO_LEDGER,
+  reminder texts) had the same three lines; the new branch keeps `offered_shell` and the Shell texts as they were
+  (`src/SpireFlagBridge.cc:803`, `:2330-2346` there; `src/SpireMag.cc:388` there).
+- 3e9e2b1 (test only): the case also checks `offered_shell` unchanged by the notice, a Shell run (lean 2, HU
+  ShellSteps column) where the EXAM k4 RESULT 0 is told, the ASK k5 offers the same step again and its RESULT 0 is
+  silent, and the length against the branch's `SPIRE_RUN_MAG_TICKER_MAX` (61) instead of a literal.
+- The text holds for bundle 2: the quest on pso-roguelike spike/route-b-2 (9995c73) has the same retry path
+  (make_spire.py:1764, 1772-1774 full -> r135 = 1; 1812-1815 mag_clear asks while r135 != 0, skipped at a boss room;
+  1706 mag_exam; 1712, 1748 no request after phase 9; rewards.py:1159 exam, 1289 clear). The lean only picks the
+  column (SpireMag.cc spire_mag_column); "mag" in the text names no column, so it is true for Fang/Mind and Shell.
+- `./build/newserv run-static-tests` there: exit 0, `-- All static tests passed` at 05:36:13 on the tree committed at
+  05:36:25 (`git diff --quiet HEAD` exit 0 after the commit). Binary md5 `c4a4998abf8fc96f47725f6c91a6dde5`.
+- Not pushed.

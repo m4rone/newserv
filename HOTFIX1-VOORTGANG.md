@@ -4,3 +4,4 @@
 - 05:28 code + test geschreven (pure functie, aparte map, nieuwe tekst); build + static tests groen
 - 05:32 commit hotfix, daarna mutaties
 - 05:34 mutaties: beide 134, teruggezet 0; rapport geschreven
+- 05:37 route-b-2: cherry-pick + Shell-test, groen; rapport bijgewerkt
