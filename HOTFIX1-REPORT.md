@@ -159,3 +159,46 @@ Mutation of the condition per branch (throwaway copy via `git archive HEAD`, `if
 | route-b-2 a02f6e3 | exit 0 | exit 134 | `StaticTests.cc:4811: !(spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 1))` | build 0, tests 0 (05:43:22) |
 
 With one text there is no second text branch to mutate; the text itself is pinned by `expect_eq` in the case.
+
+## Round 3 on spike/route-b-2 only (critic routeb2-hotfix1-critic.md N1-N5; commit 7352c39)
+
+The hotfix branch from f27d4f8 is left as it is (B-REGIE-15-10: it does not roll out on its own).
+
+- N1: `SPIRE_RUN_MAG_PACK_FULL_TEXT` = `"Pack full: your mag did not grow. Keep slots free"` (49). Slots, because a clear
+  creates its own rewards before the mag (the exam rare, rewards.py:1156-1159; up to five room clear rewards,
+  rewards.py:1259-1289), so one free slot can be taken before the retry.
+- N2: `SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT` = `"Pack full: no room for your mag. Keep slots free"` (48), sent when nothing was
+  issued before this offer (`step_before_offer < 0`: the kit or a practice run's first ASK). "did not grow" only when
+  a mag was issued before, as the RESULT 1 branch already tells reminder from evolve (`before < 0`).
+- N3: the handler's glue is now the pure `spire_run_mag_pack_full_decide(told, key, run_id, known, created,
+  offered_step, step_before_offer)` (SpireMag.hh/.cc): the record per client key, no notice without a key or run
+  id 0 (nothing recorded then), the key-limit wipe, and the text. The handler only passes `spire_run_mag_key(c)`,
+  `run->run_id` and `before`, sends `notice.text` when `notice.tell`, and logs `notice.note`. Static case "pack-full
+  decision per client key, run and step": two players of one run with step 1 (the lab case, newserv.log:183897 and
+  :184006) each get their own notice and are silent the second time; a later step and a new run tell; RESULT 1,
+  nothing settled, an empty key and run id 0 tell nothing and record nothing; the first-mag text; a third key below
+  the limit wipes nothing; at the limit a known key does not wipe, a new key wipes and the old key is told once more.
+- N4: the wipe. `SPIRE_RUN_MAG_PACK_FULL_KEYS_MAX = 1024`: when a new key arrives with 1024 records, every record is
+  cleared (the ledger store does the same, SpireFlagBridge.cc spire_run_mag_ledger_for). Effect: anyone can be told
+  once more for a step, never less; on a home server it is not reached. (Round 1 wiped at more than 1024, now at
+  1024: the store holds at most 1024 records.)
+- N5: one B0 ticker line, the newest replaces it (SendCommands.cc:920-924). The notice replaces "Room clear!" and can
+  itself be replaced within seconds by a leader's wave text sent to all clients; same exposure as the e5f4748 text,
+  no regression. Not changed.
+
+Tests: `./build/newserv run-static-tests` on the committed tree (commit 05:52:02, `git diff --quiet HEAD` exit 0):
+exit 0, `05:52:03 -- All static tests passed`. md5 `91e9a3346ba65d3a84e2e089467fcb99`.
+
+Mutations of src/SpireMag.cc in a throwaway copy (`git archive HEAD`), each from the clean file:
+
+| Mutation | Build | Tests | Failing line |
+|---|---|---|---|
+| `tell = true` after the notice call | 0 | 134 | `StaticTests.cc:4871` (second call for a, step 1) |
+| key -> constant (`told["same"]`) | 0 | 134 | `:4870` (player b not told) |
+| run id -> 0 in the notice call | 0 | 134 | `:4874` (new run not told) |
+| wipe at `>= 1` instead of the limit (`>= 0` does not build: -Werror=type-limits, build exit 2, so not counted) | 0 | 134 | `:4871` |
+| first-mag condition inverted | 0 | 134 | `:4868` (wrong text) |
+| restored | 0 | 0 | `05:54:55 -- All static tests passed` |
+
+What stays untested: the three handler lines (`spire_run_mag_key(c)`, `run->run_id`, `spire_send_ticker`); no
+static test builds a Client.
