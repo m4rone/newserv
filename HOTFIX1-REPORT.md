@@ -115,3 +115,47 @@ The send itself (`spire_send_ticker` in the handler) is not covered by a static 
 - `./build/newserv run-static-tests` there: exit 0, `-- All static tests passed` at 05:36:13 on the tree committed at
   05:36:25 (`git diff --quiet HEAD` exit 0 after the commit). Binary md5 `c4a4998abf8fc96f47725f6c91a6dde5`.
 - Not pushed.
+
+## Round 2: the text promises no retry (5bfe779 on hotfix1, a02f6e3 on route-b-2)
+
+The text above ("... next clear retries") is replaced. Final text, both branches:
+`"Pack full: your mag did not grow. Keep a slot free"` (50 characters).
+
+Why one neutral text and not two (the server cannot know whether a next clear comes):
+
+- The RESULT word carries no k: `MAG_TAG | MAG_RESULT << 16` (make_spire.py@95ecec1:1742; 1738 for result 1).
+- No server data names a quest's last room. The checkpoint's `LastRoom` is the furthest room cleared
+  (SpireFlagBridge.cc:5355, 5472-5479), not the run's end. spire-mag.json `BossRooms` is `[4, 8, 11, 15, 18, 21, 24,
+  27]`, both episodes in one list, so its highest entry is not the end of an Ep1 quest. `SpireGameRun`
+  (SpireFlagBridge.cc:670-676) holds no room list.
+- The premise "De Rol Le is the last boss in bundle 1" does not hold for q929: it plays all of spire.json, 15 rooms
+  `[1..15]`, bosses `[4, 8, 11, 15]` (spire.json@95ecec1), so its last boss is Dark Falz (k15). Room quests
+  (q940-q959) start at their own room and play on (build.sh@95ecec1:409-414, 566: "a room quest from its own room
+  on"), so a practice run in a room quest has a next clear except at the last room, the same rule as the full run.
+- A run also ends without a last room: server time up, a death, the base return 'O'; after the end no request is sent
+  (make_spire.py@95ecec1:1683, 1717).
+
+Every word of the new text is true in all those cases:
+
+| Words | Evidence |
+|---|---|
+| "Pack full" | RESULT 0 is sent only after `item_create2` returned FFFFFFFF (make_spire.py@95ecec1:1732-1733, 1741-1742) |
+| "your mag did not grow" | that path skips the unequip and the delete, the old mag stays (1733-1741); the server gives the step back (SpireMag.cc `spire_run_mag_result`, `issued_step = step_before_offer`) |
+| "Keep a slot free" | advice, no promise: if a retry comes (next room clear 1781-1785, or boss exam rewards.py@95ecec1:1158-1159), it creates the mag only with a free slot after that clear's own rewards (rewards.py@95ecec1:1155-1159, 1270-1289) |
+
+The observation about the last boss above is resolved by this round.
+
+Tests on the committed trees (`git diff --quiet HEAD` exit 0 on both, commits at 05:39:39):
+
+- hotfix1 5bfe779: `./build/newserv run-static-tests` exit 0, `05:39:44 -- All static tests passed`; md5
+  `4a52c4c9f9ac9d36ca130b5c31e56f42`.
+- route-b-2 a02f6e3: exit 0, `05:39:44 -- All static tests passed`; md5 `d4691c3d9eb8b72b24e97b6364c44437`.
+
+Mutation of the condition per branch (throwaway copy via `git archive HEAD`, `if (!known || !created)`):
+
+| Tree | Build | Tests | Failing line | Restored |
+|---|---|---|---|---|
+| hotfix1 5bfe779 | exit 0 | exit 134 | `StaticTests.cc:4514: !(spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 1))` | build 0, tests 0 (05:43:23) |
+| route-b-2 a02f6e3 | exit 0 | exit 134 | `StaticTests.cc:4811: !(spire_run_mag_pack_full_notice(told, 0x64D5C0EF, true, false, 1))` | build 0, tests 0 (05:43:22) |
+
+With one text there is no second text branch to mutate; the text itself is pinned by `expect_eq` in the case.
