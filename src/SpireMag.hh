@@ -150,6 +150,24 @@ struct SpireRunMagDecision {
 };
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
     const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus);
+// The ledger step of an ASK or EXAM that no refusal stopped (the 'Z' handler in SpireFlagBridge.cc): the start step
+// from the asking room (only while the ledger has issued, counted and offered nothing, so a later ASK never moves it),
+// the ledger following the fed mag (spire_run_mag_follow_mirror), the old type the quest deletes (data1[1] of the one
+// run mag in the overlay; SPIRE_RUN_MAG_NO_OLD with none or more than one), the decision and the r41 answer.
+struct SpireRunMagHandled {
+  SpireRunMagDecision decision;
+  uint8_t old_type = SPIRE_RUN_MAG_NO_OLD;
+  bool followed_mirror = false;
+  uint32_t answer = SPIRE_RUN_MAG_TAG | (static_cast<uint32_t>(SPIRE_RUN_MAG_NO_OLD) << 8); // a refusal's answer
+};
+SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
+    uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
+    uint32_t start_bonus);
+// The ledger step of a 'V' (savestate write): the ledger follows the overlay's fed mag (spire_run_mag_follow_mirror)
+// unless an in-game 61 refreshed the overlay in this game (amendment 3: it may hold the real mag then). False without
+// a ledger or when it did not follow.
+bool spire_run_mag_savestate_follow(
+    SpireRunMagLedger* ledger, bool refreshed_by_61, const std::vector<SpireMagBytes>& overlay_mags);
 // RESULT: 1 confirms the offered mag (last_mirrored = it; the step was issued at the answer); 0 gives the step back
 // (issued_step = step_before_offer: the step is owed again, the quest asks at the next non-boss room clear). Returns
 // false if nothing was offered.

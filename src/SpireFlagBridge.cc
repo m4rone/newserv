@@ -1428,8 +1428,8 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   ss.practice = cr->practice;
   // F6: the ledger follows the feed mirror (the overlay), unless an in-game 61 refreshed it; only its run mag comes back
   auto* led = spire_run_mag_ledger_for(c, run->run_id, false);
-  if (led && !spire_run_mag_overlay_refreshed(c, l) &&
-      spire_run_mag_follow_mirror(*led, spire_run_mag_inventory_mags(overlay->inventory))) {
+  if (spire_run_mag_savestate_follow(
+          led, spire_run_mag_overlay_refreshed(c, l), spire_run_mag_inventory_mags(overlay->inventory))) {
     c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
         spire_run_mag_bytes_hex(*led->last_mirrored));
   }
@@ -2356,24 +2356,12 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     detail = std::format(" ({})", e.what());
   }
 
-  uint8_t old_type = SPIRE_RUN_MAG_NO_OLD;
-  SpireRunMagDecision decision;
+  SpireRunMagHandled handled; // a refusal answers result 0, old type 0xFF
   if (refusal == R::NONE) {
     if (!run) { // the kit's ASK may come before 'B': the game's run starts here as at 'B'
       run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
     }
     auto* led = spire_run_mag_ledger_for(c, run->run_id, true);
-    if (led->issued_step < 0 && led->boss_rooms.empty() && !led->offered) {
-      led->start_step = spire_mag_start_step(table, k);
-    }
-    auto mags = spire_run_mag_inventory_mags(overlay->inventory);
-    if (spire_run_mag_follow_mirror(*led, mags)) {
-      c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
-          spire_run_mag_bytes_hex(*led->last_mirrored));
-    }
-    if (mags.size() == 1) {
-      old_type = mags[0][1];
-    }
     std::set<uint8_t> server_bosses;
     auto rr_it = spire_run_rooms.find(c.get());
     if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {
@@ -2385,7 +2373,13 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
         (sl_it->second.quest_number == quest_number)) {
       start_bonus = sl_it->second.bonus;
     }
-    decision = spire_run_mag_decide(*led, *line, sub, k, server_bosses, start_bonus);
+    auto mags = spire_run_mag_inventory_mags(overlay->inventory);
+    handled = spire_run_mag_handle(*led, table, *line, sub, k, mags, server_bosses, start_bonus);
+    if (handled.followed_mirror) {
+      c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
+          spire_run_mag_bytes_hex(*led->last_mirrored));
+    }
+    const auto& decision = handled.decision;
     detail += std::format("; run {:08X}, start step {}, boss rooms {}, issued step {}, expected step {}, start bonus {}, {} mag(s) in the run copy",
         run->run_id, led->start_step, led->boss_rooms.size(), led->issued_step, decision.expected_step, start_bonus,
         mags.size());
@@ -2396,12 +2390,12 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       detail += std::format("; new mag {}", spire_run_mag_bytes_hex(decision.bytes));
     }
   }
-  uint32_t answer = spire_run_mag_answer(SPIRE_RUN_MAG_TAG, old_type, decision.result);
+  uint32_t answer = handled.answer;
   spire_send_register(c, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
   c->log.info_f("Spire run mag: {} room {} for serial {:010} in q{}: {} ({}){}; r{}={:08X}",
       (sub == SPIRE_RUN_MAG_EXAM) ? "EXAM" : "ASK", k, serial_number, quest_number,
-      (refusal != R::NONE) ? "FAIL" : decision.result ? "NEW MAG" : "no change", spire_run_mag_refusal_name(refusal),
+      (refusal != R::NONE) ? "FAIL" : handled.decision.result ? "NEW MAG" : "no change", spire_run_mag_refusal_name(refusal),
       detail, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
 }
 

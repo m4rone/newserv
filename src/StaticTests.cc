@@ -4403,6 +4403,102 @@ void run_static_tests() {
       expect_eq(0x5A00FF00u, spire_run_mag_answer(SPIRE_RUN_MAG_TAG, SPIRE_RUN_MAG_NO_OLD, false));
     });
 
+    // routeb-f6-critic.md C3-6: each case below fails under the mutation it names
+    f6_case("handler: old_type is data1[1] of the one run mag, else 0xFF (C3-6 mutation 1)", [&]() {
+      SpireRunMagLedger led;
+      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0);
+      expect(kit.decision.result);
+      expect_eq(SPIRE_RUN_MAG_NO_OLD, kit.old_type); // no mag yet: the quest deletes nothing
+      expect_eq(0x5A00FF01u, kit.answer);
+      expect(spire_run_mag_result(led, true));
+      // the Dragon: the run copy holds the kit mag (kind 0x00), so the quest must delete kind 0x00 after the create
+      auto dragon = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {}, 0);
+      expect(dragon.decision.result);
+      expect_eq(kit.decision.bytes[1], dragon.old_type);
+      expect_eq(0x00, dragon.old_type);
+      expect_eq(0x5A000001u, dragon.answer);
+      expect(spire_run_mag_result(led, true));
+      // De Rol Le with the Dragon's mag (Varuna, kind 0x01) in the pack
+      auto rol = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {dragon.decision.bytes}, {}, 0);
+      expect(rol.decision.result);
+      expect_eq(0x01, dragon.decision.bytes[1]);
+      expect_eq(0x01, rol.old_type);
+      expect_eq(0x5A000101u, rol.answer);
+      // two type-02 items: never name one (the refusal catches this first; the pure part stays safe on its own)
+      SpireRunMagLedger two;
+      expect_eq(SPIRE_RUN_MAG_NO_OLD,
+          spire_run_mag_handle(two, table, hu, SPIRE_RUN_MAG_ASK, 1, {kit.decision.bytes, dragon.decision.bytes}, {}, 0).old_type);
+      // a refusal's answer
+      expect_eq(0x5A00FF00u, SpireRunMagHandled().answer);
+    });
+
+    f6_case("handler: a lost EXAM is counted from the server's boss clears (C3-6 mutation 2)", [&]() {
+      // Run from room 1: the kit mag issued; the EXAM of k4 never arrived, but the server counted the Dragon's clear
+      SpireRunMagLedger led;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto a5 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 5, {4}, 0);
+      expect(a5.result);
+      expect_eq(1u, a5.expected_step);
+      expect(a5.bytes == spire_mag_step_bytes(hu, 1, 0, spire_mag_step_bytes(hu, 0, 0, std::nullopt)));
+      expect(led.boss_rooms == std::set<uint8_t>({4}));
+      expect_eq(1, led.issued_step);
+    });
+
+    f6_case("'V': the ledger never follows an overlay a 61 refreshed (C3-6 mutation 3, amendment 3)", [&]() {
+      SpireRunMagLedger led;
+      led.issued_step = 1;
+      led.last_mirrored = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
+      // after a push the refreshed overlay holds the real mag (Pitri LV200, above the run mag's level)
+      const Bytes pitri = {0x02, 0x1D, 0xC8, 0xA3, 0xF4, 0x01, 0x1C, 0x25, 0x10, 0x27, 0x00, 0x00};
+      expect(!spire_run_mag_savestate_follow(&led, true, {pitri}));
+      expect(led.last_mirrored == spire_mag_step_bytes(hu, 1, 0, std::nullopt));
+      // the same overlay without the 61 is a fed run mag: followed (the gate is the only difference)
+      SpireRunMagLedger fed = led;
+      expect(spire_run_mag_savestate_follow(&fed, false, {pitri}));
+      expect(fed.last_mirrored == pitri);
+      expect(!spire_run_mag_savestate_follow(nullptr, false, {pitri}));
+    });
+
+    f6_case("handler: the start step is set by the first ASK only (C3-6 mutation 5)", [&]() {
+      // A run from room 1: kit at k1, the Dragon and De Rol Le examined, then an ASK at k9 (a non-boss clear)
+      SpireRunMagLedger led;
+      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 0);
+      expect_eq(0u, led.start_step);
+      expect(spire_run_mag_result(led, true));
+      auto e4 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 4, {kit.decision.bytes}, {4}, 0);
+      expect(spire_run_mag_result(led, true));
+      auto e8 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_EXAM, 8, {e4.decision.bytes}, {4, 8}, 0);
+      expect_eq(2u, e8.decision.expected_step);
+      expect(spire_run_mag_result(led, true));
+      auto a9 = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 9, {e8.decision.bytes}, {4, 8}, 0);
+      expect_eq(0u, led.start_step); // spire_mag_start_step(table, 9) would be 2
+      expect_eq(2u, a9.decision.expected_step);
+      expect(!a9.decision.result); // no skipped step
+      expect_eq(2, led.issued_step);
+      // a practice run that first asks at k9 starts after two bosses
+      SpireRunMagLedger practice;
+      auto p9 = spire_run_mag_handle(practice, table, hu, SPIRE_RUN_MAG_ASK, 9, {}, {}, 0);
+      expect_eq(2u, practice.start_step);
+      expect(p9.decision.result);
+      expect_eq(2u, p9.decision.expected_step);
+    });
+
+    f6_case("the offered mag is confirmed by the mirror only as the one type-02 item (C3-6 mutation 6)", [&]() {
+      SpireRunMagLedger led;
+      led.issued_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 0, 0, std::nullopt);
+      auto e4 = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_EXAM, 4, {}, 0);
+      expect(e4.result && led.offered);
+      // the offered mag next to the old one (created, old not deleted yet): not confirmed, the offer stays open
+      expect(!spire_run_mag_follow_mirror(led, {e4.bytes, *led.last_mirrored}));
+      expect(led.offered && (*led.offered == e4.bytes));
+      expect(led.last_mirrored == spire_mag_step_bytes(hu, 0, 0, std::nullopt));
+      // alone: confirmed as by a RESULT 1
+      expect(spire_run_mag_follow_mirror(led, {e4.bytes}));
+      expect(!led.offered && (led.last_mirrored == e4.bytes));
+    });
+
     f6_case("texts", [&]() {
       expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna"));
       for (const std::string& t : {spire_run_mag_evolve_text("Ashvinau"), std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT),

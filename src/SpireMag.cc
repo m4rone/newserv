@@ -269,6 +269,27 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   return ret;
 }
 
+SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
+    uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
+    uint32_t start_bonus) {
+  SpireRunMagHandled ret;
+  if (ledger.issued_step < 0 && ledger.boss_rooms.empty() && !ledger.offered) {
+    ledger.start_step = spire_mag_start_step(table, k);
+  }
+  ret.followed_mirror = spire_run_mag_follow_mirror(ledger, overlay_mags);
+  if (overlay_mags.size() == 1) {
+    ret.old_type = overlay_mags[0][1];
+  }
+  ret.decision = spire_run_mag_decide(ledger, line, sub, k, server_boss_rooms, start_bonus);
+  ret.answer = spire_run_mag_answer(SPIRE_RUN_MAG_TAG, ret.old_type, ret.decision.result);
+  return ret;
+}
+
+bool spire_run_mag_savestate_follow(
+    SpireRunMagLedger* ledger, bool refreshed_by_61, const std::vector<SpireMagBytes>& overlay_mags) {
+  return ledger && !refreshed_by_61 && spire_run_mag_follow_mirror(*ledger, overlay_mags);
+}
+
 bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
   if (!ledger.offered) {
     return false;
