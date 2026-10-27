@@ -111,7 +111,8 @@ After restoring the file, run2.sh printed `final build exit 0` and `final tests 
 - **The burst line can be pushed aside.** At the same boss start, the quest's room_start hook may send 'Z' NO_MAG.
   That happens when a mag was issued but is not equipped. The equip reminder then goes out right after the burst line
   and pushes it aside on the ticker.
-  - Where: SpireFlagBridge.cc:2288-2292 versus 1456.
+  - Where: SpireFlagBridge.cc:2302-2306 versus 1456 at ab3c819 (2310-2314 versus 1464 at 48e2d3c). Corrected
+    2026-10-27 (routeb2-S-critic N6): 2288-2292 was the handler's head, not the NO_MAG reminder.
   - Cost: a delayed send (`spire_send_ticker_later`) for one of the two.
 - **The resume check depends on timing.** The kit-line resume check assumes the 'J' arrives within 3 s of the 'M'
   START. The quest sends it right after; a slower 'J' would let the line through on a resume.

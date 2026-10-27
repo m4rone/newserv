@@ -222,3 +222,121 @@ in my writeSet.
 ## Expansion requests
 
 None.
+
+## Fixronde (2026-10-27, F10S critic N1-N6 and S critic N6)
+
+Base b77fb64. Code commit **48e2d3c** (`fix: run id 0 savestate refused, no-ledger 'Z' refusal, Shell texts`). Line
+numbers are those of 48e2d3c. Sources: `output/routeb2-F10S-critic.md` (SHIP, N1-N6) and `output/routeb2-S-critic.md`
+N6.
+
+### Per point
+
+1. **N1 (null deref, already on f27d4f8): fixed.**
+   - SpireFlagBridge.cc:571-573: `spire_savestate_from_json` throws "savestate has run id 0". `load_logged` catches
+     that and logs "unreadable file ...; ignored", so no run is built from it and no ledger either. The run end
+     leaves such a file alone (:925-929); before the fix it was skipped as well (no run has id 0).
+   - :2402-2414: in the 'Z' path, `led` is now fetched before the work. `!led`, `!overlay` or `!line` gives the new
+     refusal `NO_LEDGER` (SpireMag.hh:161, name SpireMag.cc:275). That answers result 0, old FF, and the log carries
+     "FAIL (NO_LEDGER); run X: no run mag ledger (run id 0 or no character key)".
+   - I checked `overlay` and `line`: under NONE they cannot be null. `has_overlay = !!overlay` and
+     `has_table = !!line` come before the refusal. I check them anyway, in the same branch, at no cost.
+   - Test StaticTests.cc:4402-4407 (`expect_raises` on a savestate with run id 0) and :4464 (the name).
+   - **Red before green:** before the fix it failed with
+     `StaticTests.cc:4407: expected exception, but none raised` (log `NSFIX/red2.test.log`).
+2. **N2 (floors in the Shell column): fixed.** New case "a Shell run with a start bonus starts on the start floor"
+   (StaticTests.cc:4584-4598) checks three things:
+   - step 0 with bonus 14 is the same for both columns;
+   - a kit ASK with lean 2 and bonus 14 gives Varuna L22 (Id 1, DEF 11, POW 10);
+   - Shell step 1 with bonus 14 is DEF 18, POW 10 (the floor wins over the row's 7), MIND 1, Id 1.
+
+   The critic's mutant S1 (copy `steps` only) now dies; see X01.
+3. **N3 (step 0 and the swap for RA/FO): fixed.** StaticTests.cc:4117-4128, in the json case, for HU, RA and FO:
+   - Shell step 0 equals Steps step 0;
+   - from step 1 on, Shell DEF = the Steps main stat (POW, or MIND for FO), Shell main stat = Steps DEF, and the other
+     two stats are equal.
+
+   This puts the data claim in the repo instead of in my script.
+4. **N4 (reminder at the first mag): fixed.**
+   - Text: "Your mag (Shell) is in your pack: equip it (Item Pack > Mag)" (SpireMag.hh:241, 60 characters), used via
+     `spire_run_mag_reminder_text(offered_shell)` (SpireFlagBridge.cc:2344).
+   - When it appears: on every first mag of a Shell run. That is the kit too, not only a practice run (decision F1
+     below).
+   - Length, measured: the longest run-mag ticker line is "Your mag evolves: Kabanda (Shell). Equip it: Item Pack >
+     Mag." = 61 characters (`SPIRE_RUN_MAG_TICKER_MAX`, SpireMag.hh:245).
+   - The test computes the evolve text (with and without Shell) for every Id of the shipped table (Steps, ShellSteps,
+     StartFloors, names from names-v3) and both reminder texts. The longest of all of them equals 61
+     (StaticTests.cc:4750-4775).
+   - The NO_MAG reminder at the boss start is unchanged (not asked, and it says nothing about the lean).
+5. **N6 (lean from the savestate): fixed.**
+   - `spire_run_mag_saved_lean` (SpireMag.cc:312) keeps 0-2 and turns anything else into 0.
+   - SpireFlagBridge.cc:606-611 logs `player_data_log` "Spire savestate: run mag ledger of run X has lean N; read as
+     0 (no choice)".
+   - Test StaticTests.cc:4386-4401: "2" stays 2; "258" (as a byte that would be 2), "3" and "-1" become 0.
+   - **Red before green:** before the fix it failed with `StaticTests.cc:4399: SPIRE_RUN_MAG_LEAN_NONE !=
+     with_lean("258")` (log `NSFIX/red.test.log`).
+6. **N5 (proof of the wiring after the rollout): not code.** After `apply-on-pc.sh`, read these two lines in the
+   newserv log on the pc. The text is literal from SpireFlagBridge.cc:2439-2442 and :2455-2458 (ASK) and :2345-2347
+   (RESULT); `<...>` differs per run.
+   - The kit ASK of a Shell run from room 1 (HU, no bought levels):
+     ```
+     Spire run mag: ASK room 1 for serial <serial> in q<920|921>: NEW MAG (NONE); run <run id>, start step 0, boss rooms 0, issued step 0, expected step 0, start bonus 0, 0 mag(s) in the run copy, lean bits 2 stored, lean 2 (Shell column); new mag 02000500F401000000000000; r41=5A00FF01
+     ```
+     The proof is the substring `lean bits 2 stored, lean 2 (Shell column)`. If it says `lean bits 0 none, lean 0
+     (Steps)`, the bits did not arrive: the quest half, or the critic's S4.
+     Grep: `grep -a "lean bits 2 stored, lean 2 (Shell column)"`.
+   - After the RESULT of that kit mag, the ticker is the Shell reminder, and the log carries
+     `RESULT 1 for serial <serial> in q<n>: step 0 confirmed, Mag (Shell) 02000500F401000000000000 (run <run id>)`.
+   - After the Dragon (HU Shell step 1 is DEF 18 / POW 7):
+     `RESULT 1 for serial <serial> in q<n>: step 1 confirmed, Varuna (Shell) 020119000807BC0200000000 (run <run id>)`.
+     I computed the bytes with a script, the same way as `spire_mag_row_bytes`. Only the substring `Varuna (Shell)`
+     counts as proof.
+7. **S critic N6: fixed.** ROUTEB2-S-REPORT.md:114 now reads 2302-2306 versus 1456 at ab3c819, and 2310-2314 versus
+   1464 at 48e2d3c. I measured both with `git show <sha>:src/SpireFlagBridge.cc | grep -n "sub ==
+   SPIRE_RUN_MAG_NO_MAG"`. 2288-2292 was the handler's head.
+
+### Red and green
+
+**Green on the committed tree:** script `NSFIX/mut/run.sh`, which restores everything first; `git status` afterwards
+shows only the two doc files changed.
+```
+final build exit 0
+final tests exit 0: I 2635377 2026-10-27 02:18:55 - -- All static tests passed
+```
+The build log has 0 warning lines, there are 66 `--` sections, and the new case is on line 177.
+
+**Mutations:** every one built with exit 0 and tested with exit 134.
+
+| # | Mutation | Failing line (literal) |
+|---|---|---|
+| X01 | `spire_mag_column` copies steps and shell_steps only, not floors (critic S1) | `StaticTests.cc:4586: !(spire_mag_step_bytes(hu_shell, 0, 14, std::nullopt) == spire_mag_step_bytes(hu, 0, 14, std::nullopt))` |
+| X02 | json: RA Shell step 0 DEF 5 -> 6 | `StaticTests.cc:4119: !(spire_mag_row_bytes(full.shell_steps[0]) == spire_mag_row_bytes(full.steps[0]))` |
+| X03 | json: FO Shell step 2 DEX 1 -> 0 | `StaticTests.cc:4127: f.dex != h.dex` |
+| X04 | json: HU Shell step 1 POW 7 -> 8 | `StaticTests.cc:4125: f.def != fo ? h.mind : h.pow` |
+| X05 | reminder without "(Shell)" | `StaticTests.cc:4751: std::string("Your mag (Shell) is in your pack: equip it (Item Pack > Mag)") != spire_run_mag_reminder_text(true)` |
+| X06 | saved lean not limited | `StaticTests.cc:4399: SPIRE_RUN_MAG_LEAN_NONE != with_lean("258")` |
+| X07 | run id 0 accepted | `StaticTests.cc:4407: expected exception, but none raised` |
+| X08 | saved lean without the lower bound | `StaticTests.cc:4401: SPIRE_RUN_MAG_LEAN_NONE != with_lean("-1")` |
+
+**Not reachable by a static test:** the `NO_LEDGER` branch in the bridge, and the reminder call in RESULT. N5 above is
+the proof for that.
+
+### Decisions (route: self, class 2)
+
+- **F1. The Shell reminder at every first mag of a Shell run, the kit included.**
+  - Coverage: the coordinator's point 4 and contract point 8 ("de tekst noemt de keuze").
+  - Why: at the kit the player has just chosen. The text is the same single ticker line as before plus 8 characters,
+    so it is not an extra ticker (design critic N10 stays satisfied).
+- **F2. A separate refusal `NO_LEDGER` instead of reusing `MARKER`.**
+  - Coverage: point 1 ("als weigering antwoordt ... met een logregel").
+  - Why: the log names the real cause; the answer is the same refusal answer.
+- **F3. `SPIRE_RUN_MAG_TICKER_MAX = 61` as a constant with a test, not a cut in `spire_ticker_line`.**
+  - Coverage: point 4 ("houd elke tickerregel ≤ de langste").
+  - Why: a cut would break the text; the test catches a longer name in the json.
+- **F4. The N3 swap test compares the stat values directly, not the Id's.**
+  - Coverage: contract point 6 and design critic N2 ("geen spiegel van Sega's regels").
+  - Why: the Id's are tested elsewhere (names-v3, a new Id per step).
+
+### Observations
+
+None new. The critic's S2 (`offered_shell` without the `if`) and S3 (the reset in `follow_mirror`) still survive.
+Neither has a behaviour effect (the critic agrees), and both are left as they are.
