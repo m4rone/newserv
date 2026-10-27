@@ -4849,7 +4849,7 @@ void run_static_tests() {
       expect_eq(shell_step, sl.offered_step); // the retry offers the given-back step
       expect(spire_run_mag_result(sl, false));
       expect(!spire_run_mag_pack_full_notice(told, sl.run_id, true, false, shell_step)); // still full: silent
-      expect_eq(std::string("Pack full: mag did not grow. Free slots; next clear retries"),
+      expect_eq(std::string("Pack full: your mag did not grow. Keep a slot free"),
           std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT));
       expect(std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT).size() <= SPIRE_RUN_MAG_TICKER_MAX);
     });

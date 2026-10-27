@@ -240,8 +240,10 @@ std::string spire_run_mag_bytes_hex(const SpireMagBytes& bytes);
 SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on a bad string
 
 // Ticker texts (C4_SRVMSG path, spire_send_ticker); the evolve text carries the Sega name
-// The quest asks again at the next clear (room clear or boss exam) while the run goes on; it grows if a slot is free
-constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: mag did not grow. Free slots; next clear retries";
+// No promise of a retry: the quest asks again at the next clear while the run goes on, but the server cannot tell
+// whether one comes (the RESULT word has no k, no config names a quest's last room, and time up, a death or 'O' end
+// a run too); the retry needs a free slot after that clear's own rewards
+constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep a slot free";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
