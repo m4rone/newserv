@@ -291,3 +291,7 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
   }
   return d.drawn;
 }
+
+std::string spire_draw_overview_line(const SpireDrawTable&, uint32_t, uint32_t) {
+  return ""; // RED STUB
+}

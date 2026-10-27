@@ -81,6 +81,12 @@ constexpr auto SPIRE_BRIDGE_BATTLE_PHASE_INTERVAL = std::chrono::seconds(2);
 // text message to every client in the game.
 constexpr uint32_t SPIRE_BRIDGE_ROOM_CLEAR_VALUE = 0x524F4F4D; // 'ROOM'
 constexpr const char* SPIRE_BRIDGE_ROOM_CLEAR_TEXT = "Room clear! Take a step for your reward.";
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 3): the r251 text of a server boss clear (SpireBossClearQuests: Vol Opt,
+// Dark Falz). A boss clear opens no reward list, so it does not ask for a step.
+constexpr const char* SPIRE_BRIDGE_BOSS_CLEAR_TEXT = "Exam passed!";
+// v62: the clear text the server sends: SPIRE_BRIDGE_BOSS_CLEAR_TEXT for a server boss clear, else
+// SPIRE_BRIDGE_ROOM_CLEAR_TEXT ('ROOM' and the r251 of a room clear)
+const char* spire_bridge_clear_text(bool server_boss_clear);
 // v36: the server's room clear (r251) sends its text this long after the r251, so the board text the quest shows on
 // the r251 does not push the line aside (pc 2026-10-25 09:06:48: B0 sent with r251, nothing seen)
 constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(1000);
@@ -89,9 +95,27 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //   'W' wave n/m (n << 8 | m) · 'L' life lost (last << 8 | lives left) · 'T' time warning (minutes left)
 //   'P' partner wait (1: your partner is waiting, 0: waiting for your partner) · 'X' run over (rooms << 16 | seconds)
 //   v36 (quest spike/stadstart b29f310), each to the writer only: 'G' pause B (0: Continue, 1: Ready) · 'U' down
-//   (1: down, 0: back on its feet) · 'H' hint: close the board and take a step · 'A' pipe approach (type << 8 | room
-//   number; type 0 normal, 1 elite, 2 rest) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
+//   (1: down, 0: back on its feet) · 'H' hint: take a step · 'A' pipe approach (extra << 16 | type << 8 | room
+//   number; type 0 normal, 1 elite, 2 rest, v62 3 exam) · v37 (quest 802ebe9) 'C' the run waits for a choice of this player
 //   (point << 8 | room number; points 1, 2, 6, 7, 8, and 9 with leader 1 / follower 0 in the low byte; 3-5 are retired and taken without a text or a log line)
+// v62 (B-REGIE-16-13, bundle 8 ux-pass; the contract is the quest's quests/spire/ROUTEB8-PROTOCOL.md § 3). Every text
+// stays one line of at most SPIRE_BRIDGE_TEXT_MAX characters; bits 16-23 = 0 (an older quest) give the text of before
+// for 'C' 6 and for 'A' types 0 and 1. Names come from the quest's draw.json (SpireDraw.hh); without one a text names
+// no tag, boss or reward.
+//   'H' "Take a step: the menu opens." · 'P' b = 1 "Your partner is ready. Walk to choose your reward." (b = 0 as before)
+//   'C' 2 the writer's last overview line of its 'Q' (spire_draw_overview_line), kept until its next 'Q' or a floor
+//     change; none kept: "Take a step: your reward list opens."
+//   'C' 6 bits 16-23 = typeB << 4 | typeA (0 normal, 1 elite, 2 rest, 3 exam; typeB 0xF: one pipe), k = the room the
+//     pipes lead to: "The way is open: Room k <A> or Room k <B>. Walk close to a warp to read it." (normal / ELITE /
+//     REST / EXAM), one exam pipe "The way is open. Walk to the warp: Exam <boss>." (exams[k]; unknown: "Room k")
+//   'A' bits 16-23 = extra: type 0 normal "Room k. Next reward: <tag>." · 1 elite "Room k - Elite: harder foes, rare
+//     reward. Next reward: <tag>." (extra = tag index + 1; no tag name: without "Next reward") · 2 rest "Room k - Rest:
+//     no enemies, full HP, then the shop." (spire.json sign_rest; the same rest in every quest version, so also at
+//     extra 0) · 3 exam pipe "Room k - Exam: <boss> (<modifier>)." (extra = modifier index + 1)
+//   'C' 10 exam reward, bits 16-22 rare entry index + 1 of the writer's archetype, bit 23 the rare did not fit, low
+//     byte bits 0-4 exam_extras index + 1 and bits 5-7 n (meseta 500 + 100 n): "Exam reward: <meseta> meseta, <rare>,
+//     <extra>." and when full " Inventory full: make room, it waits."
+//   'C' 11 start hint at the Forest 1 arrival: "Take a step: your run starts."
 // The kind letters differ from the first byte of every 4CC above ('SPIR', 'DONE', 'ENDB', 'ROOM'), from the record
 // codes ('B', 'K', 'F', 'Y'), the timer ('S'), the draw ('Q'), the lab probe ('N'), the base return ('O', v48), the
 // run again ('I', v49) and the base shop ('M', v50).
@@ -746,6 +770,26 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
 std::string spire_ticker_line(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
+// v62 (B-REGIE-16-13): what a bundle 8 text needs besides the code. The overload above is this with an empty context
+// (no names known, no overview kept).
+struct SpireDrawTable;
+constexpr size_t SPIRE_BRIDGE_TEXT_MAX = 90; // B-E01-90: one ticker line
+struct SpireBridgeTextContext {
+  const SpireDrawTable* draw = nullptr; // the quest's draw table, for the names; nullptr = no names known
+  int archetype = -1; // 'C' 10: the writer's archetype (0 HU, 1 RA, 2 FO), -1 = not known
+  std::string overview; // 'C' 2: the writer's kept overview line (spire_overview_kept_line), "" = none
+};
+std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);
+// v62: the writer's last overview line as kept at its 'Q' (lobby and floor of that 'Q'); "" when none is kept, or the
+// client is in another game or on another floor now (a floor change ends it)
+struct SpireOverviewKept {
+  std::string line;
+  uint32_t lobby_id = 0;
+  uint32_t floor = 0;
+};
+std::string spire_overview_kept_line(const SpireOverviewKept* kept, uint32_t lobby_id, uint32_t floor);
+// v62: the draw archetype of a character class (0 HU, 1 RA, 2 FO), -1 for none
+int spire_draw_archetype_for_class(uint8_t char_class);
 // v41 (B-E01-96, B-REGIE-9-1): lives are the quest's counter r172, never a Scape Doll; the Battle respawn to the city
 // is always off and the quest stands a dead player with lives left up on the spot. Its 'L' code (lives left in the low
 // byte) gets this log line: "Spire lives: death of serial S revived on the spot, lives N->N-1, no respawn to city".

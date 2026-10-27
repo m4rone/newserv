@@ -22,6 +22,15 @@ struct SpireDrawEntry {
   bool rare = false; // z == 'R'
   bool own_curse = false; // vloek: never a drawn curse on top
   bool glass_ok = false; // weapon or tech disk: the only entries a Glass curse may ride on
+  // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 1): the display name, the first line of its reward page without tags;
+  // "" = no name known (an older draw.json, or a value that is no plain ASCII string of at most 22 characters)
+  std::string name;
+};
+
+// v62 (B-REGIE-16-13): an exam of the quest, keyed by its BOSS room k (draw.json "exams")
+struct SpireDrawExam {
+  std::string boss; // "" = no name known
+  std::vector<std::string> modifiers; // spire.json boss_modifiers; index = the 'A' type 3 extra - 1
 };
 
 struct SpireDrawArchetype {
@@ -44,6 +53,12 @@ struct SpireDrawTable {
   uint32_t relic_bit_r13 = 0;
   uint32_t relic_bit_r14 = 0;
   std::vector<SpireDrawArchetype> archetypes; // HU, RA, FO
+  // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 1): optional names for the server texts; a missing key, or a value that
+  // is not a plain ASCII string within its length, means "no name known" and never fails the table (the draw is the
+  // part that must always work)
+  std::vector<std::string> tag_names; // tag index -> its word (<= 10 characters); "" = not known
+  std::map<uint8_t, SpireDrawExam> exams; // boss room k -> its exam
+  std::vector<std::string> exam_extras; // the 'C' 10 extra index - 1 -> the class extra (<= 24 characters)
 
   static SpireDrawTable from_json_file(const std::string& filename);
 };
@@ -71,3 +86,11 @@ SpireDrawInput spire_draw_input_from_values(const std::vector<uint32_t>& values)
 // Returns r181: entry id (pool index + 1) of board slot 2/3/4/5 at bits 0/6/12/18, curse code at bits 24/26/28/30. rnd(n)
 // must return a uniform value in [0, n).
 uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const std::function<uint32_t(uint32_t)>& rnd);
+
+// v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 2): the one-line overview of a draw (r181 as spire_draw returns it) for
+// archetype: "Rewards: <n1>, <n2>, <n3>. Walk to choose." in the order of the reward pages (board slot 3, 4, 5, then
+// slot 2 of R14), each name followed by " (cursed)" for a cursed draw or else " (rare)" for a rare entry. Over
+// SPIRE_DRAW_OVERVIEW_MAX characters the suffixes go; still over, "Rewards: <count> ready. Walk to choose.". Empty if
+// nothing was drawn, the archetype is out of range, or a drawn entry has no name.
+constexpr size_t SPIRE_DRAW_OVERVIEW_MAX = 90;
+std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn);

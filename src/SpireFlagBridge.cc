@@ -1616,6 +1616,22 @@ std::string spire_bridge_message_text(uint32_t value) {
   }
 }
 
+std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext&) {
+  return spire_bridge_message_text(value); // RED STUB
+}
+
+std::string spire_overview_kept_line(const SpireOverviewKept*, uint32_t, uint32_t) {
+  return ""; // RED STUB
+}
+
+int spire_draw_archetype_for_class(uint8_t) {
+  return -1; // RED STUB
+}
+
+const char* spire_bridge_clear_text(bool) {
+  return SPIRE_BRIDGE_ROOM_CLEAR_TEXT; // RED STUB
+}
+
 // v41 (B-E01-96): lives are the quest's counter r172, never a Scape Doll, and the Battle respawn to the city is always
 // off. Every 'L' code is a death the quest stands up on the spot (player_recovery): the log line says so, with the
 // lives before and after (the code carries the lives left).

@@ -2023,11 +2023,11 @@ void run_static_tests() {
     expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Ready = leave room."), spire_bridge_message_text(0x47000001));
     expect_eq(std::string("You are down - you get up when the room is clear."), spire_bridge_message_text(0x55000001));
     expect_eq(std::string("You are back on your feet."), spire_bridge_message_text(0x55000000));
-    expect_eq(std::string("Close the board and take a step."), spire_bridge_message_text(0x48000000));
+    // v62: 'H' has the bundle 8 text (section "Spire bundle 8")
     expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002));
     // v37: 'C' point << 8 | room (quest 802ebe9); 3-5 retired
     expect_eq(std::string("Take your reward: Quest Board, slot Reward."), spire_bridge_message_text(0x43000102));
-    expect_eq(std::string("Take a step: your reward pages open."), spire_bridge_message_text(0x43000202));
+    // v62: 'C' 2 shows the overview line or the bundle 8 fallback (section "Spire bundle 8")
     expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000602));
     expect_eq(std::string("Partner has not taken a reward. The way is open."), spire_bridge_message_text(0x43000702));
     expect_eq(std::string("Partner is in the shop. The warp waits for him."), spire_bridge_message_text(0x43000802));
@@ -2038,7 +2038,7 @@ void run_static_tests() {
     }
     expect_eq(std::string("Room clear! Take a step for your reward."), std::string(SPIRE_BRIDGE_ROOM_CLEAR_TEXT));
     expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105));
-    expect_eq(std::string("Room 7 - Rest"), spire_bridge_message_text(0x41000207));
+    // v62: 'A' rest names its effect (section "Spire bundle 8")
     expect_eq(std::string("Last life: fall again and you stay down until the clear."), spire_bridge_message_text(0x4C000100));
     expect_eq(std::string("$C1Life lost$C7 - 2 left. You get up on the spot."), spire_bridge_message_text(0x4C000002));
   }
@@ -4777,7 +4777,7 @@ void run_static_tests() {
 
     f6_case("bundle 2 S: the kit text after 'M' START", [&]() {
       expect(spire_kit_use_text_due(true, 1, 0, false, false)); // hp_mat only
-      expect(spire_kit_use_text_due(true, 0, 2, false, false)); // atp_grind only
+      // v62: atp_grind alone no longer makes the text due (section "Spire bundle 8")
       expect(spire_kit_use_text_due(true, 3, 3, false, false));
       expect(!spire_kit_use_text_due(true, 0, 0, false, false)); // no kit level (an old meta file): no text
       expect(!spire_kit_use_text_due(false, 1, 1, false, false)); // LIST or BUY: no text
@@ -5188,6 +5188,321 @@ void run_static_tests() {
     expect(a != spire_draw_seed(0xA1, 5, 1, in)); // the reroll: the second draw of the room
     in[9] ^= 1; // another relic
     expect(a != spire_draw_seed(0xA1, 5, 0, in));
+  }
+
+  phosg::log_info_f("-- Spire bundle 8 (ux-pass): draw.json names, overview line, server texts (v62, B-REGIE-16-13)");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did (so one run shows them all)
+    size_t b8_failed = 0;
+    auto b8_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   B8 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        b8_failed++;
+        phosg::log_error_f("   B8 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // a draw table with num_tags 2 (3 * 2 + 1 rows per band, each row every entry); per archetype its entries as
+    // (name JSON value, rare), an empty name value leaves the key out (a draw.json from before bundle 8)
+    using B8Entries = std::vector<std::pair<std::string, bool>>;
+    auto b8_table_json = [](const std::array<B8Entries, 3>& arch_entries, const std::string& top_keys) {
+      std::string archetypes;
+      for (size_t a = 0; a < 3; a++) {
+        std::string entries, members;
+        for (size_t z = 0; z < arch_entries[a].size(); z++) {
+          const auto& [name, rare] = arch_entries[a][z];
+          entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":{},\"own_curse\":false,"
+                                 "\"glass_ok\":false{}}}",
+              z ? "," : "", rare ? "true" : "false", name.empty() ? "" : (",\"name\":" + name));
+          members += std::format("{}{}", z ? "," : "", z);
+        }
+        std::string row = std::format("[{}]", members);
+        archetypes += std::format("{}{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{},{},{},{}]}},"
+                                  "\"slot_c_zero_tags\":[]}}",
+            a ? "," : "", entries, row, row, row, row, row, row, row);
+      }
+      return std::format("{{\"num_tags\":2,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,"
+                         "\"max_attempts\":8,\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,"
+                         "\"relic_bit_r14\":16,\"archetypes\":[{}]{}}}",
+          archetypes, top_keys);
+    };
+    auto b8_filename = (std::filesystem::temp_directory_path() / std::format("newserv-static-spire-b8-{}.json", getpid())).string();
+    auto b8_load = [&](const std::string& json) {
+      phosg::save_file(b8_filename, json);
+      auto t = SpireDrawTable::from_json_file(b8_filename);
+      std::filesystem::remove(b8_filename);
+      return t;
+    };
+    const B8Entries hu = {{"\"Saber\"", false}, {"\"Fire Shield\"", false}, {"\"Lavis Cannon\"", true}, {"\"Monomate x3\"", false}};
+    const B8Entries ra = {{"\"Handgun\"", false}, {"\"Ranger Wall\"", false}, {"\"Spread Needle\"", true}, {"\"Dimate x2\"", false}};
+    const B8Entries fo = {{"\"Cane\"", false}, {"\"Barrier\"", false}, {"\"Club of Laconium\"", true}, {"\"Trimate\"", false}};
+    const B8Entries old_style = {{"", false}, {"", false}, {"", true}, {"", false}};
+    const std::string new_keys = ",\"tag_names\":[\"Fire\",\"Guard\"],"
+                                 "\"exams\":{\"4\":{\"boss\":\"Dragon\",\"modifiers\":[\"Armored: HP x1.3\",\"Furious: ATP x1.15\"]},"
+                                 "\"8\":{\"boss\":\"De Rol Le\",\"modifiers\":[]}},"
+                                 "\"exam_extras\":[\"Photon Drop x2\",\"Star Atomizer\"]";
+    SpireDrawTable named, old;
+    // the draw slots of r181: board slot 2/3/4/5 entry id at bits 0/6/12/18, curse code at bits 24/26/28/30
+    auto drawn_of = [](uint32_t s2, uint32_t s3, uint32_t s4, uint32_t s5, uint32_t curse3, uint32_t curse4) -> uint32_t {
+      return s2 | (s3 << 6) | (s4 << 12) | (s5 << 18) | (curse3 << 26) | (curse4 << 28);
+    };
+    SpireBridgeTextContext none, with_names;
+
+    b8_case("loader: the new keys are read", [&]() {
+      named = b8_load(b8_table_json({hu, ra, fo}, new_keys));
+      expect_eq(std::string("Saber"), named.archetypes.at(0).entries.at(0).name);
+      expect_eq(std::string("Lavis Cannon"), named.archetypes.at(0).entries.at(2).name);
+      expect_eq(std::string("Spread Needle"), named.archetypes.at(1).entries.at(2).name);
+      expect_eq(2u, named.tag_names.size());
+      expect_eq(std::string("Guard"), named.tag_names.at(1));
+      expect_eq(2u, named.exams.size());
+      expect_eq(std::string("Dragon"), named.exams.at(4).boss);
+      expect_eq(2u, named.exams.at(4).modifiers.size());
+      expect_eq(std::string("Furious: ATP x1.15"), named.exams.at(4).modifiers.at(1));
+      expect_eq(std::string("De Rol Le"), named.exams.at(8).boss);
+      expect(named.exams.at(8).modifiers.empty());
+      expect_eq(2u, named.exam_extras.size());
+      expect_eq(std::string("Star Atomizer"), named.exam_extras.at(1));
+    });
+    with_names.draw = &named;
+    with_names.archetype = 0;
+
+    b8_case("loader: a draw.json without the keys loads, nothing named, the texts of before", [&]() {
+      old = b8_load(b8_table_json({old_style, old_style, old_style}, ""));
+      expect_eq(3u, old.archetypes.size());
+      for (const auto& a : old.archetypes) {
+        for (const auto& e : a.entries) {
+          expect(e.name.empty());
+        }
+      }
+      expect(old.tag_names.empty() && old.exams.empty() && old.exam_extras.empty());
+      auto rnd0 = [](uint32_t) -> uint32_t { return 0; };
+      uint32_t drawn = spire_draw(old, SpireDrawInput(), rnd0);
+      expect_eq(1u, ((drawn >> 6) & 0x3F)); // the draw itself as before
+      expect(spire_draw_overview_line(old, 0, drawn).empty()); // no names: no overview line
+      SpireBridgeTextContext ctx;
+      ctx.draw = &old;
+      ctx.archetype = 0;
+      // an older quest (bits 16-23 = 0) with this table: the texts of before
+      expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002, ctx));
+      expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105, ctx));
+      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000602, ctx));
+      expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000, ctx));
+      expect_eq(std::string("Partner has not taken a reward. The way is open."), spire_bridge_message_text(0x43000702, ctx));
+      // and the bundle 8 codes without names: nothing named
+      expect_eq(std::string("Room 2."), spire_bridge_message_text(0x41010002, ctx));
+      expect_eq(std::string("Room 4 - Exam."), spire_bridge_message_text(0x41020304, ctx));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 4."), spire_bridge_message_text(0x43F30604, ctx));
+      expect_eq(std::string("Exam reward: 600 meseta."), spire_bridge_message_text(0x43030A21, ctx));
+    });
+
+    b8_case("loader: a bad value is no name, never a failed table", [&]() {
+      const B8Entries bad = {{"123", false}, {"\"A name of twenty-three!\"", false}, {"\"$C4Red\"", true}, {"\"Twenty-two chars name!\"", false}};
+      auto t = b8_load(b8_table_json({bad, bad, bad},
+          ",\"tag_names\":[\"Fire\",7,\"Much too long\"],\"exams\":{\"4\":{\"boss\":5,\"modifiers\":[\"ok\",3]},\"x\":{}},"
+          "\"exam_extras\":\"no list\""));
+      expect(t.archetypes.at(0).entries.at(0).name.empty()); // a number
+      expect(t.archetypes.at(0).entries.at(1).name.empty()); // 23 characters
+      expect(t.archetypes.at(0).entries.at(2).name.empty()); // a colour escape
+      expect_eq(std::string("Twenty-two chars name!"), t.archetypes.at(0).entries.at(3).name); // 22: fits
+      expect_eq(3u, t.tag_names.size());
+      expect_eq(std::string("Fire"), t.tag_names.at(0));
+      expect(t.tag_names.at(1).empty() && t.tag_names.at(2).empty());
+      expect(t.exams.at(4).boss.empty());
+      expect_eq(2u, t.exams.at(4).modifiers.size());
+      expect(t.exams.at(4).modifiers.at(1).empty());
+      expect_eq(1u, t.exams.size()); // "x" is no room number
+      expect(t.exam_extras.empty());
+    });
+
+    b8_case("overview line: names, (rare), (cursed), page order, fewer slots, the limits", [&]() {
+      // slot 3 Saber, slot 4 Fire Shield cursed, slot 5 Lavis Cannon (rare entry)
+      expect_eq(std::string("Rewards: Saber, Fire Shield (cursed), Lavis Cannon (rare). Walk to choose."),
+          spire_draw_overview_line(named, 0, drawn_of(0, 1, 2, 3, 0, 2)));
+      // cursed wins over rare
+      expect_eq(std::string("Rewards: Lavis Cannon (cursed), Saber, Fire Shield. Walk to choose."),
+          spire_draw_overview_line(named, 0, drawn_of(0, 3, 1, 2, 3, 0)));
+      // the archetype's own names; R14's slot 2 is the fourth page
+      expect_eq(std::string("Rewards: Handgun, Ranger Wall, Spread Needle (rare), Dimate x2. Walk to choose."),
+          spire_draw_overview_line(named, 1, drawn_of(4, 1, 2, 3, 0, 0)));
+      // fewer than three: what was drawn
+      expect_eq(std::string("Rewards: Cane, Barrier. Walk to choose."), spire_draw_overview_line(named, 2, drawn_of(0, 1, 2, 0, 0, 0)));
+      expect(spire_draw_overview_line(named, 0, 0).empty()); // nothing drawn
+      expect(spire_draw_overview_line(named, 3, drawn_of(0, 1, 2, 3, 0, 0)).empty()); // no such archetype
+      expect(spire_draw_overview_line(named, 0, drawn_of(0, 1, 2, 9, 0, 0)).empty()); // past the table: no name
+      expect(spire_draw_overview_line(old, 0, drawn_of(0, 1, 2, 3, 0, 0)).empty()); // a drawn entry without a name
+      // over 90 with the suffixes: they go; still over: the count
+      const B8Entries longer = {{"\"Eighteen chars abc\"", true}, {"\"Eighteen chars def\"", true}, {"\"Eighteen chars ghi\"", true},
+          {"\"Twenty-two chars name!\"", false}};
+      const B8Entries longest = {{"\"Twenty-two chars nam1\"", false}, {"\"Twenty-two chars nam2\"", false},
+          {"\"Twenty-two chars nam3\"", false}, {"\"Twenty-two chars nam4\"", false}};
+      auto t = b8_load(b8_table_json({longer, longest, longest}, ""));
+      std::string no_suffix = spire_draw_overview_line(t, 0, drawn_of(0, 1, 2, 3, 0, 0));
+      expect_eq(std::string("Rewards: Eighteen chars abc, Eighteen chars def, Eighteen chars ghi. Walk to choose."), no_suffix);
+      expect_eq(std::string("Rewards: 3 ready. Walk to choose."), spire_draw_overview_line(t, 1, drawn_of(0, 1, 2, 3, 0, 0)));
+      expect_eq(std::string("Rewards: 4 ready. Walk to choose."), spire_draw_overview_line(t, 0, drawn_of(4, 1, 2, 3, 0, 0)));
+      for (uint32_t a = 0; a < 3; a++) {
+        for (uint32_t drawn : {drawn_of(0, 1, 2, 3, 1, 2), drawn_of(4, 1, 2, 3, 3, 3), drawn_of(0, 4, 0, 0, 0, 0)}) {
+          for (const auto* table : {&named, &t}) {
+            std::string line = spire_draw_overview_line(*table, a, drawn);
+            expect(line.size() <= SPIRE_DRAW_OVERVIEW_MAX);
+            expect_eq(line, spire_ticker_line(line));
+          }
+        }
+      }
+    });
+
+    b8_case("'C' 2 shows the kept overview line until the next 'Q' or a floor change", [&]() {
+      expect_eq(std::string("Take a step: your reward list opens."), spire_bridge_message_text(0x43000202));
+      expect_eq(std::string("Take a step: your reward list opens."), spire_bridge_message_text(0x43000202, with_names));
+      SpireOverviewKept kept{"Rewards: Saber, Fire Shield, Lavis Cannon (rare). Walk to choose.", 7, 3};
+      expect_eq(kept.line, spire_overview_kept_line(&kept, 7, 3));
+      expect(spire_overview_kept_line(&kept, 7, 4).empty()); // another floor
+      expect(spire_overview_kept_line(&kept, 8, 3).empty()); // another game
+      expect(spire_overview_kept_line(nullptr, 7, 3).empty());
+      SpireBridgeTextContext ctx = with_names;
+      ctx.overview = spire_overview_kept_line(&kept, 7, 3);
+      expect_eq(kept.line, spire_bridge_message_text(0x43000202, ctx));
+      // the other codes ignore it
+      expect_eq(std::string("Partner has not taken a reward. The way is open."), spire_bridge_message_text(0x43000702, ctx));
+    });
+
+    b8_case("'H', 'P', 'C' 11 and the boss clear", [&]() {
+      expect_eq(std::string("Take a step: the menu opens."), spire_bridge_message_text(0x48000000));
+      expect_eq(std::string("Your partner is ready. Walk to choose your reward."), spire_bridge_message_text(0x50000001));
+      expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000)); // b = 0 as before
+      expect_eq(std::string("Take a step: your run starts."), spire_bridge_message_text(0x43000B01));
+      expect_eq(std::string("Take a step: your run starts."), spire_bridge_message_text(0x43000B00, with_names));
+      expect_eq(std::string("Exam passed!"), std::string(spire_bridge_clear_text(true))); // SpireBossClearQuests
+      expect_eq(std::string(SPIRE_BRIDGE_ROOM_CLEAR_TEXT), std::string(spire_bridge_clear_text(false)));
+      expect_eq(std::string("Room clear! Take a step for your reward."), std::string(spire_bridge_clear_text(false)));
+    });
+
+    b8_case("'C' 6 names both pipes, an exam pipe its boss; bits 16-23 = 0 as before", [&]() {
+      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000605, with_names));
+      expect_eq(std::string("The way is open: Room 5 ELITE or Room 5 REST. Walk close to a warp to read it."),
+          spire_bridge_message_text(0x43210605, with_names));
+      expect_eq(std::string("The way is open: Room 5 normal or Room 5 ELITE. Walk close to a warp to read it."),
+          spire_bridge_message_text(0x43100605));
+      expect_eq(std::string("The way is open: Room 12 REST or Room 12 normal. Walk close to a warp to read it."),
+          spire_bridge_message_text(0x4302060C));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Dragon."), spire_bridge_message_text(0x43F30604, with_names));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 4."), spire_bridge_message_text(0x43F30604));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 6."), spire_bridge_message_text(0x43F30606, with_names));
+      expect_eq(std::string("The way is open. Walk to the warp: Room 3 normal."), spire_bridge_message_text(0x43F00603));
+      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43050605)); // no such type
+      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43FF0605));
+    });
+
+    b8_case("'A' names the tag, the rest, the exam boss and modifier; extra 0 of types 0 and 1 as before", [&]() {
+      expect_eq(std::string("Room 2"), spire_bridge_message_text(0x41000002, with_names));
+      expect_eq(std::string("Room 2. Next reward: Fire."), spire_bridge_message_text(0x41010002, with_names));
+      expect_eq(std::string("Room 2."), spire_bridge_message_text(0x41010002)); // no tag name known
+      expect_eq(std::string("Room 2."), spire_bridge_message_text(0x41030002, with_names)); // tag 3 of 2
+      expect_eq(std::string("Room 5 - Elite (harder, better reward)"), spire_bridge_message_text(0x41000105, with_names));
+      expect_eq(std::string("Room 5 - Elite: harder foes, rare reward. Next reward: Guard."),
+          spire_bridge_message_text(0x41020105, with_names));
+      expect_eq(std::string("Room 5 - Elite: harder foes, rare reward."), spire_bridge_message_text(0x41090105, with_names));
+      expect_eq(std::string("Room 7 - Rest: no enemies, full HP, then the shop."), spire_bridge_message_text(0x41000207));
+      expect_eq(std::string("Room 7 - Rest: no enemies, full HP, then the shop."), spire_bridge_message_text(0x41000207, with_names));
+      expect_eq(std::string("Room 4 - Exam: Dragon."), spire_bridge_message_text(0x41000304, with_names));
+      expect_eq(std::string("Room 4 - Exam: Dragon (Furious: ATP x1.15)."), spire_bridge_message_text(0x41020304, with_names));
+      expect_eq(std::string("Room 4 - Exam: Dragon."), spire_bridge_message_text(0x41050304, with_names)); // modifier 5 of 2
+      expect_eq(std::string("Room 8 - Exam: De Rol Le."), spire_bridge_message_text(0x41010308, with_names));
+      expect_eq(std::string("Room 4 - Exam."), spire_bridge_message_text(0x41020304));
+      expect_eq(std::string("Room 9"), spire_bridge_message_text(0x41000409, with_names)); // no such type: as before
+    });
+
+    b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
+      // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
+      expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));
+      expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2. Inventory full: make room, it waits."),
+          spire_bridge_message_text(0x43830A21, with_names));
+      expect_eq(std::string("Exam reward: 500 meseta."), spire_bridge_message_text(0x43000A00, with_names));
+      expect_eq(std::string("Exam reward: 1200 meseta, Star Atomizer."), spire_bridge_message_text(0x43000AE2, with_names));
+      SpireBridgeTextContext ra_ctx = with_names;
+      ra_ctx.archetype = 1;
+      expect_eq(std::string("Exam reward: 700 meseta, Spread Needle."), spire_bridge_message_text(0x43030A40, ra_ctx));
+      SpireBridgeTextContext unknown = with_names;
+      unknown.archetype = -1; // the writer's class is not known: no rare name
+      expect_eq(std::string("Exam reward: 700 meseta. Inventory full: make room, it waits."), spire_bridge_message_text(0x43830A40, unknown));
+      expect_eq(std::string("Exam reward: 700 meseta."), spire_bridge_message_text(0x43090A40, with_names)); // rare 9 of 4
+      expect_eq(std::string("Exam reward: 600 meseta."), spire_bridge_message_text(0x43030A21)); // no names known
+      // too long: the extra goes before the rare name
+      const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
+          {"\"Twenty-two chars nam4\"", true}};
+      auto t = b8_load(b8_table_json({longest, longest, longest}, ",\"exam_extras\":[\"Twenty-four characters!!\"]"));
+      SpireBridgeTextContext long_ctx;
+      long_ctx.draw = &t;
+      long_ctx.archetype = 2;
+      expect_eq(std::string("Exam reward: 1200 meseta, Twenty-two chars nam1, Twenty-four characters!!."),
+          spire_bridge_message_text(0x43010AE1, long_ctx));
+      expect_eq(std::string("Exam reward: 1200 meseta, Twenty-two chars nam1. Inventory full: make room, it waits."),
+          spire_bridge_message_text(0x43810AE1, long_ctx));
+    });
+
+    b8_case("every text one line of at most 90 characters", [&]() {
+      const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
+          {"\"Twenty-two chars nam4\"", true}};
+      auto t = b8_load(b8_table_json({longest, longest, longest},
+          ",\"tag_names\":[\"Ten chars!\",\"Ten chars?\"],\"exams\":{\"4\":{\"boss\":\"A boss with a long name\","
+          "\"modifiers\":[\"A modifier line that is long enough to overflow it\"]},"
+          "\"200\":{\"boss\":\"A boss name so long that the exam line runs over the ninety characters it may have\",\"modifiers\":[]}},"
+          "\"exam_extras\":[\"Twenty-four characters!!\"]"));
+      expect_eq(std::string("Room 4 - Exam: A boss with a long name."), spire_bridge_message_text(0x41010304, SpireBridgeTextContext{&t, 0, ""}));
+      expect_eq(std::string("Room 200 - Exam."), spire_bridge_message_text(0x413003C8, SpireBridgeTextContext{&t, 0, ""}));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 200."), spire_bridge_message_text(0x43F306C8, SpireBridgeTextContext{&t, 0, ""}));
+      size_t checked = 0, longest_seen = 0;
+      for (const SpireDrawTable* table : std::vector<const SpireDrawTable*>{nullptr, &named, &old, &t}) {
+        for (int arch : {-1, 0, 1, 2}) {
+          SpireBridgeTextContext ctx{table, arch, ""};
+          for (uint32_t bits = 0; bits < 0x100; bits++) {
+            for (uint32_t k : {1u, 4u, 9u, 12u, 200u, 255u}) {
+              for (uint32_t kind_point : {0x41000000u, 0x41000100u, 0x41000200u, 0x41000300u, 0x43000600u}) {
+                std::string text = spire_bridge_message_text(kind_point | (bits << 16) | k, ctx);
+                expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+                longest_seen = std::max(longest_seen, text.size());
+                checked++;
+              }
+            }
+            for (uint32_t low : {0x00u, 0x01u, 0x02u, 0x1Fu, 0xE1u, 0xFFu}) {
+              std::string text = spire_bridge_message_text(0x43000A00 | (bits << 16) | low, ctx);
+              expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+              longest_seen = std::max(longest_seen, text.size());
+              checked++;
+            }
+          }
+        }
+      }
+      phosg::log_info_f("   B8: {} texts checked, longest {} characters", checked, longest_seen);
+      for (uint32_t value : {0x48000000u, 0x50000001u, 0x43000202u, 0x43000B01u}) {
+        std::string text = spire_bridge_message_text(value);
+        expect(text.size() <= SPIRE_BRIDGE_TEXT_MAX && (text == spire_ticker_line(text)));
+      }
+    });
+
+    b8_case("kit ticker: HP Materials only, grinders are a grind on the kit weapon", [&]() {
+      expect_eq(std::string("Use your HP Materials now (Item Pack)."), std::string(SPIRE_KIT_USE_TEXT));
+      expect(spire_kit_use_text_due(true, 1, 0, false, false));
+      expect(spire_kit_use_text_due(true, 2, 3, false, false));
+      expect(!spire_kit_use_text_due(true, 0, 2, false, false)); // atp_grind only: no ticker
+      expect(!spire_kit_use_text_due(true, 0, 0, false, false));
+      expect(!spire_kit_use_text_due(true, 1, 0, true, false)); // resumed: the kit is not given
+      expect(!spire_kit_use_text_due(true, 1, 0, false, true)); // already sent in this run
+    });
+
+    b8_case("the draw archetype of a class", [&]() {
+      expect_eq(0, spire_draw_archetype_for_class(0)); // HUmar
+      expect_eq(0, spire_draw_archetype_for_class(9)); // HUcaseal
+      expect_eq(1, spire_draw_archetype_for_class(4)); // RAcast
+      expect_eq(1, spire_draw_archetype_for_class(11)); // RAmarl
+      expect_eq(2, spire_draw_archetype_for_class(6)); // FOmarl
+      expect_eq(2, spire_draw_archetype_for_class(10)); // FOmar
+      expect_eq(-1, spire_draw_archetype_for_class(12));
+    });
+
+    expect_eq(0u, b8_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");
