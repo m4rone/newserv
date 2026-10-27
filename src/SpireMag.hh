@@ -186,7 +186,26 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 // Ticker texts (C4_SRVMSG path, spire_send_ticker); the evolve text carries the Sega name
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag grows next room";
 constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
-constexpr const char* SPIRE_RUN_MAG_SHIELD_TEXT = "Your mag shields you";
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
-constexpr uint8_t SPIRE_RUN_MAG_SHIELD_FROM_K = 8; // the boss burst (F7) starts at De Rol Le, not at the Dragon
 std::string spire_run_mag_evolve_text(const std::string& sega_name);
+
+// Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
+// the START answer carries an hp_mat or atp_grind level above 0 (the kit creates 2 x level HP Materials / Monogrinders,
+// rewards.py kit_meta) and the client's start answer ('J') did not resume it (a resumed run gets no kit: its items come
+// from the savestate). already_sent: this client had the text in this run.
+bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent);
+
+// Route B bundle 2 S: the boss burst text. The quest (F7, make_spire.py boss_burst) casts Shifta, and Deband unless
+// the boss modifier is Furious or Elite, on each player at the door of every boss room from k8 on (not the Dragon at
+// k4). The server sees that door as the client's 'V' (savestate write) of that room, which the quest sends right
+// before the casts, in the leader's room body and in the follower's mirror phase 4. The text is true in both cases and
+// names no mag (a run has no mag before it is issued, and a disabled mag table issues none).
+constexpr const char* SPIRE_BOSS_BURST_TEXT = "Boss ahead: you are buffed";
+constexpr uint8_t SPIRE_BOSS_BURST_FROM_K = 8; // the boss burst (F7) starts at De Rol Le, not at the Dragon
+// Due when room k is a boss room (boss_rooms: spire-mag.json BossRooms) at or above SPIRE_BOSS_BURST_FROM_K and this
+// client has not had the text for k in this run (sent_rooms, per client and run); marks k in sent_rooms when due.
+bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms);
+
+// Route B bundle 2 S: whether a player data command (61 or 98, ReceiveCommands.cc on_61_98) refreshes the run copy in
+// game as the run mag ledger must know (amendment 3, spire_run_mag_note_in_game_61): only the 61.
+bool spire_run_mag_command_refreshes(uint16_t command);

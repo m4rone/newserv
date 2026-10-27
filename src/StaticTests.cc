@@ -4502,11 +4502,46 @@ void run_static_tests() {
     f6_case("texts", [&]() {
       expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna"));
       for (const std::string& t : {spire_run_mag_evolve_text("Ashvinau"), std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT),
-               std::string(SPIRE_RUN_MAG_REMINDER_TEXT), std::string(SPIRE_RUN_MAG_SHIELD_TEXT),
+               std::string(SPIRE_RUN_MAG_REMINDER_TEXT), std::string(SPIRE_BOSS_BURST_TEXT),
                std::string(SPIRE_KIT_USE_TEXT), std::string(SPIRE_RESUME_MAG_TEXT)}) {
         expect_eq(t, spire_ticker_line(t)); // one ticker line each
       }
       expect_eq(std::string("Your Spire Mag comes back: equip it."), std::string(SPIRE_RESUME_MAG_TEXT));
+      // bundle 2 S: the burst text names no mag (a run may have none) and holds for Shifta only and Shifta + Deband
+      expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
+      expect(std::string(SPIRE_BOSS_BURST_TEXT).find("mag") == std::string::npos);
+      expect(std::string(SPIRE_BOSS_BURST_TEXT).find("Mag") == std::string::npos);
+    });
+
+    f6_case("bundle 2 S: the kit text after 'M' START", [&]() {
+      expect(spire_kit_use_text_due(true, 1, 0, false, false)); // hp_mat only
+      expect(spire_kit_use_text_due(true, 0, 2, false, false)); // atp_grind only
+      expect(spire_kit_use_text_due(true, 3, 3, false, false));
+      expect(!spire_kit_use_text_due(true, 0, 0, false, false)); // no kit level (an old meta file): no text
+      expect(!spire_kit_use_text_due(false, 1, 1, false, false)); // LIST or BUY: no text
+      expect(!spire_kit_use_text_due(true, 1, 1, true, false)); // resumed: the kit is not given
+      expect(!spire_kit_use_text_due(true, 1, 1, false, true)); // a second START of this client in this run
+    });
+
+    f6_case("bundle 2 S: the boss burst text at the boss door", [&]() {
+      std::set<uint8_t> sent;
+      expect(!spire_boss_burst_text_due(4, table.boss_rooms, sent)); // the Dragon: no burst
+      expect(!spire_boss_burst_text_due(7, table.boss_rooms, sent)); // no boss room
+      expect(spire_boss_burst_text_due(8, table.boss_rooms, sent)); // De Rol Le
+      expect(!spire_boss_burst_text_due(8, table.boss_rooms, sent)); // the same room again in this run: no second line
+      expect(!spire_boss_burst_text_due(9, table.boss_rooms, sent));
+      expect(spire_boss_burst_text_due(11, table.boss_rooms, sent)); // Vol Opt
+      expect(sent == std::set<uint8_t>({8, 11}));
+      std::set<uint8_t> other_client; // per client: the partner's own 'V' gets its own line
+      expect(spire_boss_burst_text_due(8, table.boss_rooms, other_client));
+      std::set<uint8_t> none;
+      expect(!spire_boss_burst_text_due(8, {}, none)); // no boss rooms known: no text
+    });
+
+    f6_case("bundle 2 S: only an in-game 61 marks the run copy refreshed", [&]() {
+      expect(spire_run_mag_command_refreshes(0x61));
+      expect(!spire_run_mag_command_refreshes(0x98));
+      expect(!spire_run_mag_command_refreshes(0x00));
     });
 
     f6_case("hex round trip", [&]() {

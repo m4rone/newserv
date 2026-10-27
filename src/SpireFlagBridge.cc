@@ -716,6 +716,8 @@ struct SpireClientRun {
   bool practice = false;
   uint8_t start_room = 0;
   std::map<uint32_t, uint32_t> draws_per_room; // n-th draw per room (seed)
+  bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
+  std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
@@ -1445,17 +1447,21 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   run->savestate_files.emplace(filename);
   c->log.info_f("Spire savestate: stored {} in {}{}", spire_savestate_describe(ss), filename,
       ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "");
-  // F6: the boss burst (F7, quest) from De Rol Le on: the 'V' of a room start is the server's view of that start
+  // F6 / bundle 2 S: the boss burst (F7, quest) from De Rol Le on: this client's 'V' of a boss room start is the
+  // server's view of its boss door (the quest casts right after it). One line to this client only, once per room and
+  // run (SpireClientRun); the boss rooms are spire-mag.json's BossRooms (no file: no text, no warning)
   try {
-    if (room_k >= SPIRE_RUN_MAG_SHIELD_FROM_K) {
+    if ((room_k >= SPIRE_BOSS_BURST_FROM_K) && std::filesystem::exists(SPIRE_RUN_MAG_FILE)) {
       auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
-      if (table.boss_rooms.count(room_k)) {
-        spire_send_ticker(c, SPIRE_RUN_MAG_SHIELD_TEXT);
-        c->log.info_f("Spire run mag: boss room {} starts; sent \"{}\"", room_k, SPIRE_RUN_MAG_SHIELD_TEXT);
+      if (spire_boss_burst_text_due(room_k, table.boss_rooms, cr->boss_burst_texts)) {
+        spire_send_ticker(c, SPIRE_BOSS_BURST_TEXT);
+        c->log.info_f("Spire bridge: boss room {} starts; sent \"{}\"", room_k, SPIRE_BOSS_BURST_TEXT);
+      } else if (table.boss_rooms.count(room_k)) {
+        c->log.info_f("Spire bridge: boss room {} starts again; burst text already sent in this run", room_k);
       }
     }
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire run mag: {} unreadable ({}); no boss room text", SPIRE_RUN_MAG_FILE, e.what());
+    c->log.warning_f("Spire bridge: {} unreadable ({}); no boss room text", SPIRE_RUN_MAG_FILE, e.what());
   }
 }
 
@@ -2118,6 +2124,27 @@ uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
 }
 
+// Route B F5/F6, bundle 2 S: SPIRE_KIT_USE_TEXT, SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, so the kit items
+// exist when it shows. By then the client's 'J' has told a resume (no kit) from a fresh start; once per client and run.
+static asio::awaitable<void> spire_kit_use_text_later(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t hp_mat, uint32_t atp_grind) {
+  co_await async_sleep(SPIRE_KIT_USE_TEXT_DELAY);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  auto* cr = spire_client_run_for(c, l, true);
+  if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
+    cr->kit_text_sent = true;
+    spire_send_ticker(c, SPIRE_KIT_USE_TEXT);
+    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; sent \"{}\"", hp_mat, atp_grind, SPIRE_KIT_USE_TEXT);
+  } else {
+    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; no kit text ({})", hp_mat, atp_grind,
+        cr->answered_resume ? "resumed: no kit" : "already sent in this run");
+  }
+}
+
 // v50: the base shop ('M', SpireFlagBridge.hh and SpireMeta.hh). Always answers the client (state registers when it
 // has a character and the catalogue, r41, then 'DONE'). Throws nothing.
 static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
@@ -2127,7 +2154,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   auto refusal = SpireShopRefusal::NONE;
   std::string what = (sub == SPIRE_SHOP_LIST) ? "LIST" : (sub == SPIRE_SHOP_BUY) ? "BUY" : (sub == SPIRE_SHOP_START) ? "START" : "?";
   std::string detail;
-  bool kit_use_text = false;
+  uint32_t kit_hp_mat = 0, kit_atp_grind = 0; // the START answer's kit levels (route B F5: the kit text)
   try {
     auto character = c->character_file(false, false);
     std::string records_filename = spire_records_filename(c, serial_number);
@@ -2195,8 +2222,10 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
           upgrades[SPIRE_SHOP_ITEM_NAMES[0]] = run_bonus;
         }
       }
-      kit_use_text = (sub == SPIRE_SHOP_START) &&
-          (spire_shop_level(upgrades, 2) || spire_shop_level(upgrades, 3)); // hp_mat, atp_grind
+      if (sub == SPIRE_SHOP_START) {
+        kit_hp_mat = spire_shop_level(upgrades, 2); // hp_mat
+        kit_atp_grind = spire_shop_level(upgrades, 3); // atp_grind
+      }
       uint32_t strength = spire_shop_strength(cat, upgrades);
       uint32_t heat = spire_shop_heat(cat, char_class, strength, spire_meta_ladder_quest_rung(quest_number)); // v54
       std::string heat_str = std::format("H {}", heat);
@@ -2229,9 +2258,12 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   uint32_t answer = spire_shop_answer(sub, refusal);
   spire_send_register(c, SPIRE_SHOP_ANSWER_REGISTER, answer);
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
-  if (kit_use_text) { // route B F5/F6: the kit hands out the HP Materials and Monogrinders right after this answer
+  // route B F5/F6: the kit hands out the HP Materials and Monogrinders right after this answer
+  if ((refusal == SpireShopRefusal::NONE) &&
+      spire_kit_use_text_due(sub == SPIRE_SHOP_START, kit_hp_mat, kit_atp_grind, false, false)) {
     if (auto cl = c->lobby.lock()) {
-      spire_send_ticker_later(c, cl, SPIRE_KIT_USE_TEXT, SPIRE_KIT_USE_TEXT_DELAY);
+      asio::co_spawn(*c->require_server_state()->io_context,
+          spire_kit_use_text_later(c, cl, kit_hp_mat, kit_atp_grind), asio::detached);
     }
   }
   c->log.info_f("Spire shop: {} {:08X} for serial {:010} in q{}: {} ({}){}; r{}={:08X}", what, value, serial_number,

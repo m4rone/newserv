@@ -347,3 +347,18 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
 std::string spire_run_mag_evolve_text(const std::string& sega_name) {
   return std::format("Your mag evolves: {}. Equip it: Item Pack > Mag.", sega_name);
 }
+
+bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent) {
+  return start && (hp_mat_level || atp_grind_level) && !resumed && !already_sent;
+}
+
+bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms) {
+  if ((room_k < SPIRE_BOSS_BURST_FROM_K) || !boss_rooms.count(room_k)) {
+    return false;
+  }
+  return sent_rooms.emplace(room_k).second;
+}
+
+bool spire_run_mag_command_refreshes(uint16_t command) {
+  return command == 0x61;
+}
