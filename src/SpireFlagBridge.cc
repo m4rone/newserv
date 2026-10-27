@@ -1768,6 +1768,13 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return spire_text_exam_reward(value, ctx);
         case 11: // v62: the start hint at the Forest 1 arrival
           return "Take a step: your run starts.";
+        case 12: { // B-BEL-3: a relic gift that did not fit waits for the next room start; low byte the gift
+          static const std::array<const char*, 6> gifts = {"", "Hoarder", "Whetstone", "Sea of Fire", "Sol Atomizer", "Thread"};
+          uint32_t gift = value & 0xFF;
+          return (gift >= 1) && (gift < gifts.size())
+              ? std::format("{}: inventory full. Make room, it waits.", gifts[gift])
+              : "Inventory full: make room, it waits.";
+        }
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }

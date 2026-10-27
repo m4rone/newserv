@@ -5721,6 +5721,14 @@ void run_static_tests() {
       expect_eq(std::string("Room 9"), spire_bridge_message_text(0x41000409, with_names)); // no such type: as before
     });
 
+    b8_case("'C' 12 a relic gift that did not fit (B-BEL-3)", [&]() {
+      expect_eq(std::string("Hoarder: inventory full. Make room, it waits."), spire_bridge_message_text(0x43000C01));
+      expect_eq(std::string("Sol Atomizer: inventory full. Make room, it waits."), spire_bridge_message_text(0x43000C04));
+      expect_eq(std::string("Thread: inventory full. Make room, it waits."), spire_bridge_message_text(0x43000C05));
+      expect_eq(std::string("Inventory full: make room, it waits."), spire_bridge_message_text(0x43000C00));
+      expect_eq(std::string("Inventory full: make room, it waits."), spire_bridge_message_text(0x43000C09));
+    });
+
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));
