@@ -129,6 +129,9 @@ struct SpireRunMagLedger {
 
 // F10: the lean bits of an ASK or EXAM word (bits 8-15)
 uint8_t spire_run_mag_lean_bits(uint32_t value);
+// F10: the lean of a ledger read from a savestate file: 0, 1 or 2 as written, anything else 0 (no choice), so an
+// edited file never wraps to Shell (258 as a byte is 2)
+uint8_t spire_run_mag_saved_lean(int64_t value);
 // F10: storing a lean (from the ASK/EXAM bits, or a sub 5) in the ledger. Stored only when it is 1 or 2 and the ledger
 // has issued no step above 0; the column of a run never changes once a step above the kit's is out.
 enum class SpireRunMagLeanStore {
@@ -155,6 +158,7 @@ enum class SpireRunMagRefusal {
   DISABLED, // spire-mag.json "Enabled" false
   NO_TABLE, // spire-mag.json missing or unreadable, or no line for the class
   TWO_MAGS, // the overlay holds more than one type-02 item: the quest's find_inventory_item could take the wrong one
+  NO_LEDGER, // set by the 'Z' handler after the checks above: no ledger for the run (run id 0, no character key)
 };
 struct SpireRunMagState {
   bool gc_v3 = false;
@@ -232,6 +236,13 @@ constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: e
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false);
+// The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
+// round (F10S critic N4): a Shell mag names the choice as the evolve text does; otherwise SPIRE_RUN_MAG_REMINDER_TEXT.
+constexpr const char* SPIRE_RUN_MAG_REMINDER_SHELL_TEXT = "Your mag (Shell) is in your pack: equip it (Item Pack > Mag)";
+std::string spire_run_mag_reminder_text(bool shell);
+// The longest ticker line of the run mag (measured 2026-10-27: "Your mag evolves: Kabanda (Shell). Equip it: Item
+// Pack > Mag.", 61 characters); the static tests keep every run mag line at or below it
+constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 61;
 
 // Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
 // the START answer carries an hp_mat or atp_grind level above 0 (the kit creates 2 x level HP Materials / Monogrinders,

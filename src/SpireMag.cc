@@ -272,6 +272,8 @@ const char* spire_run_mag_refusal_name(SpireRunMagRefusal r) {
       return "NO_TABLE";
     case SpireRunMagRefusal::TWO_MAGS:
       return "TWO_MAGS";
+    case SpireRunMagRefusal::NO_LEDGER:
+      return "NO_LEDGER";
   }
   return "?";
 }
@@ -305,6 +307,10 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
 
 uint8_t spire_run_mag_lean_bits(uint32_t value) {
   return (value >> 8) & 0xFF;
+}
+
+uint8_t spire_run_mag_saved_lean(int64_t value) {
+  return ((value >= SPIRE_RUN_MAG_LEAN_NONE) && (value <= SPIRE_RUN_MAG_LEAN_SHELL)) ? value : SPIRE_RUN_MAG_LEAN_NONE;
 }
 
 SpireRunMagLeanStore spire_run_mag_lean_store(SpireRunMagLedger& ledger, uint8_t lean) {
@@ -421,6 +427,10 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
 
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell) {
   return std::format("Your mag evolves: {}{}. Equip it: Item Pack > Mag.", sega_name, shell ? " (Shell)" : "");
+}
+
+std::string spire_run_mag_reminder_text(bool shell) {
+  return shell ? SPIRE_RUN_MAG_REMINDER_SHELL_TEXT : SPIRE_RUN_MAG_REMINDER_TEXT;
 }
 
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent) {

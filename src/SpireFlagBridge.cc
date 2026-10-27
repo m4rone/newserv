@@ -568,6 +568,9 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
   auto json = phosg::JSON::parse(data);
   SpireSavestate ret;
   ret.run_id = json.get_int("RunId");
+  if (!ret.run_id) { // fix round (F10S critic N1): no run has id 0 (spire_new_run_id), so a run built from it has no ledger
+    throw std::runtime_error("savestate has run id 0");
+  }
   ret.episode = json.get_int("Episode");
   ret.quest_number = json.get_int("Quest");
   ret.start_room = json.get_int("StartRoom");
@@ -600,7 +603,12 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     for (const auto& k : led_json.get_list("BossRooms")) {
       led.boss_rooms.emplace(k->as_int());
     }
-    led.lean = led_json.get_int("Lean", 0);
+    int64_t lean = led_json.get_int("Lean", 0);
+    led.lean = spire_run_mag_saved_lean(lean);
+    if (led.lean != lean) {
+      player_data_log.warning_f("Spire savestate: run mag ledger of run {:08X} has lean {}; read as 0 (no choice)",
+          led.run_id, lean);
+    }
     if (led_json.contains("LastMirrored")) {
       led.last_mirrored = spire_run_mag_bytes_from_hex(led_json.get_string("LastMirrored"));
     }
@@ -2333,7 +2341,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
-        spire_send_ticker(c, (before < 0) ? SPIRE_RUN_MAG_REMINDER_TEXT : spire_run_mag_evolve_text(name, offered_shell));
+        spire_send_ticker(c, (before < 0) ? spire_run_mag_reminder_text(offered_shell) : spire_run_mag_evolve_text(name, offered_shell));
         c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {}{} {} (run {:08X})",
             serial_number, quest_number, led->issued_step, name, offered_shell ? " (Shell)" : "",
             spire_run_mag_bytes_hex(*offered), run->run_id);
@@ -2391,11 +2399,21 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
 
   SpireRunMagHandled handled; // a refusal answers result 0, old type 0xFF
+  SpireRunMagLedger* led = nullptr;
   if (refusal == R::NONE) {
     if (!run) { // the kit's ASK may come before 'B': the game's run starts here as at 'B'
       run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
     }
-    auto* led = spire_run_mag_ledger_for(c, run->run_id, true);
+    led = spire_run_mag_ledger_for(c, run->run_id, true);
+    // fix round (F10S critic N1): no ledger (run id 0, or no serial/character key) answers as a refusal. overlay and
+    // line are non-null under NONE (has_overlay, has_table); checked here too, so the block below never meets a null
+    if (!led || !overlay || !line) {
+      refusal = R::NO_LEDGER;
+      detail += std::format("; run {:08X}: {}", run->run_id, !led ? "no run mag ledger (run id 0 or no character key)" :
+          !overlay ? "no run copy" : "no line");
+    }
+  }
+  if (refusal == R::NONE) {
     std::set<uint8_t> server_bosses;
     auto rr_it = spire_run_rooms.find(c.get());
     if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {

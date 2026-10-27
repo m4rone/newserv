@@ -4114,6 +4114,18 @@ void run_static_tests() {
         expect_eq(full.steps.size(), full.shell_steps.size());
         const auto shell = spire_mag_column(full, SPIRE_RUN_MAG_LEAN_SHELL);
         expect(shell.shell && !shell.fell_back);
+        // fix round (F10S critic N3): step 0 equal, and from step 1 DEF swapped with the main stat (POW for HU/RA,
+        // MIND for FO), the two other stats equal; the Id's are checked above and below (names-v3, a new one per step)
+        expect(spire_mag_row_bytes(full.shell_steps[0]) == spire_mag_row_bytes(full.steps[0]));
+        bool fo = (std::string(cls) == "FO");
+        for (size_t s = 1; s < full.steps.size(); s++) {
+          const auto& f = full.steps[s];
+          const auto& h = full.shell_steps[s];
+          expect_eq(fo ? f.mind : f.pow, h.def);
+          expect_eq(f.def, fo ? h.mind : h.pow);
+          expect_eq(fo ? f.pow : f.mind, fo ? h.pow : h.mind);
+          expect_eq(f.dex, h.dex);
+        }
         for (const SpireMagLine* line_p : {&full, &shell.line}) {
           const auto& line = *line_p;
           expect_eq(5u, line.steps.size());
@@ -4371,6 +4383,28 @@ void run_static_tests() {
       expect(lean_pos != std::string::npos);
       old_json.replace(lean_pos, 6, "\"Xean\"");
       expect_eq(SPIRE_RUN_MAG_LEAN_NONE, spire_savestate_from_json(old_json).run_mag->lean);
+      // fix round (F10S critic N6): a "Lean" outside 0-2 (an edited file) reads as no choice, never as a wrapped byte
+      auto with_lean = [&](const std::string& value) {
+        SpireRunMagLedger l = led;
+        l.lean = SPIRE_RUN_MAG_LEAN_FANG;
+        ss.run_mag = l;
+        std::string j = spire_savestate_to_json(ss, 1);
+        size_t pos = j.find("\"Lean\"");
+        size_t colon = j.find(':', pos);
+        size_t end = j.find_first_of(",}\n", colon);
+        j.replace(colon + 1, end - colon - 1, " " + value);
+        return spire_savestate_from_json(j).run_mag->lean;
+      };
+      expect_eq(SPIRE_RUN_MAG_LEAN_SHELL, with_lean("2"));
+      expect_eq(SPIRE_RUN_MAG_LEAN_NONE, with_lean("258")); // would wrap to 2 (Shell) as a uint8_t
+      expect_eq(SPIRE_RUN_MAG_LEAN_NONE, with_lean("3"));
+      expect_eq(SPIRE_RUN_MAG_LEAN_NONE, with_lean("-1"));
+      // fix round (F10S critic N1): a savestate with run id 0 is no savestate (a run with id 0 has no ledger, and the
+      // 'Z' handler would use none); the file is refused as unreadable, never half read
+      SpireSavestate zero = ss;
+      zero.run_id = 0;
+      zero.run_mag.reset();
+      expect_raises(std::runtime_error, [&]() { spire_savestate_from_json(spire_savestate_to_json(zero, 1)); });
     });
 
     f6_case("the ledger follows the feed mirror", [&]() {
@@ -4427,6 +4461,7 @@ void run_static_tests() {
       // Enabled false answers 0 even where everything else would give a mag
       expect_eq(R::DISABLED, with([](auto& st) { st.enabled = false; st.has_table = false; }));
       expect_eq(std::string("BASE_RETURNED"), std::string(spire_run_mag_refusal_name(R::BASE_RETURNED)));
+      expect_eq(std::string("NO_LEDGER"), std::string(spire_run_mag_refusal_name(R::NO_LEDGER))); // fix round N1
       expect_eq(0x5A000000u, SPIRE_RUN_MAG_TAG);
       expect_eq(0x5A000601u, spire_run_mag_answer(SPIRE_RUN_MAG_TAG, 0x06, true));
       expect_eq(0x5A00FF00u, spire_run_mag_answer(SPIRE_RUN_MAG_TAG, SPIRE_RUN_MAG_NO_OLD, false));
@@ -4545,6 +4580,22 @@ void run_static_tests() {
     // F10 mag lean (routeb2-f10-randgevallen.md, "Besluit na de critic" 1, 2, 6, 7, 8)
     const auto hu_shell = spire_mag_column(hu, SPIRE_RUN_MAG_LEAN_SHELL).line;
     using LS = SpireRunMagLeanStore;
+
+    f6_case("F10: a Shell run with a start bonus starts on the start floor (fix round, F10S critic N2)", [&]() {
+      // the floors are one list for both columns: spire_mag_column must carry them into the Shell line
+      expect(spire_mag_step_bytes(hu_shell, 0, 14, std::nullopt) == spire_mag_step_bytes(hu, 0, 14, std::nullopt));
+      SpireRunMagLedger led;
+      auto kit = spire_run_mag_handle(led, table, hu, SPIRE_RUN_MAG_ASK, 1, {}, {}, 14, SPIRE_RUN_MAG_LEAN_SHELL);
+      expect(kit.decision.result && kit.shell);
+      expect_eq(0x01, kit.decision.bytes[1]); // Varuna L22, not Mag 5/0/0/0
+      expect_eq(1100, word(kit.decision.bytes, 0));
+      expect_eq(1000, word(kit.decision.bytes, 1));
+      auto s1 = spire_mag_step_bytes(hu_shell, 1, 14, std::nullopt); // Shell 18/7/0/0 merged with the floor 11/10/0/1
+      expect_eq(1800, word(s1, 0));
+      expect_eq(1000, word(s1, 1)); // the floor's POW 10 beats the row's 7
+      expect_eq(100, word(s1, 3));
+      expect_eq(0x01, s1[1]);
+    });
 
     f6_case("F10: the lean is bits 8-15 of the ASK/EXAM word", [&]() {
       expect_eq(2, spire_run_mag_lean_bits(0x5A040204)); // 'Z' EXAM, lean 2 (Shell), k4
@@ -4696,6 +4747,32 @@ void run_static_tests() {
           spire_run_mag_evolve_text("Varuna", true));
       expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false));
       expect_eq(spire_run_mag_evolve_text("Bana", true), spire_ticker_line(spire_run_mag_evolve_text("Bana", true)));
+      // fix round (F10S critic N4): the first mag of a run (the kit, or a practice run's first ASK) names Shell too
+      expect_eq(std::string("Your mag (Shell) is in your pack: equip it (Item Pack > Mag)"), spire_run_mag_reminder_text(true));
+      expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text(false));
+      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack > Mag)"), spire_run_mag_reminder_text(false));
+      // no run mag line is longer than the longest before this round: every Id of the shipped table, both columns
+      auto names = phosg::JSON::parse(phosg::load_file("system/tables/names-v3.json"));
+      size_t longest = 0;
+      for (const auto& [cls, line] : table.classes) {
+        std::vector<SpireMagRow> rows = line.steps;
+        rows.insert(rows.end(), line.shell_steps.begin(), line.shell_steps.end());
+        for (const auto& f : line.floors) {
+          rows.emplace_back(f.row);
+        }
+        for (const auto& row : rows) {
+          std::string name = names.get_string(std::format("02{:02X}00", row.id));
+          for (bool shell : {false, true}) {
+            longest = std::max(longest, spire_run_mag_evolve_text(name, shell).size());
+          }
+        }
+      }
+      for (bool shell : {false, true}) {
+        longest = std::max(longest, spire_run_mag_reminder_text(shell).size());
+      }
+      expect_eq(SPIRE_RUN_MAG_TICKER_MAX, longest); // Kabanda (Shell): 61
+      expect_eq(61u, spire_run_mag_evolve_text("Kabanda", true).size());
+      expect(spire_run_mag_reminder_text(true).size() <= SPIRE_RUN_MAG_TICKER_MAX);
     });
 
     f6_case("bundle 2 S: the kit text after 'M' START", [&]() {
