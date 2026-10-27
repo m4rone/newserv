@@ -265,13 +265,13 @@ constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: e
 // v62: unchanged in bundle 8. The grind on the kit weapon moved to bundle 9 (B-REGIE-16-15: equip_item cannot set a
 // grind), so the kit still holds Monogrinders to use next to the HP Materials
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
-// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): the kit ticker of a client with r15 = 1 (SpireEquipItem.hh). The quest
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): the kit ticker of a client with r143 = 1 (SpireEquipItem.hh). The quest
 // then gives no Monogrinders but makes the kit weapon with grind G, so the text names the grind and only the HP
 // Materials: "Your kit weapon is ground +<G>. Use your HP Materials now (Item Pack)." Without HP Materials (hp_mat 0)
 // only the grind sentence; G 0 (atp_grind 0) only the HP Materials sentence. server_equips false: SPIRE_KIT_USE_TEXT.
 std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level);
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before. Bundle 9:
-// server_equips (r15 = 1, the server equips the new mag at 'C' 14) drops " Equip it: Item Pack > Mag."
+// server_equips (r143 = 1, the server equips the new mag at 'C' 14) drops " Equip it: Item Pack > Mag."
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false, bool server_equips = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
 // round (F10S critic N4): a Shell mag names the choice as the evolve text does; otherwise SPIRE_RUN_MAG_REMINDER_TEXT.
