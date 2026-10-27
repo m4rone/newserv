@@ -37,16 +37,16 @@
       "PNeeded": 8
     },
     "open_vh": {
-      "_what": "BaseRung 2 (Very Hard). PNeeded: the rule of open_hard on Hard's table (pso-roguelike sim/curve_spire.py pneeded): Hard's top is H 8 (its hardest row k3/k6 HU f 0.60 + 0.05 H reaches 1.0), and P 29 is the first P at which half the classes have H_auto >= 8 (on Normal the same rule gives open_hard's P 8). Above the catalogue's highest strength (P 16): the shop cannot open Very Hard until the strength items grow; a win on Hard still opens it.",
+      "_what": "BaseRung 2 (Very Hard). PNeeded: the rule of open_hard on Hard's table (pso-roguelike sim/curve_spire.py pneeded): Hard's top is H 8 (its hardest row k3/k6 HU f 0.60 + 0.05 H reaches 1.0), and by that rule it would be P 29 (half the classes at H_auto >= 8), but the most strength anyone can own is 9 (kit_tier 2 + hp_mat 2 + atp_grind 5), so P 29 could never be bought while the refusal says more upgrades open it. Spoor beloningen B-BEL-3: P 9, everything bought; Hard open, the price and a win on Hard still gate it.",
       "Max": 1,
       "Price": [120],
-      "PNeeded": 29
+      "PNeeded": 9
     },
     "open_ult": {
-      "_what": "BaseRung 3 (Ultimate). PNeeded: the same rule on Very Hard's table: top H 5 (k3 HU f 0.75), half the classes at H_auto >= 5 from P 38. Above P 16 as open_vh; a win on Very Hard still opens it.",
+      "_what": "BaseRung 3 (Ultimate). PNeeded: the same rule on Very Hard's table: top H 5 (k3 HU f 0.75), half the classes at H_auto >= 5 from P 38, above the strength anyone can own (9). B-BEL-3: P 9 as open_vh; Very Hard open, the price and a win on Very Hard still gate it.",
       "Max": 1,
       "Price": [240],
-      "PNeeded": 38
+      "PNeeded": 9
     }
   },
   "Payout": {
