@@ -2821,6 +2821,22 @@ void run_static_tests() {
       expect_eq(0u, pay_cleared);
       expect_eq(1u, unlock_set);
     }
+    // critic beloningen #3: a Hard copy adopted from the card (set) next to the server's Normal entry (cleared by a
+    // Collect) must not set the flag again: only the Normal entry goes out, on the game's difficulty
+    SpireMetaFlags readopted;
+    readopted[std::make_pair(static_cast<uint8_t>(0), SPIRE_META_FLAG_PAY_WIN)] = false;
+    readopted[std::make_pair(static_cast<uint8_t>(1), SPIRE_META_FLAG_PAY_WIN)] = true;
+    SpireMetaFile readopted_file{.exists = true, .adopted = SpireMetaAdopted::KNOWN, .flags = readopted, .base_rung = {}, .upgrades = {}};
+    for (uint8_t d : {0, 1}) {
+      size_t pay_set = 0, pay_cleared = 0;
+      for (const auto& e : spire_meta_delivery_entries(readopted_file, d, false)) {
+        if (e.flag == SPIRE_META_FLAG_PAY_WIN) {
+          (e.set ? pay_set : pay_cleared)++;
+        }
+      }
+      expect_eq(0u, pay_set);
+      expect(pay_cleared >= 1);
+    }
     std::filesystem::remove_all(dir);
   }
 

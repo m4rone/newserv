@@ -34,7 +34,11 @@ std::vector<SpireMetaDelivery> spire_meta_delivery_entries(const SpireMetaFile& 
     // B-BEL-4: the server stores the payout flags on Normal but sends them to the game's difficulty: the base game
     // after a Hard run is a Hard game, and q925's Collect reads its flags there ("the same difficulty as here"). A
     // payout flag adopted from the card on another difficulty goes where it was.
-    bool payout = (key.first == 0) && (spire_meta_flag_difficulty(key.second, 1) == 0);
+    bool payout_flag = (spire_meta_flag_difficulty(key.second, 1) == 0);
+    if (payout_flag && (key.first != 0) && file.flags.count(std::make_pair(static_cast<uint8_t>(0), key.second))) {
+      continue; // critic beloningen #3: the server's own Normal entry is the newer one; a card copy never sets it again
+    }
+    bool payout = payout_flag && (key.first == 0);
     ret.emplace_back(SpireMetaDelivery{payout ? difficulty : key.first, key.second, is_set});
   }
   // B-REGIE-10-2: the delivery that adopted the file clears nothing (the character keeps what it has), and an UNKNOWN
@@ -173,6 +177,11 @@ bool spire_meta_record_flag(std::shared_ptr<Client> c, uint32_t serial_number, u
   // B-BEL-4: a payout flag lives on Normal (spire_meta_apply_finish), so a Collect in a Hard base game clears that one
   uint8_t stored_difficulty = spire_meta_flag_difficulty(flag_num, difficulty);
   flags[std::make_pair(stored_difficulty, flag_num)] = is_set;
+  if (stored_difficulty != difficulty) {
+    // critic beloningen #3: a copy adopted from the card on the game's difficulty would be sent after the Normal one
+    // and set the flag again, so the Collect that cleared it here clears that copy too
+    flags.erase(std::make_pair(difficulty, flag_num));
+  }
   spire_meta_save(filename, serial_number, file);
   c->log.info_f("Spire meta: recorded {} quest flag {}:{:04X} in {} ({} stored)", is_set ? "set" : "cleared",
       name_for_difficulty(static_cast<Difficulty>(stored_difficulty)), flag_num, filename, flags.size());
