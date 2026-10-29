@@ -1446,13 +1446,13 @@ void run_static_tests() {
     auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
     expect_eq(0u, spire_start_level_bonus(&repo, {}));
     expect_eq(0u, spire_start_level_bonus(&repo, {{"hp_mat", 3}}));
-    const uint32_t shipped_bonus[6] = {0, 5, 10, 14, 14, 14}; // owned 0-5
-    for (uint32_t owned = 0; owned <= 5; owned++) {
+    const uint32_t shipped_bonus[11] = {0, 5, 10, 14, 18, 22, 26, 30, 34, 38, 38}; // owned 0-10 (B-AF-1: 4-9 by boss)
+    for (uint32_t owned = 0; owned <= 10; owned++) {
       expect_eq(shipped_bonus[owned], spire_start_level_bonus(&repo, {{"start_level", owned}}));
       expect_eq(shipped_bonus[owned], spire_start_level_bonus(nullptr, {{"start_level", owned}}));
     }
-    expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 99}}));
-    expect_eq(14u, spire_start_level_bonus(nullptr, {{"start_level", 99}}));
+    expect_eq(38u, spire_start_level_bonus(&repo, {{"start_level", 99}}));
+    expect_eq(38u, spire_start_level_bonus(nullptr, {{"start_level", 99}}));
     // the catalogue sells start_level now (B-BASIS-32 closed by v52)
     expect(repo.items[0].on_sale >= 1);
     uint8_t none_open[2] = {0, 0};
@@ -1511,18 +1511,25 @@ void run_static_tests() {
   phosg::log_info_f("-- Spire shop route B F3: +5 start levels per purchase, bought levels add no heat, kit_tier once");
   {
     using R = SpireShopRefusal;
-    // the shipped catalogue parses, with start_level Levels [0, 5, 10, 14], Max 3, OnSale 3, Price [50, 60, 75], P 0
+    // the shipped catalogue parses, with start_level Levels [0, 5, 10, 14, 18 ... 38], Max 9, OnSale 9, P 0; levels
+    // 4-9 wait for a late boss each (B-AF-1)
     auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
     const auto& start_level = repo.items[0];
-    expect_eq(3u, start_level.max);
-    expect_eq(3u, start_level.on_sale);
-    expect_eq((std::vector<uint32_t>{0, 5, 10, 14}), start_level.levels);
-    expect_eq((std::vector<uint32_t>{50, 60, 75}), start_level.price);
-    expect_eq((std::vector<uint32_t>{0, 0, 0, 0}), start_level.strength);
+    expect_eq(9u, start_level.max);
+    expect_eq(9u, start_level.on_sale);
+    expect_eq((std::vector<uint32_t>{0, 5, 10, 14, 18, 22, 26, 30, 34, 38}), start_level.levels);
+    expect_eq((std::vector<uint32_t>{50, 60, 75, 90, 105, 120, 135, 150, 165}), start_level.price);
+    expect_eq((std::vector<uint32_t>(10, 0)), start_level.strength);
+    expect_eq((std::vector<uint8_t>{0, 0, 0, 0, 11, 15, 18, 21, 24, 27}), start_level.boss);
+    // the fallback table without a catalogue is the shipped one, so a broken catalogue never takes a bought level away
+    expect_eq(start_level.levels.size(), SPIRE_START_LEVEL_FALLBACK_LEVELS.size());
+    for (size_t z = 0; z < start_level.levels.size(); z++) {
+      expect_eq(start_level.levels[z], SPIRE_START_LEVEL_FALLBACK_LEVELS[z]);
+    }
     expect_eq(5u, spire_start_level_bonus(&repo, {{"start_level", 1}}));
     expect_eq(10u, spire_start_level_bonus(&repo, {{"start_level", 2}}));
     expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 3}}));
-    expect_eq(14u, spire_start_level_bonus(&repo, {{"start_level", 5}}));
+    expect_eq(22u, spire_start_level_bonus(&repo, {{"start_level", 5}}));
     // bought start levels count 0 toward P (invariant 7, B-BASIS-67); hp_mat, atp_grind and kit_tier keep their P
     for (uint32_t owned = 0; owned <= 5; owned++) {
       expect_eq(0u, spire_shop_strength(repo, {{"start_level", owned}}));
@@ -1588,6 +1595,112 @@ void run_static_tests() {
       file.flags[std::make_pair(uint8_t(1), own)] = true; // earned on Hard only: a Normal run still lacks it
       expect(!spire_meta_kit2_owned(file, cls));
     }
+  }
+
+  phosg::log_info_f("-- Spire late bosses (B-AF-1): each opens one start level at the Quartermaster, kept in meta.json");
+  {
+    using R = SpireShopRefusal;
+    auto repo = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+    uint8_t none_open[2] = {0, 0};
+    const std::map<std::string, uint32_t> owned3 = {{"start_level", 3}};
+    // level 4 (+18) waits for Vol Opt (k11): refused as not on sale, listed with price 0, whatever the balance
+    expect_eq(11, spire_shop_boss_needed(repo, 0, owned3, {}));
+    expect(R::NOT_ON_SALE == spire_shop_buy_refusal(repo, 0, owned3, 9999, none_open));
+    expect(R::NOT_ON_SALE == spire_shop_buy_refusal(repo, 0, owned3, 9999, none_open, false, {4, 8}));
+    expect_eq(0u, spire_shop_next_price(repo, 0, owned3, none_open));
+    // the levels below need no boss: nothing changes for a character that beat none
+    for (uint32_t owned = 0; owned < 3; owned++) {
+      expect_eq(0, spire_shop_boss_needed(repo, 0, {{"start_level", owned}}, {}));
+      expect(R::NONE == spire_shop_buy_refusal(repo, 0, {{"start_level", owned}}, 9999, none_open));
+    }
+    // Vol Opt beaten: level 4 for sale at its price, the balance checked as before; level 5 then waits for Dark Falz
+    const std::set<uint8_t> vol_opt = {11};
+    expect_eq(0, spire_shop_boss_needed(repo, 0, owned3, vol_opt));
+    expect(R::NONE == spire_shop_buy_refusal(repo, 0, owned3, 90, none_open, false, vol_opt));
+    expect(R::BALANCE == spire_shop_buy_refusal(repo, 0, owned3, 89, none_open, false, vol_opt));
+    expect_eq(90u, spire_shop_next_price(repo, 0, owned3, none_open, false, vol_opt));
+    expect_eq(15, spire_shop_boss_needed(repo, 0, {{"start_level", 4}}, vol_opt));
+    // a boss beaten out of order opens only its own level: Olga Flow alone does not sell level 4
+    expect_eq(11, spire_shop_boss_needed(repo, 0, owned3, {27}));
+    // every late boss beaten: up to level 9 (+38), then the cap
+    const std::set<uint8_t> all = {4, 8, 11, 15, 18, 21, 24, 27};
+    const uint8_t bosses[6] = {11, 15, 18, 21, 24, 27};
+    for (uint32_t owned = 3; owned < 9; owned++) {
+      std::set<uint8_t> below(bosses, bosses + (owned - 3));
+      expect_eq(bosses[owned - 3], spire_shop_boss_needed(repo, 0, {{"start_level", owned}}, below));
+      expect(R::NONE == spire_shop_buy_refusal(repo, 0, {{"start_level", owned}}, 9999, none_open, false, all));
+    }
+    expect(R::MAX_LEVEL == spire_shop_buy_refusal(repo, 0, {{"start_level", 9}}, 9999, none_open, false, all));
+    expect_eq(38u, spire_start_level_bonus(&repo, {{"start_level", 9}}));
+    // the other items carry no boss
+    for (size_t z = 1; z < SPIRE_SHOP_NUM_ITEMS; z++) {
+      expect(repo.items[z].boss.empty());
+      expect_eq(0, spire_shop_boss_needed(repo, z, {}, {}));
+    }
+    // the texts: the ticker of a refused level, and what the first clear of each boss opens
+    expect_eq(std::string("Start level 18 opens when you beat Vol Opt in a run."),
+        spire_shop_boss_needed_text(repo, 0, owned3, 11));
+    expect_eq(std::string(""), spire_shop_boss_needed_text(repo, 0, owned3, 0));
+    expect_eq(std::string("Vol Opt beaten! Unlocked: Start level 18 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 11));
+    expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II, Start level 22 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 15));
+    expect_eq(std::string("Olga Flow beaten! Unlocked: Start level 38 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 27));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 4)); // Dragon: its pacts come at 'F' as before
+    expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 11));
+    for (uint8_t k : bosses) {
+      expect(spire_meta_boss_name(k) != nullptr);
+      expect(!spire_meta_boss_unlock_text(&repo, k).empty());
+    }
+    expect(spire_meta_boss_name(5) == nullptr);
+    // a level not on sale (OnSale below it) is never named as unlocked
+    auto half = spire_shop_parse(R"({"Items": {
+        "start_level": {"Levels": [0, 5, 10], "Max": 2, "OnSale": 1, "Price": [50, 60], "P": [0, 0, 0],
+          "Boss": [0, 0, 11]},
+        "kit_tier": {"Max": 1, "Price": [30], "P": [0, 2]},
+        "hp_mat": {"Max": 1, "Price": [8], "P": [0, 0]},
+        "atp_grind": {"Max": 1, "Price": [10], "P": [0, 1]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 3},
+        "open_vh": {"Max": 1, "Price": [120], "PNeeded": 5},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 9}},
+      "MetaHeat": {"HAuto": {}}})");
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&half, 11));
+    // a Boss list of the wrong length, or a value that is no room k, refuses the catalogue
+    auto throws = [](const char* text) {
+      try {
+        spire_shop_parse(text);
+      } catch (const std::exception&) {
+        return true;
+      }
+      return false;
+    };
+    expect(throws(R"({"Items": {"start_level": {"Levels": [0, 5], "Max": 1, "Price": [50], "P": [0, 0],
+        "Boss": [0]}}})"));
+    expect(throws(R"({"Items": {"start_level": {"Levels": [0, 5], "Max": 1, "Price": [50], "P": [0, 0],
+        "Boss": [0, 256]}}})"));
+    // meta.json: BossesBeaten survives a save and a load next to the rest, and an older file has none
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-boss-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto name = (dir / "boss.meta.json").string();
+    SpireMetaFile saved;
+    saved.flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)] = true;
+    saved.upgrades = {{"start_level", 4}};
+    saved.bosses_beaten = {11, 27};
+    spire_meta_save_file(name, 42, saved);
+    auto loaded = spire_meta_load_file(name);
+    expect(loaded.bosses_beaten == std::set<uint8_t>({11, 27}));
+    expect_eq(4u, spire_shop_level(loaded.upgrades, 0));
+    expect(loaded.flags.at(std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)));
+    saved.bosses_beaten.clear();
+    spire_meta_save_file(name, 42, saved);
+    expect(phosg::load_file(name).find("BossesBeaten") == std::string::npos); // written only if there is one
+    phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[],\"BossesBeaten\":[0, 15, 300]}");
+    expect(spire_meta_load_file(name).bosses_beaten == std::set<uint8_t>({15})); // 0 and past 255 are dropped
+    phosg::save_file(name, "{\"SerialNumber\":42,\"Flags\":[]}");
+    expect(spire_meta_load_file(name).bosses_beaten.empty());
+    std::filesystem::remove_all(dir);
   }
 
   phosg::log_info_f("-- Spire heat: the sidecar writes one step's bytes into the H 0 .bin, or nothing on any doubt (v53)");
@@ -2777,8 +2890,8 @@ void run_static_tests() {
     expect(!spire_meta_load_file(local(spire_meta_filename_for(42, &b))).exists);
     // A's file is from before B-REGIE-10-2 (no marker); B here has an empty file of its own from then: both cleared
     // as before
-    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a, .base_rung = {}, .upgrades = {}};
-    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b, .base_rung = {}, .upgrades = {}};
+    SpireMetaFile file_a{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_a, .base_rung = {}, .upgrades = {}, .bosses_beaten = {}};
+    SpireMetaFile file_b{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = stored_b, .base_rung = {}, .upgrades = {}, .bosses_beaten = {}};
     auto to_a = spire_meta_delivery_entries(file_a, 0, false);
     auto to_b = spire_meta_delivery_entries(file_b, 0, false);
     expect_eq(1, value_of(to_a, 0x0384));                    // A's own unlock
@@ -2805,7 +2918,7 @@ void run_static_tests() {
     SpireMetaFlags pay_flags;
     pay_flags[std::make_pair(static_cast<uint8_t>(0), SPIRE_META_FLAG_PAY_WIN)] = true;
     pay_flags[std::make_pair(static_cast<uint8_t>(1), static_cast<uint16_t>(0x0384))] = true;
-    SpireMetaFile pay_file{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = pay_flags, .base_rung = {}, .upgrades = {}};
+    SpireMetaFile pay_file{.exists = true, .adopted = SpireMetaAdopted::NO_MARKER, .flags = pay_flags, .base_rung = {}, .upgrades = {}, .bosses_beaten = {}};
     for (uint8_t d : {0, 1, 3}) {
       size_t pay_set = 0, pay_cleared = 0, unlock_set = 0;
       for (const auto& e : spire_meta_delivery_entries(pay_file, d, false)) {
@@ -2826,7 +2939,7 @@ void run_static_tests() {
     SpireMetaFlags readopted;
     readopted[std::make_pair(static_cast<uint8_t>(0), SPIRE_META_FLAG_PAY_WIN)] = false;
     readopted[std::make_pair(static_cast<uint8_t>(1), SPIRE_META_FLAG_PAY_WIN)] = true;
-    SpireMetaFile readopted_file{.exists = true, .adopted = SpireMetaAdopted::KNOWN, .flags = readopted, .base_rung = {}, .upgrades = {}};
+    SpireMetaFile readopted_file{.exists = true, .adopted = SpireMetaAdopted::KNOWN, .flags = readopted, .base_rung = {}, .upgrades = {}, .bosses_beaten = {}};
     for (uint8_t d : {0, 1}) {
       size_t pay_set = 0, pay_cleared = 0;
       for (const auto& e : spire_meta_delivery_entries(readopted_file, d, false)) {

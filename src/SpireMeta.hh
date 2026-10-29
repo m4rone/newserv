@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include <stdint.h>
@@ -78,6 +79,10 @@ struct SpireMetaFile {
   // "Upgrades": {"hp_mat": 2, ...}. One block for every difficulty (a flag is per difficulty, an upgrade is not);
   // written only if there is one, kept through every flag write like BaseRung
   std::map<std::string, uint32_t> upgrades;
+  // B-AF-1 (spel-af): the boss rooms k this character cleared in a real run (no practice run, the run began), on any
+  // difficulty, in the file as "BossesBeaten": [11, 15, ...]. A shop level with a Boss entry is sold only once its boss
+  // is in here (SpireShopItem::boss). Written only if there is one, kept through every flag write like Upgrades.
+  std::set<uint8_t> bosses_beaten;
 };
 SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
 SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags
@@ -214,6 +219,10 @@ struct SpireShopItem {
   std::vector<uint32_t> levels;
   uint8_t rung = 0; // 1-3 for open_hard/open_vh/open_ult, 0 otherwise
   uint32_t p_needed = 0; // a rung item: the P the character needs to buy it
+  // B-AF-1: boss[n]: the boss room k whose clear opens level n (SpireMetaFile::bosses_beaten), 0 = none; "Boss" in the
+  // catalogue, max + 1 entries; empty without it. A level whose boss is not beaten is refused with NOT_ON_SALE (the
+  // quest's "Not for sale yet.") and listed with price 0; the server names the boss in a ticker line.
+  std::vector<uint8_t> boss;
 };
 // v54: MetaHeat has one H_auto table per ladder rung, HAuto (Normal) and HAutoHard, HAutoVHard, HAutoUltimate (each
 // rung's quests carry their own heat rows, q981-q986, curve_spire.economy() on sim/plan-spire-<rung>.json). HAuto is
@@ -263,12 +272,31 @@ const char* spire_shop_refusal_name(SpireShopRefusal r);
 // The decision of a BUY of item index, free of state for the static tests. open_rung[r - 1] = the open rung of run r
 // (spire_meta_open_rung). Route B F3: kit2_owned = the character already has its archetype's second kit
 // (spire_meta_kit2_owned); then kit_tier is refused with ALREADY_OPEN (code 8), so it never takes splinters twice.
+// B-AF-1: bosses_beaten = the character's SpireMetaFile::bosses_beaten; a next level whose Boss is not in it is
+// refused with NOT_ON_SALE.
 SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2],
-    bool kit2_owned = false);
+    bool kit2_owned = false, const std::set<uint8_t>& bosses_beaten = {});
 // The price of the next level of item index, or 0 if it cannot be bought now for any reason but the balance.
 uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned = false);
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned = false,
+    const std::set<uint8_t>& bosses_beaten = {});
+// B-AF-1: the boss room k the next level of item index waits for (its Boss entry, not in bosses_beaten), or 0.
+uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const std::set<uint8_t>& bosses_beaten);
+// B-AF-1: the boss of a boss room k of the run (k4 Dragon ... k27 Olga Flow, spire-mag.json BossRooms), nullptr for
+// another k.
+const char* spire_meta_boss_name(uint8_t k);
+// B-AF-1: the ticker line for a BUY refused because the next level waits for boss room k ("" for k 0).
+std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint8_t k);
+// B-AF-1: what the first clear of boss room k opens, one line for the lobby ("" if it opens nothing): every shop level
+// whose Boss is k ("Start level 18"), and Spire Run II for Dark Falz (q922's AvailableIf reads SPIRE_K15).
+std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k);
+// B-AF-1: stores boss room k in the character's BossesBeaten. Returns true if it is new (then *text gets
+// spire_meta_boss_unlock_text, "" if it opens nothing), false if it was there or the client has no character data.
+// Throws on a file error.
+bool spire_meta_record_boss(std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, std::string* text);
 // Route B F3: whether the character has the second-kit flag of its class's archetype (0x388 HU, 0x389 RA, 0x38A FO,
 // spire_meta_flags_for_finish) set on Normal. The flag is per difficulty and kit_tier is not: Normal is where every run
 // of a character starts, so a flag earned on a higher difficulty only does not make kit_tier a double buy.
@@ -295,7 +323,7 @@ const char* spire_meta_flag_name(uint16_t flag_num); // nullptr for a flag that 
 // a readable catalogue, the shipped table, so a broken catalogue never takes bought levels away); the level at most
 // SPIRE_START_LEVEL_LEVEL_CAP (create_battle_overlay's clamp, 0-based). Bought start levels count 0 toward P
 // (B-BASIS-67): the catalogue's start_level P is all 0, so they add no heat.
-constexpr std::array<uint32_t, 4> SPIRE_START_LEVEL_FALLBACK_LEVELS = {0, 5, 10, 14};
+constexpr std::array<uint32_t, 10> SPIRE_START_LEVEL_FALLBACK_LEVELS = {0, 5, 10, 14, 18, 22, 26, 30, 34, 38};
 constexpr uint32_t SPIRE_START_LEVEL_FALLBACK_MAX = SPIRE_START_LEVEL_FALLBACK_LEVELS.size() - 1; // owned level cap
 constexpr uint32_t SPIRE_START_LEVEL_LEVEL_CAP = 199;
 uint32_t spire_start_level_bonus(const SpireShopCatalogue* cat, const std::map<std::string, uint32_t>& upgrades);

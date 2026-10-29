@@ -97,6 +97,14 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       }
     }
   }
+  if (json.contains("BossesBeaten")) { // B-AF-1
+    for (const auto& k_json : json.get_list("BossesBeaten")) {
+      int64_t k = k_json->as_int();
+      if ((k > 0) && (k < 0x100)) {
+        ret.bosses_beaten.emplace(k);
+      }
+    }
+  }
   return ret;
 }
 
@@ -141,6 +149,13 @@ static void spire_meta_save(const std::string& filename, uint32_t serial_number,
       upgrades_json.emplace(name, level);
     }
     json.emplace("Upgrades", std::move(upgrades_json));
+  }
+  if (!file.bosses_beaten.empty()) { // B-AF-1: kept through every flag write, as Upgrades
+    auto bosses_json = phosg::JSON::list();
+    for (uint8_t k : file.bosses_beaten) {
+      bosses_json.emplace_back(k);
+    }
+    json.emplace("BossesBeaten", std::move(bosses_json));
   }
   if (file.adopted == SpireMetaAdopted::UNKNOWN) {
     json.emplace("Adopted", "unknown");
@@ -522,6 +537,19 @@ SpireShopCatalogue spire_shop_parse(const std::string& json_text) {
         }
       }
     }
+    if (item_json.contains("Boss")) { // B-AF-1
+      for (const auto& v : item_json.get_list("Boss")) {
+        int64_t k = v->as_int();
+        if ((k < 0) || (k > 0xFF)) {
+          throw std::runtime_error(std::format("item {}: Boss {} is no room k", name, k));
+        }
+        item.boss.emplace_back(k);
+      }
+      if (item.boss.size() != item.max + 1) {
+        throw std::runtime_error(std::format("item {}: Boss has {} entries for levels 0-{}", name, item.boss.size(),
+            item.max));
+      }
+    }
     ret.items.emplace_back(std::move(item));
   }
   // route B F2: the splinter payout, strict (a typo must not quietly fall back to the old payout)
@@ -631,8 +659,23 @@ const char* spire_shop_refusal_name(SpireShopRefusal r) {
 }
 
 // Every refusal but the balance
+uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const std::set<uint8_t>& bosses_beaten) {
+  if (index >= cat.items.size()) {
+    return 0;
+  }
+  const auto& item = cat.items[index];
+  uint32_t next = spire_shop_level(upgrades, index) + 1;
+  if (next >= item.boss.size()) {
+    return 0;
+  }
+  uint8_t k = item.boss[next];
+  return (k && !bosses_beaten.contains(k)) ? k : 0;
+}
+
 static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned) {
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
   if (index >= cat.items.size()) {
     return SpireShopRefusal::UNKNOWN_ITEM;
   }
@@ -643,6 +686,9 @@ static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, s
   }
   if (level >= item.on_sale) {
     return SpireShopRefusal::NOT_ON_SALE;
+  }
+  if (spire_shop_boss_needed(cat, index, upgrades, bosses_beaten)) {
+    return SpireShopRefusal::NOT_ON_SALE; // B-AF-1: its boss is not beaten yet; the ticker names the boss
   }
   if ((index == 1) && kit2_owned) { // SPIRE_SHOP_ITEM_NAMES[1] = kit_tier
     return SpireShopRefusal::ALREADY_OPEN; // route B F3: the second kit is the character's already
@@ -662,8 +708,9 @@ static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, s
 }
 
 SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2], bool kit2_owned) {
-  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned);
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2], bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
+  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned, bosses_beaten);
   if (r != SpireShopRefusal::NONE) {
     return r;
   }
@@ -672,8 +719,9 @@ SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t in
 }
 
 uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned) {
-  if (spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned) != SpireShopRefusal::NONE) {
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
+  if (spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned, bosses_beaten) != SpireShopRefusal::NONE) {
     return 0;
   }
   return cat.items[index].price[spire_shop_level(upgrades, index)];
@@ -705,6 +753,96 @@ bool spire_meta_kit2_owned(const SpireMetaFile& file, uint8_t char_class) {
   }
   auto it = file.flags.find(std::make_pair(uint8_t(0), flag)); // Normal
   return (it != file.flags.end()) && it->second;
+}
+
+const char* spire_meta_boss_name(uint8_t k) {
+  switch (k) {
+    case 4:
+      return "Dragon";
+    case 8:
+      return "De Rol Le";
+    case 11:
+      return "Vol Opt";
+    case 15:
+      return "Dark Falz";
+    case 18:
+      return "Barba Ray";
+    case 21:
+      return "Gol Dragon";
+    case 24:
+      return "Gal Gryphon";
+    case 27:
+      return "Olga Flow";
+    default:
+      return nullptr;
+  }
+}
+
+// "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
+static std::string spire_shop_level_name(const SpireShopCatalogue& cat, size_t index, uint32_t level) {
+  if ((index == 0) && (level < cat.items[0].levels.size())) {
+    return std::format("Start level {}", cat.items[0].levels[level]);
+  }
+  return std::format("{} level {}", SPIRE_SHOP_ITEM_NAMES[index], level);
+}
+
+std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint8_t k) {
+  if (!k || (index >= cat.items.size())) {
+    return "";
+  }
+  const char* boss = spire_meta_boss_name(k);
+  return std::format("{} opens when you beat {} in a run.",
+      spire_shop_level_name(cat, index, spire_shop_level(upgrades, index) + 1),
+      boss ? boss : std::format("room {}", k));
+}
+
+std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k) {
+  std::string what;
+  auto add = [&](const std::string& s) {
+    what += what.empty() ? s : std::format(", {}", s);
+  };
+  if (k == 15) {
+    add("Spire Run II");
+  }
+  if (cat) {
+    for (size_t z = 0; z < cat->items.size(); z++) {
+      for (uint32_t level = 1; level < cat->items[z].boss.size(); level++) {
+        if ((cat->items[z].boss[level] == k) && (level <= cat->items[z].on_sale)) {
+          add(spire_shop_level_name(*cat, z, level) + " at the Quartermaster");
+        }
+      }
+    }
+  }
+  if (what.empty()) {
+    return "";
+  }
+  const char* boss = spire_meta_boss_name(k);
+  return std::format("{} beaten! Unlocked: {}.", boss ? boss : std::format("Room {} boss", k), what);
+}
+
+bool spire_meta_record_boss(std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, std::string* text) {
+  std::string filename = spire_meta_filename(c, serial_number);
+  if (filename.empty() || !k) {
+    return false;
+  }
+  bool adopted;
+  auto file = spire_meta_load_or_adopt(c, filename, serial_number, &adopted);
+  if (!file.bosses_beaten.emplace(k).second) {
+    return false;
+  }
+  spire_meta_save(filename, serial_number, file);
+  std::optional<SpireShopCatalogue> cat;
+  try {
+    cat = spire_shop_parse(phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE));
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire meta: {} unreadable ({}); the unlock text names no shop level", SPIRE_SHOP_CATALOGUE_FILE,
+        e.what());
+  }
+  *text = spire_meta_boss_unlock_text(cat ? &*cat : nullptr, k);
+  c->log.info_f("Spire meta: boss room {} beaten for the first time; {} boss(es) in {}", k, file.bosses_beaten.size(),
+      filename);
+  return true;
 }
 
 SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename) {

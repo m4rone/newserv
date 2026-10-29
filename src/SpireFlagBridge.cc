@@ -2405,7 +2405,14 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       // with ALREADY_OPEN at BUY, and listed with price 0
       bool kit2 = spire_meta_kit2_owned(meta, char_class);
       if (sub == SPIRE_SHOP_BUY) {
-        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung, kit2);
+        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung, kit2, meta.bosses_beaten);
+        // B-AF-1: a level that waits for a boss is refused as not on sale; the ticker says which boss opens it
+        if (uint8_t boss_k = (refusal == SpireShopRefusal::NOT_ON_SALE)
+                ? spire_shop_boss_needed(cat, index, meta.upgrades, meta.bosses_beaten)
+                : 0) {
+          spire_send_ticker(c, spire_shop_boss_needed_text(cat, index, meta.upgrades, boss_k));
+          detail += std::format(" (waits for boss room {})", boss_k);
+        }
         if (refusal == SpireShopRefusal::NONE) {
           uint32_t level_before = spire_shop_level(meta.upgrades, index);
           uint32_t price = spire_shop_apply_buy(cat, index, meta);
@@ -2461,7 +2468,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
         uint32_t level = spire_shop_level(upgrades, z);
-        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung, kit2);
+        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung, kit2, meta.bosses_beaten);
         spire_send_register(c, SPIRE_SHOP_LEVEL_FIRST_REGISTER + z, level);
         spire_send_register(c, SPIRE_SHOP_PRICE_FIRST_REGISTER + z, price);
         levels_str += std::format(" {}={}/{}", SPIRE_SHOP_ITEM_NAMES[z], level, price);
@@ -5726,6 +5733,28 @@ static void spire_checkpoint_credit(std::shared_ptr<const Lobby> l, std::shared_
   }
 }
 
+// B-AF-1: a boss clear in a real run (the run began, no practice run) goes into the character's BossesBeaten (SpireMeta),
+// on any difficulty; the first one names what it opens in a text held for the lobby, with the run's records text
+// (never a window in the run). A boss clear before 'B' or in a practice run opens nothing, as the other unlocks. Never
+// throws.
+static void spire_checkpoint_record_boss(
+    std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k) {
+  try {
+    auto* cr = spire_client_run_for(lc, l, false);
+    if (!cr || !cr->began || cr->practice) {
+      lc->log.info_f("Spire meta: boss room {} not recorded: {}", k,
+          (cr && cr->began) ? "practice run" : "no run started in this game");
+      return;
+    }
+    std::string text;
+    if (spire_meta_record_boss(lc, serial_number, k, &text) && !text.empty()) {
+      spire_defer_to_lobby(lc, text);
+    }
+  } catch (const std::exception& e) {
+    lc->log.warning_f("Spire meta: failed to record boss room {}: {}", k, e.what());
+  }
+}
+
 static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss) {
   // Route B F2: the Payout block, read at every store (SpireMeta.hh); unreadable = no payout now ('F' catches up)
   std::optional<SpireShopPayout> payout;
@@ -5744,6 +5773,9 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       bool new_room = run_rooms.rooms.emplace(k).second;
       bool new_boss = boss && run_rooms.boss_rooms.emplace(k).second;
       uint32_t serial_number = spire_bridge_serial_for_client(lc);
+      if (boss) {
+        spire_checkpoint_record_boss(l, lc, serial_number, k);
+      }
       std::string filename = spire_checkpoint_filename(lc, serial_number);
       if (filename.empty()) {
         lc->log.info_f("Spire checkpoint: no character data; room {} not stored", k);
