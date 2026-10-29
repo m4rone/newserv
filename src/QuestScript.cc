@@ -5280,7 +5280,15 @@ void populate_quest_metadata_from_script(
 
           case 0x0008: { // let
             uint8_t a = r.get_u8();
-            regs.set(a, regs.get(r.get_u8()));
+            uint8_t b = r.get_u8();
+            // A source the walk no longer knows (every register is unknown after a call) makes the destination
+            // unknown, like the arithmetic opcodes do, instead of ending the walk with "value for rN not known".
+            // Measured 2026-10-29: q921 lost its battle rules, and so its start, over one call placed before them.
+            if (regs.is_valid(b)) {
+              regs.set(a, regs.get(b));
+            } else {
+              regs.invalidate(a);
+            }
             break;
           }
           case 0x0009: { // leti
