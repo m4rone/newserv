@@ -2762,6 +2762,60 @@ Action a_spire_follow_check(
       phosg::fwrite_fmt(stdout, "{}\n", warp ? "warp" : "skip");
     });
 
+Action a_spire_battle_rules_check(
+    "spire-battle-rules-check", "\
+  spire-battle-rules-check [--none] FILE...\n\
+    Read each GC quest script FILE (a PRS-compressed .bin, as in system/quests)\n\
+    with the reader newserv uses when it indexes quests\n\
+    (populate_quest_metadata_from_script), and print per file \"ok\" with the\n\
+    battle rules it found (lives, char_level, replace_char) or \"FAIL\". A file\n\
+    without battle rules is refused in a Battle game (\"incorrect game mode\",\n\
+    ReceiveCommands.cc), so every Spire run and room quest must have them\n\
+    (B-REGIE-17-13: a let from an unknown register once stopped the reader).\n\
+    With --none every FILE must have none (q925, a retrieval quest). Exits 1\n\
+    if any file fails.\n",
+    +[](phosg::Arguments& args) {
+      DataIndex di;
+      di.load_quest_opcode_defs();
+      bool expect_none = args.get<bool>("none");
+      size_t failed = 0, checked = 0;
+      for (size_t z = 1;; z++) {
+        const auto& filename = args.get<std::string>(z, false);
+        if (filename.empty()) {
+          break;
+        }
+        checked++;
+        QuestMetadata meta;
+        std::string error;
+        try {
+          auto data = prs_decompress(phosg::load_file(filename));
+          populate_quest_metadata_from_script(
+              *di.quest_opcodes, meta, data.data(), data.size(), Version::GC_V3, Language::ENGLISH);
+        } catch (const std::exception& e) {
+          error = e.what();
+        }
+        const auto& br = meta.battle_rules;
+        if (!error.empty()) {
+          failed++;
+          phosg::fwrite_fmt(stdout, "FAIL {}: unreadable: {}\n", filename, error);
+        } else if (expect_none ? !br : !!br) {
+          phosg::fwrite_fmt(stdout, "ok {} q{}: {}\n", filename, meta.quest_number,
+              br ? std::format("battle rules: lives {}, char_level {}, replace_char {}", br->lives.load(),
+                       br->char_level.load(), br->replace_char)
+                 : std::string("no battle rules, as expected"));
+        } else {
+          failed++;
+          phosg::fwrite_fmt(stdout, "FAIL {} q{}: {}\n", filename, meta.quest_number,
+              br ? std::string("battle rules found; a non-Battle game would refuse it")
+                 : std::string("no battle rules; a Battle game refuses it (incorrect game mode)"));
+        }
+      }
+      phosg::fwrite_fmt(stdout, "{} of {} file(s) {}\n", checked - failed, checked, failed ? "ok, some FAILED" : "ok");
+      if (!checked || failed) {
+        exit(1);
+      }
+    });
+
 Action a_spire_lives_check(
     "spire-lives-check", "\
   spire-lives-check\n\

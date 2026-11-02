@@ -1529,6 +1529,9 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
 }
 
+static void spire_checkpoint_record_boss(
+    std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k);
+
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
 static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -1577,6 +1580,11 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   run->savestate_files.emplace(filename);
   c->log.info_f("Spire savestate: stored {} in {}{}", spire_savestate_describe(ss), filename,
       ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "");
+  // B-AF-1 (critic spel-af-1 S1): a boss counts as beaten once this client's run starts the room after it; its wave
+  // clear may come from a child's 6x76 (Darvant, Pig Ray, Olga's first form) before the boss is dead
+  if (spire_meta_boss_room_before(room_k)) {
+    spire_checkpoint_record_boss(l, c, serial_number, room_k - 1);
+  }
   // F6 / bundle 2 S: the boss burst (F7, quest) from De Rol Le on: this client's 'V' of a boss room start is the
   // server's view of its boss door (the quest casts right after it). One line to this client only, once per room and
   // run (SpireClientRun); the boss rooms are spire-mag.json's BossRooms (no file: no text, no warning)
@@ -2353,6 +2361,10 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   // 'F': the run's score ('K' before it) and time against the records
   bool is_won = spire_meta_decode_finish(value).won;
+  // B-AF-1 (critic S1): the last boss of the episode has no room after it; a won run of a real run is its kill
+  if (uint8_t final_k = is_won ? spire_meta_final_boss_room(static_cast<uint8_t>(l->episode)) : 0) {
+    spire_checkpoint_record_boss(l, c, serial_number, final_k);
+  }
   uint32_t seconds = value & 0xFFFF;
   auto it = spire_records_pending_score.find(c.get());
   uint32_t score = (it == spire_records_pending_score.end()) ? 0 : it->second;
@@ -2515,7 +2527,14 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       // with ALREADY_OPEN at BUY, and listed with price 0
       bool kit2 = spire_meta_kit2_owned(meta, char_class);
       if (sub == SPIRE_SHOP_BUY) {
-        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung, kit2);
+        refusal = spire_shop_buy_refusal(cat, index, meta.upgrades, rec.splinters, open_rung, kit2, meta.bosses_beaten);
+        // B-AF-1: a level that waits for a boss is refused as not on sale; the ticker says which boss opens it
+        if (uint8_t boss_k = (refusal == SpireShopRefusal::NOT_ON_SALE)
+                ? spire_shop_boss_needed(cat, index, meta.upgrades, meta.bosses_beaten)
+                : 0) {
+          spire_send_ticker(c, spire_shop_boss_needed_text(cat, index, meta.upgrades, boss_k));
+          detail += std::format(" (waits for boss room {})", boss_k);
+        }
         if (refusal == SpireShopRefusal::NONE) {
           uint32_t level_before = spire_shop_level(meta.upgrades, index);
           uint32_t price = spire_shop_apply_buy(cat, index, meta);
@@ -2571,7 +2590,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       std::string levels_str;
       for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
         uint32_t level = spire_shop_level(upgrades, z);
-        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung, kit2);
+        uint32_t price = spire_shop_next_price(cat, z, meta.upgrades, open_rung, kit2, meta.bosses_beaten);
         spire_send_register(c, SPIRE_SHOP_LEVEL_FIRST_REGISTER + z, level);
         spire_send_register(c, SPIRE_SHOP_PRICE_FIRST_REGISTER + z, price);
         levels_str += std::format(" {}={}/{}", SPIRE_SHOP_ITEM_NAMES[z], level, price);
@@ -5891,6 +5910,29 @@ static void spire_checkpoint_credit(std::shared_ptr<const Lobby> l, std::shared_
     }
   } catch (const std::exception& e) {
     lc->log.warning_f("Spire splinters: failed to pay room {}: {}", k, e.what());
+  }
+}
+
+// B-AF-1: a boss beaten in a real run (the run began, no practice run) goes into the character's BossesBeaten
+// (SpireMeta), on any difficulty: at the 'V' of the room after it, or at a won 'F' for the episode's last boss (critic
+// S1: not at its wave clear). The first one names what it opens in a text held for the lobby, with the run's records
+// text (never a window in the run). Before 'B' or in a practice run it opens nothing, as the other unlocks. Never
+// throws.
+static void spire_checkpoint_record_boss(
+    std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k) {
+  try {
+    auto* cr = spire_client_run_for(lc, l, false);
+    if (!cr || !cr->began || cr->practice) {
+      lc->log.info_f("Spire meta: boss room {} not recorded: {}", k,
+          (cr && cr->began) ? "practice run" : "no run started in this game");
+      return;
+    }
+    std::string text;
+    if (spire_meta_record_boss(lc, serial_number, k, &text) && !text.empty()) {
+      spire_defer_to_lobby(lc, text);
+    }
+  } catch (const std::exception& e) {
+    lc->log.warning_f("Spire meta: failed to record boss room {}: {}", k, e.what());
   }
 }
 

@@ -2,12 +2,13 @@
   "_comment": "Spire base shop catalogue (newserv guard v50, SpireMeta.hh; plan-basis-metawinkel-2026-10-26 slice 4, B-BASIS-2/-3/-13). Read at every 'M' request; a missing or broken file closes the shop. FIRST VERSION: every price and P is a placeholder until the balance is tuned; PNeeded comes from the sim (curve_spire.py pneeded) (route B F2: an average run earns about 50 splinters, see Payout).",
   "Items": {
     "start_level": {
-      "_what": "Route B F3: Levels[n] start levels at level n (+5 for 50, +10 for 110 in total, +14 for 185 in total). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by that many levels and builds its overlay at that level (quest load and run again 'I'). P 0 at every level (B-BASIS-67, route B invariant 7): bought start levels add no heat.",
-      "Levels": [0, 5, 10, 14],
-      "Max": 3,
-      "OnSale": 3,
-      "Price": [50, 60, 75],
-      "P": [0, 0, 0, 0]
+      "_what": "Route B F3: Levels[n] start levels at level n (+5 for 50, +10 for 110 in total, +14 for 185 in total). Guard v52: the server sends each client the quest .bin with the rule block's ba_set_char_level raised by that many levels and builds its overlay at that level (quest load and run again 'I'). P 0 at every level (B-BASIS-67, route B invariant 7): bought start levels add no heat. B-AF-1 (spel-af): levels 4-9 (+18 ... +38, +4 each) open one per late boss, the first time the character beats it in a real run on any difficulty (Boss: the boss room k; meta.json BossesBeaten): Vol Opt k11, Dark Falz k15, Barba Ray k18, Gol Dragon k21, Gal Gryphon k24, Olga Flow k27. Until then the level is listed with price 0 and refused as not on sale, with a ticker that names the boss.",
+      "Levels": [0, 5, 10, 14, 18, 22, 26, 30, 34, 38],
+      "Max": 9,
+      "OnSale": 9,
+      "Price": [50, 60, 75, 90, 105, 120, 135, 150, 165],
+      "P": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "Boss": [0, 0, 0, 0, 11, 15, 18, 21, 24, 27]
     },
     "kit_tier": {
       "_what": "level 1: the second kit of the class archetype (the quest's existing second-kit branch, Dagger/Rifle/Barta) from the first run. OnSale 1: level 2 has no kit yet.",
