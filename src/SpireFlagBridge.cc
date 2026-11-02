@@ -546,6 +546,9 @@ std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_nu
   if (ss.level) { // B-AF-3
     json.emplace("Level", *ss.level);
   }
+  if (ss.start_bonus) { // B-AF-7
+    json.emplace("StartBonus", *ss.start_bonus);
+  }
   if (ss.run_mag) { // F6: the run mag ledger, keyed by run id and step, never by item id
     const auto& led = *ss.run_mag;
     phosg::JSON bosses = phosg::JSON::list();
@@ -597,10 +600,17 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     ret.glass_index = -1;
   }
   ret.time_usecs = json.get_int("Time", 0);
-  if (json.contains("Level")) { // B-AF-3: a level outside Sega's range is no level
-    int64_t level = json.get_int("Level");
-    if ((level >= 0) && (level <= static_cast<int64_t>(SPIRE_START_LEVEL_LEVEL_CAP))) {
-      ret.level = level;
+  // B-AF-3, B-AF-7: a level or start bonus outside Sega's range, or no integer, is none; the rest of the file (the items)
+  // still resumes (critic spel-af-2)
+  for (auto [key, field] : {std::make_pair("Level", &ret.level), std::make_pair("StartBonus", &ret.start_bonus)}) {
+    try {
+      if (json.contains(key)) {
+        int64_t v = json.get_int(key);
+        if ((v >= 0) && (v <= static_cast<int64_t>(SPIRE_START_LEVEL_LEVEL_CAP))) {
+          *field = v;
+        }
+      }
+    } catch (const std::exception&) {
     }
   }
   if (json.contains("RunMag")) {
@@ -1484,6 +1494,8 @@ static void spire_checkpoint_record_boss(
     std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k);
 
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
+static std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number);
+
 static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
@@ -1522,6 +1534,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index,
       led ? led->last_mirrored : std::nullopt);
   ss.level = overlay->disp.stats.level; // B-AF-3: the run copy's level, kept up by its 6x30 level-ups
+  ss.start_bonus = spire_start_level_run_bonus(c.get(), l->lobby_id, quest_number); // B-AF-7
   if (led) {
     ss.run_mag = *led;
   }
@@ -2360,9 +2373,19 @@ struct SpireStartLevelSent {
   uint32_t quest_number = 0;
   uint32_t bonus = 0;
   std::optional<uint32_t> resume_level; // B-AF-3: the saved level the .bin carried for a resume (then bonus is 0)
+  std::optional<uint32_t> resume_start_bonus; // B-AF-7: that savestate's start_level bonus, if it has one
 };
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_sent;
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_run;
+
+// B-AF-7: the start_level bonus of the run this client plays in this game and quest (spire_start_level_run), if known
+static std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number) {
+  auto it = spire_start_level_run.find(c);
+  if ((it == spire_start_level_run.end()) || (it->second.lobby_id != lobby_id) || (it->second.quest_number != quest_number)) {
+    return std::nullopt;
+  }
+  return it->second.bonus;
+}
 
 // v55: the heat step of each client's quest .bin (spire_heat_quest_bin sets it at every send, SpireFlagBridge.hh
 // SpireHeatSent), for the 'M' START answer. Keyed by the Client's address and never dereferenced; a 98
@@ -3449,8 +3472,10 @@ static uint32_t spire_start_level_bonus_for_client(std::shared_ptr<Client> c, st
 
 // B-AF-3: the saved level a client resumes at in this room quest (spire_resume_level), if the quest is one of
 // SpireRoomQuests and the guard covers the client as for the start_level bonus. The leader is SpireFollowLeader's
-// LeaderClient (else lobby client 0), as in the 'J' answer. Never throws.
-static std::optional<uint32_t> spire_resume_level_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+// LeaderClient (else lobby client 0), as in the 'J' answer. *start_bonus gets that savestate's start_level bonus
+// (B-AF-7). Never throws.
+static std::optional<uint32_t> spire_resume_level_for_client(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, std::optional<uint32_t>* start_bonus) {
   try {
     const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
     if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
@@ -3473,6 +3498,7 @@ static std::optional<uint32_t> spire_resume_level_for_client(std::shared_ptr<Cli
     auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
     SpireSavestate leader_ss = !leader ? SpireSavestate() : (leader == c) ? own : spire_savestate_load_logged(leader);
     auto level = spire_resume_level(own, leader_ss, rq.episode, rq.k, rq.variant);
+    *start_bonus = own.start_bonus;
     if (!level) {
       c->log.info_f("Spire savestate: q{} (room {} variant {}) will not resume {} (leader {}); the quest's level",
           l->quest->meta.quest_number, rq.k, rq.variant, spire_savestate_describe(own),
@@ -3489,7 +3515,8 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
   spire_start_level_sent.erase(c.get());
   // B-AF-3: a resume carries the run's saved level (bought start levels are in it already), not the quest's own
-  if (auto resume_level = bin_contents ? spire_resume_level_for_client(c, l) : std::nullopt) {
+  std::optional<uint32_t> resume_start_bonus;
+  if (auto resume_level = bin_contents ? spire_resume_level_for_client(c, l, &resume_start_bonus) : std::nullopt) {
     uint32_t quest_number = l->quest->meta.quest_number;
     uint32_t base = l->quest->meta.battle_rules->char_level;
     uint32_t level = std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
@@ -3501,7 +3528,7 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
             quest_number, count, base + 1, base + 1);
         return bin_contents;
       }
-      spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, 0, level};
+      spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, 0, level, resume_start_bonus};
       c->log.info_f("Spire savestate: q{} sent with the rule block's level Lv{} -> Lv{} (the saved run level)",
           quest_number, base + 1, level + 1);
       return std::make_shared<const std::string>(prs_compress(bin));
@@ -3527,7 +3554,7 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
       return bin_contents;
     }
     auto ret = std::make_shared<const std::string>(prs_compress(bin));
-    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt};
+    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
     c->log.info_f("Spire start level: q{} sent with the rule block's level Lv{} -> Lv{} (start_level +{})",
         quest_number, base + 1, level + 1, level - base);
     return ret;
@@ -3651,6 +3678,7 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
   // now (the push carries the overlay to the client)
   uint32_t bonus = 0;
   std::optional<uint32_t> resume_level; // B-AF-3
+  std::optional<uint32_t> resume_start_bonus; // B-AF-7
   if (run_again) {
     bonus = spire_start_level_bonus_for_client(c, l);
   } else {
@@ -3659,6 +3687,7 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
         (it->second.quest_number == l->quest->meta.quest_number)) {
       bonus = it->second.bonus;
       resume_level = it->second.resume_level;
+      resume_start_bonus = it->second.resume_start_bonus;
     }
     spire_start_level_sent.erase(c.get());
   }
@@ -3679,13 +3708,18 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
   c->create_battle_overlay(rules, c->require_server_state()->data->level_table(c->version()));
   c->log.info_f("Created battle overlay");
   if (l->quest) {
-    spire_start_level_run[c.get()] = SpireStartLevelSent{
-        l->lobby_id, l->quest->meta.quest_number,
-        // B-AF-3: a saved level below the quest's own is no start_level bonus (never a wrap)
-        (rules && (rules->char_level > l->quest->meta.battle_rules->char_level))
-            ? (rules->char_level - l->quest->meta.battle_rules->char_level)
-            : 0,
-        std::nullopt};
+    // B-AF-7 (critic spel-af-2 S1): a resume keeps the run's own start_level bonus (its savestate's, else the one owned
+    // now), not the saved level minus the quest's: the run mag's start floors read it
+    uint32_t run_bonus = resume_level
+        ? resume_start_bonus.value_or(spire_start_level_bonus_for_client(c, l))
+        : ((rules && (rules->char_level > l->quest->meta.battle_rules->char_level))
+                  ? (rules->char_level - l->quest->meta.battle_rules->char_level)
+                  : 0);
+    spire_start_level_run[c.get()] = SpireStartLevelSent{l->lobby_id, l->quest->meta.quest_number, run_bonus, std::nullopt, std::nullopt};
+    if (resume_level) {
+      c->log.info_f("Spire savestate: the run's start_level bonus +{} ({})", run_bonus,
+          resume_start_bonus ? "saved" : "owned now; the savestate has none");
+    }
   }
   return true;
 }

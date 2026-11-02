@@ -5597,6 +5597,17 @@ void run_static_tests() {
       expect(!spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": -1")).level);
       expect(spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": 199")).level ==
           std::optional<uint32_t>(199));
+      // B-AF-7 (critic spel-af-2): the run's start_level bonus goes with the file (none in a file from before: then the
+      // bonus owned now); a Level that is no integer drops only the level, the rest of the file still resumes
+      SpireSavestate sb = lv;
+      sb.start_bonus = 3;
+      expect(spire_savestate_from_json(spire_savestate_to_json(sb, 42)).start_bonus == std::optional<uint32_t>(3));
+      expect(!spire_savestate_from_json(text).start_bonus);
+      auto broken = spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": \"x\""));
+      expect(!broken.level);
+      expect(broken.exists);
+      expect_eq(0xA1u, broken.run_id);
+      expect_eq(5u, broken.values[SPIRE_SS_K]);
     }
 
     // Two clients: the leader's savestate sets the game's run; the partner resumes only from the same run
