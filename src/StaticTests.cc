@@ -2785,8 +2785,16 @@ void run_static_tests() {
         "SpireCheckpointRooms": [{"Floor": 14, "Room": -1, "K": 15}, {"Floor": 1, "Room": 7, "K": 2},
             {"Episode": 2, "Floor": 1, "Room": 70, "K": 16}, {"Episode": 2, "Floor": 2, "Room": 50, "K": 17},
             {"Episode": 2, "Floor": 14, "K": 18}],
-        "SpireCheckpointArrivals": [{"Floor": 14, "K": 14}, {"Episode": 2, "Floor": 14, "K": 17}]})"));
+        "SpireCheckpointArrivals": [{"Floor": 14, "K": 14}, {"Episode": 2, "Floor": 14, "K": 17}],
+        "SpireRoomQuests": [{"Quest": 947, "K": 5, "Variant": 1}, {"Quest": 971, "Episode": 2, "K": 27, "Variant": 0}]})"));
       d.load_spire_checkpoint_config();
+      // B-AF-3: the room quests as build.sh --rooms writes them (Episode missing: 1)
+      expect_eq(2u, d.spire_room_quests.size());
+      expect_eq(1, d.spire_room_quests.at(947).episode);
+      expect_eq(5, d.spire_room_quests.at(947).k);
+      expect_eq(1, d.spire_room_quests.at(947).variant);
+      expect_eq(2, d.spire_room_quests.at(971).episode);
+      expect_eq(27, d.spire_room_quests.at(971).k);
       expect_eq(15, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP1, 14, 3));
       expect_eq(18, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 14, 3));
       expect_eq(2, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP1, 1, 7));
@@ -5556,6 +5564,52 @@ void run_static_tests() {
     ss.practice = true;
     expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played (practice run)"),
         spire_savestate_continue_text(ss));
+    // B-AF-3: the level the savestate took from the run copy; the text names it, the resume gives it back only into
+    // the quest whose 'J' resumes this savestate (same room, variant and run as the leader's)
+    {
+      SpireSavestate lv = ss;
+      lv.practice = false;
+      lv.level = 22; // Lv23
+      expect_eq(std::string("Continue at Spire room 5 elite: Lv23, 2 lives, 31 min played"),
+          spire_savestate_continue_text(lv));
+      SpireSavestate leader = lv;
+      leader.level = 30; // the leader's own level never decides this client's
+      expect(spire_resume_level(lv, leader, 0, 5, 1) == std::optional<uint32_t>(22));
+      expect(spire_resume_level(lv, lv, 0, 5, 1) == std::optional<uint32_t>(22)); // the leader itself
+      expect(!spire_resume_level(lv, leader, 0, 5, 0)); // the normal k5 quest: fresh, the quest's level
+      expect(!spire_resume_level(lv, leader, 0, 6, 1));
+      SpireSavestate other_run = leader;
+      other_run.run_id = 0xB2;
+      expect(!spire_resume_level(lv, other_run, 0, 5, 1)); // a partner of another run starts fresh
+      expect(!spire_resume_level(lv, SpireSavestate(), 0, 5, 1)); // no leader savestate: a new run
+      SpireSavestate no_level = lv;
+      no_level.level.reset();
+      expect(!spire_resume_level(no_level, leader, 0, 5, 1)); // a savestate from before: the quest's level
+      // the file keeps the level; a file from before has none, and a level outside 0-199 reads as none
+      auto json = phosg::JSON::parse(spire_savestate_to_json(lv, 42));
+      expect_eq(22, json.get_int("Level"));
+      expect(spire_savestate_from_json(spire_savestate_to_json(lv, 42)).level == std::optional<uint32_t>(22));
+      expect(!spire_savestate_from_json(spire_savestate_to_json(no_level, 42)).level);
+      expect(spire_savestate_to_json(no_level, 42).find("Level") == std::string::npos);
+      std::string text = spire_savestate_to_json(lv, 42);
+      size_t pos = text.find("\"Level\": 22");
+      expect(pos != std::string::npos);
+      expect(!spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": 200")).level);
+      expect(!spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": -1")).level);
+      expect(spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": 199")).level ==
+          std::optional<uint32_t>(199));
+      // B-AF-7 (critic spel-af-2): the run's start_level bonus goes with the file (none in a file from before: then the
+      // bonus owned now); a Level that is no integer drops only the level, the rest of the file still resumes
+      SpireSavestate sb = lv;
+      sb.start_bonus = 3;
+      expect(spire_savestate_from_json(spire_savestate_to_json(sb, 42)).start_bonus == std::optional<uint32_t>(3));
+      expect(!spire_savestate_from_json(text).start_bonus);
+      auto broken = spire_savestate_from_json(std::string(text).replace(pos, 11, "\"Level\": \"x\""));
+      expect(!broken.level);
+      expect(broken.exists);
+      expect_eq(0xA1u, broken.run_id);
+      expect_eq(5u, broken.values[SPIRE_SS_K]);
+    }
 
     // Two clients: the leader's savestate sets the game's run; the partner resumes only from the same run
     // arguments: run_ended, game_resumed, game_run_id, own_matches, own_run_id

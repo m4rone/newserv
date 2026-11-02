@@ -347,6 +347,14 @@ struct SpireSavestate {
   int32_t glass_index = -1; // index in items of the Glass run item, -1 = none
   uint64_t time_usecs = 0;
   std::optional<SpireRunMagLedger> run_mag; // F6: the run mag ledger of this run ("RunMag"), if the run has one
+  // B-AF-3 (spel-af): the run copy's level at the 'V' (0-based, as ba_set_char_level), "Level"; none in a file from
+  // before. The server knows it from the client's own level-ups (6x30 on the overlay). The EXP within the level is not
+  // given back: an in-game 61 would show it, but setting it at the quest load needs the full-character push, which is
+  // refused while anyone loads (v33), so a resume gives Sega's EXP of that level (critic spel-af-2 S2).
+  std::optional<uint32_t> level;
+  // B-AF-7 (critic spel-af-2 S1): the run's start_level bonus at the 'V' ("StartBonus", spire_start_level_run), which a
+  // resume puts back for the run mag's start floors; none in a file from before (then the bonus owned now).
+  std::optional<uint32_t> start_bonus;
 };
 // The pure parts, for the static tests:
 // The items a savestate takes from a run copy: every item but empty slots, Scape Dolls and mags, in inventory order;
@@ -434,6 +442,11 @@ std::vector<std::string> spire_savestate_notice_take(
 // Called from on_6F after the other Spire join hooks: sends the notice above. A no-op for a client the bridge does not
 // apply to (no GC V3 license serial, no character data). Never throws.
 void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// B-AF-3: the level a room quest's rule block carries for a client at the quest load: its own savestate's level when
+// the 'J' of that quest will resume it (own and leader savestate fit the quest's episode, room and variant, the same
+// run id, own has a level), else nothing (the quest's own level plus the start_level bonus, as before). Pure.
+std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
+    uint8_t k, uint8_t variant);
 
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
 // a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client
