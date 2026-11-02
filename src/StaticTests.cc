@@ -1667,6 +1667,19 @@ void run_static_tests() {
         "open_ult": {"Max": 1, "Price": [240], "PNeeded": 9}},
       "MetaHeat": {"HAuto": {}}})");
     expect_eq(std::string(""), spire_meta_boss_unlock_text(&half, 11));
+    // critic N5: a level above OnSale waits for no boss, so no ticker promises it
+    expect_eq(0, spire_shop_boss_needed(half, 0, {{"start_level", 1}}, {}));
+    // critic S1: a boss counts when the run starts the room after it, or (the episode's last boss) at a won run
+    for (uint32_t k : {5u, 9u, 12u, 16u, 19u, 22u, 25u, 28u}) {
+      expect(spire_meta_boss_room_before(k));
+    }
+    for (uint32_t k : {0u, 1u, 2u, 4u, 6u, 11u, 15u, 17u, 27u, 300u}) {
+      expect(!spire_meta_boss_room_before(k));
+    }
+    expect_eq(15, spire_meta_final_boss_room(1));
+    expect_eq(27, spire_meta_final_boss_room(2));
+    expect_eq(0, spire_meta_final_boss_room(3));
+    expect_eq(0, spire_meta_final_boss_room(0));
     // a Boss list of the wrong length, or a value that is no room k, refuses the catalogue
     auto throws = [](const char* text) {
       try {

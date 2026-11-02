@@ -1461,6 +1461,9 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
 }
 
+static void spire_checkpoint_record_boss(
+    std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k);
+
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
 static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -1509,6 +1512,11 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   run->savestate_files.emplace(filename);
   c->log.info_f("Spire savestate: stored {} in {}{}", spire_savestate_describe(ss), filename,
       ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "");
+  // B-AF-1 (critic spel-af-1 S1): a boss counts as beaten once this client's run starts the room after it; its wave
+  // clear may come from a child's 6x76 (Darvant, Pig Ray, Olga's first form) before the boss is dead
+  if (spire_meta_boss_room_before(room_k)) {
+    spire_checkpoint_record_boss(l, c, serial_number, room_k - 1);
+  }
   // F6 / bundle 2 S: the boss burst (F7, quest) from De Rol Le on: this client's 'V' of a boss room start is the
   // server's view of its boss door (the quest casts right after it). One line to this client only, once per room and
   // run (SpireClientRun); the boss rooms are spire-mag.json's BossRooms (no file: no text, no warning)
@@ -2251,6 +2259,10 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   // 'F': the run's score ('K' before it) and time against the records
   bool is_won = spire_meta_decode_finish(value).won;
+  // B-AF-1 (critic S1): the last boss of the episode has no room after it; a won run of a real run is its kill
+  if (uint8_t final_k = is_won ? spire_meta_final_boss_room(static_cast<uint8_t>(l->episode)) : 0) {
+    spire_checkpoint_record_boss(l, c, serial_number, final_k);
+  }
   uint32_t seconds = value & 0xFFFF;
   auto it = spire_records_pending_score.find(c.get());
   uint32_t score = (it == spire_records_pending_score.end()) ? 0 : it->second;
@@ -5733,9 +5745,10 @@ static void spire_checkpoint_credit(std::shared_ptr<const Lobby> l, std::shared_
   }
 }
 
-// B-AF-1: a boss clear in a real run (the run began, no practice run) goes into the character's BossesBeaten (SpireMeta),
-// on any difficulty; the first one names what it opens in a text held for the lobby, with the run's records text
-// (never a window in the run). A boss clear before 'B' or in a practice run opens nothing, as the other unlocks. Never
+// B-AF-1: a boss beaten in a real run (the run began, no practice run) goes into the character's BossesBeaten
+// (SpireMeta), on any difficulty: at the 'V' of the room after it, or at a won 'F' for the episode's last boss (critic
+// S1: not at its wave clear). The first one names what it opens in a text held for the lobby, with the run's records
+// text (never a window in the run). Before 'B' or in a practice run it opens nothing, as the other unlocks. Never
 // throws.
 static void spire_checkpoint_record_boss(
     std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k) {
@@ -5773,9 +5786,6 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       bool new_room = run_rooms.rooms.emplace(k).second;
       bool new_boss = boss && run_rooms.boss_rooms.emplace(k).second;
       uint32_t serial_number = spire_bridge_serial_for_client(lc);
-      if (boss) {
-        spire_checkpoint_record_boss(l, lc, serial_number, k);
-      }
       std::string filename = spire_checkpoint_filename(lc, serial_number);
       if (filename.empty()) {
         lc->log.info_f("Spire checkpoint: no character data; room {} not stored", k);

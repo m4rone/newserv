@@ -666,8 +666,8 @@ uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
   }
   const auto& item = cat.items[index];
   uint32_t next = spire_shop_level(upgrades, index) + 1;
-  if (next >= item.boss.size()) {
-    return 0;
+  if ((next >= item.boss.size()) || (next > item.on_sale)) {
+    return 0; // critic N5: a level not on sale waits for no boss
   }
   uint8_t k = item.boss[next];
   return (k && !bosses_beaten.contains(k)) ? k : 0;
@@ -776,6 +776,14 @@ const char* spire_meta_boss_name(uint8_t k) {
     default:
       return nullptr;
   }
+}
+
+bool spire_meta_boss_room_before(uint32_t k) {
+  return (k >= 2) && (k <= 0x100) && spire_meta_boss_name(k - 1);
+}
+
+uint8_t spire_meta_final_boss_room(uint8_t episode) {
+  return (episode == 1) ? 15 : (episode == 2) ? 27 : 0;
 }
 
 // "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
