@@ -915,6 +915,16 @@ struct SpireBridgeTextContext {
   std::string overview; // 'C' 2: the writer's kept overview line (spire_overview_kept_line), "" = none
 };
 std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);
+// kwaliteit-1: 'C' 15 and 'C' 16 (a reward that waited is now in the pack) arrive in the same frame as another line
+// (the exam's 'C' 10 after ex_retry) or as each other (two extras that fit in one ex_retry round, two gifts in one
+// gw_retry), and a B0 line that follows at once pushes the one before aside (pc 2026-10-25, see
+// SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY). Such a pack line goes to the writer SPIRE_PACK_LINE_GAP after it arrives and
+// at least SPIRE_PACK_LINE_GAP after the writer's previous pack line (as SPIRE_SAVESTATE_NOTICE_SECOND_DELAY).
+constexpr auto SPIRE_PACK_LINE_GAP = std::chrono::milliseconds(4000);
+bool spire_bridge_is_pack_line(uint32_t value);
+// The delay for a pack line arriving at now; next_free (per client) moves to the moment the line after it may go
+std::chrono::milliseconds spire_pack_line_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
 // v62: the writer's last overview line as kept at its 'Q' (lobby and floor of that 'Q'); "" when none is kept, or the
 // client is in another game or on another floor now (a floor change ends it)
 struct SpireOverviewKept {

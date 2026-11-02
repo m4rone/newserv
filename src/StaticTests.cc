@@ -6216,6 +6216,22 @@ void run_static_tests() {
       expect_eq(std::string("Your waiting gift is now in your pack."), spire_bridge_message_text(0x43001009));
     });
 
+    b8_case("'C' 15 and 'C' 16 come spaced, so no pack line pushes another aside (kwaliteit-1)", [&]() {
+      expect(spire_bridge_is_pack_line(0x43000F01) && spire_bridge_is_pack_line(0x43001005));
+      expect(!spire_bridge_is_pack_line(0x43000A21) && !spire_bridge_is_pack_line(0x43000C05) &&
+          !spire_bridge_is_pack_line(0x4E000F01));
+      std::chrono::steady_clock::time_point t0{std::chrono::seconds(100)};
+      std::chrono::steady_clock::time_point next_free{};
+      auto ms = [&](std::chrono::steady_clock::time_point now) -> int64_t {
+        return spire_pack_line_delay(next_free, now).count();
+      };
+      // two extras in one ex_retry round (and the exam's 'C' 10 in the same frame): 4 s, then 4 s after the first
+      expect_eq(int64_t(4000), ms(t0));
+      expect_eq(int64_t(8000), ms(t0));
+      expect_eq(int64_t(9000), ms(t0 + std::chrono::seconds(3))); // a gift line 3 s later waits behind both
+      expect_eq(int64_t(4000), ms(t0 + std::chrono::seconds(60))); // a later room: only the gap after its arrival
+    });
+
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));

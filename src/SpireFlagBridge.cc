@@ -2210,6 +2210,18 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
   }
 }
 
+bool spire_bridge_is_pack_line(uint32_t value) {
+  uint32_t point = (value >> 8) & 0xFF;
+  return ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT) && ((point == 15) || (point == 16));
+}
+
+std::chrono::milliseconds spire_pack_line_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
+  auto at = std::max(now + SPIRE_PACK_LINE_GAP, next_free);
+  next_free = at + SPIRE_PACK_LINE_GAP;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(at - now);
+}
+
 std::string spire_bridge_message_text(uint32_t value) {
   return spire_bridge_message_text(value, SpireBridgeTextContext());
 }
@@ -3500,6 +3512,10 @@ bool spire_bridge_handle_register(
               sent++;
             }
           }
+        } else if (spire_bridge_is_pack_line(value)) { // kwaliteit-1: spaced, so it pushes no line aside
+          spire_send_ticker_later(
+              c, l, msg, spire_pack_line_delay(c->spire_pack_line_free, std::chrono::steady_clock::now()));
+          sent = 1;
         } else {
           spire_send_ticker(c, msg);
           sent = 1;
