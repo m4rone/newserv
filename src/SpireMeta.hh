@@ -129,8 +129,9 @@ bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t fla
 // next one. Run I is q921 (and the retired q920) on Normal plus q981-q983 (Hard, Very Hard, Ultimate); Run II is q922
 // plus q984-q986. 0 = a quest of neither run (no ladder flag).
 uint8_t spire_meta_ladder_run(uint32_t quest_number);
-// v54: the rung a ladder quest plays (1 Hard q981/q984, 2 Very Hard q982/q985, 3 Ultimate q983/q986); 0 for q920-q922
-// and every other quest. The heat table of that rung applies (SpireShopCatalogue::heat).
+// v54: the rung a ladder quest plays (1 Hard q981/q984, 2 Very Hard q982/q985, 3 Ultimate q983/q986), and of a room
+// quest on a rung (q1940-q1979 Hard, q2940-q2979 Very Hard, q3940-q3979 Ultimate; spel-af item 3); 0 for q920-q922,
+// the Normal room quests q940-q979 and every other quest. The heat table of that rung applies (SpireShopCatalogue::heat).
 uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number);
 uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
 // The highest difficulty won open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
@@ -157,7 +158,8 @@ SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, u
 // One line (a lobby message box) for a refused difficulty: the level Sega asks and the Spire win that opens it.
 std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level);
 // The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
-// runs are open there), so a hidden run quest is never a silent nothing.
+// runs are open there), so a hidden run quest is never a silent nothing. The rooms of that run on that difficulty open
+// with it (spel-af item 3: their AvailableIf carries the same SPIRE_RUN condition), so the line names them too.
 std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty);
 // The open rung of a run for a client's real character (its meta file, v49 won or BaseRung; 0 without one or on a read
 // error). Never throws.

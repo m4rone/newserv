@@ -1345,6 +1345,15 @@ void run_static_tests() {
     expect_eq(2, spire_meta_ladder_quest_rung(985));
     expect_eq(3, spire_meta_ladder_quest_rung(986));
     expect_eq(0, spire_meta_ladder_quest_rung(987));
+    expect_eq(0, spire_meta_ladder_quest_rung(940)); // a room quest on Normal
+    expect_eq(1, spire_meta_ladder_quest_rung(1940)); // spel-af item 3: room quests on a rung
+    expect_eq(1, spire_meta_ladder_quest_rung(1971));
+    expect_eq(2, spire_meta_ladder_quest_rung(2955));
+    expect_eq(3, spire_meta_ladder_quest_rung(3979));
+    expect_eq(0, spire_meta_ladder_quest_rung(1939));
+    expect_eq(0, spire_meta_ladder_quest_rung(1980));
+    expect_eq(0, spire_meta_ladder_quest_rung(1981)); // not a ladder quest plus 1000
+    expect_eq(0, spire_meta_ladder_quest_rung(4940));
     auto rung_cat = spire_shop_parse(R"({"Items": {
         "start_level": {"Max": 1, "Price": [15], "P": [0, 1]},
         "kit_tier": {"Max": 1, "Price": [30], "P": [0, 2]},
@@ -2622,9 +2631,9 @@ void run_static_tests() {
     // quest menu on a difficulty whose run quest is hidden: one info line, nothing when both are open or on Normal
     expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0));
     expect_eq(std::string(""), spire_meta_ladder_menu_note(1, 1, 1));
-    expect_eq(std::string("Spire Run on Hard opens after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
-    expect_eq(std::string("Spire Run II on Very Hard opens after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
-    expect_eq(std::string("Spire Run I on Ultimate opens after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
+    expect_eq(std::string("Spire Run and rooms on Hard open after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
+    expect_eq(std::string("Spire Run II and rooms on Very Hard open after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
+    expect_eq(std::string("Spire Run I and rooms on Ultimate open after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
   }
 
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");

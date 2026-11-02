@@ -324,6 +324,11 @@ uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number) {
   if ((quest_number >= 981) && (quest_number <= 986)) {
     return (quest_number - 981) % 3 + 1;
   }
+  // spel-af item 3: a room quest on a rung is the Normal room quest (q940-q979) plus 1000 per rung (build.sh --rooms)
+  uint32_t room = quest_number % 1000;
+  if ((quest_number >= 1000) && (quest_number < 4000) && (room >= 940) && (room <= 979)) {
+    return quest_number / 1000;
+  }
   return 0;
 }
 
@@ -397,11 +402,11 @@ std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t di
   if (open1 && open2) {
     return "";
   } else if (!open1 && !open2) {
-    return std::format("Spire Run on {} opens after a win on {}.", here, below);
+    return std::format("Spire Run and rooms on {} open after a win on {}.", here, below);
   } else if (!open1) {
-    return std::format("Spire Run I on {} opens after a win on {}.", here, below);
+    return std::format("Spire Run I and rooms on {} open after a win on {}.", here, below);
   }
-  return std::format("Spire Run II on {} opens after a win on {}.", here, below);
+  return std::format("Spire Run II and rooms on {} open after a win on {}.", here, below);
 }
 
 uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run) {
