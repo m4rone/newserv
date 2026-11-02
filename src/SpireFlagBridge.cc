@@ -3183,6 +3183,10 @@ bool spire_bridge_handle_register(
             spire_run_again(c, std::const_pointer_cast<Lobby>(l), serial_number, quest_number), asio::detached);
         return true;
       }
+      if ((value >> 24) == SPIRE_BRIDGE_FOLLOW_HOLD_ASK) { // critic spel-af-4 S1
+        spire_follow_hold_answer(c, l);
+        return true;
+      }
       if ((value >> 24) == SPIRE_BRIDGE_DRAW_REQUEST) {
         spire_draw_answer(c, l, serial_number, quest_number, value);
         return true;
@@ -6402,6 +6406,25 @@ void spire_follow_note_register(
   } catch (const std::exception& e) {
     c->log.warning_f("Spire follow: failed to note r{}: {}", register_number, e.what());
   }
+}
+
+void spire_follow_hold_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    const auto& reg = c->require_server_state()->data->spire_follow_hold_register;
+    if (reg) {
+      uint32_t open = 0;
+      for (const auto& lc : l->clients) {
+        if (lc && (lc != c) && spire_follow_hold_open(lc.get(), lc, l->lobby_id)) {
+          open = 1;
+        }
+      }
+      spire_send_register(c, *reg, open);
+      c->log.info_f("Spire follow: hold ask; r{} = {} (a partner's shop is {})", *reg, open, open ? "open" : "not open");
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire follow: hold ask failed: {}", e.what());
+  }
+  spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
 }
 
 void spire_replay_note_register(

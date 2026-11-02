@@ -2161,6 +2161,15 @@ void run_static_tests() {
     auto c = std::make_shared<int>(3);
     expect(!spire_follow_hold_open(gone, c, 7));
     spire_follow_hold_forget(gone);
+    // critic spel-af-4 S1: the hold ask's letter is no other request's (r248 is shared by every request)
+    for (uint8_t other : {SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_BRIDGE_RESUME, SPIRE_BRIDGE_BASE_RETURN, SPIRE_BRIDGE_SHOP,
+             SPIRE_BRIDGE_RUN_MAG, SPIRE_BRIDGE_RUN_AGAIN, SPIRE_BRIDGE_DRAW_REQUEST, SPIRE_BRIDGE_MSG_WAVE,
+             SPIRE_BRIDGE_MSG_LIFE, SPIRE_BRIDGE_MSG_TIME, SPIRE_BRIDGE_MSG_PARTNER, SPIRE_BRIDGE_MSG_RUN_OVER,
+             SPIRE_BRIDGE_MSG_PAUSE_B, SPIRE_BRIDGE_MSG_DOWN, SPIRE_BRIDGE_MSG_HINT, SPIRE_BRIDGE_MSG_APPROACH,
+             SPIRE_BRIDGE_MSG_PROMPT, SPIRE_BRIDGE_REC_BEGIN, SPIRE_BRIDGE_REC_SCORE, SPIRE_BRIDGE_REC_FINISH,
+             SPIRE_BRIDGE_REC_BOARD, SPIRE_BRIDGE_TIMER_START, SPIRE_BRIDGE_TIMER_END}) {
+      expect_ne(other, SPIRE_BRIDGE_FOLLOW_HOLD_ASK);
+    }
   }
 
   phosg::log_info_f("-- Spire bridge: no window in a run, every run text is one line (v35)");

@@ -603,6 +603,15 @@ void spire_follow_note_register(
 void spire_follow_hold_note(const void* key, std::weak_ptr<const void> owner, uint32_t lobby_id, uint32_t value);
 bool spire_follow_hold_open(const void* key, const std::shared_ptr<const void>& owner, uint32_t lobby_id);
 void spire_follow_hold_forget(const void* key);
+// Critic spel-af-4 S1: the hold ask. A partner's write of the shop flag that reaches the leader while the leader loads
+// Sega's warp is lost there, and the replay comes 1.5 s after the load, after the leader's floor handler has already
+// looked at the flag. So the leader's floor handler asks 'R' << 24 in r248 before it waits for the partner's shop; the
+// server answers SpireFollowHoldRegister = 1 when another client of the game has its hold open (as the warp pass sees
+// it), else 0, then r248 = 'DONE'. The quest holds its other r248 writers meanwhile (r255, as for a server draw) and
+// goes on without an answer after a short wait, so an older newserv only costs that wait. Nothing but DONE without a
+// SpireFollowHoldRegister.
+constexpr uint8_t SPIRE_BRIDGE_FOLLOW_HOLD_ASK = 'R';
+void spire_follow_hold_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 
 // Called when a client has loaded a floor (6x1F, 6x21) or the game (6F). Never throws.
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);
