@@ -285,8 +285,8 @@ constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 61;
 // Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
 // the START answer carries an hp_mat level above 0 (the kit creates 2 x level HP Materials, rewards.py kit_meta) and the
 // client's start answer ('J') did not resume it (a resumed run gets no kit: its items come from the savestate).
-// already_sent: this client had the text in this run. v62 (B-REGIE-16-13): atp_grind no longer makes it due (the
-// grinders are a grind on the kit weapon); the level stays an argument for the callers' log lines.
+// already_sent: this client had the text in this run. An atp_grind level above 0 makes it due as well (B-REGIE-16-15:
+// before bundle 9 the kit holds Monogrinders to use; with a 'C' 13 the text names the grind, spire_kit_ticker_take).
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent);
 
 // Route B bundle 9 critic B-1: the kit and evolution texts follow what the quest did, not what the server can do (r143).

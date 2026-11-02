@@ -692,7 +692,7 @@ std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
     parts.emplace_back(std::format("Room {}{}", v[SPIRE_SS_K], has_variant ? variants[v[SPIRE_SS_VARIANT]] : ""));
   }
   if (v.size() > SPIRE_SS_LIVES) {
-    parts.emplace_back(std::format("{} lives", v[SPIRE_SS_LIVES]));
+    parts.emplace_back(std::format("{} {}", v[SPIRE_SS_LIVES], (v[SPIRE_SS_LIVES] == 1) ? "life" : "lives"));
   }
   if (v.size() > SPIRE_SS_ELAPSED) {
     uint32_t t = v[SPIRE_SS_ELAPSED];

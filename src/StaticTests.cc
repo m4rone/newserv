@@ -6172,9 +6172,9 @@ void run_static_tests() {
       expect_eq(size_t(2), lines.size());
       expect_eq(std::string("Saved run: Room 3 rest, 0 lives, 1:02:05."), lines.at(0)); // h:mm:ss from an hour on
       expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 3 rest."), lines.at(1));
-      expect_eq(std::string("Saved run: Room 7, 1 lives, 59:59."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3599)));
-      expect_eq(std::string("Saved run: Room 7, 1 lives, 1:00:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3600)));
-      expect_eq(std::string("Saved run: Room 7, 1 lives, 0:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 0)));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 59:59."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3599)));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 1:00:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3600)));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 0:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 0)));
     });
 
     b9_case("a missing field is left out", [&]() {
