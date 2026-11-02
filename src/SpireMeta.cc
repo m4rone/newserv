@@ -810,12 +810,12 @@ std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t in
       boss ? boss : std::format("room {}", k));
 }
 
-std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k) {
+std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k, bool checkpoint_new) {
   std::string what;
   auto add = [&](const std::string& s) {
     what += what.empty() ? s : std::format(", {}", s);
   };
-  if (k == 15) {
+  if ((k == 15) && checkpoint_new) { // kwaliteit-1 266: Run II only when this clear opened it (not after a practice run)
     add("Spire Run II");
   }
   if (cat) {
@@ -834,7 +834,8 @@ std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k
   return std::format("{} beaten! Unlocked: {}.", boss ? boss : std::format("Room {} boss", k), what);
 }
 
-bool spire_meta_record_boss(std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, std::string* text) {
+bool spire_meta_record_boss(
+    std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, bool checkpoint_new, std::string* text) {
   std::string filename = spire_meta_filename(c, serial_number);
   if (filename.empty() || !k) {
     return false;
@@ -852,7 +853,7 @@ bool spire_meta_record_boss(std::shared_ptr<Client> c, uint32_t serial_number, u
     c->log.warning_f("Spire meta: {} unreadable ({}); the unlock text names no shop level", SPIRE_SHOP_CATALOGUE_FILE,
         e.what());
   }
-  *text = spire_meta_boss_unlock_text(cat ? &*cat : nullptr, k);
+  *text = spire_meta_boss_unlock_text(cat ? &*cat : nullptr, k, checkpoint_new);
   c->log.info_f("Spire meta: boss room {} beaten for the first time; {} boss(es) in {}", k, file.bosses_beaten.size(),
       filename);
   return true;

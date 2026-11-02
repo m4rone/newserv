@@ -2303,6 +2303,7 @@ struct SpireRunRooms {
   uint32_t lobby_id = 0;
   std::set<uint8_t> rooms;
   std::set<uint8_t> boss_rooms;
+  std::set<uint8_t> checkpoint_new; // kwaliteit-1 266: rooms this game put into the checkpoint file first
 };
 static std::unordered_map<const Client*, SpireRunRooms> spire_run_rooms;
 
@@ -6502,7 +6503,8 @@ static void spire_checkpoint_record_boss(
       return;
     }
     std::string text;
-    if (spire_meta_record_boss(lc, serial_number, k, &text) && !text.empty()) {
+    bool checkpoint_new = spire_run_rooms_for(lc, l->lobby_id).checkpoint_new.count(k);
+    if (spire_meta_record_boss(lc, serial_number, k, checkpoint_new, &text) && !text.empty()) {
       spire_defer_to_lobby(lc, text);
     }
   } catch (const std::exception& e) {
@@ -6541,6 +6543,9 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
           spire_checkpoint_credit(l, lc, serial_number, payout, k, new_boss);
         }
         continue;
+      }
+      if (!known) {
+        run_rooms.checkpoint_new.emplace(k);
       }
       cp.rooms |= (1u << (k - 1));
       cp.last_room = k;

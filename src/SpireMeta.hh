@@ -301,11 +301,14 @@ std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t in
     const std::map<std::string, uint32_t>& upgrades, uint8_t k);
 // B-AF-1: what the first clear of boss room k opens, one line for the lobby ("" if it opens nothing): every shop level
 // whose Boss is k ("Start level 18"), and Spire Run II for Dark Falz (q922's AvailableIf reads SPIRE_K15).
-std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k);
+// kwaliteit-1 266: checkpoint_new is whether room k entered the character's checkpoint in this game; Run II is named
+// only then (a k15 checkpoint of an earlier run, a practice run too, opened it already).
+std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k, bool checkpoint_new);
 // B-AF-1: stores boss room k in the character's BossesBeaten. Returns true if it is new (then *text gets
 // spire_meta_boss_unlock_text, "" if it opens nothing), false if it was there or the client has no character data.
 // Throws on a file error.
-bool spire_meta_record_boss(std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, std::string* text);
+bool spire_meta_record_boss(
+    std::shared_ptr<Client> c, uint32_t serial_number, uint8_t k, bool checkpoint_new, std::string* text);
 // Route B F3: whether the character has the second-kit flag of its class's archetype (0x388 HU, 0x389 RA, 0x38A FO,
 // spire_meta_flags_for_finish) set on Normal. The flag is per difficulty and kit_tier is not: Normal is where every run
 // of a character starts, so a flag earned on a higher difficulty only does not make kit_tier a double buy.

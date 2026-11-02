@@ -1661,20 +1661,26 @@ void run_static_tests() {
         spire_shop_boss_needed_text(repo, 0, owned3, 11));
     expect_eq(std::string(""), spire_shop_boss_needed_text(repo, 0, owned3, 0));
     expect_eq(std::string("Vol Opt beaten! Unlocked: Start level 18 at the Quartermaster."),
-        spire_meta_boss_unlock_text(&repo, 11));
+        spire_meta_boss_unlock_text(&repo, 11, true));
     expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II, Start level 22 at the Quartermaster."),
-        spire_meta_boss_unlock_text(&repo, 15));
+        spire_meta_boss_unlock_text(&repo, 15, true));
     expect_eq(std::string("Olga Flow beaten! Unlocked: Start level 38 at the Quartermaster."),
-        spire_meta_boss_unlock_text(&repo, 30));
+        spire_meta_boss_unlock_text(&repo, 30, true));
     expect_eq(std::string("Gal Gryphon beaten! Unlocked: Start level 34 at the Quartermaster."),
-        spire_meta_boss_unlock_text(&repo, 27));
-    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 24)); // k24 is no boss room since spel-af item 5
-    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 4)); // Dragon: its pacts come at 'F' as before
-    expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15));
-    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 11));
+        spire_meta_boss_unlock_text(&repo, 27, true));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 24, true)); // k24 is no boss room since spel-af item 5
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 4, true)); // Dragon: its pacts come at 'F' as before
+    expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15, true));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 11, true));
+    // kwaliteit-1 266: Run II already open (k15 in the checkpoint before this game) is not named again
+    expect_eq(std::string("Dark Falz beaten! Unlocked: Start level 22 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 15, false));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 15, false));
+    expect_eq(std::string("Vol Opt beaten! Unlocked: Start level 18 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 11, false));
     for (uint8_t k : bosses) {
       expect(spire_meta_boss_name(k) != nullptr);
-      expect(!spire_meta_boss_unlock_text(&repo, k).empty());
+      expect(!spire_meta_boss_unlock_text(&repo, k, true).empty());
     }
     expect(spire_meta_boss_name(5) == nullptr);
     // spel-af item 5: the Episode 2 bosses by room k after the Central Control Area (k23-k26)
@@ -1698,7 +1704,7 @@ void run_static_tests() {
         "open_vh": {"Max": 1, "Price": [120], "PNeeded": 5},
         "open_ult": {"Max": 1, "Price": [240], "PNeeded": 9}},
       "MetaHeat": {"HAuto": {}}})");
-    expect_eq(std::string(""), spire_meta_boss_unlock_text(&half, 11));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&half, 11, true));
     // critic N5: a level above OnSale waits for no boss, so no ticker promises it
     expect_eq(0, spire_shop_boss_needed(half, 0, {{"start_level", 1}}, {}));
     // critic S1: a boss counts when the run starts the room after it, or (the episode's last boss) at a won run
