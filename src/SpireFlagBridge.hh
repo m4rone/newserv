@@ -355,14 +355,37 @@ struct SpireSavestate {
   // B-AF-7 (critic spel-af-2 S1): the run's start_level bonus at the 'V' ("StartBonus", spire_start_level_run), which a
   // resume puts back for the run mag's start floors; none in a file from before (then the bonus owned now).
   std::optional<uint32_t> start_bonus;
+  // kwaliteit-1 (observaties 209/216): the indices in items of the items the run copy had equipped at the 'V'
+  // ("Equipped"); none in a file from before (then the resume asks the player to equip all gear, as before). The quest
+  // creates every item new and unequipped (item_create2), so newserv equips the weapon and the mag again with
+  // SpireEquipItem (spire_resume_equip_targets) once the quest's resume item loop is done.
+  std::optional<std::vector<uint32_t>> equipped;
 };
 // The pure parts, for the static tests:
 // The items a savestate takes from a run copy: every item but empty slots, Scape Dolls and mags, in inventory order;
 // F6: the one exception is the run mag, an item whose 12 data1 bytes equal run_mag (the ledger's last mirrored run mag;
 // amendment 2: never matched by data1[1] alone), kept once. *glass_index is the position of the item whose id is
 // glass_item_id (0: none) among them, or -1.
+// kwaliteit-1: *equipped (if given) gets the positions among them of the items the inventory has equipped.
 std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id,
-    int32_t* glass_index, const SpireRunMagBytes& run_mag);
+    int32_t* glass_index, const SpireRunMagBytes& run_mag, std::vector<uint32_t>* equipped = nullptr);
+// kwaliteit-1: whether SpireEquipItem can equip this item on a resume: a weapon or a mag (the function answers 3 for
+// anything else, SpireEquipItemGC.s), so armor, shields and units stay the player's to equip.
+bool spire_resume_equip_by_server(const ItemData& item);
+// kwaliteit-1: what the resume start line asks the player to equip: " Equip your gear." when newserv equips nothing
+// (server_equips false: r143 = 0 for the client) or the savestate does not say what was equipped (a file from before);
+// else only the equipped items newserv cannot equip, by kind (" Equip your armor, shield and units."), or "" when
+// newserv equips them all.
+std::string spire_resume_equip_hint(const SpireSavestate& ss, bool server_equips);
+// kwaliteit-1: whether newserv equips the savestate's mag on the resume (it was equipped at the 'V'), so the resume mag
+// line (SPIRE_RESUME_MAG_TEXT) is not needed
+bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips);
+// kwaliteit-1: the item ids in inventory (newserv's copy of the run copy after the quest's resume item loop) to send
+// SpireEquipItem for: per weapon or mag equipped at the 'V', the first item with the same 12 data1 bytes (the quest's
+// item_create2 makes it from exactly those) that is not equipped and not taken yet, in savestate order. *expected (if
+// given) gets how many such saved items there are; fewer ids than that means some are not (yet) in the copy.
+std::vector<uint32_t> spire_resume_equip_targets(
+    const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected = nullptr);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
@@ -412,14 +435,17 @@ bool spire_run_counts_as_new(uint8_t start_k, bool resumed, bool practice);
 bool spire_practice_blocks_flag(bool practice, uint16_t flag_num);
 // The one ticker line at 'B': "Run resumed at room k: ..." (with the savestate), "Practice run: ...", or "" for a run
 // from its first room
-std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss);
+// kwaliteit-1: server_equips (r143 = 1 for the client) shortens the equip hint to what newserv cannot equip
+// (spire_resume_equip_hint).
+std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss, bool server_equips = false);
 // The second ticker line of a resumed run (F6): the savestate brings the ledger's run mag back
 // (spire_savestate_items), unequipped, so the line asks the player to equip it; "" when not resumed or the savestate
 // holds no mag. It follows the start line after SPIRE_RESUME_MAG_TEXT_DELAY, so it does not push that line aside (as
 // the room clear text, v36).
 constexpr const char* SPIRE_RESUME_MAG_TEXT = "Your Spire Mag comes back: equip it.";
 constexpr auto SPIRE_RESUME_MAG_TEXT_DELAY = std::chrono::milliseconds(4000);
-std::string spire_run_resume_mag_ticker(bool resumed, bool has_mag);
+// kwaliteit-1: "" also when newserv equips the mag itself (spire_resume_server_equips_mag)
+std::string spire_run_resume_mag_ticker(bool resumed, bool has_mag, bool server_equips_mag = false);
 // Route B F6 (amendment 3): an in-game 61 refreshed this client's overlay (on_61_98 writes it there); 'Z' is refused
 // and 'V' no longer updates the run mag ledger in that game until the next quest load. Called after every 61 the
 // bridge requests; does nothing outside a game or without an overlay.

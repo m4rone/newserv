@@ -5859,6 +5859,86 @@ void run_static_tests() {
     }
     expect_eq(std::string("Practice run: records and unlocks do not count."), spire_run_start_ticker(false, true, nullptr));
     expect(spire_run_start_ticker(false, false, nullptr).empty());
+    {
+      // kwaliteit-1 (observaties 209/216): the savestate keeps what the run copy had equipped, and a resume with r143 = 1
+      // equips the weapon and the mag again (SpireEquipItem) and asks only for what that function cannot equip
+      PlayerInventory worn;
+      worn.num_items = 7;
+      auto wear = [&](size_t z, std::array<uint8_t, 12> d1, uint32_t id, bool on) {
+        for (size_t i = 0; i < 12; i++) {
+          worn.items[z].data.data1[i] = d1[i];
+        }
+        worn.items[z].data.id = id;
+        worn.items[z].flags = on ? 0x00000008 : 0;
+      };
+      wear(1, {0x00, 0x01, 0x00, 0x05, 0x8A, 0, 0, 0, 0, 0, 0, 0}, 0x00810001, true); // Saber +5, equipped
+      wear(2, {0x00, 0x05, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810002, false); // a second weapon
+      wear(4, {0x03, 0x00, 0x00, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00810003, false); // Monomate x4
+      wear(5, {0x01, 0x01, 0x05, 0x00, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810005, true); // a frame, equipped
+      wear(6, {0x01, 0x03, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00810006, false); // a unit, not equipped
+      std::vector<uint32_t> eq;
+      int32_t g = 0;
+      auto saved = spire_savestate_items(worn, 0, &g, std::nullopt, &eq);
+      expect_eq(5u, saved.size()); // Saber, second weapon, Monomates, frame, unit
+      expect_eq(2u, eq.size());
+      expect_eq(0u, eq[0]); // the Saber
+      expect_eq(3u, eq[1]); // the frame
+      SpireSavestate rs = ss;
+      rs.run_id = 0x12345678;
+      rs.items = saved;
+      rs.equipped = eq;
+      auto back = spire_savestate_from_json(spire_savestate_to_json(rs, 1234567890));
+      expect(back.equipped.has_value() && (*back.equipped == eq));
+      SpireSavestate before = rs; // a file from before this change: no "Equipped"
+      before.equipped.reset();
+      expect(!spire_savestate_from_json(spire_savestate_to_json(before, 1234567890)).equipped.has_value());
+      // the start line: the frame is the player's, the Saber newserv's
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your armor."),
+          spire_run_start_ticker(true, false, &rs, true));
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
+          spire_run_start_ticker(true, false, &rs, false)); // r143 = 0: all by hand, as before
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
+          spire_run_start_ticker(true, false, &before, true)); // no record of what was equipped
+      SpireSavestate weapon_only = rs;
+      weapon_only.equipped = std::vector<uint32_t>{0};
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &weapon_only, true));
+      SpireSavestate all_kinds = rs;
+      all_kinds.equipped = std::vector<uint32_t>{0, 3, 4};
+      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your armor and units."),
+          spire_run_start_ticker(true, true, &all_kinds, true));
+      // after the quest's item loop newserv's copy holds the items again, new ids, none equipped: the Saber is the target
+      PlayerInventory after;
+      after.num_items = saved.size();
+      for (size_t z = 0; z < saved.size(); z++) {
+        after.items[z].data = saved[z];
+        after.items[z].data.id = 0x00010000 + z;
+      }
+      size_t expected = 99;
+      auto ids = spire_resume_equip_targets(rs, after, &expected);
+      expect_eq(1u, expected); // the frame is not SpireEquipItem's (it answers 3)
+      expect_eq(1u, ids.size());
+      expect_eq(0x00010000u, ids[0]);
+      expect_eq(std::string(SPIRE_EQUIP_WEAPON_MISSING_TEXT),
+          spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).value_or(""));
+      after.items[0].flags = 0x00000008; // the 6x25 came
+      expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).has_value());
+      expect(spire_resume_equip_targets(rs, after, &expected).empty()); // already equipped: nothing to send
+      PlayerInventory not_yet; // the item_create2 6x2Bs not in yet
+      expect(spire_resume_equip_targets(rs, not_yet, &expected).empty());
+      expect_eq(1u, expected);
+      // the run mag: equipped at the save point, so newserv equips it and its line is not sent
+      SpireSavestate with_mag = rs;
+      ItemData mag;
+      mag.data1[0] = 0x02;
+      mag.data1[1] = 0x01;
+      with_mag.items.emplace_back(mag);
+      with_mag.equipped->emplace_back(with_mag.items.size() - 1);
+      expect(spire_resume_server_equips_mag(with_mag, true));
+      expect(!spire_resume_server_equips_mag(with_mag, false));
+      expect(!spire_resume_server_equips_mag(rs, true));
+      expect(spire_run_resume_mag_ticker(true, true, true).empty());
+      expect_eq(std::string(SPIRE_RESUME_MAG_TEXT), spire_run_resume_mag_ticker(true, true, false));
+    }
     for (const auto& line : {spire_run_start_ticker(true, true, &ss), spire_run_start_ticker(false, true, nullptr)}) {
       expect_eq(line, spire_ticker_line(line)); // one line, no window in a run (v35)
     }
