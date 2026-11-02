@@ -1332,6 +1332,21 @@ void DataIndex::load_spire_checkpoint_config() {
     config_log.info_f("SpireCheckpointArrivals: {} floor(s)", count);
   } catch (const std::out_of_range&) {
   }
+  this->spire_room_quests.clear();
+  try {
+    for (const auto& item : this->config_json->get_list("SpireRoomQuests")) { // B-AF-3
+      int64_t quest = item->get_int("Quest", 0), k = item->get_int("K", 0), variant = item->get_int("Variant", -1);
+      int64_t episode = item->get_int("Episode", 1);
+      if ((quest < 1) || (k < 1) || (k > 31) || (variant < 0) || (variant > 2) ||
+          ((episode != 1) && (episode != 2) && (episode != 4))) {
+        throw std::runtime_error("SpireRoomQuests: Quest above 0, Episode 1, 2 or 4, K 1-31, Variant 0-2");
+      }
+      this->spire_room_quests[quest] = SpireRoomQuest{
+          static_cast<uint8_t>(episode), static_cast<uint8_t>(k), static_cast<uint8_t>(variant)};
+    }
+    config_log.info_f("SpireRoomQuests: {} quest(s)", this->spire_room_quests.size());
+  } catch (const std::out_of_range&) {
+  }
 }
 
 void DataIndex::load_config_late() {

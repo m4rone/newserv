@@ -334,6 +334,10 @@ struct SpireSavestate {
   int32_t glass_index = -1; // index in items of the Glass run item, -1 = none
   uint64_t time_usecs = 0;
   std::optional<SpireRunMagLedger> run_mag; // F6: the run mag ledger of this run ("RunMag"), if the run has one
+  // B-AF-3 (spel-af): the run copy's level at the 'V' (0-based, as ba_set_char_level), "Level"; none in a file from
+  // before. The server knows it from the client's own level-ups (6x30 on the overlay); the EXP within a level it does
+  // not know on GC (the client keeps it), so a resume gives Sega's EXP of that level.
+  std::optional<uint32_t> level;
 };
 // The pure parts, for the static tests:
 // The items a savestate takes from a run copy: every item but empty slots, Scape Dolls and mags, in inventory order;
@@ -390,6 +394,11 @@ constexpr auto SPIRE_KIT_USE_TEXT_DELAY = std::chrono::milliseconds(3000);
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
 std::string spire_savestate_continue_text(const SpireSavestate& ss);
+// B-AF-3: the level a room quest's rule block carries for a client at the quest load: its own savestate's level when
+// the 'J' of that quest will resume it (own and leader savestate fit the quest's episode, room and variant, the same
+// run id, own has a level), else nothing (the quest's own level plus the start_level bonus, as before). Pure.
+std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
+    uint8_t k, uint8_t variant);
 
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
 // a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client

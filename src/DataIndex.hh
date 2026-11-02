@@ -189,7 +189,16 @@ struct DataIndex {
   // episode e (missing: 1) has done room k (a rest room has no fight the server can see, so the floor of the room after
   // it is its checkpoint). Keyed by episode, then floor.
   std::map<uint8_t, std::map<uint8_t, uint8_t>> spire_checkpoint_arrivals;
-  // Parses the two keys above from config_json (called by load_config_early).
+  // B-AF-3: SpireRoomQuests [{"Quest": n, "Episode": e, "K": k, "Variant": v}, ...]: the room and variant (0 normal,
+  // 1 elite, 2 rest) a room quest starts at, as its 'J' says (episode missing: 1). The server needs it at the quest
+  // load, before the 'J', to give a resuming client its saved level in the rule block. Keyed by quest number.
+  struct SpireRoomQuest {
+    uint8_t episode = 1;
+    uint8_t k = 0;
+    uint8_t variant = 0;
+  };
+  std::map<uint32_t, SpireRoomQuest> spire_room_quests;
+  // Parses the keys above from config_json (called by load_config_early).
   void load_spire_checkpoint_config();
   // v23 replay: SpireReplayRegisters [n, ...], the quest registers whose latest 6x77 value the server keeps per game and
   // sends again to a client after its own floor load (a packet that arrives during a load can be lost); empty means off.
