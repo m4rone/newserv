@@ -4922,6 +4922,21 @@ int main(int argc, char** argv) {
     phosg::log_error_f("Unknown or invalid action; try --help");
     return 1;
   }
-  a->run(args);
+  // The server (the action without a name) runs as before, so a real server crash still leaves a core dump. Every other
+  // action is a tool run (run-static-tests, decompress-prs, ...): an exception there is an error line and exit 1, not a
+  // terminate/SIGABRT (a core dump and a crash notice on the desktop for a failed check or a missing file).
+  if (action_name.empty()) {
+    a->run(args);
+    return 0;
+  }
+  try {
+    a->run(args);
+  } catch (const std::exception& e) {
+    phosg::log_error_f("{}: {}", action_name, e.what());
+    return 1;
+  } catch (...) {
+    phosg::log_error_f("{}: unknown exception", action_name);
+    return 1;
+  }
   return 0;
 }
