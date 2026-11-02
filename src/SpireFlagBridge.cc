@@ -775,7 +775,7 @@ struct SpireClientRun {
   uint8_t start_room = 0;
   std::map<uint32_t, uint32_t> draws_per_room; // n-th draw per room (seed)
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
-  int kit_grind = -1; // route B bundle 9: the grind G of this client's 'C' 13 in this run, -1 = none came
+  SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
@@ -2472,16 +2472,15 @@ static asio::awaitable<void> spire_kit_use_text_later(
   auto* cr = spire_client_run_for(c, l, true);
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     cr->kit_text_sent = true;
-    // route B bundle 9: with r143 = 1 the kit weapon carries the grind G of the client's 'C' 13 (not come yet: the
-    // quest's G, 2 Monogrinders per atp_grind level, which no kit weapon's MaxGrind caps) and no Monogrinders
-    bool server_equips = spire_equip_item_available_for(c);
-    uint32_t grind = (cr->kit_grind >= 0) ? static_cast<uint32_t>(cr->kit_grind) : 2 * atp_grind;
-    std::string text = spire_kit_use_text(server_equips, grind, hp_mat);
+    // route B bundle 9 critic B-1: the bundle 9 form only after this client's 'C' 13 (the quest made the kit weapon +G
+    // and gave no Monogrinders); a later 'C' 13 sends that line then (spire_equip_prompt_handle)
+    std::string text = spire_kit_ticker_take(cr->b9_texts, hp_mat, atp_grind);
     if (!text.empty()) {
       spire_send_ticker(c, text);
     }
-    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {} r{} {}; sent \"{}\"", hp_mat, atp_grind, SPIRE_EQUIP_REGISTER,
-        server_equips ? 1 : 0, text);
+    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {} r{} {} 'C' 13 {}; sent \"{}\"", hp_mat, atp_grind,
+        SPIRE_EQUIP_REGISTER, spire_equip_item_available_for(c) ? 1 : 0,
+        (cr->b9_texts.kit_grind >= 0) ? std::format("G {}", cr->b9_texts.kit_grind) : std::string("not yet"), text);
   } else {
     c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; no kit text ({})", hp_mat, atp_grind,
         cr->answered_resume ? "resumed: no kit" : "already sent in this run");
@@ -2652,8 +2651,16 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
   }
   uint8_t low = value & 0xFF;
   const char* what = (point == SPIRE_PROMPT_KIT_GROUND) ? "kit weapon" : "run mag";
+  auto* cr = spire_client_run_for(c, l, true);
   if (point == SPIRE_PROMPT_KIT_GROUND) {
-    spire_client_run_for(c, l, true)->kit_grind = low;
+    // critic B-1: the kit ticker went out before this 'C' 13 in the old form: the bundle 9 line now, once
+    std::string late = spire_kit_c13_take(cr->b9_texts, low);
+    if (!late.empty()) {
+      spire_send_ticker(c, late);
+      c->log.info_f("Spire equip: 'C' 13 after the kit ticker; sent \"{}\"", late);
+    }
+  } else {
+    cr->b9_texts.mag_c14_seen = true; // critic B-1: the evolution text of this RESULT 1 drops the equip hint
   }
   bool available = spire_equip_item_available_for(c);
   std::optional<uint32_t> item_id;
@@ -2687,6 +2694,23 @@ bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<c
 
 // ---- Route B F6: the run mag request 'Z' (SpireMag.hh; contract: quests/spire/ROUTEB-F6-PROTOCOL.md)
 static std::string spire_guard_filename_for(std::shared_ptr<Client> c, uint32_t serial_number);
+
+// Route B bundle 9 critic B-1: the evolution text, SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1, with the
+// "Equip it" hint unless that RESULT's 'C' 14 came (then newserv equips the mag)
+static asio::awaitable<void> spire_run_mag_evolve_text_later(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, std::string name, bool shell) {
+  co_await async_sleep(SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  auto* cr = spire_client_run_for(c, l, true);
+  std::string text = spire_run_mag_evolve_text_take(cr->b9_texts, name, shell);
+  spire_send_ticker(c, text);
+  c->log.info_f("Spire run mag: evolution text{}: \"{}\"", cr->b9_texts.mag_c14_seen ? " after 'C' 14" : " (no 'C' 14)",
+      text);
+}
 
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -2743,7 +2767,14 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
-        spire_send_ticker(c, (before < 0) ? spire_run_mag_reminder_text(offered_shell) : spire_run_mag_evolve_text(name, offered_shell, spire_equip_item_available_for(c)));
+        if (before < 0) {
+          spire_send_ticker(c, spire_run_mag_reminder_text(offered_shell));
+        } else {
+          // critic B-1: the 'C' 14 follows this RESULT 1 in the same quest frame; the text waits for it
+          spire_client_run_for(c, l, true)->b9_texts.mag_c14_seen = false;
+          asio::co_spawn(*c->require_server_state()->io_context,
+              spire_run_mag_evolve_text_later(c, l, name, offered_shell), asio::detached);
+        }
         c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {}{} {} (run {:08X})",
             serial_number, quest_number, led->issued_step, name, offered_shell ? " (Shell)" : "",
             spire_run_mag_bytes_hex(*offered), run->run_id);

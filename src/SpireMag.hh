@@ -265,13 +265,14 @@ constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: e
 // v62: unchanged in bundle 8. The grind on the kit weapon moved to bundle 9 (B-REGIE-16-15: equip_item cannot set a
 // grind), so the kit still holds Monogrinders to use next to the HP Materials
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
-// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): the kit ticker of a client with r143 = 1 (SpireEquipItem.hh). The quest
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): the kit ticker after the client's 'C' 13 (critic B-1). The quest
 // then gives no Monogrinders but makes the kit weapon with grind G, so the text names the grind and only the HP
 // Materials: "Your kit weapon is ground +<G>. Use your HP Materials now (Item Pack)." Without HP Materials (hp_mat 0)
 // only the grind sentence; G 0 (atp_grind 0) only the HP Materials sentence. server_equips false: SPIRE_KIT_USE_TEXT.
 std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level);
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before. Bundle 9:
-// server_equips (r143 = 1, the server equips the new mag at 'C' 14) drops " Equip it: Item Pack > Mag."
+// server_equips (its RESULT's 'C' 14 came, so the server equips the new mag; spire_run_mag_evolve_text_take) drops
+// " Equip it: Item Pack > Mag."
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false, bool server_equips = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
 // round (F10S critic N4): a Shell mag names the choice as the evolve text does; otherwise SPIRE_RUN_MAG_REMINDER_TEXT.
@@ -287,6 +288,27 @@ constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 61;
 // already_sent: this client had the text in this run. v62 (B-REGIE-16-13): atp_grind no longer makes it due (the
 // grinders are a grind on the kit weapon); the level stays an argument for the callers' log lines.
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent);
+
+// Route B bundle 9 critic B-1: the kit and evolution texts follow what the quest did, not what the server can do (r143).
+// Only a quest that sends 'C' 13 made the kit weapon +G without Monogrinders, and only after a 'C' 14 does newserv
+// equip the new mag; an older quest (live 8.1, the reward bundle, spel-af) on this newserv keeps the texts of before.
+// One per client and run (SpireClientRun); mag_c14_seen is cleared at each RESULT 1 and set by its 'C' 14.
+struct SpireKitMagTexts {
+  bool kit_sent = false; // the kit ticker went out (either form)
+  bool kit_b9_sent = false; // the bundle 9 form went out
+  int kit_grind = -1; // the grind G of the 'C' 13, -1 = none came
+  uint32_t kit_hp_mat = 0; // the hp_mat level of the kit ticker
+  bool mag_c14_seen = false; // a 'C' 14 came since the last RESULT 1
+};
+// The kit ticker (SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, when spire_kit_use_text_due): the bundle 9 form
+// after a 'C' 13, otherwise SPIRE_KIT_USE_TEXT. Marks the state sent.
+std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, uint32_t atp_grind_level);
+// At 'C' 13 (grind G): stores G and returns the bundle 9 kit line when the ticker already went out in the old form
+// (the quest's kit was slower than the ticker, e.g. a leader's long lean list), once; "" otherwise.
+std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind);
+// The evolution text SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1: without the hint only when that RESULT's
+// 'C' 14 came.
+std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell);
 
 // Route B bundle 2 S: the boss burst text. The quest (F7, make_spire.py boss_burst) casts Shifta, and Deband unless
 // the boss modifier is Furious or Elite, on each player at the door of every boss room from k8 on (not the Dragon at

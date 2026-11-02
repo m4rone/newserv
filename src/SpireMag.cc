@@ -485,6 +485,29 @@ bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grin
   return start && (hp_mat_level || atp_grind_level) && !resumed && !already_sent;
 }
 
+std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, uint32_t) {
+  st.kit_sent = true;
+  st.kit_hp_mat = hp_mat_level;
+  if (st.kit_grind < 0) {
+    return SPIRE_KIT_USE_TEXT; // no 'C' 13 (yet): the quest's kit as before bundle 9, or spire_kit_c13_take follows
+  }
+  st.kit_b9_sent = true;
+  return spire_kit_use_text(true, static_cast<uint32_t>(st.kit_grind), hp_mat_level);
+}
+
+std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind) {
+  st.kit_grind = grind;
+  if (!st.kit_sent || st.kit_b9_sent) {
+    return "";
+  }
+  st.kit_b9_sent = true;
+  return spire_kit_use_text(true, grind, st.kit_hp_mat);
+}
+
+std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell) {
+  return spire_run_mag_evolve_text(sega_name, shell, st.mag_c14_seen);
+}
+
 bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms) {
   if ((room_k < SPIRE_BOSS_BURST_FROM_K) || !boss_rooms.count(room_k)) {
     return false;

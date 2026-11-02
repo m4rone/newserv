@@ -399,6 +399,9 @@ std::string spire_run_resume_mag_ticker(bool resumed, bool has_mag);
 void spire_run_mag_note_in_game_61(std::shared_ptr<const Client> c);
 // Route B F6: the kit text follows the 'M' START answer by this much, so the kit items exist when it shows
 constexpr auto SPIRE_KIT_USE_TEXT_DELAY = std::chrono::milliseconds(3000);
+// Route B bundle 9 critic B-1: the evolution text waits this long after its RESULT 1 for the 'C' 14 that the quest
+// sends in the same frame (make_spire.py report_send)
+constexpr auto SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY = std::chrono::milliseconds(500);
 // The seed of the draw 'Q' of a run: run id, room, n-th draw of the client in that room and the input values.
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests

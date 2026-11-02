@@ -6401,6 +6401,29 @@ void run_static_tests() {
       }
     });
 
+    b9_case("critic B-1: the texts follow the quest's 'C' 13/14, not r143", [&]() {
+      // an older quest (no 'C' 13/14) on this newserv, r143 = 1: the texts of today
+      SpireKitMagTexts old_quest;
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(old_quest, 5, 3));
+      expect(old_quest.kit_sent && !old_quest.kit_b9_sent);
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+          spire_run_mag_evolve_text_take(old_quest, "Varuna", false));
+      // the bundle 9 quest: 'C' 13 before the ticker, 'C' 14 after the RESULT 1
+      SpireKitMagTexts new_quest;
+      expect(spire_kit_c13_take(new_quest, 10).empty()); // the ticker has not gone out: nothing late
+      expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."),
+          spire_kit_ticker_take(new_quest, 5, 3));
+      expect(new_quest.kit_b9_sent);
+      new_quest.mag_c14_seen = true;
+      expect_eq(std::string("Your mag evolves: Kabanda (Shell)."), spire_run_mag_evolve_text_take(new_quest, "Kabanda", true));
+      // a slow leader: the ticker before the 'C' 13 gives the old line, the 'C' 13 then the bundle 9 line, once
+      SpireKitMagTexts slow;
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(slow, 2, 2));
+      expect_eq(std::string("Your kit weapon is ground +4. Use your HP Materials now (Item Pack)."), spire_kit_c13_take(slow, 4));
+      expect(slow.kit_b9_sent);
+      expect(spire_kit_c13_take(slow, 4).empty());
+    });
+
     expect_eq(0u, b9_failed);
   }
 
