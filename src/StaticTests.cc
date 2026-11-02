@@ -6209,6 +6209,13 @@ void run_static_tests() {
           spire_bridge_message_text(0x43000F1F, with_names)); // index beyond the list
     });
 
+    b8_case("'C' 16 a waiting relic gift now in the pack (kwaliteit-1 relic gift)", [&]() {
+      expect_eq(std::string("Hoarder: your waiting gift is now in your pack."), spire_bridge_message_text(0x43001001));
+      expect_eq(std::string("Sol Atomizer: your waiting gift is now in your pack."),
+          spire_bridge_message_text(0x43001004));
+      expect_eq(std::string("Your waiting gift is now in your pack."), spire_bridge_message_text(0x43001009));
+    });
+
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));

@@ -2112,6 +2112,10 @@ static std::string spire_text_exam_reward_waiting(uint32_t value, const SpireBri
   return spire_text_first_fitting({form(true, true), form(false, true), form(false, false)});
 }
 
+// 'C' 12 and 'C' 16: the relic gifts by rewards.py GIFT_KIND (1 Hoarder ... 5 Thread)
+static const std::array<const char*, 6> spire_relic_gift_names = {
+    "", "Hoarder", "Whetstone", "Sea of Fire", "Sol Atomizer", "Thread"};
+
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
 // texts; <color N> as $CN, <color 0> as $C7); empty if the value is no message code. v35: one line each, the form of
 // "Waiting for your partner..." (no window during a run, see spire_ticker_line); v49: the run-over text names no
@@ -2166,11 +2170,17 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           if ((value >> 23) & 1) {
             return spire_text_exam_reward_waiting(value, ctx);
           }
-          static const std::array<const char*, 6> gifts = {"", "Hoarder", "Whetstone", "Sea of Fire", "Sol Atomizer", "Thread"};
           uint32_t gift = value & 0xFF;
-          return (gift >= 1) && (gift < gifts.size())
-              ? std::format("{}: inventory full. Make room, it waits.", gifts[gift])
+          return (gift >= 1) && (gift < spire_relic_gift_names.size())
+              ? std::format("{}: inventory full. Make room, it waits.", spire_relic_gift_names[gift])
               : "Inventory full: make room, it waits.";
+        }
+        case 16: { // kwaliteit-1 relic gift: a relic gift that waited (rewards.py gw_retry) is now in the pack; low byte
+          // the gift as in 'C' 12 (rewards.py GIFT_KIND)
+          uint32_t gift = value & 0xFF;
+          return (gift >= 1) && (gift < spire_relic_gift_names.size())
+              ? std::format("{}: your waiting gift is now in your pack.", spire_relic_gift_names[gift])
+              : "Your waiting gift is now in your pack.";
         }
         case 15: { // kwaliteit-1 239: an exam extra that waited (rewards.py ex_retry) is now in the pack; low byte
           // bits 0-4 its exam_extras index + 1 (the layout of 'C' 10's extra)
