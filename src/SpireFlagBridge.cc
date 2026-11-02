@@ -2076,6 +2076,8 @@ uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_
   return static_cast<uint32_t>(std::min<uint64_t>(ret, 0xFFFFFFFF));
 }
 
+static void spire_replay_forget(std::shared_ptr<const Lobby> l);
+
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
   spire_follow_hold_forget(c.get()); // B-AF-10
@@ -2090,6 +2092,9 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
     if (spire_game_runs.erase(l->lobby_id)) {
       c->log.info_f("Spire savestate: the run of this game forgotten at the quest start");
     }
+    // critic spel-af-4 S2: no register of an earlier quest in this game is replayed in the new one (as at 'I'); a shop
+    // flag of 1 left from a run that ended with the follower in its shop would hold the leader in partner_shop_wait
+    spire_replay_forget(l);
   }
   if (spire_checkpoint_lives_forget(c.get())) {
     c->log.info_f("Spire checkpoint: lives of the previous run forgotten at the quest start");
