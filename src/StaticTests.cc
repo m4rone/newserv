@@ -5725,6 +5725,12 @@ void run_static_tests() {
         expect_eq(std::string("Spire room 5 elite"), name);
         expect(!spire_savestate_notice_pick(stem, 2, &name).exists); // nothing parked on Very Hard: no notice
         expect(name.empty());
+        // critic spel-af-4b S-1: ...but a line that says where the run waits (the lowest other difficulty)
+        expect(spire_savestate_notice_elsewhere(stem, 2) == std::optional<uint8_t>(0));
+        expect(spire_savestate_notice_elsewhere(stem, 0) == std::optional<uint8_t>(1));
+        expect(!spire_savestate_notice_elsewhere(stem + "-none", 0)); // no run anywhere: no line
+        expect_eq(std::string("Your Hard run is saved: start a game on Hard to continue."),
+            spire_savestate_elsewhere_text(1));
         spire_savestate_store_rung(stem, 1, spire_savestate_to_json(hard, 42)); // back to the Hard run of before
         expect_eq(hard_file, hard_room_file);
       }

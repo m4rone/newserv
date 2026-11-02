@@ -227,6 +227,8 @@ public:
   // Route B bundle 9 (SpireFlagBridge.hh, spire_savestate_notice_on_game_join): the save point notice went out in
   // this session
   bool spire_savestate_told = false;
+  // critic spel-af-4b S-1: the line that the run waits on another difficulty went out in this session
+  bool spire_savestate_elsewhere_told = false;
 
   // File loading state
   std::unordered_map<std::string, std::shared_ptr<const std::string>> sending_files;

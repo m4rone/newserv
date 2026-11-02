@@ -748,6 +748,20 @@ SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t diff
   return ss;
 }
 
+std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty) {
+  for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
+    if ((rung != (difficulty & 3)) && spire_savestate_load_rung(stem, rung).exists) {
+      return rung;
+    }
+  }
+  return std::nullopt;
+}
+
+std::string spire_savestate_elsewhere_text(uint8_t rung) {
+  return std::format("Your {} run is saved: start a game on {} to continue.", spire_meta_difficulty_name(rung),
+      spire_meta_difficulty_name(rung));
+}
+
 std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
   static const char* variants[] = {"", " elite", " rest"};
   const auto& v = ss.values;
@@ -6649,10 +6663,20 @@ void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_
     }
     // B-REGIE-18-6: the savestate of the game's difficulty, the one its room quests resume, and that difficulty's room
     // quest; unreadable: logged, read as none
-    std::string category_name, quest_name;
+    std::string category_name, quest_name, stem = spire_savestate_stem(c);
+    uint8_t difficulty = static_cast<uint8_t>(l->difficulty);
     SpireSavestate ss;
     try {
-      ss = spire_savestate_notice_pick(spire_savestate_stem(c), static_cast<uint8_t>(l->difficulty), &quest_name);
+      ss = spire_savestate_notice_pick(stem, difficulty, &quest_name);
+      // critic spel-af-4b S-1: the run waits on another difficulty: say which, once per session
+      auto other = (ss.exists || c->spire_savestate_elsewhere_told) ? std::nullopt
+                                                                    : spire_savestate_notice_elsewhere(stem, difficulty);
+      if (other) {
+        c->spire_savestate_elsewhere_told = true;
+        spire_send_ticker(c, spire_savestate_elsewhere_text(*other));
+        c->log.info_f("Spire savestate: no savestate on {}, one on {}; said so at game join",
+            spire_meta_difficulty_name(difficulty), spire_meta_difficulty_name(*other));
+      }
     } catch (const std::exception& e) {
       c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
       return;
