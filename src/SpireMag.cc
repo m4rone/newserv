@@ -485,6 +485,10 @@ bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grin
   return start && (hp_mat_level || atp_grind_level) && !resumed && !already_sent;
 }
 
+bool spire_kit_ticker_waits_for_c13(const SpireKitMagTexts& st, bool server_equips) {
+  return server_equips && (st.kit_grind < 0);
+}
+
 std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, uint32_t) {
   st.kit_sent = true;
   st.kit_hp_mat = hp_mat_level;
@@ -502,6 +506,12 @@ std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind) {
   }
   st.kit_b9_sent = true;
   return spire_kit_use_text(true, grind, st.kit_hp_mat);
+}
+
+void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent) {
+  if (equip_sent) {
+    st.mag_c14_seen = true;
+  }
 }
 
 std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell) {

@@ -292,22 +292,30 @@ bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grin
 // Route B bundle 9 critic B-1: the kit and evolution texts follow what the quest did, not what the server can do (r143).
 // Only a quest that sends 'C' 13 made the kit weapon +G without Monogrinders, and only after a 'C' 14 does newserv
 // equip the new mag; an older quest (live 8.1, the reward bundle, spel-af) on this newserv keeps the texts of before.
-// One per client and run (SpireClientRun); mag_c14_seen is cleared at each RESULT 1 and set by its 'C' 14.
+// One per client and run (SpireClientRun); mag_c14_seen is cleared at each RESULT 1 and set by its 'C' 14 when newserv
+// equips the mag for it (spire_run_mag_c14_take).
 struct SpireKitMagTexts {
   bool kit_sent = false; // the kit ticker went out (either form)
   bool kit_b9_sent = false; // the bundle 9 form went out
   int kit_grind = -1; // the grind G of the 'C' 13, -1 = none came
   uint32_t kit_hp_mat = 0; // the hp_mat level of the kit ticker
-  bool mag_c14_seen = false; // a 'C' 14 came since the last RESULT 1
+  bool mag_c14_seen = false; // a 'C' 14 came since the last RESULT 1 and newserv sent SpireEquipItem for it
 };
+// critic r2 (B-1, a slow leader): when the kit ticker is due, whether it waits one SPIRE_KIT_USE_TEXT_DELAY more for
+// the 'C' 13: only while none came and the server would equip (r143 = 1), so a bundle 9 quest's line does not follow
+// the old one. Once per ticker (spire_kit_use_text_later).
+bool spire_kit_ticker_waits_for_c13(const SpireKitMagTexts& st, bool server_equips);
 // The kit ticker (SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, when spire_kit_use_text_due): the bundle 9 form
 // after a 'C' 13, otherwise SPIRE_KIT_USE_TEXT. Marks the state sent.
 std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, uint32_t atp_grind_level);
 // At 'C' 13 (grind G): stores G and returns the bundle 9 kit line when the ticker already went out in the old form
 // (the quest's kit was slower than the ticker, e.g. a leader's long lean list), once; "" otherwise.
 std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind);
+// At 'C' 14: the evolution text drops its equip hint only when newserv sends SpireEquipItem for the mag (equip_sent);
+// the quest sends 'C' 14 also with r143 = 0 (critic r2).
+void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent);
 // The evolution text SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1: without the hint only when that RESULT's
-// 'C' 14 came.
+// 'C' 14 came and newserv equips the mag.
 std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell);
 
 // Route B bundle 2 S: the boss burst text. The quest (F7, make_spire.py boss_burst) casts Shifta, and Deband unless

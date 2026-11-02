@@ -2521,6 +2521,19 @@ static asio::awaitable<void> spire_kit_use_text_later(
     co_return;
   }
   auto* cr = spire_client_run_for(c, l, true);
+  // critic r2 (B-1, a slow leader): r143 = 1 and no 'C' 13 yet: one more delay, so a bundle 9 quest's line does not
+  // follow the old one that names grinders it did not give; an old quest on r143 = 1 gets its old line that much later
+  if (spire_kit_ticker_waits_for_c13(cr->b9_texts, spire_equip_item_available_for(c))) {
+    c.reset();
+    l.reset();
+    co_await async_sleep(SPIRE_KIT_USE_TEXT_DELAY);
+    c = weak_c.lock();
+    l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    cr = spire_client_run_for(c, l, true);
+  }
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     cr->kit_text_sent = true;
     // route B bundle 9 critic B-1: the bundle 9 form only after this client's 'C' 13 (the quest made the kit weapon +G
@@ -2710,7 +2723,9 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, ui
                : std::string("equipped (or gone): no line"));
     }
   } catch (const std::exception& e) {
-    c->log.warning_f("Spire equip: {} {:08X}; equip check failed: {}", what, item_id, e.what());
+    if (c) { // critic r2: c is empty from c.reset() on, and stays so when the client left during the wait
+      c->log.warning_f("Spire equip: {} {:08X}; equip check failed: {}", what, item_id, e.what());
+    }
   }
 }
 
@@ -2734,8 +2749,6 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
       spire_send_ticker(c, late);
       c->log.info_f("Spire equip: 'C' 13 after the kit ticker; sent \"{}\"", late);
     }
-  } else {
-    cr->b9_texts.mag_c14_seen = true; // critic B-1: the evolution text of this RESULT 1 drops the equip hint
   }
   bool available = spire_equip_item_available_for(c);
   std::optional<uint32_t> item_id;
@@ -2743,6 +2756,11 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
     if (auto character = c->character_file(false, true)) {
       item_id = spire_equip_target(point, low, true, character->inventory);
     }
+  }
+  if (point == SPIRE_PROMPT_RUN_MAG_REPLACED) {
+    // critic B-1 (r2): the quest sends 'C' 14 also with r143 = 0; the evolution text drops its equip hint only when
+    // newserv sends SpireEquipItem for the mag below
+    spire_run_mag_c14_take(cr->b9_texts, available && item_id.has_value());
   }
   if (!available) {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; r{} = 0 for this client, nothing sent",

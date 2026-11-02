@@ -6533,6 +6533,26 @@ void run_static_tests() {
       expect(spire_kit_c13_take(slow, 4).empty());
     });
 
+    b9_case("critic r2: the kit ticker waits for a 'C' 13 only on r143 = 1, the mag hint goes only with an equip", [&]() {
+      // a slow leader on r143 = 1: the ticker waits once, the 'C' 13 then lands before it and the line is the new one
+      SpireKitMagTexts slow;
+      expect(spire_kit_ticker_waits_for_c13(slow, true));
+      expect(!spire_kit_ticker_waits_for_c13(slow, false)); // r143 = 0: the old quest's line on time
+      expect(spire_kit_c13_take(slow, 6).empty());
+      expect(!spire_kit_ticker_waits_for_c13(slow, true));
+      expect_eq(std::string("Your kit weapon is ground +6. Use your HP Materials now (Item Pack)."),
+          spire_kit_ticker_take(slow, 1, 3));
+      // 'C' 14 with r143 = 0 (or no such mag in the copy): nothing equips it, the hint stays
+      SpireKitMagTexts not_sent;
+      spire_run_mag_c14_take(not_sent, false);
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+          spire_run_mag_evolve_text_take(not_sent, "Varuna", false));
+      // 'C' 14 and SpireEquipItem sent: no hint
+      SpireKitMagTexts sent;
+      spire_run_mag_c14_take(sent, true);
+      expect_eq(std::string("Your mag evolves: Varuna."), spire_run_mag_evolve_text_take(sent, "Varuna", false));
+    });
+
     expect_eq(0u, b9_failed);
   }
 
