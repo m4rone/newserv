@@ -288,11 +288,11 @@ uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
 // B-AF-1: the boss room k the next level of item index waits for (its Boss entry, not in bosses_beaten), or 0.
 uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, const std::set<uint8_t>& bosses_beaten);
-// B-AF-1: the boss of a boss room k of the run (k4 Dragon ... k27 Olga Flow, spire-mag.json BossRooms), nullptr for
+// B-AF-1: the boss of a boss room k of the run (k4 Dragon ... k30 Olga Flow, spire-mag.json BossRooms), nullptr for
 // another k.
 const char* spire_meta_boss_name(uint8_t k);
 // B-AF-1 (critic S1): whether the room before room k is a boss room (a run that starts room k beat that boss), and the
-// boss room of an episode's last boss (Dark Falz k15 in Episode 1, Olga Flow k27 in Episode 2; 0 otherwise), which a
+// boss room of an episode's last boss (Dark Falz k15 in Episode 1, Olga Flow k30 in Episode 2; 0 otherwise), which a
 // won run beat. Pure.
 bool spire_meta_boss_room_before(uint32_t k);
 uint8_t spire_meta_final_boss_room(uint8_t episode);

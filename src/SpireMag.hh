@@ -71,7 +71,7 @@ struct SpireMagLine {
 struct SpireMagTable {
   bool enabled = false; // false: every 'Z' answers 0 (the data-only kill switch)
   std::map<std::string, SpireMagLine> classes; // "HU", "RA", "FO"
-  std::set<uint8_t> boss_rooms; // the boss rooms k (Episode 1 k4-k15, Episode 2 k18-k27: one room counter)
+  std::set<uint8_t> boss_rooms; // the boss rooms k (Episode 1 k4-k15, Episode 2 k18-k30: one room counter)
 };
 // Strict: throws on a missing key, an empty line, a stat above 200, a row whose levels sum above 200. ShellSteps is the
 // one exception: a bad ShellSteps only empties that class's shell_steps (SpireMagLine::shell_note).

@@ -1530,7 +1530,8 @@ void run_static_tests() {
     expect_eq((std::vector<uint32_t>{0, 5, 10, 14, 18, 22, 26, 30, 34, 38}), start_level.levels);
     expect_eq((std::vector<uint32_t>{50, 60, 75, 90, 105, 120, 135, 150, 165}), start_level.price);
     expect_eq((std::vector<uint32_t>(10, 0)), start_level.strength);
-    expect_eq((std::vector<uint8_t>{0, 0, 0, 0, 11, 15, 18, 21, 24, 27}), start_level.boss);
+    // spel-af item 5: the Central Control Area moved Gal Gryphon to k27 and Olga Flow to k30
+    expect_eq((std::vector<uint8_t>{0, 0, 0, 0, 11, 15, 18, 21, 27, 30}), start_level.boss);
     // the fallback table without a catalogue is the shipped one, so a broken catalogue never takes a bought level away
     expect_eq(start_level.levels.size(), SPIRE_START_LEVEL_FALLBACK_LEVELS.size());
     for (size_t z = 0; z < start_level.levels.size(); z++) {
@@ -1631,10 +1632,18 @@ void run_static_tests() {
     expect_eq(90u, spire_shop_next_price(repo, 0, owned3, none_open, false, vol_opt));
     expect_eq(15, spire_shop_boss_needed(repo, 0, {{"start_level", 4}}, vol_opt));
     // a boss beaten out of order opens only its own level: Olga Flow alone does not sell level 4
-    expect_eq(11, spire_shop_boss_needed(repo, 0, owned3, {27}));
+    expect_eq(11, spire_shop_boss_needed(repo, 0, owned3, {30}));
+    // spel-af item 5: level 8 (+34) waits for Gal Gryphon in k27 (the old k24 is a Central Control Area room now, so it
+    // opens nothing) and level 9 (+38) for Olga Flow in k30
+    const std::set<uint8_t> to_gol_dragon = {11, 15, 18, 21};
+    expect_eq(27, spire_shop_boss_needed(repo, 0, {{"start_level", 7}}, to_gol_dragon));
+    expect_eq(27, spire_shop_boss_needed(repo, 0, {{"start_level", 7}}, {11, 15, 18, 21, 24}));
+    expect_eq(0, spire_shop_boss_needed(repo, 0, {{"start_level", 7}}, {11, 15, 18, 21, 27}));
+    expect_eq(30, spire_shop_boss_needed(repo, 0, {{"start_level", 8}}, {11, 15, 18, 21, 27}));
+    expect_eq(0, spire_shop_boss_needed(repo, 0, {{"start_level", 8}}, {11, 15, 18, 21, 27, 30}));
     // every late boss beaten: up to level 9 (+38), then the cap
-    const std::set<uint8_t> all = {4, 8, 11, 15, 18, 21, 24, 27};
-    const uint8_t bosses[6] = {11, 15, 18, 21, 24, 27};
+    const std::set<uint8_t> all = {4, 8, 11, 15, 18, 21, 27, 30};
+    const uint8_t bosses[6] = {11, 15, 18, 21, 27, 30};
     for (uint32_t owned = 3; owned < 9; owned++) {
       std::set<uint8_t> below(bosses, bosses + (owned - 3));
       expect_eq(bosses[owned - 3], spire_shop_boss_needed(repo, 0, {{"start_level", owned}}, below));
@@ -1656,7 +1665,10 @@ void run_static_tests() {
     expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II, Start level 22 at the Quartermaster."),
         spire_meta_boss_unlock_text(&repo, 15));
     expect_eq(std::string("Olga Flow beaten! Unlocked: Start level 38 at the Quartermaster."),
+        spire_meta_boss_unlock_text(&repo, 30));
+    expect_eq(std::string("Gal Gryphon beaten! Unlocked: Start level 34 at the Quartermaster."),
         spire_meta_boss_unlock_text(&repo, 27));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 24)); // k24 is no boss room since spel-af item 5
     expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 4)); // Dragon: its pacts come at 'F' as before
     expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15));
     expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 11));
@@ -1665,6 +1677,16 @@ void run_static_tests() {
       expect(!spire_meta_boss_unlock_text(&repo, k).empty());
     }
     expect(spire_meta_boss_name(5) == nullptr);
+    // spel-af item 5: the Episode 2 bosses by room k after the Central Control Area (k23-k26)
+    auto boss_name = [](uint8_t k) {
+      const char* name = spire_meta_boss_name(k);
+      return std::string(name ? name : "(none)");
+    };
+    expect_eq(std::string("Barba Ray"), boss_name(18));
+    expect_eq(std::string("Gol Dragon"), boss_name(21));
+    expect_eq(std::string("Gal Gryphon"), boss_name(27));
+    expect_eq(std::string("Olga Flow"), boss_name(30));
+    expect(spire_meta_boss_name(24) == nullptr);
     // a level not on sale (OnSale below it) is never named as unlocked
     auto half = spire_shop_parse(R"({"Items": {
         "start_level": {"Levels": [0, 5, 10], "Max": 2, "OnSale": 1, "Price": [50, 60], "P": [0, 0, 0],
@@ -1680,14 +1702,14 @@ void run_static_tests() {
     // critic N5: a level above OnSale waits for no boss, so no ticker promises it
     expect_eq(0, spire_shop_boss_needed(half, 0, {{"start_level", 1}}, {}));
     // critic S1: a boss counts when the run starts the room after it, or (the episode's last boss) at a won run
-    for (uint32_t k : {5u, 9u, 12u, 16u, 19u, 22u, 25u, 28u}) {
+    for (uint32_t k : {5u, 9u, 12u, 16u, 19u, 22u, 28u, 31u}) {
       expect(spire_meta_boss_room_before(k));
     }
-    for (uint32_t k : {0u, 1u, 2u, 4u, 6u, 11u, 15u, 17u, 27u, 300u}) {
+    for (uint32_t k : {0u, 1u, 2u, 4u, 6u, 11u, 15u, 17u, 25u, 27u, 30u, 300u}) {
       expect(!spire_meta_boss_room_before(k));
     }
     expect_eq(15, spire_meta_final_boss_room(1));
-    expect_eq(27, spire_meta_final_boss_room(2));
+    expect_eq(30, spire_meta_final_boss_room(2)); // spel-af item 5: Olga Flow in k30
     expect_eq(0, spire_meta_final_boss_room(3));
     expect_eq(0, spire_meta_final_boss_room(0));
     // a Boss list of the wrong length, or a value that is no room k, refuses the catalogue
@@ -1710,10 +1732,10 @@ void run_static_tests() {
     SpireMetaFile saved;
     saved.flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)] = true;
     saved.upgrades = {{"start_level", 4}};
-    saved.bosses_beaten = {11, 27};
+    saved.bosses_beaten = {11, 30};
     spire_meta_save_file(name, 42, saved);
     auto loaded = spire_meta_load_file(name);
-    expect(loaded.bosses_beaten == std::set<uint8_t>({11, 27}));
+    expect(loaded.bosses_beaten == std::set<uint8_t>({11, 30}));
     expect_eq(4u, spire_shop_level(loaded.upgrades, 0));
     expect(loaded.flags.at(std::make_pair(uint8_t(0), SPIRE_META_FLAG_FIRST_RUN)));
     saved.bosses_beaten.clear();
@@ -4569,11 +4591,11 @@ void run_static_tests() {
           expect(spire_run_mag_result(run2, true));
           held = start.decision.bytes;
           uint32_t step2 = 4;
-          run_bosses(run2, held, step2, {18, 21, 24, 27}); // Barba Ray, Gol Dragon, Gal Gryphon, Olga Flow: steps 5-8
+          run_bosses(run2, held, step2, {18, 21, 27, 30}); // Barba Ray, Gol Dragon, Gal Gryphon, Olga Flow: steps 5-8
           expect_eq(8u, step2);
           expect_eq(8, run2.issued_step);
           // after Olga Flow the last step is the cap: the same EXAM again issues nothing
-          auto again = spire_run_mag_handle(run2, table, full, SPIRE_RUN_MAG_EXAM, 27, {held}, {}, 0, 0);
+          auto again = spire_run_mag_handle(run2, table, full, SPIRE_RUN_MAG_EXAM, 30, {held}, {}, 0, 0);
           expect(!again.decision.result);
           expect_eq(8u, again.decision.expected_step);
           // a single room k19 (five bosses before it) starts at step 5
@@ -4584,8 +4606,8 @@ void run_static_tests() {
           expect(s19.decision.result);
           expect_eq(5u, s19.decision.expected_step);
           expect(s19.decision.bytes == spire_mag_row_bytes(col.steps[5]));
-          // Run I on into Episode 2 grows the same way: after k27 step 8
-          run_bosses(run, run1_mag, want, {18, 21, 24, 27});
+          // Run I on into Episode 2 grows the same way: after k30 step 8
+          run_bosses(run, run1_mag, want, {18, 21, 27, 30});
           expect_eq(8u, want);
         }
       }
@@ -4665,7 +4687,7 @@ void run_static_tests() {
       expect_eq(std::string("RA"), spire_mag_archetype(11));
       expect_eq(std::string("FO"), spire_mag_archetype(10));
       expect_eq(std::string(""), spire_mag_archetype(12));
-      expect_eq(std::set<uint8_t>({4, 8, 11, 15, 18, 21, 24, 27}), table.boss_rooms);
+      expect_eq(std::set<uint8_t>({4, 8, 11, 15, 18, 21, 27, 30}), table.boss_rooms); // spel-af item 5
     });
 
     f6_case("HU start floor L22", [&]() {
@@ -4747,14 +4769,17 @@ void run_static_tests() {
       auto e18 = spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 18, {}, 0);
       expect(e18.result);
       expect_eq(5u, e18.expected_step);
-      full.boss_rooms = {4, 8, 11, 15, 18, 21, 24, 27};
+      full.boss_rooms = {4, 8, 11, 15, 18, 21, 27, 30};
       full.issued_step = 8;
-      expect(!spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 27, {}, 0).result);
-      expect_eq(8u, spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 27, {}, 0).expected_step);
+      expect(!spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 30, {}, 0).result);
+      expect_eq(8u, spire_run_mag_decide(full, hu, SPIRE_RUN_MAG_EXAM, 30, {}, 0).expected_step);
       expect_eq(4u, spire_mag_expected_step(5, 0, 5, true));
       // a practice run from k9 starts after two bosses
       expect_eq(2u, spire_mag_start_step(table, 9));
       expect_eq(0u, spire_mag_start_step(table, 4));
+      // spel-af item 5: a single room k25 (Central Control Area) has six bosses before it, k28 (Seabed) seven
+      expect_eq(6u, spire_mag_start_step(table, 25));
+      expect_eq(7u, spire_mag_start_step(table, 28));
     });
 
     f6_case("pack full: the step stays owed", [&]() {

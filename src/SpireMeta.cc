@@ -774,9 +774,9 @@ const char* spire_meta_boss_name(uint8_t k) {
       return "Barba Ray";
     case 21:
       return "Gol Dragon";
-    case 24:
+    case 27: // spel-af item 5: the Central Control Area (k23-k26) comes before Gal Gryphon
       return "Gal Gryphon";
-    case 27:
+    case 30:
       return "Olga Flow";
     default:
       return nullptr;
@@ -788,7 +788,7 @@ bool spire_meta_boss_room_before(uint32_t k) {
 }
 
 uint8_t spire_meta_final_boss_room(uint8_t episode) {
-  return (episode == 1) ? 15 : (episode == 2) ? 27 : 0;
+  return (episode == 1) ? 15 : (episode == 2) ? 30 : 0; // Episode 2: Olga Flow in k30 (spel-af item 5)
 }
 
 // "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
