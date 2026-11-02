@@ -653,10 +653,15 @@ bool spire_practice_blocks_flag(bool practice, uint16_t flag_num) {
   return practice && (flag_num >= SPIRE_BRIDGE_FIRST_FLAG) && (flag_num <= SPIRE_BRIDGE_LAST_FLAG);
 }
 
+// "1 life" / "<n> lives", as the save point notice says it
+static std::string spire_lives_phrase(uint32_t lives) {
+  return std::format("{} {}", lives, (lives == 1) ? "life" : "lives");
+}
+
 std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss) {
   if (resumed && ss && (ss->values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
-    return std::format("{} resumed at room {}: {} lives, {} min. Equip your gear.", practice ? "Practice run" : "Run",
-        ss->values[SPIRE_SS_K], ss->values[SPIRE_SS_LIVES], ss->values[SPIRE_SS_ELAPSED] / 60);
+    return std::format("{} resumed at room {}: {}, {} min. Equip your gear.", practice ? "Practice run" : "Run",
+        ss->values[SPIRE_SS_K], spire_lives_phrase(ss->values[SPIRE_SS_LIVES]), ss->values[SPIRE_SS_ELAPSED] / 60);
   }
   return practice ? "Practice run: records and unlocks do not count." : "";
 }
@@ -688,9 +693,9 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss) {
   const auto& v = ss.values;
   static const char* variants[] = {"", " elite", " rest"};
   uint32_t variant = v[SPIRE_SS_VARIANT];
-  return std::format("Continue at Spire room {}{}: {}{} lives, {} min played{}", v[SPIRE_SS_K],
+  return std::format("Continue at Spire room {}{}: {}{}, {} min played{}", v[SPIRE_SS_K],
       (variant < 3) ? variants[variant] : "", ss.level ? std::format("Lv{}, ", *ss.level + 1) : std::string(),
-      v[SPIRE_SS_LIVES], v[SPIRE_SS_ELAPSED] / 60, ss.practice ? " (practice run)" : "");
+      spire_lives_phrase(v[SPIRE_SS_LIVES]), v[SPIRE_SS_ELAPSED] / 60, ss.practice ? " (practice run)" : "");
 }
 
 std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
@@ -720,7 +725,7 @@ std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
     parts.emplace_back(std::format("Room {}{}", v[SPIRE_SS_K], has_variant ? variants[v[SPIRE_SS_VARIANT]] : ""));
   }
   if (v.size() > SPIRE_SS_LIVES) {
-    parts.emplace_back(std::format("{} {}", v[SPIRE_SS_LIVES], (v[SPIRE_SS_LIVES] == 1) ? "life" : "lives"));
+    parts.emplace_back(spire_lives_phrase(v[SPIRE_SS_LIVES]));
   }
   if (v.size() > SPIRE_SS_ELAPSED) {
     uint32_t t = v[SPIRE_SS_ELAPSED];
@@ -6409,8 +6414,9 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
     if (!cp.last_room) {
       return "No checkpoint yet: start at room 1";
     }
-    return cp.last_lives ? std::format("Continue at room {} (you had {} lives)", cp.last_room + 1, cp.last_lives)
-                         : std::format("Continue at room {}", cp.last_room + 1);
+    return cp.last_lives
+        ? std::format("Continue at room {} (you had {})", cp.last_room + 1, spire_lives_phrase(cp.last_lives))
+        : std::format("Continue at room {}", cp.last_room + 1);
   }
   throw std::runtime_error("Use: $spire status or $spire continue");
 }

@@ -5561,6 +5561,12 @@ void run_static_tests() {
     expect(!spire_savestate_matches(ss, 1, 5, 1)); // another episode
     expect(!spire_savestate_matches(SpireSavestate(), 0, 5, 1));
     expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played"), spire_savestate_continue_text(ss));
+    {
+      // one life left: singular, as the save point notice
+      SpireSavestate one = ss;
+      one.values[SPIRE_SS_LIVES] = 1;
+      expect_eq(std::string("Continue at Spire room 5 elite: 1 life, 31 min played"), spire_savestate_continue_text(one));
+    }
     ss.practice = true;
     expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played (practice run)"),
         spire_savestate_continue_text(ss));
@@ -5667,6 +5673,13 @@ void run_static_tests() {
     ss.values[SPIRE_SS_ELAPSED] = 1865;
     expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, false, &ss));
     expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, true, &ss));
+    {
+      // one life left: singular, as the save point notice
+      SpireSavestate one = ss;
+      one.values[SPIRE_SS_LIVES] = 1;
+      expect_eq(std::string("Run resumed at room 5: 1 life, 31 min. Equip your gear."),
+          spire_run_start_ticker(true, false, &one));
+    }
     expect_eq(std::string("Practice run: records and unlocks do not count."), spire_run_start_ticker(false, true, nullptr));
     expect(spire_run_start_ticker(false, false, nullptr).empty());
     for (const auto& line : {spire_run_start_ticker(true, true, &ss), spire_run_start_ticker(false, true, nullptr)}) {
