@@ -1346,6 +1346,15 @@ void run_static_tests() {
     expect_eq(2, spire_meta_ladder_quest_rung(985));
     expect_eq(3, spire_meta_ladder_quest_rung(986));
     expect_eq(0, spire_meta_ladder_quest_rung(987));
+    expect_eq(0, spire_meta_ladder_quest_rung(940)); // a room quest on Normal
+    expect_eq(1, spire_meta_ladder_quest_rung(1940)); // spel-af item 3: room quests on a rung
+    expect_eq(1, spire_meta_ladder_quest_rung(1971));
+    expect_eq(2, spire_meta_ladder_quest_rung(2955));
+    expect_eq(3, spire_meta_ladder_quest_rung(3979));
+    expect_eq(0, spire_meta_ladder_quest_rung(1939));
+    expect_eq(0, spire_meta_ladder_quest_rung(1980));
+    expect_eq(0, spire_meta_ladder_quest_rung(1981)); // not a ladder quest plus 1000
+    expect_eq(0, spire_meta_ladder_quest_rung(4940));
     auto rung_cat = spire_shop_parse(R"({"Items": {
         "start_level": {"Max": 1, "Price": [15], "P": [0, 1]},
         "kit_tier": {"Max": 1, "Price": [30], "P": [0, 2]},
@@ -2623,9 +2632,9 @@ void run_static_tests() {
     // quest menu on a difficulty whose run quest is hidden: one info line, nothing when both are open or on Normal
     expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0));
     expect_eq(std::string(""), spire_meta_ladder_menu_note(1, 1, 1));
-    expect_eq(std::string("Spire Run on Hard opens after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
-    expect_eq(std::string("Spire Run II on Very Hard opens after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
-    expect_eq(std::string("Spire Run I on Ultimate opens after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
+    expect_eq(std::string("Spire Run and rooms on Hard open after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
+    expect_eq(std::string("Spire Run II and rooms on Very Hard open after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
+    expect_eq(std::string("Spire Run I and rooms on Ultimate open after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
   }
 
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
@@ -5555,11 +5564,26 @@ void run_static_tests() {
     ss.values[SPIRE_SS_VARIANT] = 1; // k5 elite
     ss.values[SPIRE_SS_LIVES] = 2;
     ss.values[SPIRE_SS_ELAPSED] = 31 * 60 + 5;
-    expect(spire_savestate_matches(ss, 0, 5, 1)); // "Spire room 5 elite"
-    expect(!spire_savestate_matches(ss, 0, 5, 0)); // the normal k5 quest: no free swap from elite to normal
-    expect(!spire_savestate_matches(ss, 0, 6, 1)); // another room
-    expect(!spire_savestate_matches(ss, 1, 5, 1)); // another episode
-    expect(!spire_savestate_matches(SpireSavestate(), 0, 5, 1));
+    expect(spire_savestate_matches(ss, 0, 5, 1, 0)); // "Spire room 5 elite"
+    expect(!spire_savestate_matches(ss, 0, 5, 0, 0)); // the normal k5 quest: no free swap from elite to normal
+    expect(!spire_savestate_matches(ss, 0, 6, 1, 0)); // another room
+    expect(!spire_savestate_matches(ss, 1, 5, 1, 0)); // another episode
+    expect(!spire_savestate_matches(SpireSavestate(), 0, 5, 1, 0));
+    // B-AF-9 (critic spel-af-3 B2): only on the rung of the quest that wrote it; a file without a quest number is Normal
+    {
+      SpireSavestate hard = ss;
+      hard.quest_number = 981; // Spire Run on Hard
+      expect(spire_savestate_matches(hard, 0, 5, 1, 1)); // q1946 "Spire room 5 Hard" (rung 1)
+      expect(!spire_savestate_matches(hard, 0, 5, 1, 0)); // the Normal room q946: no Hard run on Normal
+      expect(!spire_savestate_matches(hard, 0, 5, 1, 3));
+      SpireSavestate normal = ss;
+      normal.quest_number = 921;
+      expect(!spire_savestate_matches(normal, 0, 5, 1, 1)); // a Normal run never in a Hard room
+      expect(spire_savestate_matches(normal, 0, 5, 1, 0));
+      normal.quest_number = 1946; // written in a Hard room quest
+      expect(spire_savestate_matches(normal, 0, 5, 1, 1));
+      expect(!spire_resume_level(normal, normal, 0, 5, 1, 0));
+    }
     expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played"), spire_savestate_continue_text(ss));
     {
       // one life left: singular, as the save point notice
@@ -5580,17 +5604,17 @@ void run_static_tests() {
           spire_savestate_continue_text(lv));
       SpireSavestate leader = lv;
       leader.level = 30; // the leader's own level never decides this client's
-      expect(spire_resume_level(lv, leader, 0, 5, 1) == std::optional<uint32_t>(22));
-      expect(spire_resume_level(lv, lv, 0, 5, 1) == std::optional<uint32_t>(22)); // the leader itself
-      expect(!spire_resume_level(lv, leader, 0, 5, 0)); // the normal k5 quest: fresh, the quest's level
-      expect(!spire_resume_level(lv, leader, 0, 6, 1));
+      expect(spire_resume_level(lv, leader, 0, 5, 1, 0) == std::optional<uint32_t>(22));
+      expect(spire_resume_level(lv, lv, 0, 5, 1, 0) == std::optional<uint32_t>(22)); // the leader itself
+      expect(!spire_resume_level(lv, leader, 0, 5, 0, 0)); // the normal k5 quest: fresh, the quest's level
+      expect(!spire_resume_level(lv, leader, 0, 6, 1, 0));
       SpireSavestate other_run = leader;
       other_run.run_id = 0xB2;
-      expect(!spire_resume_level(lv, other_run, 0, 5, 1)); // a partner of another run starts fresh
-      expect(!spire_resume_level(lv, SpireSavestate(), 0, 5, 1)); // no leader savestate: a new run
+      expect(!spire_resume_level(lv, other_run, 0, 5, 1, 0)); // a partner of another run starts fresh
+      expect(!spire_resume_level(lv, SpireSavestate(), 0, 5, 1, 0)); // no leader savestate: a new run
       SpireSavestate no_level = lv;
       no_level.level.reset();
-      expect(!spire_resume_level(no_level, leader, 0, 5, 1)); // a savestate from before: the quest's level
+      expect(!spire_resume_level(no_level, leader, 0, 5, 1, 0)); // a savestate from before: the quest's level
       // the file keeps the level; a file from before has none, and a level outside 0-199 reads as none
       auto json = phosg::JSON::parse(spire_savestate_to_json(lv, 42));
       expect_eq(22, json.get_int("Level"));
