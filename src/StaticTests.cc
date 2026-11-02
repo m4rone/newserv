@@ -6202,6 +6202,13 @@ void run_static_tests() {
       expect_eq(std::string("Inventory full: make room, it waits."), spire_bridge_message_text(0x43000C09));
     });
 
+    b8_case("'C' 15 a waiting exam extra now in the pack (kwaliteit-1 239)", [&]() {
+      expect_eq(std::string("Photon Drop x2 is now in your pack."), spire_bridge_message_text(0x43000F01, with_names));
+      expect_eq(std::string("Your waiting exam reward is now in your pack."), spire_bridge_message_text(0x43000F01));
+      expect_eq(std::string("Your waiting exam reward is now in your pack."),
+          spire_bridge_message_text(0x43000F1F, with_names)); // index beyond the list
+    });
+
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));

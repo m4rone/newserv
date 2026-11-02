@@ -2172,6 +2172,12 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
               ? std::format("{}: inventory full. Make room, it waits.", gifts[gift])
               : "Inventory full: make room, it waits.";
         }
+        case 15: { // kwaliteit-1 239: an exam extra that waited (rewards.py ex_retry) is now in the pack; low byte
+          // bits 0-4 its exam_extras index + 1 (the layout of 'C' 10's extra)
+          const std::string& name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, value & 0x1F);
+          return name.empty() ? std::string("Your waiting exam reward is now in your pack.")
+                              : std::format("{} is now in your pack.", name);
+        }
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
@@ -3456,7 +3462,8 @@ bool spire_bridge_handle_register(
       uint8_t text_kind = value >> 24;
       uint32_t text_point = (value >> 8) & 0xFF;
       if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
-          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12)))) {
+          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12) ||
+                                                         (text_point == 15)))) {
         text_table = spire_draw_table_for_text(c, quest_number);
         text_ctx.draw = text_table ? &*text_table : nullptr;
       }
