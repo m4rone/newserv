@@ -381,23 +381,23 @@ SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, u
   return (battle_game && spire_character && (difficulty <= rung)) ? SpireLadderGate::RUNG_OPEN : SpireLadderGate::REFUSED;
 }
 
-static const char* spire_ladder_difficulty_name(uint8_t difficulty) {
+const char* spire_meta_difficulty_name(uint8_t difficulty) {
   static const char* names[4] = {"Normal", "Hard", "Very Hard", "Ultimate"};
   return names[difficulty & 3];
 }
 
 std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level) {
   // one line, Sega's message box words first; the Spire part names the win that opens the difficulty without the level
-  return std::format("$C7{} needs level {}. Spire: win Spire Run on {} to open it.", spire_ladder_difficulty_name(difficulty),
-      static_cast<size_t>(min_level + 1), spire_ladder_difficulty_name(difficulty ? (difficulty - 1) : 0));
+  return std::format("$C7{} needs level {}. Spire: win Spire Run on {} to open it.", spire_meta_difficulty_name(difficulty),
+      static_cast<size_t>(min_level + 1), spire_meta_difficulty_name(difficulty ? (difficulty - 1) : 0));
 }
 
 std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty) {
   if (!difficulty) {
     return "";
   }
-  const char* below = spire_ladder_difficulty_name(difficulty - 1);
-  const char* here = spire_ladder_difficulty_name(difficulty);
+  const char* below = spire_meta_difficulty_name(difficulty - 1);
+  const char* here = spire_meta_difficulty_name(difficulty);
   bool open1 = difficulty <= rung1, open2 = difficulty <= rung2;
   if (open1 && open2) {
     return "";
@@ -442,7 +442,7 @@ SpireMetaFinishApplied spire_meta_apply_finish(SpireMetaFlags& flags, const std:
     } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON)) {
       if (!was_set && (difficulty < 3)) {
         std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : "II",
-            spire_ladder_difficulty_name(difficulty + 1));
+            spire_meta_difficulty_name(difficulty + 1));
         ret.unlocked += ret.unlocked.empty() ? what : std::format(", {}", what);
       }
     } else if (!was_set) {

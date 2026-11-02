@@ -157,6 +157,8 @@ SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, u
     uint32_t char_level, uint32_t min_level);
 // One line (a lobby message box) for a refused difficulty: the level Sega asks and the Spire win that opens it.
 std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level);
+// "Normal", "Hard", "Very Hard" or "Ultimate" (a ladder rung or a difficulty, 0-3)
+const char* spire_meta_difficulty_name(uint8_t difficulty);
 // The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
 // runs are open there), so a hidden run quest is never a silent nothing. The rooms of that run on that difficulty open
 // with it (spel-af item 3: their AvailableIf carries the same SPIRE_RUN condition), so the line names them too.

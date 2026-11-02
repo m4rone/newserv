@@ -5583,9 +5583,18 @@ void run_static_tests() {
       expect(spire_savestate_matches(normal, 0, 5, 1, 1));
       expect(!spire_resume_level(normal, normal, 0, 5, 1, 0));
     }
-    expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played"), spire_savestate_continue_text(ss));
+    expect_eq(std::string("Continue at Spire room 5 elite on Normal: 2 lives, 31 min played"),
+        spire_savestate_continue_text(ss));
+    {
+      SpireSavestate hard = ss; // critic spel-af-3 r2 S-1: the text names the difficulty that resumes the run
+      hard.quest_number = 1946;
+      expect_eq(std::string("Continue at Spire room 5 elite on Hard: 2 lives, 31 min played"),
+          spire_savestate_continue_text(hard));
+      expect_eq(std::string("Your Very Hard run waits in this room: open it on Very Hard to go on. It stays saved."),
+          spire_savestate_parked_text(2));
+    }
     ss.practice = true;
-    expect_eq(std::string("Continue at Spire room 5 elite: 2 lives, 31 min played (practice run)"),
+    expect_eq(std::string("Continue at Spire room 5 elite on Normal: 2 lives, 31 min played (practice run)"),
         spire_savestate_continue_text(ss));
     // B-AF-3: the level the savestate took from the run copy; the text names it, the resume gives it back only into
     // the quest whose 'J' resumes this savestate (same room, variant and run as the leader's)
@@ -5593,7 +5602,7 @@ void run_static_tests() {
       SpireSavestate lv = ss;
       lv.practice = false;
       lv.level = 22; // Lv23
-      expect_eq(std::string("Continue at Spire room 5 elite: Lv23, 2 lives, 31 min played"),
+      expect_eq(std::string("Continue at Spire room 5 elite on Normal: Lv23, 2 lives, 31 min played"),
           spire_savestate_continue_text(lv));
       SpireSavestate leader = lv;
       leader.level = 30; // the leader's own level never decides this client's
@@ -5632,6 +5641,70 @@ void run_static_tests() {
       expect(broken.exists);
       expect_eq(0xA1u, broken.run_id);
       expect_eq(5u, broken.values[SPIRE_SS_K]);
+    }
+
+    // B-REGIE-18-6: one savestate per difficulty. A start on Normal leaves a Hard run's file byte for byte; the file
+    // of before counts for the rung it records and goes at that rung's first write only
+    {
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-rungs-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::string stem = (dir / "0000000042.abc").string();
+      expect_eq(stem + ".savestate.hard.json", spire_savestate_rung_filename(stem, 1));
+      expect_eq(stem + ".savestate.ultimate.json", spire_savestate_rung_filename(stem, 3));
+      SpireSavestate hard = ss;
+      hard.practice = false;
+      hard.run_id = 0xC3;
+      hard.quest_number = 981; // Spire Run on Hard, parked at room 5
+      SpireSavestate normal = hard;
+      normal.run_id = 0xC4;
+      normal.quest_number = 946; // "Spire room 5" on Normal
+      bool replaced = true;
+      std::string hard_file = spire_savestate_store_rung(stem, 1, spire_savestate_to_json(hard, 42), &replaced);
+      expect(!replaced);
+      std::string hard_bytes = phosg::load_file(hard_file);
+      std::string normal_file = spire_savestate_store_rung(stem, 0, spire_savestate_to_json(normal, 42));
+      expect(normal_file != hard_file);
+      expect_eq(hard_bytes, phosg::load_file(hard_file)); // the Normal start did not touch the Hard run
+      std::string from;
+      expect_eq(0xC3u, spire_savestate_load_rung(stem, 1, &from).run_id);
+      expect_eq(hard_file, from);
+      expect_eq(0xC4u, spire_savestate_load_rung(stem, 0, &from).run_id);
+      expect(!spire_savestate_load_rung(stem, 2, &from).exists);
+      expect(from.empty());
+      SpireSavestate normal2 = normal; // within one difficulty a new start still replaces the parked run
+      normal2.run_id = 0xC5;
+      spire_savestate_store_rung(stem, 0, spire_savestate_to_json(normal2, 42));
+      expect_eq(0xC5u, spire_savestate_load_rung(stem, 0).run_id);
+      expect_eq(hard_bytes, phosg::load_file(hard_file));
+      std::filesystem::remove(hard_file);
+      std::filesystem::remove(normal_file);
+      // the file of before holds a Hard run: it is Hard's (not Normal's) until Hard writes its own file
+      std::string old_file = spire_savestate_old_filename(stem);
+      expect_eq(stem + ".savestate.json", old_file);
+      spire_bridge_write_durable(old_file, spire_savestate_to_json(hard, 42));
+      std::string old_bytes = phosg::load_file(old_file);
+      expect_eq(0xC3u, spire_savestate_load_rung(stem, 1, &from).run_id);
+      expect_eq(old_file, from);
+      expect(!spire_savestate_load_rung(stem, 0).exists);
+      spire_savestate_store_rung(stem, 0, spire_savestate_to_json(normal, 42), &replaced);
+      expect(!replaced);
+      expect_eq(old_bytes, phosg::load_file(old_file)); // a Normal start keeps the old Hard file
+      expect_eq(0xC3u, spire_savestate_load_rung(stem, 1).run_id);
+      spire_savestate_store_rung(stem, 1, spire_savestate_to_json(hard, 42), &replaced);
+      expect(replaced);
+      expect(!std::filesystem::exists(old_file)); // Hard's own file replaces it
+      expect(spire_savestate_old_counts(false, hard, 1));
+      expect(!spire_savestate_old_counts(true, hard, 1)); // the rung's own file wins
+      expect(!spire_savestate_old_counts(false, hard, 0));
+      // a file of before without "Quest" counts as Normal (critic spel-af-3 r2)
+      std::string text = spire_savestate_to_json(normal, 42);
+      size_t q = text.find("\"Quest\": 946,");
+      expect(q != std::string::npos);
+      auto no_quest = spire_savestate_from_json(std::string(text).erase(q, std::string("\"Quest\": 946,").size()));
+      expect_eq(0u, no_quest.quest_number);
+      expect(spire_savestate_old_counts(false, no_quest, 0));
+      std::filesystem::remove_all(dir);
     }
 
     // Two clients: the leader's savestate sets the game's run; the partner resumes only from the same run

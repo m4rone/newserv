@@ -505,6 +505,19 @@ bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
   return ss.exists && run_id && (ss.run_id == run_id);
 }
 
+std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
+  static const char* names[SPIRE_SAVESTATE_RUNGS] = {"normal", "hard", "vhard", "ultimate"};
+  return std::format("{}.savestate.{}.json", stem, names[rung % SPIRE_SAVESTATE_RUNGS]);
+}
+
+std::string spire_savestate_old_filename(const std::string& stem) {
+  return stem + ".savestate.json";
+}
+
+bool spire_savestate_old_counts(bool rung_file_exists, const SpireSavestate& old, uint8_t rung) {
+  return !rung_file_exists && old.exists && (spire_meta_ladder_quest_rung(old.quest_number) == rung);
+}
+
 bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant, uint8_t rung) {
   return ss.exists && (ss.values.size() == SPIRE_SAVESTATE_NUM_VALUES) && (ss.episode == episode) &&
       (ss.values[SPIRE_SS_K] == k) && (ss.values[SPIRE_SS_VARIANT] == variant) &&
@@ -579,7 +592,7 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     throw std::runtime_error("savestate has run id 0");
   }
   ret.episode = json.get_int("Episode");
-  ret.quest_number = json.get_int("Quest");
+  ret.quest_number = json.get_int("Quest", 0); // critic spel-af-3 r2: a file without it counts as Normal
   ret.start_room = json.get_int("StartRoom");
   ret.practice = json.get_bool("Practice");
   for (const auto& v : json.get_list("Values")) {
@@ -688,9 +701,16 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss) {
   const auto& v = ss.values;
   static const char* variants[] = {"", " elite", " rest"};
   uint32_t variant = v[SPIRE_SS_VARIANT];
-  return std::format("Continue at Spire room {}{}: {}{} lives, {} min played{}", v[SPIRE_SS_K],
-      (variant < 3) ? variants[variant] : "", ss.level ? std::format("Lv{}, ", *ss.level + 1) : std::string(),
-      v[SPIRE_SS_LIVES], v[SPIRE_SS_ELAPSED] / 60, ss.practice ? " (practice run)" : "");
+  // critic spel-af-3 r2 S-1: the difficulty too, so the run is opened on the difficulty that resumes it
+  return std::format("Continue at Spire room {}{} on {}: {}{} lives, {} min played{}", v[SPIRE_SS_K],
+      (variant < 3) ? variants[variant] : "", spire_meta_difficulty_name(spire_meta_ladder_quest_rung(ss.quest_number)),
+      ss.level ? std::format("Lv{}, ", *ss.level + 1) : std::string(), v[SPIRE_SS_LIVES], v[SPIRE_SS_ELAPSED] / 60,
+      ss.practice ? " (practice run)" : "");
+}
+
+std::string spire_savestate_parked_text(uint8_t rung) {
+  return std::format("Your {} run waits in this room: open it on {} to go on. It stays saved.",
+      spire_meta_difficulty_name(rung), spire_meta_difficulty_name(rung));
 }
 
 std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
@@ -783,15 +803,15 @@ static bool spire_client_run_is_practice(std::shared_ptr<Client> c, std::shared_
   return cr && cr->began && cr->practice;
 }
 
-// The savestate file of the client's character (the server's character data, never the overlay), "" without one
-static std::string spire_savestate_filename(std::shared_ptr<const Client> c) {
+// The stem of the savestate files of the client's character (the server's character data, never the overlay), "" without
+// one; B-REGIE-18-6: one file per difficulty rung after it (spire_savestate_rung_filename)
+static std::string spire_savestate_stem(std::shared_ptr<const Client> c) {
   uint32_t serial_number = spire_bridge_serial_for_client(c);
   auto character = c->character_file(false, false);
   if (!character || !serial_number) {
     return "";
   }
-  return std::format("{}/{:010}.{}.savestate.json", SPIRE_BRIDGE_DIRECTORY, serial_number,
-      spire_guard_character_id(character->disp));
+  return std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, serial_number, spire_guard_character_id(character->disp));
 }
 
 static SpireSavestate spire_savestate_load(const std::string& filename) {
@@ -801,11 +821,64 @@ static SpireSavestate spire_savestate_load(const std::string& filename) {
   return spire_savestate_from_json(phosg::load_file(filename));
 }
 
-static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c) {
+SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename) {
+  if (filename) {
+    filename->clear();
+  }
+  if (stem.empty()) {
+    return SpireSavestate();
+  }
+  std::string own = spire_savestate_rung_filename(stem, rung);
+  bool own_exists = std::filesystem::is_regular_file(own);
+  if (own_exists) {
+    if (filename) {
+      *filename = own;
+    }
+    return spire_savestate_load(own);
+  }
+  std::string old = spire_savestate_old_filename(stem);
+  SpireSavestate old_ss = spire_savestate_load(old);
+  if (!spire_savestate_old_counts(own_exists, old_ss, rung)) {
+    return SpireSavestate();
+  }
+  if (filename) {
+    *filename = old;
+  }
+  return old_ss;
+}
+
+std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old) {
+  std::string filename = spire_savestate_rung_filename(stem, rung);
+  spire_bridge_write_durable(filename, data);
+  if (replaced_old) {
+    *replaced_old = false;
+  }
+  // the file of before goes once this rung has its own file, if it held this rung's run (a new start on a difficulty
+  // replaces the run parked there); a run of another rung in it stays, and so does a file that cannot be read
+  std::string old = spire_savestate_old_filename(stem);
   try {
-    return spire_savestate_load(spire_savestate_filename(c));
+    SpireSavestate old_ss = spire_savestate_load(old);
+    if (old_ss.exists && (spire_meta_ladder_quest_rung(old_ss.quest_number) == rung)) {
+      std::filesystem::remove(old);
+      if (replaced_old) {
+        *replaced_old = true;
+      }
+    }
+  } catch (const std::exception&) {
+  }
+  return filename;
+}
+
+// The client's savestate on this rung (spire_savestate_load_rung), and its file in *filename ("" without one)
+static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c, uint8_t rung,
+    std::string* filename = nullptr) {
+  try {
+    return spire_savestate_load_rung(spire_savestate_stem(c), rung, filename);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
+    if (filename) {
+      filename->clear();
+    }
     return SpireSavestate();
   }
 }
@@ -856,7 +929,13 @@ static SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client>
   auto& store = store_it->second;
   auto it = store.runs.find(run_id);
   if (it == store.runs.end()) {
-    SpireSavestate ss = spire_savestate_load_logged(c);
+    SpireSavestate ss; // B-REGIE-18-6: the run is in the savestate of one rung (a run id is never reused)
+    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
+      ss = spire_savestate_load_logged(c, rung);
+      if (ss.exists && ss.run_mag && (ss.run_mag->run_id == run_id)) {
+        break;
+      }
+    }
     if (ss.exists && ss.run_mag && (ss.run_mag->run_id == run_id)) {
       it = store.runs.emplace(run_id, *ss.run_mag).first;
       c->log.info_f("Spire run mag: ledger of run {:08X} read from the savestate (step {})", run_id, it->second.issued_step);
@@ -947,10 +1026,14 @@ static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const cha
           run->run_id);
       return;
     }
-    std::vector<std::string> present;
+    std::vector<std::string> present; // B-REGIE-18-6: every rung's file and the file of before; only this run's go
     for (const auto& lc : l->clients) {
-      if (lc) {
-        present.emplace_back(spire_savestate_filename(lc));
+      std::string stem = lc ? spire_savestate_stem(lc) : "";
+      if (!stem.empty()) {
+        for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
+          present.emplace_back(spire_savestate_rung_filename(stem, rung));
+        }
+        present.emplace_back(spire_savestate_old_filename(stem));
       }
     }
     for (const auto& filename : spire_savestate_end_files(run->savestate_files, present)) {
@@ -1512,9 +1595,9 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
         (cr && cr->began) ? "run begun" : "no 'B' yet");
     return;
   }
-  std::string filename = spire_savestate_filename(c);
+  std::string stem = spire_savestate_stem(c);
   auto overlay = c->character_file(false, true);
-  if (filename.empty() || !overlay) {
+  if (stem.empty() || !overlay) {
     c->log.warning_f("Spire savestate: no character data for serial {:010}; not stored", serial_number);
     return;
   }
@@ -1542,10 +1625,14 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   uint32_t room_k = values[SPIRE_SS_K];
   ss.values = std::move(values);
   ss.time_usecs = phosg::now();
-  spire_bridge_write_durable(filename, spire_savestate_to_json(ss, serial_number));
+  // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
+  bool replaced_old = false;
+  std::string filename = spire_savestate_store_rung(stem, spire_meta_ladder_quest_rung(quest_number),
+      spire_savestate_to_json(ss, serial_number), &replaced_old);
   run->savestate_files.emplace(filename);
-  c->log.info_f("Spire savestate: stored {} in {}{}", spire_savestate_describe(ss), filename,
-      ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "");
+  c->log.info_f("Spire savestate: stored {} in {}{}{}", spire_savestate_describe(ss), filename,
+      ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "",
+      replaced_old ? std::format("; {} of before removed (same difficulty)", spire_savestate_old_filename(stem)) : "");
   // B-AF-1 (critic spel-af-1 S1): a boss counts as beaten once this client's run starts the room after it; its wave
   // clear may come from a child's 6x76 (Darvant, Pig Ray, Olga's first form) before the boss is dead
   if (spire_meta_boss_room_before(room_k)) {
@@ -1615,7 +1702,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     const auto& follow = c->require_server_state()->data->spire_follow_leader;
     uint8_t leader_id = follow ? follow->first : 0;
     auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
-    SpireSavestate leader_ss = leader ? spire_savestate_load_logged(leader) : SpireSavestate();
+    SpireSavestate leader_ss = leader ? spire_savestate_load_logged(leader, rung) : SpireSavestate();
     if (!end && spire_savestate_matches(leader_ss, episode, k, variant, rung)) {
       run = &spire_game_run_set(l, SpireGameRun{
           .run_id = leader_ss.run_id, .resumed = true, .elapsed = leader_ss.values[SPIRE_SS_ELAPSED], .savestate_files = {}});
@@ -1626,11 +1713,12 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     }
   }
   auto* cr = spire_client_run_for(c, l, true);
-  SpireSavestate own = spire_savestate_load_logged(c);
+  std::string own_filename;
+  SpireSavestate own = spire_savestate_load_logged(c, rung, &own_filename);
   bool resume = spire_resume_client(!!end, run->resumed, run->run_id, spire_savestate_matches(own, episode, k, variant, rung),
       own.run_id);
   if (resume) {
-    run->savestate_files.emplace(spire_savestate_filename(c)); // a true end deletes it even if this client is gone by then
+    run->savestate_files.emplace(own_filename); // a true end deletes it even if this client is gone by then
     cr->answered_resume = true;
     cr->savestate = std::move(own);
     spire_run_mag_adopt(c, run->run_id, cr->savestate.run_mag); // F6
@@ -1645,9 +1733,22 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     cr->answered_resume = false;
     cr->savestate = SpireSavestate();
     spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ANSWER_TAG);
-    c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh (own savestate {}, game run {:08X}{})",
-        serial_number, quest_number, k, variant, spire_savestate_describe(own), run->run_id,
-        run->resumed ? " resumed" : "");
+    c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh on {} (own savestate {}, game run {:08X}{})",
+        serial_number, quest_number, k, variant, spire_meta_difficulty_name(rung), spire_savestate_describe(own),
+        run->run_id, run->resumed ? " resumed" : "");
+    // critic spel-af-3 r2 S-1 (B-REGIE-18-6): a run of this room parked on another difficulty stays saved; say where
+    for (uint8_t other = 0; !end && (other < SPIRE_SAVESTATE_RUNGS); other++) {
+      if (other == rung) {
+        continue;
+      }
+      SpireSavestate parked = spire_savestate_load_logged(c, other);
+      if (spire_savestate_matches(parked, episode, k, variant, other)) {
+        spire_send_ticker(c, spire_savestate_parked_text(other));
+        c->log.info_f("Spire savestate: serial {:010} has a run of this room on {} ({}); it stays saved",
+            serial_number, spire_meta_difficulty_name(other), spire_savestate_describe(parked));
+        break;
+      }
+    }
   }
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
 }
@@ -3491,16 +3592,16 @@ static std::optional<uint32_t> spire_resume_level_for_client(
       return std::nullopt;
     }
     const auto& rq = rq_it->second;
-    SpireSavestate own = spire_savestate_load_logged(c);
+    uint8_t rung = spire_meta_ladder_quest_rung(l->quest->meta.quest_number); // B-REGIE-18-6: this quest's file
+    SpireSavestate own = spire_savestate_load_logged(c, rung);
     if (!own.level) {
       return std::nullopt;
     }
     const auto& follow = data->spire_follow_leader;
     uint8_t leader_id = follow ? follow->first : 0;
     auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
-    SpireSavestate leader_ss = !leader ? SpireSavestate() : (leader == c) ? own : spire_savestate_load_logged(leader);
-    auto level = spire_resume_level(own, leader_ss, rq.episode, rq.k, rq.variant,
-        spire_meta_ladder_quest_rung(l->quest->meta.quest_number));
+    SpireSavestate leader_ss = !leader ? SpireSavestate() : (leader == c) ? own : spire_savestate_load_logged(leader, rung);
+    auto level = spire_resume_level(own, leader_ss, rq.episode, rq.k, rq.variant, rung);
     *start_bonus = own.start_bonus;
     if (!level) {
       c->log.info_f("Spire savestate: q{} (room {} variant {}) will not resume {} (leader {}); the quest's level",
@@ -6181,10 +6282,17 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
                     : std::string("No rooms cleared yet");
   }
   if (arg == "continue") {
-    // v44: a savestate names the exact room quest and what the run had at its start
-    auto ss = spire_savestate_load_logged(c);
-    if (ss.exists) {
-      return spire_savestate_continue_text(ss);
+    // v44: a savestate names the exact room quest and what the run had at its start; B-REGIE-18-6: one line per
+    // difficulty that has one
+    std::string lines;
+    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
+      auto ss = spire_savestate_load_logged(c, rung);
+      if (ss.exists) {
+        lines += (lines.empty() ? "" : "\n") + spire_savestate_continue_text(ss);
+      }
+    }
+    if (!lines.empty()) {
+      return lines;
     }
     if (!cp.last_room) {
       return "No checkpoint yet: start at room 1";

@@ -367,6 +367,22 @@ bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
 // quest now; a file from before has no quest number and counts as Normal), so a Hard run never resumes on Normal or
 // the other way round.
 bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant, uint8_t rung);
+// B-REGIE-18-6: one savestate per difficulty rung (spire_meta_ladder_quest_rung: Normal, Hard, Very Hard, Ultimate), so a
+// start on one difficulty never touches a run parked on another; within one rung a new start still replaces it. The
+// stem is "<SPIRE_BRIDGE_DIRECTORY>/<serial>.<character id>"; the rung's file is <stem>.savestate.<rung name>.json. The
+// file of before, <stem>.savestate.json, counts for the rung it records itself (its quest number), only while that
+// rung has no file of its own, and goes at that rung's first write.
+constexpr uint8_t SPIRE_SAVESTATE_RUNGS = 4;
+std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung);
+std::string spire_savestate_old_filename(const std::string& stem);
+// Whether the file of before holds the savestate of this rung: the rung has no own file and it records that rung
+bool spire_savestate_old_counts(bool rung_file_exists, const SpireSavestate& old, uint8_t rung);
+// The savestate of one rung (the rung's file, else the file of before if it counts, else none) and in *filename the
+// file it came from ("" for none). Throws on an unreadable file.
+SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename = nullptr);
+// Writes data as the rung's file (durable) and removes the file of before if it held this rung; returns the filename
+std::string spire_savestate_store_rung(
+    const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old = nullptr);
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
@@ -401,6 +417,8 @@ constexpr auto SPIRE_KIT_USE_TEXT_DELAY = std::chrono::milliseconds(3000);
 uint64_t spire_draw_seed(uint32_t run_id, uint32_t k, uint32_t nth, const std::vector<uint32_t>& values);
 // '$spire continue' with a savestate (SPIRE_SS_* values); for the static tests
 std::string spire_savestate_continue_text(const SpireSavestate& ss);
+// The ticker of a fresh start in a room where the client's run waits on another difficulty (critic spel-af-3 r2 S-1)
+std::string spire_savestate_parked_text(uint8_t rung);
 // B-AF-3: the level a room quest's rule block carries for a client at the quest load: its own savestate's level when
 // the 'J' of that quest will resume it (own and leader savestate fit the quest's episode, room and variant, the same
 // run id, own has a level), else nothing (the quest's own level plus the start_level bonus, as before). Pure.
