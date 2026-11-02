@@ -20,6 +20,7 @@
 #include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
+#include "SpireEquipItem.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMag.hh"
 #include "SpireMeta.hh"
@@ -5616,6 +5617,13 @@ void run_static_tests() {
       expect_eq(std::string("Your Very Hard run waits in this room: open it on Very Hard to go on. It stays saved."),
           spire_savestate_parked_text(2));
     }
+    {
+      // one life left: singular, as the save point notice
+      SpireSavestate one = ss;
+      one.values[SPIRE_SS_LIVES] = 1;
+      expect_eq(std::string("Continue at Spire room 5 elite on Normal: 1 life, 31 min played"),
+          spire_savestate_continue_text(one));
+    }
     ss.practice = true;
     expect_eq(std::string("Continue at Spire room 5 elite on Normal: 2 lives, 31 min played (practice run)"),
         spire_savestate_continue_text(ss));
@@ -5786,6 +5794,13 @@ void run_static_tests() {
     ss.values[SPIRE_SS_ELAPSED] = 1865;
     expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, false, &ss));
     expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your gear."), spire_run_start_ticker(true, true, &ss));
+    {
+      // one life left: singular, as the save point notice
+      SpireSavestate one = ss;
+      one.values[SPIRE_SS_LIVES] = 1;
+      expect_eq(std::string("Run resumed at room 5: 1 life, 31 min. Equip your gear."),
+          spire_run_start_ticker(true, false, &one));
+    }
     expect_eq(std::string("Practice run: records and unlocks do not count."), spire_run_start_ticker(false, true, nullptr));
     expect(spire_run_start_ticker(false, false, nullptr).empty());
     for (const auto& line : {spire_run_start_ticker(true, true, &ss), spire_run_start_ticker(false, true, nullptr)}) {
@@ -6076,6 +6091,61 @@ void run_static_tests() {
           spire_bridge_message_text(0x43810AE1, long_ctx));
     });
 
+    // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 1, 8.1 critic NB-1): 'C' 12 has the fixtures of 'C' 10, so it runs here
+    b8_case("B9 'C' 12 the exam reward while an older rare waits", [&]() {
+      // waiting rare 2 + 1 = 3 (Lavis Cannon), bit 23 set, extra 0 + 1 = 1, n = 1
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. Still waiting: Lavis Cannon. Make room."),
+          spire_bridge_message_text(0x43830C21, with_names));
+      expect_eq(std::string("Exam reward: 500 meseta. Still waiting: Lavis Cannon. Make room."),
+          spire_bridge_message_text(0x43830C00, with_names)); // no extra
+      SpireBridgeTextContext ra_ctx = with_names;
+      ra_ctx.archetype = 1;
+      expect_eq(std::string("Exam reward: 700 meseta, Star Atomizer. Still waiting: Spread Needle. Make room."),
+          spire_bridge_message_text(0x43830C42, ra_ctx));
+      // the waiting rare not known (index 0, past the table, no class, no names): the words of the last form
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43800C21, with_names));
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43890C21, with_names));
+      SpireBridgeTextContext unknown = with_names;
+      unknown.archetype = -1;
+      expect_eq(std::string("Exam reward: 600 meseta, Photon Drop x2. A rare still waits: make room."),
+          spire_bridge_message_text(0x43830C21, unknown));
+      expect_eq(std::string("Exam reward: 600 meseta. A rare still waits: make room."), spire_bridge_message_text(0x43830C21));
+      // too long: the extra goes first
+      const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
+          {"\"Twenty-two chars nam4\"", true}};
+      auto t = b8_load(b8_table_json({longest, longest, longest}, ",\"exam_extras\":[\"Twenty-four characters!!\"]"));
+      SpireBridgeTextContext long_ctx;
+      long_ctx.draw = &t;
+      long_ctx.archetype = 2;
+      std::string full = "Exam reward: 1200 meseta, Twenty-four characters!!. Still waiting: Twenty-two chars nam1. Make room.";
+      expect(full.size() > SPIRE_BRIDGE_TEXT_MAX); // the form the first fallback replaces
+      expect_eq(std::string("Exam reward: 1200 meseta. Still waiting: Twenty-two chars nam1. Make room."),
+          spire_bridge_message_text(0x43810CE1, long_ctx));
+      // still too long: no rare name either. The loader caps a name at 22 characters (the form without the extra is
+      // then at most 75), so a name set past the loader stands in for a longer cap later
+      auto v = t;
+      v.archetypes[0].entries[0].name = "A rare name that is long enough to need the last form!";
+      SpireBridgeTextContext very_long_ctx{&v, 0, ""};
+      std::string no_extra = "Exam reward: 1200 meseta. Still waiting: A rare name that is long enough to need the last form!. Make room.";
+      expect(no_extra.size() > SPIRE_BRIDGE_TEXT_MAX);
+      expect_eq(std::string("Exam reward: 1200 meseta. A rare still waits: make room."),
+          spire_bridge_message_text(0x43810CE1, very_long_ctx));
+      // every 'C' 12: one line of at most 90 characters, never empty
+      size_t checked = 0;
+      for (const SpireBridgeTextContext* ctx : {&none, &with_names, &ra_ctx, &unknown, &long_ctx, &very_long_ctx}) {
+        for (uint32_t bits = 0; bits < 0x100; bits++) {
+          for (uint32_t low = 0; low < 0x100; low++) {
+            std::string text = spire_bridge_message_text(0x43000C00 | (bits << 16) | low, *ctx);
+            expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+            checked++;
+          }
+        }
+      }
+      phosg::log_info_f("   B9: {} 'C' 12 texts checked", checked);
+    });
+
     b8_case("every text one line of at most 90 characters", [&]() {
       const B8Entries longest = {{"\"Twenty-two chars nam1\"", true}, {"\"Twenty-two chars nam2\"", true}, {"\"Twenty-two chars nam3\"", true},
           {"\"Twenty-two chars nam4\"", true}};
@@ -6235,6 +6305,357 @@ void run_static_tests() {
     });
 
     expect_eq(0u, bel_failed);
+  }
+
+  phosg::log_info_f("-- Spire bundle 9 (ux-pass): the save point notice at a game join (ROUTEB9-PROTOCOL.md § 2)");
+  {
+    size_t b9_failed = 0;
+    auto b9_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   B9 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        b9_failed++;
+        phosg::log_error_f("   B9 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    auto b9_savestate = [](uint32_t k, uint32_t variant, uint32_t lives, uint32_t seconds) {
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = 0xA1;
+      ss.episode = 1;
+      ss.quest_number = 921;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = k;
+      ss.values[SPIRE_SS_VARIANT] = variant;
+      ss.values[SPIRE_SS_LIVES] = lives;
+      ss.values[SPIRE_SS_ELAPSED] = seconds;
+      return ss;
+    };
+    const std::string category = "PSO Spire: losse kamers";
+
+    b9_case("the room quest name the build gives", [&]() {
+      expect_eq(std::string("Spire room 1"), spire_savestate_room_quest_name(b9_savestate(1, 0, 3, 0)));
+      expect_eq(std::string("Spire room 5 elite"), spire_savestate_room_quest_name(b9_savestate(5, 1, 3, 0)));
+      expect_eq(std::string("Spire room 3 rest"), spire_savestate_room_quest_name(b9_savestate(3, 2, 3, 0)));
+      expect(spire_savestate_room_quest_name(b9_savestate(5, 3, 3, 0)).empty()); // unknown variant
+      expect(spire_savestate_room_quest_name(b9_savestate(0, 0, 3, 0)).empty()); // no room
+      expect(spire_savestate_room_quest_name(SpireSavestate()).empty()); // no values
+      {
+        SpireSavestate rung = b9_savestate(5, 1, 3, 0); // a rung's room quest: the Normal name plus the difficulty
+        rung.quest_number = 2946;
+        expect_eq(std::string("Spire room 5 elite Very Hard"), spire_savestate_room_quest_name(rung));
+      }
+    });
+
+    b9_case("normal, elite and rest: both lines", [&]() {
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, b9_savestate(1, 0, 3, 125), category, "Spire room 1");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 1, 3 lives, 2:05."), lines.at(0));
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 1."), lines.at(1));
+      expect(told);
+      told = false;
+      lines = spire_savestate_notice_take(&told, b9_savestate(5, 1, 2, 725), category, "Spire room 5 elite");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 5 elite, 2 lives, 12:05."), lines.at(0));
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 5 elite."), lines.at(1));
+      told = false;
+      lines = spire_savestate_notice_take(&told, b9_savestate(3, 2, 0, 3725), category, "Spire room 3 rest");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 3 rest, 0 lives, 1:02:05."), lines.at(0)); // h:mm:ss from an hour on
+      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 3 rest."), lines.at(1));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 59:59."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3599)));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 1:00:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3600)));
+      expect_eq(std::string("Saved run: Room 7, 1 life, 0:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 0)));
+    });
+
+    b9_case("a missing field is left out", [&]() {
+      auto ss = b9_savestate(5, 1, 2, 725);
+      ss.values.resize(SPIRE_SS_ELAPSED); // no run time
+      expect_eq(std::string("Saved run: Room 5 elite, 2 lives."), spire_savestate_notice_saved_line(ss));
+      ss.values.resize(SPIRE_SS_LIVES); // no lives either
+      expect_eq(std::string("Saved run: Room 5 elite."), spire_savestate_notice_saved_line(ss));
+      auto unknown_variant = b9_savestate(5, 7, 2, 725);
+      expect_eq(std::string("Saved run: Room 5, 2 lives, 12:05."), spire_savestate_notice_saved_line(unknown_variant));
+      auto no_room = b9_savestate(0, 0, 2, 725);
+      expect_eq(std::string("Saved run: 2 lives, 12:05."), spire_savestate_notice_saved_line(no_room));
+      // no room quest name, so no quest to find: the $spire continue line
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, no_room, "", "");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("To continue: type $spire continue."), lines.at(1));
+    });
+
+    b9_case("the room quest not found: the $spire continue line", [&]() {
+      expect_eq(std::string(SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT), spire_savestate_notice_continue_line("", ""));
+      expect_eq(std::string("To continue: type $spire continue."), spire_savestate_notice_continue_line(category, ""));
+      expect_eq(std::string("To continue: type $spire continue."), spire_savestate_notice_continue_line("", "Spire room 1"));
+      // over the limit: the $spire continue line too
+      expect_eq(std::string("To continue: type $spire continue."),
+          spire_savestate_notice_continue_line(category, "A quest name so long that the whole line runs over its ninety"));
+      bool told = false;
+      auto lines = spire_savestate_notice_take(&told, b9_savestate(9, 0, 3, 61), category, "");
+      expect_eq(size_t(2), lines.size());
+      expect_eq(std::string("Saved run: Room 9, 3 lives, 1:01."), lines.at(0));
+      expect_eq(std::string("To continue: type $spire continue."), lines.at(1));
+    });
+
+    b9_case("once per session, and nothing without a savestate", [&]() {
+      bool told = false;
+      expect(spire_savestate_notice_take(&told, SpireSavestate(), category, "Spire room 1").empty()); // none (or unreadable)
+      expect(!told); // a later join in the session can still tell a savestate written since
+      expect_eq(size_t(2), spire_savestate_notice_take(&told, b9_savestate(2, 0, 3, 90), category, "Spire room 2").size());
+      expect(told);
+      // a second 6F in the same session sends nothing
+      expect(spire_savestate_notice_take(&told, b9_savestate(2, 0, 3, 90), category, "Spire room 2").empty());
+      expect(spire_savestate_notice_take(&told, b9_savestate(3, 0, 3, 95), category, "Spire room 3").empty());
+      expect(told);
+    });
+
+    b9_case("every notice line one line of at most 90 characters", [&]() {
+      size_t checked = 0, longest_seen = 0;
+      for (uint32_t k : {1u, 9u, 15u, 26u, 255u, 0xFFFFFFFFu}) {
+        for (uint32_t variant : {0u, 1u, 2u, 3u}) {
+          for (uint32_t lives : {0u, 3u, 99u, 0xFFFFFFFFu}) {
+            for (uint32_t seconds : {0u, 59u, 3599u, 3600u, 359999u, 0xFFFFFFFFu}) {
+              auto ss = b9_savestate(k, variant, lives, seconds);
+              std::string quest = spire_savestate_room_quest_name(ss);
+              for (const std::string& line : {spire_savestate_notice_saved_line(ss),
+                       spire_savestate_notice_continue_line(category, quest), spire_savestate_notice_continue_line("", "")}) {
+                expect(!line.empty() && (line.size() <= SPIRE_BRIDGE_TEXT_MAX) && (line == spire_ticker_line(line)));
+                longest_seen = std::max(longest_seen, line.size());
+                checked++;
+              }
+            }
+          }
+        }
+      }
+      phosg::log_info_f("   B9: {} notice lines checked, longest {} characters", checked, longest_seen);
+    });
+
+    expect_eq(0u, b9_failed);
+  }
+
+  phosg::log_info_f("-- Spire bundle 9 (ux-pass): server equip, r143, 'C' 13/14, the kit and evolution texts");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did
+    size_t b9_failed = 0;
+    auto b9_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   B9 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        b9_failed++;
+        phosg::log_error_f("   B9 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // an inventory of (data1 bytes 0-7, id, equipped, flags) items
+    struct B9Item {
+      uint64_t first;
+      uint32_t id;
+      bool equipped;
+      uint32_t extra_flags = 0;
+    };
+    auto b9_inventory = [](const std::vector<B9Item>& items) {
+      PlayerInventory inv;
+      for (const auto& it : items) {
+        ItemData data(it.first, 0);
+        data.id = it.id;
+        auto& slot = inv.items[inv.num_items++];
+        slot = PlayerInventoryItem(data, it.equipped);
+        slot.state = it.equipped ? 2 : 1;
+        slot.flags = slot.flags | it.extra_flags;
+      }
+      return inv;
+    };
+
+    b9_case("r143: 1 only for 3OP0 with the switch on, function calls that run code and the function loaded", [&]() {
+      expect(SPIRE_EQUIP_REGISTER == 143);
+      // r143 is no register newserv writes otherwise: past the 'M' levels r1-r7 and prices r8-r14, the resume items
+      // r20-r31 and header r32-r58, the shop r105-r107 and the draw result r181; below the stored r232-r247
+      expect(SPIRE_SHOP_PRICE_FIRST_REGISTER + SPIRE_SHOP_NUM_ITEMS - 1 < SPIRE_EQUIP_REGISTER);
+      expect(SPIRE_EQUIP_REGISTER != 15); // r15 is every quest version's resume "asked" flag
+      for (uint8_t reg : {SPIRE_SHOP_BALANCE_REGISTER, SPIRE_SHOP_STRENGTH_REGISTER, SPIRE_SHOP_HEAT_REGISTER,
+               SPIRE_BRIDGE_DRAW_RESULT_REGISTER, SPIRE_RESUME_ANSWER_REGISTER, SPIRE_RESUME_ITEM_ACK_REGISTER}) {
+        expect(reg != SPIRE_EQUIP_REGISTER);
+      }
+      expect(SPIRE_EQUIP_REGISTER >= SPIRE_RESUME_ITEM_FIRST_REGISTER + 12);
+      expect(SPIRE_EQUIP_REGISTER < SPIRE_BRIDGE_FIRST_REGISTER);
+      for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
+        expect(reg != SPIRE_EQUIP_REGISTER);
+      }
+      expect(spire_equip_item_available(0x334F5030, true, true, true)); // 3OP0: r143 = 1
+      expect(!spire_equip_item_available(0x334F5030, false, true, true)); // SpireEquipItemPatch false: r143 = 0
+      expect(!spire_equip_item_available(0x334F5030, true, false, true)); // no function calls that run code
+      expect(!spire_equip_item_available(0x334F5030, true, true, false)); // the function not in the index
+      for (uint32_t other : {0x334F4532u /* 3OE2 */, 0x334F4A35u /* 3OJ5 */, 0x344F5055u /* 4OPU */, 0u}) {
+        expect(!spire_equip_item_available(other, true, true, true));
+      }
+      expect_eq(std::string("SpireEquipItem"), std::string(SPIRE_EQUIP_FUNCTION_NAME));
+    });
+
+    // Part F3: SpireEquipItemGC.s assembles for 3OP0 only, so with the switch on r143 = 1 for a 3OP0 client
+    b9_case("SpireEquipItem assembles for 3OP0, is in the function index, and r143 = 1 for 3OP0", [&]() {
+      ClientFunctionIndex index("system/client-functions", true);
+      auto fn = index.get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);
+      expect(fn != nullptr);
+      expect_eq(static_cast<int>(ClientFunctionIndex::Function::Architecture::POWERPC), static_cast<int>(fn->arch));
+      expect_eq(SPIRE_EQUIP_ITEM_SPECIFIC_VERSION, fn->specific_version);
+      expect(!fn->appears_in_patches_menu());
+      // the argument newserv writes (spire_equip_item_send) is a label of the function
+      expect(fn->label_offsets.count(SPIRE_EQUIP_ITEM_ID_LABEL) == 1);
+      expect(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4 <= fn->code.size());
+      expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}}).empty());
+      // the game functions it calls are the six of ROUTEB9-NEWSERV-F2-REPORT.md, each loaded as lis r0 / ori r0
+      auto has_call_to = [&](uint32_t addr) {
+        uint32_t lis = 0x3C000000 | (addr >> 16);
+        uint32_t ori = 0x60000000 | (addr & 0xFFFF);
+        std::string be;
+        for (uint32_t w : {lis, ori}) {
+          be.push_back((w >> 24) & 0xFF);
+          be.push_back((w >> 16) & 0xFF);
+          be.push_back((w >> 8) & 0xFF);
+          be.push_back(w & 0xFF);
+        }
+        return fn->code.find(be) != std::string::npos;
+      };
+      for (uint32_t addr : {0x801BAC08u /* TObjPlayer_for_client_id */, 0x801D53D0u /* find_pack_node_by_id */,
+               0x801D5C20u /* pack_node_item */, 0x801C6C18u /* slot get */, 0x801BA398u /* send_unequip_item_6x26 */,
+               0x801BA5ACu /* send_equip_item_6x25 */}) {
+        expect(has_call_to(addr));
+      }
+      // never TObjPlayer_equip_item directly: the game's own send path equips locally
+      expect(!has_call_to(0x801BA3FCu));
+      expect(spire_equip_item_available(fn->specific_version, true, true, true));
+      for (uint32_t other : {0x334F4530u, 0x334F4531u, 0x334F4532u, 0x334F4A35u, 0x33535030u}) {
+        bool threw = false;
+        try {
+          index.get(SPIRE_EQUIP_FUNCTION_NAME, other);
+        } catch (const std::out_of_range&) {
+          threw = true;
+        }
+        expect(threw);
+      }
+    });
+
+    b9_case("'C' 13: the newest unequipped weapon with grind G", [&]() {
+      auto inv = b9_inventory({
+          {0x0001000A00000000ULL, 0x00210010, false}, // an older unequipped Saber +10
+          {0x0006000A00000000ULL, 0x00210011, true}, // the equipped Handgun +10: not it
+          {0x0101000000000000ULL, 0x00210012, true}, // Frame
+          {0x030B030000000000ULL, 0x00210013, false}, // HP Material
+          {0x0001000A00000000ULL, 0x00210017, false}, // the kit Saber +10, made last
+          {0x0001000A00000000ULL, 0x00210018, false, 0x400}, // a wrapped Saber +10: not equippable
+      });
+      auto id = spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, true, inv);
+      expect(id.has_value());
+      expect_eq(0x00210017u, id.value_or(0));
+      // not found: no weapon with that grind, or only equipped ones
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 6, true, inv).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 0, true, b9_inventory({{0x0001000000000000ULL, 1, true}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, true, PlayerInventory()).has_value());
+      // r143 = 0 for this client: nothing, even with the weapon there
+      expect(!spire_equip_target(SPIRE_PROMPT_KIT_GROUND, 10, false, inv).has_value());
+      // another 'C' point sends nothing
+      expect(!spire_equip_target(12, 10, true, inv).has_value());
+    });
+
+    b9_case("'C' 14: the one run mag", [&]() {
+      auto inv = b9_inventory({
+          {0x0001000000000000ULL, 0x00210017, true}, // Saber
+          {0x0215190700000000ULL, 0x00210034, false}, // Varuna LV25, the new mag
+      });
+      expect_eq(0x00210034u, spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, inv).value_or(0));
+      // not found: no mag, two mags (not the one run mag), the one mag already equipped
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, b9_inventory({{0x0001000000000000ULL, 1, true}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true,
+          b9_inventory({{0x0200050000000000ULL, 1, false}, {0x0215190700000000ULL, 2, false}})).has_value());
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, b9_inventory({{0x0215190700000000ULL, 2, true}})).has_value());
+      // r143 = 0
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, false, inv).has_value());
+    });
+
+    b9_case("kit ticker and evolution text in both r143 states, one line within 90 characters", [&]() {
+      // r143 = 0: both as today
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_use_text(false, 10, 5));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false, false));
+      // r143 = 1
+      expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 10, 5));
+      expect_eq(std::string("Your kit weapon is ground +4."), spire_kit_use_text(true, 4, 0)); // no HP Materials
+      expect_eq(std::string("Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 0, 2)); // no grind
+      expect_eq(std::string("Your mag evolves: Varuna."), spire_run_mag_evolve_text("Varuna", false, true));
+      expect_eq(std::string("Your mag evolves: Kabanda (Shell)."), spire_run_mag_evolve_text("Kabanda", true, true));
+      for (bool equips : {false, true}) {
+        for (const std::string& t : {spire_kit_use_text(equips, 255, 5), spire_kit_use_text(equips, 10, 5),
+                 spire_run_mag_evolve_text("Kabanda", true, equips), spire_run_mag_evolve_text("Varuna", false, equips)}) {
+          expect(!t.empty() && (t.size() <= SPIRE_BRIDGE_TEXT_MAX) && (t == spire_ticker_line(t)));
+        }
+      }
+    });
+
+    b9_case("critic N-4: no 6x25 after SpireEquipItem gives one equip line, a 6x25 none", [&]() {
+      auto kit_unequipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, false}});
+      auto kit_equipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, true}});
+      expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."),
+          spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_unequipped).value_or(""));
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_equipped).has_value());
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010002, kit_unequipped).has_value()); // item gone
+      auto mag_unequipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, false}});
+      auto mag_equipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, true}});
+      expect_eq(std::string("Equip your mag: Item Pack > Mag."),
+          spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_unequipped).value_or(""));
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_equipped).has_value());
+      expect(!spire_equip_missing_text(0x0C, 0x00010003, mag_unequipped).has_value()); // another point
+      for (const char* t : {SPIRE_EQUIP_KIT_MISSING_TEXT, SPIRE_EQUIP_MAG_MISSING_TEXT}) {
+        expect((std::string(t).size() <= 90) && (std::string(t) == spire_ticker_line(t)));
+      }
+    });
+
+    b9_case("critic B-1: the texts follow the quest's 'C' 13/14, not r143", [&]() {
+      // an older quest (no 'C' 13/14) on this newserv, r143 = 1: the texts of today
+      SpireKitMagTexts old_quest;
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(old_quest, 5, 3));
+      expect(old_quest.kit_sent && !old_quest.kit_b9_sent);
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+          spire_run_mag_evolve_text_take(old_quest, "Varuna", false));
+      // the bundle 9 quest: 'C' 13 before the ticker, 'C' 14 after the RESULT 1
+      SpireKitMagTexts new_quest;
+      expect(spire_kit_c13_take(new_quest, 10).empty()); // the ticker has not gone out: nothing late
+      expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."),
+          spire_kit_ticker_take(new_quest, 5, 3));
+      expect(new_quest.kit_b9_sent);
+      new_quest.mag_c14_seen = true;
+      expect_eq(std::string("Your mag evolves: Kabanda (Shell)."), spire_run_mag_evolve_text_take(new_quest, "Kabanda", true));
+      // a slow leader: the ticker before the 'C' 13 gives the old line, the 'C' 13 then the bundle 9 line, once
+      SpireKitMagTexts slow;
+      expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(slow, 2, 2));
+      expect_eq(std::string("Your kit weapon is ground +4. Use your HP Materials now (Item Pack)."), spire_kit_c13_take(slow, 4));
+      expect(slow.kit_b9_sent);
+      expect(spire_kit_c13_take(slow, 4).empty());
+    });
+
+    b9_case("critic r2: the kit ticker waits for a 'C' 13 only on r143 = 1, the mag hint goes only with an equip", [&]() {
+      // a slow leader on r143 = 1: the ticker waits once, the 'C' 13 then lands before it and the line is the new one
+      SpireKitMagTexts slow;
+      expect(spire_kit_ticker_waits_for_c13(slow, true));
+      expect(!spire_kit_ticker_waits_for_c13(slow, false)); // r143 = 0: the old quest's line on time
+      expect(spire_kit_c13_take(slow, 6).empty());
+      expect(!spire_kit_ticker_waits_for_c13(slow, true));
+      expect_eq(std::string("Your kit weapon is ground +6. Use your HP Materials now (Item Pack)."),
+          spire_kit_ticker_take(slow, 1, 3));
+      // 'C' 14 with r143 = 0 (or no such mag in the copy): nothing equips it, the hint stays
+      SpireKitMagTexts not_sent;
+      spire_run_mag_c14_take(not_sent, false);
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+          spire_run_mag_evolve_text_take(not_sent, "Varuna", false));
+      // 'C' 14 and SpireEquipItem sent: no hint
+      SpireKitMagTexts sent;
+      spire_run_mag_c14_take(sent, true);
+      expect_eq(std::string("Your mag evolves: Varuna."), spire_run_mag_evolve_text_take(sent, "Varuna", false));
+    });
+
+    expect_eq(0u, b9_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");

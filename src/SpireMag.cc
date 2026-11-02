@@ -463,8 +463,18 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
   return ret;
 }
 
-std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell) {
-  return std::format("Your mag evolves: {}{}. Equip it: Item Pack > Mag.", sega_name, shell ? " (Shell)" : "");
+std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell, bool server_equips) {
+  return std::format("Your mag evolves: {}{}.{}", sega_name, shell ? " (Shell)" : "",
+      server_equips ? "" : " Equip it: Item Pack > Mag.");
+}
+
+std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level) {
+  if (!server_equips) {
+    return SPIRE_KIT_USE_TEXT;
+  }
+  std::string ground = grind ? std::format("Your kit weapon is ground +{}.", grind) : "";
+  std::string materials = hp_mat_level ? "Use your HP Materials now (Item Pack)." : "";
+  return (ground.empty() || materials.empty()) ? (ground + materials) : (ground + " " + materials);
 }
 
 std::string spire_run_mag_reminder_text(bool shell) {
@@ -473,6 +483,39 @@ std::string spire_run_mag_reminder_text(bool shell) {
 
 bool spire_kit_use_text_due(bool start, uint32_t hp_mat_level, uint32_t atp_grind_level, bool resumed, bool already_sent) {
   return start && (hp_mat_level || atp_grind_level) && !resumed && !already_sent;
+}
+
+bool spire_kit_ticker_waits_for_c13(const SpireKitMagTexts& st, bool server_equips) {
+  return server_equips && (st.kit_grind < 0);
+}
+
+std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, uint32_t) {
+  st.kit_sent = true;
+  st.kit_hp_mat = hp_mat_level;
+  if (st.kit_grind < 0) {
+    return SPIRE_KIT_USE_TEXT; // no 'C' 13 (yet): the quest's kit as before bundle 9, or spire_kit_c13_take follows
+  }
+  st.kit_b9_sent = true;
+  return spire_kit_use_text(true, static_cast<uint32_t>(st.kit_grind), hp_mat_level);
+}
+
+std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind) {
+  st.kit_grind = grind;
+  if (!st.kit_sent || st.kit_b9_sent) {
+    return "";
+  }
+  st.kit_b9_sent = true;
+  return spire_kit_use_text(true, grind, st.kit_hp_mat);
+}
+
+void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent) {
+  if (equip_sent) {
+    st.mag_c14_seen = true;
+  }
+}
+
+std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell) {
+  return spire_run_mag_evolve_text(sega_name, shell, st.mag_c14_seen);
 }
 
 bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms) {

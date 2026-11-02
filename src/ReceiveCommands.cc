@@ -5149,6 +5149,8 @@ static asio::awaitable<void> on_6F(std::shared_ptr<Client> c, Channel::Message& 
   spire_replay_after_floor_load(c, l);
   // Spire guard (v21): every Battle game is guarded, also one without a quest (see SpireFlagBridge.hh)
   spire_guard_battle_join(c, l);
+  // Route B bundle 9: a client with a Spire save point hears once per session where it stands and how to continue
+  spire_savestate_notice_on_game_join(c, l);
   // Inventory backup at every game join, every character (regie pso-regie-10, see InventoryBackup.hh)
   inventory_backup_on_game_join(c, l);
 

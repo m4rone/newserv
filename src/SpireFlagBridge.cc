@@ -24,6 +24,7 @@
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireBBATxGuard.hh"
+#include "SpireEquipItem.hh"
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
 #include "SpireMeta.hh"
@@ -666,10 +667,15 @@ bool spire_practice_blocks_flag(bool practice, uint16_t flag_num) {
   return practice && (flag_num >= SPIRE_BRIDGE_FIRST_FLAG) && (flag_num <= SPIRE_BRIDGE_LAST_FLAG);
 }
 
+// "1 life" / "<n> lives", as the save point notice says it
+static std::string spire_lives_phrase(uint32_t lives) {
+  return std::format("{} {}", lives, (lives == 1) ? "life" : "lives");
+}
+
 std::string spire_run_start_ticker(bool resumed, bool practice, const SpireSavestate* ss) {
   if (resumed && ss && (ss->values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
-    return std::format("{} resumed at room {}: {} lives, {} min. Equip your gear.", practice ? "Practice run" : "Run",
-        ss->values[SPIRE_SS_K], ss->values[SPIRE_SS_LIVES], ss->values[SPIRE_SS_ELAPSED] / 60);
+    return std::format("{} resumed at room {}: {}, {} min. Equip your gear.", practice ? "Practice run" : "Run",
+        ss->values[SPIRE_SS_K], spire_lives_phrase(ss->values[SPIRE_SS_LIVES]), ss->values[SPIRE_SS_ELAPSED] / 60);
   }
   return practice ? "Practice run: records and unlocks do not count." : "";
 }
@@ -702,10 +708,10 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss) {
   static const char* variants[] = {"", " elite", " rest"};
   uint32_t variant = v[SPIRE_SS_VARIANT];
   // critic spel-af-3 r2 S-1: the difficulty too, so the run is opened on the difficulty that resumes it
-  return std::format("Continue at Spire room {}{} on {}: {}{} lives, {} min played{}", v[SPIRE_SS_K],
+  return std::format("Continue at Spire room {}{} on {}: {}{}, {} min played{}", v[SPIRE_SS_K],
       (variant < 3) ? variants[variant] : "", spire_meta_difficulty_name(spire_meta_ladder_quest_rung(ss.quest_number)),
-      ss.level ? std::format("Lv{}, ", *ss.level + 1) : std::string(), v[SPIRE_SS_LIVES], v[SPIRE_SS_ELAPSED] / 60,
-      ss.practice ? " (practice run)" : "");
+      ss.level ? std::format("Lv{}, ", *ss.level + 1) : std::string(), spire_lives_phrase(v[SPIRE_SS_LIVES]),
+      v[SPIRE_SS_ELAPSED] / 60, ss.practice ? " (practice run)" : "");
 }
 
 std::string spire_savestate_parked_text(uint8_t rung) {
@@ -720,6 +726,58 @@ std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const Spir
     return std::nullopt;
   }
   return own.level;
+}
+
+std::string spire_savestate_room_quest_name(const SpireSavestate& ss) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = ss.values;
+  if ((v.size() <= SPIRE_SS_VARIANT) || (v[SPIRE_SS_K] == 0) || (v[SPIRE_SS_VARIANT] >= 3)) {
+    return "";
+  }
+  // spel-af item 3: a room quest on a rung carries the difficulty after the Normal name (build.sh --rooms)
+  uint8_t rung = spire_meta_ladder_quest_rung(ss.quest_number);
+  return std::format("Spire room {}{}{}{}", v[SPIRE_SS_K], variants[v[SPIRE_SS_VARIANT]], rung ? " " : "",
+      rung ? spire_meta_difficulty_name(rung) : "");
+}
+
+std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = ss.values;
+  std::vector<std::string> parts;
+  if ((v.size() > SPIRE_SS_K) && (v[SPIRE_SS_K] != 0)) {
+    bool has_variant = (v.size() > SPIRE_SS_VARIANT) && (v[SPIRE_SS_VARIANT] < 3);
+    parts.emplace_back(std::format("Room {}{}", v[SPIRE_SS_K], has_variant ? variants[v[SPIRE_SS_VARIANT]] : ""));
+  }
+  if (v.size() > SPIRE_SS_LIVES) {
+    parts.emplace_back(spire_lives_phrase(v[SPIRE_SS_LIVES]));
+  }
+  if (v.size() > SPIRE_SS_ELAPSED) {
+    uint32_t t = v[SPIRE_SS_ELAPSED];
+    parts.emplace_back((t >= 3600) ? std::format("{}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60)
+                                   : std::format("{}:{:02}", t / 60, t % 60));
+  }
+  std::string ret = "Saved run";
+  for (size_t z = 0; z < parts.size(); z++) {
+    ret += (z ? ", " : ": ") + parts[z];
+  }
+  return ret + ".";
+}
+
+std::string spire_savestate_notice_continue_line(const std::string& category_name, const std::string& quest_name) {
+  if (category_name.empty() || quest_name.empty()) {
+    return SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
+  }
+  std::string ret = spire_ticker_line(std::format("To continue: Quest > {} > {}.", category_name, quest_name));
+  return (ret.size() <= SPIRE_BRIDGE_TEXT_MAX) ? ret : SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
+}
+
+std::vector<std::string> spire_savestate_notice_take(
+    bool* told, const SpireSavestate& ss, const std::string& category_name, const std::string& quest_name) {
+  if (*told || !ss.exists) {
+    return {};
+  }
+  *told = true;
+  return {spire_savestate_notice_saved_line(ss), spire_savestate_notice_continue_line(category_name, quest_name)};
 }
 
 // The run of a game (lobby id; a game's id is never reused while the server runs): set by the first 'J' or 'B' in the
@@ -774,9 +832,27 @@ struct SpireClientRun {
   uint8_t start_room = 0;
   std::map<uint32_t, uint32_t> draws_per_room; // n-th draw per room (seed)
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
+  SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
+
+// Route B bundle 9 (SpireEquipItem.hh): r143 for this client, the same answer in every 'M' answer, at 'C' 13/14 and for
+// the kit and evolution texts
+static bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
+  auto s = c->require_server_state();
+  bool loaded = false;
+  if (spire_equip_item_applies(c->specific_version) && s->data->client_functions) {
+    try {
+      s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
+      loaded = true;
+    } catch (const std::out_of_range&) {
+    }
+  }
+  return spire_equip_item_available(c->specific_version, s->data->spire_equip_item_patch,
+      c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE),
+      loaded);
+}
 
 static SpireClientRun* spire_client_run_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool create) {
   auto it = spire_client_runs.find(c.get());
@@ -1836,16 +1912,21 @@ static std::string spire_text_approach(uint32_t type, uint32_t extra, uint32_t k
 // 'C' 10 exam reward: bits 16-22 rare entry index + 1 of the writer's archetype, bit 23 the rare did not fit; low byte
 // bits 0-4 exam_extras index + 1, bits 5-7 n (meseta 500 + 100 n). A part without a name is left out; over the limit
 // the extra goes first, then the rare name (the full note is about the rare, so it stays)
+// the name of entry "index + 1" (0 = none) of the writer's archetype; "" when not known
+static const std::string& spire_text_archetype_entry_name(const SpireBridgeTextContext& ctx, uint32_t index_plus_1) {
+  if (ctx.draw && (ctx.archetype >= 0) && (static_cast<size_t>(ctx.archetype) < ctx.draw->archetypes.size())) {
+    const auto& entries = ctx.draw->archetypes[ctx.archetype].entries;
+    if ((index_plus_1 != 0) && (index_plus_1 <= entries.size())) {
+      return entries[index_plus_1 - 1].name;
+    }
+  }
+  return SPIRE_TEXT_NO_NAME;
+}
+
 static std::string spire_text_exam_reward(uint32_t value, const SpireBridgeTextContext& ctx) {
   uint32_t rare = (value >> 16) & 0x7F, extra = value & 0x1F, n = (value >> 5) & 0x07;
   bool full = (value >> 23) & 1;
-  const std::string* rare_name = &SPIRE_TEXT_NO_NAME;
-  if (ctx.draw && (ctx.archetype >= 0) && (static_cast<size_t>(ctx.archetype) < ctx.draw->archetypes.size())) {
-    const auto& entries = ctx.draw->archetypes[ctx.archetype].entries;
-    if ((rare != 0) && (rare <= entries.size())) {
-      rare_name = &entries[rare - 1].name;
-    }
-  }
+  const std::string* rare_name = &spire_text_archetype_entry_name(ctx, rare);
   const std::string& extra_name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, extra);
   auto form = [&](bool with_rare, bool with_extra) {
     std::string ret = std::format("Exam reward: {} meseta", 500 + 100 * n);
@@ -1862,6 +1943,30 @@ static std::string spire_text_exam_reward(uint32_t value, const SpireBridgeTextC
     return ret;
   };
   return spire_text_first_fitting({form(true, true), form(true, false), form(false, false)});
+}
+
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 1, 8.1 critic NB-1): 'C' 12, an exam reward while an older exam rare still
+// waits. The layout of 'C' 10, but bits 16-22 name the WAITING rare (entry index + 1 of the writer's archetype, 0 = not
+// known) and bit 23 is always set (the inventory is full by definition, so the bit says nothing more). A part without a
+// name is left out; a waiting rare without a name keeps the "a rare still waits" words of the last form. Over the limit
+// the extra goes first, then the rare name.
+static std::string spire_text_exam_reward_waiting(uint32_t value, const SpireBridgeTextContext& ctx) {
+  uint32_t rare = (value >> 16) & 0x7F, extra = value & 0x1F, n = (value >> 5) & 0x07;
+  const std::string& rare_name = spire_text_archetype_entry_name(ctx, rare);
+  const std::string& extra_name = spire_text_name_at(ctx.draw ? &ctx.draw->exam_extras : nullptr, extra);
+  auto form = [&](bool with_extra, bool with_rare) {
+    std::string ret = std::format("Exam reward: {} meseta", 500 + 100 * n);
+    if (with_extra && !extra_name.empty()) {
+      ret += ", " + extra_name;
+    }
+    if (with_rare && !rare_name.empty()) {
+      ret += ". Still waiting: " + rare_name + ". Make room.";
+    } else {
+      ret += ". A rare still waits: make room.";
+    }
+    return ret;
+  };
+  return spire_text_first_fitting({form(true, true), form(false, true), form(false, false)});
 }
 
 // v17: the text for a short-message code (SPIRE_BRIDGE_MSG_*), the words of the quest's window_msg (spire.json
@@ -1912,7 +2017,12 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return spire_text_exam_reward(value, ctx);
         case 11: // v62: the start hint at the Forest 1 arrival
           return "Take a step: your run starts.";
-        case 12: { // B-BEL-3: a relic gift that did not fit waits for the next room start; low byte the gift
+        case 12: { // two senders share 'C' 12 (route-b-9-main): bit 23 set = bundle 9's exam reward while an older exam
+          // rare still waits (ROUTEB9-PROTOCOL.md § 1, bit 23 always set); bit 23 clear = B-BEL-3's relic gift that did
+          // not fit and waits for the next room start, the gift in the low byte (rewards.py gw_tell, bits 16-23 zero)
+          if ((value >> 23) & 1) {
+            return spire_text_exam_reward_waiting(value, ctx);
+          }
           static const std::array<const char*, 6> gifts = {"", "Hoarder", "Whetstone", "Sea of Fire", "Sol Atomizer", "Thread"};
           uint32_t gift = value & 0xFF;
           return (gift >= 1) && (gift < gifts.size())
@@ -2549,10 +2659,30 @@ static asio::awaitable<void> spire_kit_use_text_later(
     co_return;
   }
   auto* cr = spire_client_run_for(c, l, true);
+  // critic r2 (B-1, a slow leader): r143 = 1 and no 'C' 13 yet: one more delay, so a bundle 9 quest's line does not
+  // follow the old one that names grinders it did not give; an old quest on r143 = 1 gets its old line that much later
+  if (spire_kit_ticker_waits_for_c13(cr->b9_texts, spire_equip_item_available_for(c))) {
+    c.reset();
+    l.reset();
+    co_await async_sleep(SPIRE_KIT_USE_TEXT_DELAY);
+    c = weak_c.lock();
+    l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    cr = spire_client_run_for(c, l, true);
+  }
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     cr->kit_text_sent = true;
-    spire_send_ticker(c, SPIRE_KIT_USE_TEXT);
-    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; sent \"{}\"", hp_mat, atp_grind, SPIRE_KIT_USE_TEXT);
+    // route B bundle 9 critic B-1: the bundle 9 form only after this client's 'C' 13 (the quest made the kit weapon +G
+    // and gave no Monogrinders); a later 'C' 13 sends that line then (spire_equip_prompt_handle)
+    std::string text = spire_kit_ticker_take(cr->b9_texts, hp_mat, atp_grind);
+    if (!text.empty()) {
+      spire_send_ticker(c, text);
+    }
+    c->log.info_f("Spire shop: kit hp_mat {} atp_grind {} r{} {} 'C' 13 {}; sent \"{}\"", hp_mat, atp_grind,
+        SPIRE_EQUIP_REGISTER, spire_equip_item_available_for(c) ? 1 : 0,
+        (cr->b9_texts.kit_grind >= 0) ? std::format("G {}", cr->b9_texts.kit_grind) : std::string("not yet"), text);
   } else {
     c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; no kit text ({})", hp_mat, atp_grind,
         cr->answered_resume ? "resumed: no kit" : "already sent in this run");
@@ -2677,6 +2807,10 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     detail = std::format(" ({})", e.what());
   }
   uint32_t answer = spire_shop_answer(sub, refusal);
+  // route B bundle 9 (ROUTEB9-PROTOCOL.md § 1): r143 in every 'M' answer, before DONE, refused or not
+  uint32_t equip_reg = spire_equip_item_available_for(c) ? 1 : 0;
+  spire_send_register(c, SPIRE_EQUIP_REGISTER, equip_reg);
+  detail += std::format("; r{}={}", SPIRE_EQUIP_REGISTER, equip_reg);
   spire_send_register(c, SPIRE_SHOP_ANSWER_REGISTER, answer);
   spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
   // route B F5/F6: the kit hands out the HP Materials and Monogrinders right after this answer
@@ -2692,6 +2826,94 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       SPIRE_SHOP_ANSWER_REGISTER, answer);
 }
 
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only. Never throws; the
+// client's B3 answer is logged.
+static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what,
+    uint8_t point) {
+  try {
+    auto s = c->require_server_state();
+    auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
+    co_await prepare_client_for_patches(c);
+    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
+    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
+        e.what());
+  }
+  // critic N-4: the game can refuse the 6x25 quietly (F2 § 6); without it the item is still unequipped in the copy
+  try {
+    std::weak_ptr<Client> weak_c = c;
+    std::weak_ptr<Lobby> weak_l = c->lobby;
+    c.reset(); // the wait holds neither the client nor its game
+    co_await async_sleep(SPIRE_EQUIP_CHECK_DELAY);
+    auto l = weak_l.lock();
+    c = weak_c.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    if (auto character = c->character_file(false, true)) {
+      auto text = spire_equip_missing_text(point, item_id, character->inventory);
+      if (text) {
+        spire_send_ticker(c, *text);
+      }
+      c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
+          text ? std::format("not equipped after {} ms; sent \"{}\"", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
+               : std::string("equipped (or gone): no line"));
+    }
+  } catch (const std::exception& e) {
+    if (c) { // critic r2: c is empty from c.reset() on, and stays so when the client left during the wait
+      c->log.warning_f("Spire equip: {} {:08X}; equip check failed: {}", what, item_id, e.what());
+    }
+  }
+}
+
+// Route B bundle 9: 'C' 13 (the kit weapon with grind G in the low byte) and 'C' 14 (the run mag replaced after an
+// evolution) from the writer: with r143 = 1 for it, send SpireEquipItem for the item in newserv's copy of its inventory
+// (the run copy during a run). r143 = 0 or no such item: one log line, nothing sent. False for every other value.
+static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t point = (value >> 8) & 0xFF;
+  if (((value >> 24) != SPIRE_BRIDGE_MSG_PROMPT) || ((value >> 16) & 0xFF) ||
+      ((point != SPIRE_PROMPT_KIT_GROUND) && (point != SPIRE_PROMPT_RUN_MAG_REPLACED))) {
+    return false;
+  }
+  uint8_t low = value & 0xFF;
+  const char* what = (point == SPIRE_PROMPT_KIT_GROUND) ? "kit weapon" : "run mag";
+  auto* cr = spire_client_run_for(c, l, true);
+  if (point == SPIRE_PROMPT_KIT_GROUND) {
+    // critic B-1: the kit ticker went out before this 'C' 13 in the old form: the bundle 9 line now, once
+    std::string late = spire_kit_c13_take(cr->b9_texts, low);
+    if (!late.empty()) {
+      spire_send_ticker(c, late);
+      c->log.info_f("Spire equip: 'C' 13 after the kit ticker; sent \"{}\"", late);
+    }
+  }
+  bool available = spire_equip_item_available_for(c);
+  std::optional<uint32_t> item_id;
+  if (available) {
+    if (auto character = c->character_file(false, true)) {
+      item_id = spire_equip_target(point, low, true, character->inventory);
+    }
+  }
+  if (point == SPIRE_PROMPT_RUN_MAG_REPLACED) {
+    // critic B-1 (r2): the quest sends 'C' 14 also with r143 = 0; the evolution text drops its equip hint only when
+    // newserv sends SpireEquipItem for the mag below
+    spire_run_mag_c14_take(cr->b9_texts, available && item_id.has_value());
+  }
+  if (!available) {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; r{} = 0 for this client, nothing sent",
+        point, what, low, serial_number, quest_number, SPIRE_EQUIP_REGISTER);
+  } else if (!item_id) {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; no such item in the inventory copy, nothing sent",
+        point, what, low, serial_number, quest_number);
+  } else {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for item {:08X}", point,
+        what, low, serial_number, quest_number, SPIRE_EQUIP_FUNCTION_NAME, *item_id);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what, point), asio::detached);
+  }
+  return true;
+}
+
 // v48: the return to base ('O'), below with the guard's restore
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
@@ -2703,6 +2925,23 @@ bool spire_base_game_handle_new_run(std::shared_ptr<Client> c, std::shared_ptr<c
 
 // ---- Route B F6: the run mag request 'Z' (SpireMag.hh; contract: quests/spire/ROUTEB-F6-PROTOCOL.md)
 static std::string spire_guard_filename_for(std::shared_ptr<Client> c, uint32_t serial_number);
+
+// Route B bundle 9 critic B-1: the evolution text, SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1, with the
+// "Equip it" hint unless that RESULT's 'C' 14 came (then newserv equips the mag)
+static asio::awaitable<void> spire_run_mag_evolve_text_later(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, std::string name, bool shell) {
+  co_await async_sleep(SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  auto* cr = spire_client_run_for(c, l, true);
+  std::string text = spire_run_mag_evolve_text_take(cr->b9_texts, name, shell);
+  spire_send_ticker(c, text);
+  c->log.info_f("Spire run mag: evolution text{}: \"{}\"", cr->b9_texts.mag_c14_seen ? " after 'C' 14" : " (no 'C' 14)",
+      text);
+}
 
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -2759,7 +2998,14 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
-        spire_send_ticker(c, (before < 0) ? spire_run_mag_reminder_text(offered_shell) : spire_run_mag_evolve_text(name, offered_shell));
+        if (before < 0) {
+          spire_send_ticker(c, spire_run_mag_reminder_text(offered_shell));
+        } else {
+          // critic B-1: the 'C' 14 follows this RESULT 1 in the same quest frame; the text waits for it
+          spire_client_run_for(c, l, true)->b9_texts.mag_c14_seen = false;
+          asio::co_spawn(*c->require_server_state()->io_context,
+              spire_run_mag_evolve_text_later(c, l, name, offered_shell), asio::detached);
+        }
         c->log.info_f("Spire run mag: RESULT 1 for serial {:010} in q{}: step {} confirmed, {}{} {} (run {:08X})",
             serial_number, quest_number, led->issued_step, name, offered_shell ? " (Shell)" : "",
             spire_run_mag_bytes_hex(*offered), run->run_id);
@@ -2974,18 +3220,21 @@ bool spire_bridge_handle_register(
         spire_run_over(c, l, serial_number, quest_number, value);
         return true;
       }
+      if (spire_equip_prompt_handle(c, l, serial_number, quest_number, value)) {
+        return true; // route B bundle 9: 'C' 13 and 'C' 14 have no text of their own
+      }
       // v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the
-      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2
+      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2; bundle 9: 'C' 12 as 'C' 10
       SpireBridgeTextContext text_ctx;
       std::optional<SpireDrawTable> text_table;
       uint8_t text_kind = value >> 24;
       uint32_t text_point = (value >> 8) & 0xFF;
       if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
-          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10)))) {
+          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12)))) {
         text_table = spire_draw_table_for_text(c, quest_number);
         text_ctx.draw = text_table ? &*text_table : nullptr;
       }
-      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 10)) {
+      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12))) {
         auto character = c->character_file(false, false);
         text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
       }
@@ -6355,10 +6604,50 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
     if (!cp.last_room) {
       return "No checkpoint yet: start at room 1";
     }
-    return cp.last_lives ? std::format("Continue at room {} (you had {} lives)", cp.last_room + 1, cp.last_lives)
-                         : std::format("Continue at room {}", cp.last_room + 1);
+    return cp.last_lives
+        ? std::format("Continue at room {} (you had {})", cp.last_room + 1, spire_lives_phrase(cp.last_lives))
+        : std::format("Continue at room {}", cp.last_room + 1);
   }
   throw std::runtime_error("Use: $spire status or $spire continue");
+}
+
+void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    if (c->spire_savestate_told || !l || !l->is_game() || !spire_bridge_serial_for_client(c)) {
+      return;
+    }
+    // B-REGIE-18-6: the savestate of the game's difficulty, the one its room quests resume; unreadable: logged there,
+    // read as none
+    SpireSavestate ss = spire_savestate_load_logged(c, static_cast<uint8_t>(l->difficulty) & 3);
+    if (!ss.exists) {
+      return;
+    }
+    // the room quest by the name the quest build gives it, of the savestate's episode, for this client's version
+    std::string category_name, quest_name = spire_savestate_room_quest_name(ss);
+    auto s = c->require_server_state();
+    auto q = (quest_name.empty() || !s->data->quest_index) ? nullptr : s->data->quest_index->get(quest_name);
+    if (q && (static_cast<uint8_t>(q->meta.episode) == ss.episode) && q->has_version_any_language(c->version()) &&
+        s->data->quest_index->category_index) {
+      try {
+        auto cat = s->data->quest_index->category_index->at(q->meta.category_id);
+        category_name = cat ? cat->name : "";
+      } catch (const std::out_of_range&) {
+      }
+    }
+    if (category_name.empty()) {
+      quest_name.clear();
+    }
+    auto lines = spire_savestate_notice_take(&c->spire_savestate_told, ss, category_name, quest_name);
+    if (lines.size() != 2) {
+      return;
+    }
+    spire_send_ticker(c, lines[0]);
+    spire_send_ticker_later(c, l, lines[1], SPIRE_SAVESTATE_NOTICE_SECOND_DELAY);
+    c->log.info_f("Spire savestate: notice at game join ({}): \"{}\" and \"{}\"", spire_savestate_describe(ss),
+        lines[0], lines[1]);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire savestate: notice at game join failed: {}", e.what());
+  }
 }
 
 asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c) {
