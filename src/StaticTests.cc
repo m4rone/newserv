@@ -6401,6 +6401,24 @@ void run_static_tests() {
       }
     });
 
+    b9_case("critic N-4: no 6x25 after SpireEquipItem gives one equip line, a 6x25 none", [&]() {
+      auto kit_unequipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, false}});
+      auto kit_equipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, true}});
+      expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."),
+          spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_unequipped).value_or(""));
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_equipped).has_value());
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010002, kit_unequipped).has_value()); // item gone
+      auto mag_unequipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, false}});
+      auto mag_equipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, true}});
+      expect_eq(std::string("Equip your mag: Item Pack > Mag."),
+          spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_unequipped).value_or(""));
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_equipped).has_value());
+      expect(!spire_equip_missing_text(0x0C, 0x00010003, mag_unequipped).has_value()); // another point
+      for (const char* t : {SPIRE_EQUIP_KIT_MISSING_TEXT, SPIRE_EQUIP_MAG_MISSING_TEXT}) {
+        expect((std::string(t).size() <= 90) && (std::string(t) == spire_ticker_line(t)));
+      }
+    });
+
     b9_case("critic B-1: the texts follow the quest's 'C' 13/14, not r143", [&]() {
       // an older quest (no 'C' 13/14) on this newserv, r143 = 1: the texts of today
       SpireKitMagTexts old_quest;

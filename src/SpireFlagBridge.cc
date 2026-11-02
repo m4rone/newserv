@@ -2626,7 +2626,8 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
 
 // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only. Never throws; the
 // client's B3 answer is logged.
-static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what) {
+static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what,
+    uint8_t point) {
   try {
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
@@ -2636,6 +2637,29 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, ui
   } catch (const std::exception& e) {
     c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
         e.what());
+  }
+  // critic N-4: the game can refuse the 6x25 quietly (F2 § 6); without it the item is still unequipped in the copy
+  try {
+    std::weak_ptr<Client> weak_c = c;
+    std::weak_ptr<Lobby> weak_l = c->lobby;
+    c.reset(); // the wait holds neither the client nor its game
+    co_await async_sleep(SPIRE_EQUIP_CHECK_DELAY);
+    auto l = weak_l.lock();
+    c = weak_c.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    if (auto character = c->character_file(false, true)) {
+      auto text = spire_equip_missing_text(point, item_id, character->inventory);
+      if (text) {
+        spire_send_ticker(c, *text);
+      }
+      c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
+          text ? std::format("not equipped after {} ms; sent \"{}\"", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
+               : std::string("equipped (or gone): no line"));
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire equip: {} {:08X}; equip check failed: {}", what, item_id, e.what());
   }
 }
 
@@ -2678,7 +2702,7 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
   } else {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for item {:08X}", point,
         what, low, serial_number, quest_number, SPIRE_EQUIP_FUNCTION_NAME, *item_id);
-    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what), asio::detached);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what, point), asio::detached);
   }
   return true;
 }

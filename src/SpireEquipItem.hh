@@ -2,7 +2,9 @@
 
 #include <stdint.h>
 
+#include <chrono>
 #include <optional>
+#include <string>
 
 #include "PlayerInventory.hh"
 
@@ -73,6 +75,30 @@ inline std::optional<uint32_t> spire_equip_find_run_mag(const PlayerInventory& i
     }
   }
   return (mags == 1) ? ret : std::nullopt;
+}
+
+// Route B bundle 9 critic N-4: SpireEquipItem returns 1 also when the game refuses the 6x25 quietly (F2 § 6). newserv
+// waits SPIRE_EQUIP_CHECK_DELAY after the send for that client's 6x25 (on_equip_item marks the item equipped in its
+// copy); when the item is still there and not equipped, one line tells the player to equip it by hand.
+constexpr auto SPIRE_EQUIP_CHECK_DELAY = std::chrono::milliseconds(1000);
+constexpr const char* SPIRE_EQUIP_KIT_MISSING_TEXT = "Equip your kit weapon: Item Pack > Equip.";
+constexpr const char* SPIRE_EQUIP_MAG_MISSING_TEXT = "Equip your mag: Item Pack > Mag.";
+// The line for 'C' point after SpireEquipItem for item_id, or nullopt: the 6x25 came (the item is equipped), the item
+// is no longer in newserv's copy, or another point.
+inline std::optional<std::string> spire_equip_missing_text(uint8_t point, uint32_t item_id, const PlayerInventory& inventory) {
+  if ((point != SPIRE_PROMPT_KIT_GROUND) && (point != SPIRE_PROMPT_RUN_MAG_REPLACED)) {
+    return std::nullopt;
+  }
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (!item.data.empty() && (item.data.id == item_id)) {
+      if (item.is_equipped()) {
+        return std::nullopt;
+      }
+      return std::string((point == SPIRE_PROMPT_KIT_GROUND) ? SPIRE_EQUIP_KIT_MISSING_TEXT : SPIRE_EQUIP_MAG_MISSING_TEXT);
+    }
+  }
+  return std::nullopt;
 }
 
 // The item id to send SpireEquipItem for at 'C' point (13 or 14; low = the code's low byte), or nullopt: another
