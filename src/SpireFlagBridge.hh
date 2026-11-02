@@ -362,8 +362,11 @@ std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& 
     const std::vector<std::string>& present_files);
 // Whether a run end deletes this savestate: only one of the game's run.
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
-// Whether a savestate fits a room quest's start: same episode, room and variant.
-bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant);
+// Whether a savestate fits a room quest's start: same episode, room and variant, and the same ladder rung (B-AF-9,
+// critic spel-af-3 B2: the rung of the quest that wrote it, spire_meta_ladder_quest_rung, equals the given rung of the
+// quest now; a file from before has no quest number and counts as Normal), so a Hard run never resumes on Normal or
+// the other way round.
+bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant, uint8_t rung);
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
@@ -402,7 +405,7 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss);
 // the 'J' of that quest will resume it (own and leader savestate fit the quest's episode, room and variant, the same
 // run id, own has a level), else nothing (the quest's own level plus the start_level bonus, as before). Pure.
 std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
-    uint8_t k, uint8_t variant);
+    uint8_t k, uint8_t variant, uint8_t rung);
 
 // Called from the 6x75 handler for every valid quest flag write. Does nothing unless the client is GC V3, the lobby is
 // a game running a quest listed in SpireBridgeQuests (or a payout-flag clear in a SpireMetaQuests quest), the client

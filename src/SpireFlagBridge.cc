@@ -505,9 +505,10 @@ bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
   return ss.exists && run_id && (ss.run_id == run_id);
 }
 
-bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant) {
+bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t k, uint8_t variant, uint8_t rung) {
   return ss.exists && (ss.values.size() == SPIRE_SAVESTATE_NUM_VALUES) && (ss.episode == episode) &&
-      (ss.values[SPIRE_SS_K] == k) && (ss.values[SPIRE_SS_VARIANT] == variant);
+      (ss.values[SPIRE_SS_K] == k) && (ss.values[SPIRE_SS_VARIANT] == variant) &&
+      (spire_meta_ladder_quest_rung(ss.quest_number) == rung);
 }
 
 uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index) {
@@ -693,9 +694,9 @@ std::string spire_savestate_continue_text(const SpireSavestate& ss) {
 }
 
 std::optional<uint32_t> spire_resume_level(const SpireSavestate& own, const SpireSavestate& leader, uint8_t episode,
-    uint8_t k, uint8_t variant) {
-  if (!own.level || !spire_savestate_matches(own, episode, k, variant) ||
-      !spire_savestate_matches(leader, episode, k, variant) || (own.run_id != leader.run_id)) {
+    uint8_t k, uint8_t variant, uint8_t rung) {
+  if (!own.level || !spire_savestate_matches(own, episode, k, variant, rung) ||
+      !spire_savestate_matches(leader, episode, k, variant, rung) || (own.run_id != leader.run_id)) {
     return std::nullopt;
   }
   return own.level;
@@ -1607,6 +1608,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
   }
 
   uint8_t k = value & 0xFF, variant = (value >> 8) & 0xFF, episode = static_cast<uint8_t>(l->episode);
+  uint8_t rung = spire_meta_ladder_quest_rung(quest_number); // B-AF-9: a savestate resumes only on its own rung
   auto* run = spire_game_run_for(l);
   if (!run) {
     // the first request of the game decides its run from the leader's savestate
@@ -1614,7 +1616,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     uint8_t leader_id = follow ? follow->first : 0;
     auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
     SpireSavestate leader_ss = leader ? spire_savestate_load_logged(leader) : SpireSavestate();
-    if (!end && spire_savestate_matches(leader_ss, episode, k, variant)) {
+    if (!end && spire_savestate_matches(leader_ss, episode, k, variant, rung)) {
       run = &spire_game_run_set(l, SpireGameRun{
           .run_id = leader_ss.run_id, .resumed = true, .elapsed = leader_ss.values[SPIRE_SS_ELAPSED], .savestate_files = {}});
     } else {
@@ -1625,7 +1627,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
   }
   auto* cr = spire_client_run_for(c, l, true);
   SpireSavestate own = spire_savestate_load_logged(c);
-  bool resume = spire_resume_client(!!end, run->resumed, run->run_id, spire_savestate_matches(own, episode, k, variant),
+  bool resume = spire_resume_client(!!end, run->resumed, run->run_id, spire_savestate_matches(own, episode, k, variant, rung),
       own.run_id);
   if (resume) {
     run->savestate_files.emplace(spire_savestate_filename(c)); // a true end deletes it even if this client is gone by then
@@ -3497,7 +3499,8 @@ static std::optional<uint32_t> spire_resume_level_for_client(
     uint8_t leader_id = follow ? follow->first : 0;
     auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
     SpireSavestate leader_ss = !leader ? SpireSavestate() : (leader == c) ? own : spire_savestate_load_logged(leader);
-    auto level = spire_resume_level(own, leader_ss, rq.episode, rq.k, rq.variant);
+    auto level = spire_resume_level(own, leader_ss, rq.episode, rq.k, rq.variant,
+        spire_meta_ladder_quest_rung(l->quest->meta.quest_number));
     *start_bonus = own.start_bonus;
     if (!level) {
       c->log.info_f("Spire savestate: q{} (room {} variant {}) will not resume {} (leader {}); the quest's level",
