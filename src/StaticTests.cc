@@ -5712,6 +5712,22 @@ void run_static_tests() {
       expect_eq(0xC4u, spire_savestate_load_rung(stem, 0, &from).run_id);
       expect(!spire_savestate_load_rung(stem, 2, &from).exists);
       expect(from.empty());
+      {
+        // the crash notice at a game join (bundle 9 § 2, regie 2 nov): the savestate of the game's difficulty and the
+        // room quest of that difficulty, never the Normal file or the Normal room quest for a run parked on Hard
+        std::string name;
+        SpireSavestate hard_room = hard;
+        hard_room.quest_number = 1946; // "Spire room 5 elite Hard"
+        std::string hard_room_file = spire_savestate_store_rung(stem, 1, spire_savestate_to_json(hard_room, 42));
+        expect_eq(0xC3u, spire_savestate_notice_pick(stem, 1, &name).run_id);
+        expect_eq(std::string("Spire room 5 elite Hard"), name);
+        expect_eq(0xC4u, spire_savestate_notice_pick(stem, 0, &name).run_id);
+        expect_eq(std::string("Spire room 5 elite"), name);
+        expect(!spire_savestate_notice_pick(stem, 2, &name).exists); // nothing parked on Very Hard: no notice
+        expect(name.empty());
+        spire_savestate_store_rung(stem, 1, spire_savestate_to_json(hard, 42)); // back to the Hard run of before
+        expect_eq(hard_file, hard_room_file);
+      }
       SpireSavestate normal2 = normal; // within one difficulty a new start still replaces the parked run
       normal2.run_id = 0xC5;
       spire_savestate_store_rung(stem, 0, spire_savestate_to_json(normal2, 42));

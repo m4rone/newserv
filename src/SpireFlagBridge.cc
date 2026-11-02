@@ -740,6 +740,14 @@ std::string spire_savestate_room_quest_name(const SpireSavestate& ss) {
       rung ? spire_meta_difficulty_name(rung) : "");
 }
 
+SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name) {
+  SpireSavestate ss = spire_savestate_load_rung(stem, difficulty & 3);
+  if (quest_name) {
+    *quest_name = spire_savestate_room_quest_name(ss);
+  }
+  return ss;
+}
+
 std::string spire_savestate_notice_saved_line(const SpireSavestate& ss) {
   static const char* variants[] = {"", " elite", " rest"};
   const auto& v = ss.values;
@@ -6639,14 +6647,20 @@ void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_
     if (c->spire_savestate_told || !l || !l->is_game() || !spire_bridge_serial_for_client(c)) {
       return;
     }
-    // B-REGIE-18-6: the savestate of the game's difficulty, the one its room quests resume; unreadable: logged there,
-    // read as none
-    SpireSavestate ss = spire_savestate_load_logged(c, static_cast<uint8_t>(l->difficulty) & 3);
+    // B-REGIE-18-6: the savestate of the game's difficulty, the one its room quests resume, and that difficulty's room
+    // quest; unreadable: logged, read as none
+    std::string category_name, quest_name;
+    SpireSavestate ss;
+    try {
+      ss = spire_savestate_notice_pick(spire_savestate_stem(c), static_cast<uint8_t>(l->difficulty), &quest_name);
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
+      return;
+    }
     if (!ss.exists) {
       return;
     }
     // the room quest by the name the quest build gives it, of the savestate's episode, for this client's version
-    std::string category_name, quest_name = spire_savestate_room_quest_name(ss);
     auto s = c->require_server_state();
     auto q = (quest_name.empty() || !s->data->quest_index) ? nullptr : s->data->quest_index->get(quest_name);
     if (q && (static_cast<uint8_t>(q->meta.episode) == ss.episode) && q->has_version_any_language(c->version()) &&

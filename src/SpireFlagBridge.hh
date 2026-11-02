@@ -453,6 +453,10 @@ constexpr auto SPIRE_SAVESTATE_NOTICE_SECOND_DELAY = std::chrono::milliseconds(4
 // The name of the room quest of a savestate's room, as the quest's build.sh names it: "Spire room <k>[ elite| rest]";
 // "" when the room or the variant is missing or unknown
 std::string spire_savestate_room_quest_name(const SpireSavestate& ss);
+// The notice's savestate for a client (savestate file stem, spire_savestate_stem) in a game of this difficulty: that
+// difficulty's own (B-REGIE-18-6), the one the game's room quests resume, and the room quest's name on that difficulty
+// in *quest_name. Throws on an unreadable file (as spire_savestate_load_rung).
+SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name);
 // Line 1 of the notice
 std::string spire_savestate_notice_saved_line(const SpireSavestate& ss);
 // Line 2 of the notice; category_name and quest_name "" = the room quest was not found
