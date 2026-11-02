@@ -2139,6 +2139,29 @@ void run_static_tests() {
     expect(!spire_follow_partner_pending(SPIRE_FOLLOW_CITY_FLOOR, 2, false)); // city: takes the Ragol warp itself
   }
 
+  phosg::log_info_f("-- Spire follow: never a partner whose shop is open (B-AF-10, spel-af item 4)");
+  {
+    auto a = std::make_shared<int>(1), b = std::make_shared<int>(2);
+    expect(!spire_follow_hold_open(a.get(), a, 7)); // never noted: follows
+    spire_follow_hold_note(a.get(), a, 7, 1); // the shop flag set in game 7
+    expect(spire_follow_hold_open(a.get(), a, 7)); // open at the time the pass fires: not warped
+    expect(!spire_follow_hold_open(b.get(), b, 7)); // another client
+    expect(!spire_follow_hold_open(a.get(), a, 8)); // a later game
+    expect(!spire_follow_hold_open(a.get(), b, 7)); // another client at the same address
+    expect(!spire_follow_hold_open(a.get(), nullptr, 7));
+    spire_follow_hold_note(a.get(), a, 7, 0); // closed: follows again
+    expect(!spire_follow_hold_open(a.get(), a, 7));
+    spire_follow_hold_note(a.get(), a, 7, 1);
+    spire_follow_hold_forget(a.get()); // its floor load or quest start
+    expect(!spire_follow_hold_open(a.get(), a, 7));
+    spire_follow_hold_note(b.get(), b, 7, 1);
+    const void* gone = b.get();
+    b.reset(); // the client left with its shop open
+    auto c = std::make_shared<int>(3);
+    expect(!spire_follow_hold_open(gone, c, 7));
+    spire_follow_hold_forget(gone);
+  }
+
   phosg::log_info_f("-- Spire bridge: no window in a run, every run text is one line (v35)");
   {
     expect_eq(std::string("New best score: 5237! Records saved."), spire_ticker_line("New best score: 5237!\nRecords saved."));

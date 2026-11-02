@@ -2014,6 +2014,34 @@ uint32_t spire_checkpoint_lives_for(const Client* key) {
 // address and never dereferenced; an entry is removed at that client's next loaded floor or quest start.
 static std::unordered_set<const Client*> spire_follow_pending;
 
+// B-AF-10: the partners whose shop is open (spire_follow_note_register); present = the last write was not 0
+struct SpireFollowHold {
+  std::weak_ptr<const void> owner;
+  uint32_t lobby_id = 0;
+};
+static std::unordered_map<const void*, SpireFollowHold> spire_follow_holds;
+
+void spire_follow_hold_note(const void* key, std::weak_ptr<const void> owner, uint32_t lobby_id, uint32_t value) {
+  if (!value) {
+    spire_follow_holds.erase(key);
+    return;
+  }
+  if (spire_follow_holds.size() > 256) {
+    std::erase_if(spire_follow_holds, [](const auto& e) { return e.second.owner.expired(); });
+  }
+  spire_follow_holds[key] = SpireFollowHold{.owner = std::move(owner), .lobby_id = lobby_id};
+}
+
+bool spire_follow_hold_open(const void* key, const std::shared_ptr<const void>& owner, uint32_t lobby_id) {
+  auto it = spire_follow_holds.find(key);
+  return (it != spire_follow_holds.end()) && owner && (it->second.owner.lock() == owner) &&
+      (it->second.lobby_id == lobby_id);
+}
+
+void spire_follow_hold_forget(const void* key) {
+  spire_follow_holds.erase(key);
+}
+
 // v48: the rooms k this client's run stored as a checkpoint in its current game (spire_checkpoint_store), and which of
 // them were boss rooms, for the splinters at 'F'. Forgotten at every quest start and at the client's 'B'; the weak_ptr
 // and the lobby id tell a reused Client address or a later game from the one that wrote it.
@@ -2050,6 +2078,7 @@ uint32_t spire_splinters_for_run(uint32_t rooms, uint32_t bosses, uint32_t heat_
 
 void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
+  spire_follow_hold_forget(c.get()); // B-AF-10
   spire_base_returned.erase(c.get()); // v49: an 'O' OK of an earlier quest never allows an 'I'
   spire_client_runs.erase(c.get()); // v44: a new quest is a new run for this client
   spire_run_rooms.erase(c.get()); // v48
@@ -4850,6 +4879,7 @@ static void spire_replay_forget(std::shared_ptr<const Lobby> l);
 // spire_run_again_forget_game)
 static void spire_run_again_forget_client(std::shared_ptr<const Client> c) {
   spire_follow_pending.erase(c.get());
+  spire_follow_hold_forget(c.get()); // B-AF-10
   spire_client_runs.erase(c.get());
   spire_run_rooms.erase(c.get());
   spire_records_pending_score.erase(c.get());
@@ -6106,6 +6136,20 @@ static bool spire_replay_applies(std::shared_ptr<const Client> c, std::shared_pt
       spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number);
 }
 
+void spire_follow_note_register(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value) {
+  try {
+    const auto& reg = c->require_server_state()->data->spire_follow_hold_register;
+    if (!reg || (*reg != register_number) || !spire_replay_applies(c, l)) {
+      return;
+    }
+    spire_follow_hold_note(c.get(), c, l->lobby_id, value);
+    c->log.info_f("Spire follow: r{} = {} (shop {})", register_number, value, value ? "open: not warped" : "closed");
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire follow: failed to note r{}: {}", register_number, e.what());
+  }
+}
+
 void spire_replay_note_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value) {
   try {
@@ -6198,6 +6242,14 @@ static asio::awaitable<void> spire_follow_leader_warp(
           lc->lobby_client_id, floor);
       continue;
     }
+    if (spire_follow_should_warp(lc->floor, floor, loading) && spire_follow_hold_open(lc.get(), lc, l->lobby_id)) {
+      // B-AF-10 (spel-af item 4): behind Sega's own warp (Barba Ray, Gol Dragon, Gal Gryphon) the leader stepped in
+      // while this partner's shop is open; the leader waits for that shop on its new floor (partner_shop_wait), then
+      // its travel clock brings the partner, as at every pipe. Checked when this pass fires, 2 s after the leader's load
+      l->log.info_f("Spire follow: client {} has its shop open; not warped to the leader's floor {:02X} (moves on the leader's travel clock)",
+          lc->lobby_client_id, floor);
+      continue;
+    }
     if (!spire_follow_should_warp(lc->floor, floor, loading)) {
       // v29 (regie 2026-10-24): a partner still on Pioneer 2 takes the Ragol warp itself, as in a Sega quest; the
       // server only follows room transitions during the run
@@ -6236,6 +6288,7 @@ static void spire_follow_leader(std::shared_ptr<Client> c, std::shared_ptr<Lobby
 
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   try {
+    spire_follow_hold_forget(c.get()); // B-AF-10: a floor load ends an open shop (the quest clears its flag then too)
     spire_overview_floor_changed(c); // v62: a floor change ends the kept overview line
     if (!spire_replay_applies(c, l)) {
       return;

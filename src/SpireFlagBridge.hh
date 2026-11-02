@@ -547,6 +547,17 @@ uint32_t spire_checkpoint_lives_for(const Client* key); // 0 = no lives reported
 // Called from the 6x77 handler for every quest register write in a game, after the bridge (forwarded or not). Never throws.
 void spire_replay_note_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value);
+// B-AF-10 (spel-af item 4): the same for SpireFollowHoldRegister (the quest's shop flag): while a partner's last write
+// of it in this game is not 0 the follow warp leaves it where it is, and it travels on the leader's clock as at a pipe
+// (the leader waits for the shop there first). Only in a bridged quest (as the replay). Forgotten at each of that
+// client's floor loads (a floor load ends an open shop, the quest clears it then too) and at its quest start. Never throws.
+void spire_follow_note_register(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value);
+// The hold store itself, keyed by the client's address; the owner (the client) and the game's lobby id tell a reused
+// address or a later game from the one that wrote it. Exported for StaticTests.
+void spire_follow_hold_note(const void* key, std::weak_ptr<const void> owner, uint32_t lobby_id, uint32_t value);
+bool spire_follow_hold_open(const void* key, const std::shared_ptr<const void>& owner, uint32_t lobby_id);
+void spire_follow_hold_forget(const void* key);
 
 // Called when a client has loaded a floor (6x1F, 6x21) or the game (6F). Never throws.
 void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);

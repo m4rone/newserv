@@ -796,6 +796,16 @@ void DataIndex::load_config_early() {
     config_log.info_f("SpireFollowLeader: client {} leads, others follow after {} ms", leader, delay);
   } catch (const std::out_of_range&) {
   }
+  this->spire_follow_hold_register.reset();
+  try {
+    int64_t reg = this->config_json->at("SpireFollowHoldRegister").as_int();
+    if ((reg < 0) || (reg > 255)) {
+      throw std::runtime_error("SpireFollowHoldRegister: registers 0-255");
+    }
+    this->spire_follow_hold_register = static_cast<uint8_t>(reg);
+    config_log.info_f("SpireFollowHoldRegister: a partner with r{} set is not warped to the leader's floor", reg);
+  } catch (const std::out_of_range&) {
+  }
   this->spire_drops = SpireDropsConfig();
   try {
     this->spire_drops = SpireDropsConfig::from_json(this->config_json->at("SpireDrops"));

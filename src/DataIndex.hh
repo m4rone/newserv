@@ -206,6 +206,9 @@ struct DataIndex {
   // v26 follow the leader: SpireFollowLeader {"LeaderClient": n, "DelayMs": m}. When that client of a Spire game loads
   // a floor other than Pioneer 2, every other client not on it is warped there (6x94) after DelayMs; missing = off.
   std::optional<std::pair<uint8_t, uint32_t>> spire_follow_leader;
+  // B-AF-10 (spel-af item 4): a partner whose last 6x77 on this register was not 0 (the quest's shop flag) is not warped
+  // to the leader's floor; none = every partner follows as before
+  std::optional<uint8_t> spire_follow_hold_register;
   // Regie pso-regie-9 (B-E01-108): SpireDrops {"DropMode": "SERVER_PRIVATE", "OnlyRunItems": true, "LevelsAhead": 5,
   // "PityDrops": 8, "BossWeaponPerPlayer": true, "BossGrindBase": g, "BossGrindPerK": gk, "BossHitBase": h,
   // "BossHitPerK": hk, "PickFromK": p}: in a Spire game the server makes the drops and filters them per player (see
