@@ -547,14 +547,24 @@ std::vector<uint32_t> spire_resume_equip_targets(
         continue;
       }
       count++;
-      for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
-        const auto& item = inventory.items[z];
-        if (!item.data.empty() && !item.is_equipped() && !taken.count(z) &&
-            !memcmp(item.data.data1.data(), ss.items[index].data1.data(), 12)) {
-          taken.emplace(z);
-          ret.emplace_back(item.data.id.load());
-          break;
+      // kwaliteit-1 r2 (critic B-3a): an exactly equal item that is equipped already (the player put it on during the
+      // wait) is done: nothing to send, and not counted as to equip, so no "Equip your gear" line follows
+      auto find = [&](bool equipped) -> std::optional<size_t> {
+        for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+          const auto& item = inventory.items[z];
+          if (!item.data.empty() && (item.is_equipped() == equipped) && !taken.count(z) &&
+              !memcmp(item.data.data1.data(), ss.items[index].data1.data(), 12)) {
+            return z;
+          }
         }
+        return std::nullopt;
+      };
+      if (auto z = find(true)) {
+        taken.emplace(*z);
+        count--;
+      } else if (auto z = find(false)) {
+        taken.emplace(*z);
+        ret.emplace_back(inventory.items[*z].data.id.load());
       }
     }
   }

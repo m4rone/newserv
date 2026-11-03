@@ -5929,6 +5929,17 @@ void run_static_tests() {
       after.items[0].flags = 0x00000008; // the 6x25 came
       expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).has_value());
       expect(spire_resume_equip_targets(rs, after, &expected).empty()); // already equipped: nothing to send
+      expect_eq(0u, expected); // kwaliteit-1 r2 (critic B-3a): and nothing left to equip, so no "Equip your gear" line
+      {
+        // the player equipped the resumed Saber himself while a second, equal Saber waits unequipped: done, no send
+        PlayerInventory both = after;
+        both.num_items = saved.size() + 1;
+        both.items[saved.size()].data = saved[0];
+        both.items[saved.size()].data.id = 0x00020000;
+        size_t left = 99;
+        expect(spire_resume_equip_targets(rs, both, &left).empty());
+        expect_eq(0u, left);
+      }
       PlayerInventory not_yet; // the item_create2 6x2Bs not in yet
       expect(spire_resume_equip_targets(rs, not_yet, &expected).empty());
       expect_eq(1u, expected);

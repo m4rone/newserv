@@ -383,7 +383,9 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
 // kwaliteit-1: the item ids in inventory (newserv's copy of the run copy after the quest's resume item loop) to send
 // SpireEquipItem for: per weapon or mag equipped at the 'V', the first item with the same 12 data1 bytes (the quest's
 // item_create2 makes it from exactly those) that is not equipped and not taken yet, in savestate order. *expected (if
-// given) gets how many such saved items there are; fewer ids than that means some are not (yet) in the copy.
+// given) gets how many such saved items are still to equip; fewer ids than that means some are not (yet) in the copy.
+// kwaliteit-1 r2 (critic B-3a): a saved item with an exactly equal item that is equipped already counts as done: no
+// id and not in *expected.
 std::vector<uint32_t> spire_resume_equip_targets(
     const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected = nullptr);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
