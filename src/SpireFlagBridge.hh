@@ -410,6 +410,13 @@ bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t
 // kwaliteit-1 r2 (critic r2 N-3): what a 'V' does: owed (spire_savestate_items_owed) only keeps the savestate it resumed
 // from (no store); the ledger still follows the fed mag, the boss before this room still counts as beaten (B-AF-1:
 // record_boss) and the boss burst text still goes out, so a resume with an item that does not fit loses no meta progress
+// kwaliteit-1 r2 (critic r2 N-1): whether a 'J' item request of index is the quest asking it again (asked: the highest
+// index answered + 1 before this request; P-1: an item the item_create2 could not make) while the run copy's pack is
+// full (pack_items of capacity), so the player learns why the save point, the mag steps and the gifts wait: once per
+// resume (sent). A request again after a floor load (the teleporter during the loop) with room in the pack says nothing.
+bool spire_resume_full_pack_text_due(uint32_t asked, uint32_t index, size_t pack_items, size_t capacity, bool sent);
+// The line for it, naming the saved item (its item name, or "item" when the name is unknown)
+std::string spire_resume_full_pack_text(const std::string& item_name);
 struct SpireSavestateVPlan {
   bool store;
   bool follow_ledger;

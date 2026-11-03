@@ -6009,6 +6009,14 @@ void run_static_tests() {
         expect(!spire_resume_equip_start_due(false, 20000, false, true, true, 0));
         expect(spire_resume_equip_start_due(true, 0, false, true, true, 3));
         expect(spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, true, 2)); // stalled loop
+        // critic r2 N-1: an item asked again with a full pack gets one line per resume, naming the item
+        expect(spire_resume_full_pack_text_due(5, 4, 30, 30, false)); // item 5 asked again, the pack full
+        expect(!spire_resume_full_pack_text_due(5, 4, 30, 30, true)); // the second time: no second line
+        expect(!spire_resume_full_pack_text_due(5, 5, 30, 30, false)); // the next item: no ask again
+        expect(!spire_resume_full_pack_text_due(0, 0, 30, 30, false)); // the first request
+        expect(!spire_resume_full_pack_text_due(5, 4, 29, 30, false)); // again after a floor load, room in the pack
+        expect_eq(std::string("Pack full: your saved Saber waits. Sell or drop something."),
+            spire_resume_full_pack_text("Saber"));
         SpireSavestate two_sabers = rs;
         two_sabers.items = {saved[0], saved[0]};
         expect(!spire_resume_last_item_in(two_sabers, part)); // one of two equal Sabers in: not yet

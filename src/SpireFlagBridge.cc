@@ -597,6 +597,14 @@ bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t
   return answered_resume && num_items && !items_in && ((asked < num_items) || !last_in_copy);
 }
 
+bool spire_resume_full_pack_text_due(uint32_t asked, uint32_t index, size_t pack_items, size_t capacity, bool sent) {
+  return !sent && (index + 1 <= asked) && (pack_items >= capacity);
+}
+
+std::string spire_resume_full_pack_text(const std::string& item_name) {
+  return std::format("Pack full: your saved {} waits. Sell or drop something.", item_name);
+}
+
 SpireSavestateVPlan spire_savestate_v_plan(bool owed) {
   return SpireSavestateVPlan{.store = !owed, .follow_ledger = true, .record_boss = true, .burst_text = true};
 }
@@ -1004,6 +1012,7 @@ struct SpireClientRun {
   std::chrono::steady_clock::time_point resume_item_last; // kwaliteit-1 r2 B-3b: the start answer or the last 'J' item
   uint32_t resume_items_asked = 0; // kwaliteit-1 r2: the highest 'J' item index answered + 1
   bool resume_items_in = false; // kwaliteit-1 r2: the last resume item was seen in the run copy (spire_resume_items_watch)
+  bool resume_full_text_sent = false; // kwaliteit-1 r2 N-1: spire_resume_full_pack_text went to this client's resume
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
   SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
@@ -2027,6 +2036,13 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     if (cr) {
       cr->resume_item_last = std::chrono::steady_clock::now(); // kwaliteit-1 r2 B-3b: the item loop is alive
     }
+    // critic r2 N-1: the quest asks an item again when it did not fit (P-1); with a full pack, tell the player once
+    bool full_pack_text = false;
+    if (ack) {
+      auto overlay = c->character_file(false, true);
+      full_pack_text = overlay && spire_resume_full_pack_text_due(cr->resume_items_asked, index,
+          overlay->inventory.num_items, overlay->inventory.items.size(), cr->resume_full_text_sent);
+    }
     if (ack) {
       cr->resume_items_asked = std::max<uint32_t>(cr->resume_items_asked, index + 1);
       if ((index + 1 == cr->savestate.items.size()) && !cr->resume_items_in) {
@@ -2046,6 +2062,24 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     }
     spire_send_register(c, SPIRE_RESUME_ITEM_ACK_REGISTER, ack);
     spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+    if (full_pack_text) {
+      const auto& item = cr->savestate.items[index];
+      std::string name = "item";
+      try {
+        auto names = c->require_server_state()->data->item_name_index_opt(Version::GC_V3);
+        if (names) {
+          auto it = names->all_by_primary_identifier().find(item.primary_identifier());
+          if (it != names->all_by_primary_identifier().end()) {
+            name = it->second->name;
+          }
+        }
+      } catch (const std::exception&) {
+      }
+      cr->resume_full_text_sent = true;
+      spire_send_ticker(c, spire_resume_full_pack_text(name));
+      c->log.info_f("Spire savestate: item {} of {} for serial {:010} in q{} asked again with a full pack; sent \"{}\"",
+          index + 1, cr->savestate.items.size(), serial_number, quest_number, spire_resume_full_pack_text(name));
+    }
     // kwaliteit-1 (observaties 209/216): the last item went out, so the quest's item loop ends with this item_create2;
     // newserv equips the weapon and the mag that were equipped at the 'V' again, once per resume
     if (ack && spire_resume_equip_start_due(index + 1 == cr->savestate.items.size(), 0, cr->resume_equip_started,
@@ -2081,6 +2115,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
   if (resume) {
     run->savestate_files.emplace(own_filename); // a true end deletes it even if this client is gone by then
     cr->answered_resume = true;
+    cr->resume_full_text_sent = false;
     cr->savestate = std::move(own);
     spire_run_mag_adopt(c, run->run_id, cr->savestate.run_mag); // F6
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
