@@ -1671,6 +1671,31 @@ void run_static_tests() {
     expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 24, true)); // k24 is no boss room since spel-af item 5
     expect_eq(std::string(""), spire_meta_boss_unlock_text(&repo, 4, true)); // Dragon: its pacts come at 'F' as before
     expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15, true));
+    // kwaliteit-1 r2 (critic B-6): a won 'F' of Episode 1 stores k15 itself before it records the boss, so "Spire Run
+    // II" follows in both orders: the Dark Falz flag stored k15 first, or the flag was never seen
+    expect(spire_finish_boss_store_room(true, 1) == 15);
+    expect(spire_finish_boss_store_room(false, 1) == 0);
+    expect(spire_finish_boss_store_room(true, 2) == 0); // Olga Flow: as before
+    for (bool flag_first : {true, false}) {
+      uint32_t cp_rooms = 0x3FFF; // k1-k14 stored in this run
+      std::set<uint8_t> checkpoint_new;
+      auto store = [&](uint8_t k) { // spire_checkpoint_store's file step
+        if (spire_checkpoint_room_first(cp_rooms, k)) {
+          checkpoint_new.emplace(k);
+        }
+        cp_rooms |= (1u << (k - 1));
+      };
+      if (flag_first) {
+        store(15); // spire_bridge_check_dark_falz_flag
+      }
+      if (uint8_t k = spire_finish_boss_store_room(true, 1)) {
+        store(k); // the won 'F'
+      }
+      expect(cp_rooms == 0x7FFF);
+      expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."),
+          spire_meta_boss_unlock_text(nullptr, 15, checkpoint_new.count(15)));
+    }
+    expect(!spire_checkpoint_room_first(0x7FFF, 15)); // k15 from an earlier run: Run II is not named again
     expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 11, true));
     // kwaliteit-1 266: Run II already open (k15 in the checkpoint before this game) is not named again
     expect_eq(std::string("Dark Falz beaten! Unlocked: Start level 22 at the Quartermaster."),

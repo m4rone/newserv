@@ -590,6 +590,12 @@ uint8_t spire_checkpoint_room_k(
 // The same for a game of this episode: the rooms of SpireCheckpointRooms with that Episode (missing: 1), 0 if none.
 uint8_t spire_checkpoint_room_k(const std::map<uint8_t, std::map<std::pair<uint8_t, int32_t>, uint8_t>>& rooms_by_episode,
     Episode episode, uint8_t floor, uint16_t room);
+// kwaliteit-1 r2 (critic B-6): whether room k is not in the checkpoint's rooms yet, so storing it makes it new in this
+// game (SpireRunRooms::checkpoint_new, which names "Spire Run II" at k15)
+bool spire_checkpoint_room_first(uint32_t rooms, uint8_t k);
+// kwaliteit-1 r2 (critic B-6): the room a finishing 'F' stores in the checkpoint itself before it records the boss: k15
+// for a won run of Episode 1 (Dark Falz), so the Run II text does not depend on the server-side Dark Falz flag; else 0
+uint8_t spire_finish_boss_store_room(bool won, uint8_t episode);
 // The room index k an arrival on this floor in a game of this episode stores (SpireCheckpointArrivals), or 0.
 uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor);

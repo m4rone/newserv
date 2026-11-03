@@ -1794,6 +1794,7 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
 
 static void spire_checkpoint_record_boss(
     std::shared_ptr<const Lobby> l, std::shared_ptr<Client> lc, uint32_t serial_number, uint8_t k);
+static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss = false);
 
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
 static std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number);
@@ -2786,6 +2787,12 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   // 'F': the run's score ('K' before it) and time against the records
   bool is_won = spire_meta_decode_finish(value).won;
   // B-AF-1 (critic S1): the last boss of the episode has no room after it; a won run of a real run is its kill
+  // kwaliteit-1 r2 (critic B-6): the won 'F' of Episode 1 stores k15 for this client itself first (idempotent: a known
+  // room stays as it is), so "Spire Run II" and its unlock never depend on the Dark Falz flag having stored it before
+  if (uint8_t store_k = spire_finish_boss_store_room(is_won, static_cast<uint8_t>(l->episode))) {
+    std::array<std::shared_ptr<Client>, 1> just_c{c};
+    spire_checkpoint_store(l, just_c, store_k, true);
+  }
   if (uint8_t final_k = is_won ? spire_meta_final_boss_room(static_cast<uint8_t>(l->episode)) : 0) {
     spire_checkpoint_record_boss(l, c, serial_number, final_k);
   }
@@ -5998,7 +6005,6 @@ static void spire_bridge_forget_room_clears(uint32_t lobby_id) {
   std::erase_if(spire_bridge_cleared_rooms, [lobby_id](uint64_t key) { return (key >> 32) == lobby_id; });
 }
 static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, bool boss = false);
-static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss = false);
 static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
 
 std::string spire_room_actions_hold(const void* action_stream, size_t action_stream_size, uint16_t room,
@@ -6540,6 +6546,14 @@ uint8_t spire_checkpoint_room_k(const std::map<uint8_t, std::map<std::pair<uint8
   return (it == rooms_by_episode.end()) ? 0 : spire_checkpoint_room_k(it->second, floor, room);
 }
 
+bool spire_checkpoint_room_first(uint32_t rooms, uint8_t k) {
+  return (k >= 1) && (k <= 32) && !((rooms >> (k - 1)) & 1);
+}
+
+uint8_t spire_finish_boss_store_room(bool won, uint8_t episode) {
+  return (won && (episode == 1)) ? spire_meta_final_boss_room(episode) : 0;
+}
+
 uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor) {
   auto ep_it = arrivals_by_episode.find(static_cast<uint8_t>(episode));
@@ -6639,7 +6653,7 @@ static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& c
       }
       auto cp = spire_checkpoint_load(filename);
       // A room already stored (a respawn reloads its floor, an arrival repeats) never moves the last room back
-      bool known = (cp.rooms >> (k - 1)) & 1;
+      bool known = !spire_checkpoint_room_first(cp.rooms, k);
       if (known && (k < cp.last_room)) {
         if (new_room || new_boss) {
           spire_checkpoint_credit(l, lc, serial_number, payout, k, new_boss);
