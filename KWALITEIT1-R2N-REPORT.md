@@ -26,7 +26,7 @@ teruggezet en vergeleken met `cmp`); B-3a is rood gemeten tegen de broncode van 
   (hervatten, Equipped, r143 = 1) loopt `spire_resume_equip_watch` (1 s stappen, max 600) die dan
   `spire_resume_equip_start` aanroept; die rust uit wat er is en zegt "Equip your gear: Item Pack > Equip." voor wat er
   niet is. Waarom 15 s: de quest vraagt een onbeantwoord item na RS_POLLS x RS_FRAMES = 300 frames (10 s) opnieuw
-  (quests/spire/make_spire.py:265, 1770-1779), dus een lopende itemlus wacht nooit zo lang. De normale route (laatste
+  (quests/spire/make_spire.py:265, :1782), dus een lopende itemlus wacht nooit zo lang. De normale route (laatste
   ack) is ongewijzigd; eenmalig per hervatting via `resume_equip_started`.
 - Test: zes gevallen (laatste ack, lus loopt nog, geen laatste ack na 15 s, al gestart, oud bestand, r143 = 0).
 - Rood (mutatie: alleen `last_item_acked`, de oude regel), exit 1:
@@ -52,7 +52,7 @@ teruggezet en vergeleken met `cmp`); B-3a is rood gemeten tegen de broncode van 
 
 ## Punt 4: savestate met openstaande hervat-items — RISICO JA, gefixt in newserv (commit c4bfab0)
 Meting:
-- quests/spire/make_spire.py:2191 `rs_apply` start de itemlus als thread (`thread_stg t_rs_items`, :1749); de kamerstart
+- quests/spire/make_spire.py:2191 `rs_apply` start de itemlus als thread (`thread_stg t_rs_items`, :1750); de kamerstart
   daarna roept `ss_write` aan bij k > K0 (:2568, :2688, :2807; volger :4022, :4151). Een hervatting is altijd k > K0,
   dus de 'V' komt bij de start van de hervatte kamer zelf, terwijl de lus nog items maakt. quests/spire/rewards.py:1681-1690
   (`room_start_retries`) gaat er zelf al van uit dat bij room_start items open kunnen staan.
