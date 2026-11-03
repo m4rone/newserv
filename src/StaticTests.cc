@@ -5970,12 +5970,12 @@ void run_static_tests() {
       expect_eq(1u, expected);
       // kwaliteit-1 r2 (critic B-3b): equipping starts at the last item's ack, or after SPIRE_RESUME_EQUIP_FALLBACK_MS
       // without a 'J' item request when that ack never comes; once, only with "Equipped" and r143 = 1
-      expect(spire_resume_equip_start_due(true, 0, false, true, true));
-      expect(!spire_resume_equip_start_due(false, 2000, false, true, true)); // the item loop goes on
-      expect(spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, true)); // no last ack
-      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, true, true, true)); // started already
-      expect(!spire_resume_equip_start_due(true, 0, false, false, true)); // a file from before: "Equip your gear."
-      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, false)); // r143 = 0
+      expect(spire_resume_equip_start_due(true, 0, false, true, true, 1));
+      expect(!spire_resume_equip_start_due(false, 2000, false, true, true, 1)); // the item loop goes on
+      expect(spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, true, 1)); // no last ack
+      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, true, true, true, 1)); // started already
+      expect(!spire_resume_equip_start_due(true, 0, false, false, true, 1)); // a file from before: "Equip your gear."
+      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, false, 1)); // r143 = 0
       // kwaliteit-1 r2 (resume question): a 'V' while the resume still owes items keeps the savestate it resumed from
       {
         SpireSavestate three = rs;
@@ -6004,6 +6004,11 @@ void run_static_tests() {
         expect(kept.follow_ledger);
         auto stored = spire_savestate_v_plan(false);
         expect(stored.store && stored.record_boss && stored.burst_text && stored.follow_ledger);
+        // critic r2 N-2: the safety net counts from the item loop's first request, not from the start answer: 20 s of
+        // step and partner waits without any 'J' item request start nothing; then the loop's last ack equips as before
+        expect(!spire_resume_equip_start_due(false, 20000, false, true, true, 0));
+        expect(spire_resume_equip_start_due(true, 0, false, true, true, 3));
+        expect(spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, true, 2)); // stalled loop
         SpireSavestate two_sabers = rs;
         two_sabers.items = {saved[0], saved[0]};
         expect(!spire_resume_last_item_in(two_sabers, part)); // one of two equal Sabers in: not yet

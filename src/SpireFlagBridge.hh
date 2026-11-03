@@ -392,9 +392,12 @@ std::vector<uint32_t> spire_resume_equip_targets(
 // last resume item, or, as the safety net when that ack never comes, once no 'J' item request came for
 // SPIRE_RESUME_EQUIP_FALLBACK_MS since the start answer or the latest one (the quest asks an unanswered item again after
 // RS_POLLS x RS_FRAMES = 300 frames, 10 s, so a running item loop never waits that long). Once per resume (started),
-// only for a savestate that says what was equipped (has_equipped) and with r143 = 1 (available).
+// only for a savestate that says what was equipped (has_equipped) and with r143 = 1 (available). Critic r2 N-2: the
+// safety net waits for the item loop itself (items_asked > 0, the first 'J' item request): before it come the quest's
+// step wait and, in coop, ui_start's partner wait, which may take far longer than 15 s with an empty run copy.
 constexpr uint64_t SPIRE_RESUME_EQUIP_FALLBACK_MS = 15000;
-bool spire_resume_equip_start_due(bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available);
+bool spire_resume_equip_start_due(
+    bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available, uint32_t items_asked);
 // kwaliteit-1 r2 (resume question, make_spire.py ss_write): whether the last item of a resume is in the run copy:
 // as many items like it as the savestate has (tools by kind, as they stack; mags by kind, as feeding changes them; the
 // rest by its 12 data1 bytes, which item_create2 makes it from)
