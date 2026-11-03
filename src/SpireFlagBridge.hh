@@ -388,6 +388,13 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
 // id and not in *expected.
 std::vector<uint32_t> spire_resume_equip_targets(
     const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected = nullptr);
+// kwaliteit-1 r2 (critic B-3b): whether newserv starts equipping a resume (spire_resume_equip) now: at the ack of the
+// last resume item, or, as the safety net when that ack never comes, once no 'J' item request came for
+// SPIRE_RESUME_EQUIP_FALLBACK_MS since the start answer or the latest one (the quest asks an unanswered item again after
+// RS_POLLS x RS_FRAMES = 300 frames, 10 s, so a running item loop never waits that long). Once per resume (started),
+// only for a savestate that says what was equipped (has_equipped) and with r143 = 1 (available).
+constexpr uint64_t SPIRE_RESUME_EQUIP_FALLBACK_MS = 15000;
+bool spire_resume_equip_start_due(bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);

@@ -5943,6 +5943,14 @@ void run_static_tests() {
       PlayerInventory not_yet; // the item_create2 6x2Bs not in yet
       expect(spire_resume_equip_targets(rs, not_yet, &expected).empty());
       expect_eq(1u, expected);
+      // kwaliteit-1 r2 (critic B-3b): equipping starts at the last item's ack, or after SPIRE_RESUME_EQUIP_FALLBACK_MS
+      // without a 'J' item request when that ack never comes; once, only with "Equipped" and r143 = 1
+      expect(spire_resume_equip_start_due(true, 0, false, true, true));
+      expect(!spire_resume_equip_start_due(false, 2000, false, true, true)); // the item loop goes on
+      expect(spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, true)); // no last ack
+      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, true, true, true)); // started already
+      expect(!spire_resume_equip_start_due(true, 0, false, false, true)); // a file from before: "Equip your gear."
+      expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, false)); // r143 = 0
       // the run mag: equipped at the save point, so newserv equips it and its line is not sent
       SpireSavestate with_mag = rs;
       ItemData mag;
