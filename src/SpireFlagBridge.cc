@@ -574,6 +574,29 @@ std::vector<uint32_t> spire_resume_equip_targets(
   return ret;
 }
 
+static bool spire_resume_item_like(const ItemData& a, const ItemData& b) {
+  size_t bytes = (a.data1[0] == 0x03) ? 3 : (a.data1[0] == 0x02) ? 2 : 12;
+  return !memcmp(a.data1.data(), b.data1.data(), bytes);
+}
+
+bool spire_resume_last_item_in(const SpireSavestate& ss, const PlayerInventory& inventory) {
+  if (ss.items.empty()) {
+    return true;
+  }
+  const auto& last = ss.items.back();
+  size_t saved = std::count_if(ss.items.begin(), ss.items.end(),
+      [&](const ItemData& item) { return spire_resume_item_like(last, item); });
+  size_t in_copy = 0;
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    in_copy += (!inventory.items[z].data.empty() && spire_resume_item_like(last, inventory.items[z].data)) ? 1 : 0;
+  }
+  return in_copy >= saved;
+}
+
+bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t asked, bool items_in, bool last_in_copy) {
+  return answered_resume && num_items && !items_in && ((asked < num_items) || !last_in_copy);
+}
+
 bool spire_resume_equip_start_due(bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available) {
   return !started && has_equipped && available && (last_item_acked || (idle_ms >= SPIRE_RESUME_EQUIP_FALLBACK_MS));
 }
@@ -973,6 +996,8 @@ struct SpireClientRun {
   bool resume_equip_started = false; // kwaliteit-1: spire_resume_equip ran for this client's resume
   bool resume_equip_watching = false; // kwaliteit-1 r2 B-3b: spire_resume_equip_watch runs for this client's resume
   std::chrono::steady_clock::time_point resume_item_last; // kwaliteit-1 r2 B-3b: the start answer or the last 'J' item
+  uint32_t resume_items_asked = 0; // kwaliteit-1 r2: the highest 'J' item index answered + 1
+  bool resume_items_in = false; // kwaliteit-1 r2: the last resume item was seen in the run copy (spire_resume_items_watch)
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
   SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
@@ -1820,6 +1845,15 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     c->log.warning_f("Spire savestate: no character data for serial {:010}; not stored", serial_number);
     return;
   }
+  // kwaliteit-1 r2 (resume question): the quest's ss_write comes at the resumed room's start, while its 'J' item loop
+  // may still run; the run copy then lacks items the savestate has, so the savestate it resumed from stays
+  if (spire_savestate_items_owed(cr->answered_resume, cr->savestate.items.size(), cr->resume_items_asked,
+          cr->resume_items_in, spire_resume_last_item_in(cr->savestate, overlay->inventory))) {
+    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} not stored: the resume still owes items ({} of {} "
+        "asked); the savestate it resumed from stays", serial_number, quest_number, cr->resume_items_asked,
+        cr->savestate.items.size());
+    return;
+  }
   SpireSavestate ss;
   ss.exists = true;
   ss.run_id = run->run_id;
@@ -1903,6 +1937,35 @@ static void spire_resume_equip_start(std::shared_ptr<Client> c, SpireClientRun* 
   }
 }
 
+// kwaliteit-1 r2 (resume question): after the last item's answer, watch the run copy for it (SPIRE_RESUME_EQUIP_POLLS x
+// 500 ms, as spire_resume_equip) and latch resume_items_in, so a later 'V' stores again even if the player uses the item
+// up. Not seen (a full pack: the quest asks again, P-1): the next answer of it watches again. Never throws.
+static asio::awaitable<void> spire_resume_items_watch(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l) {
+  try {
+    for (size_t tries = 0; tries < 10; tries++) {
+      co_await async_sleep(std::chrono::milliseconds(500));
+      auto l = weak_l.lock();
+      auto c = weak_c.lock();
+      if (!c || !l || (c->lobby.lock() != l)) {
+        co_return;
+      }
+      auto* cr = spire_client_run_for(c, l, false);
+      if (!cr || !cr->answered_resume || cr->resume_items_in) {
+        co_return;
+      }
+      auto overlay = c->character_file(false, true);
+      if (overlay && spire_resume_last_item_in(cr->savestate, overlay->inventory)) {
+        cr->resume_items_in = true;
+        c->log.info_f("Spire savestate: the last of {} resume item(s) is in the run copy; 'V' stores again",
+            cr->savestate.items.size());
+        co_return;
+      }
+    }
+  } catch (const std::exception&) {
+    // the game or the client went away during the wait
+  }
+}
+
 // kwaliteit-1 r2 (critic B-3b): the safety net for a resume whose last item ack never comes (the quest's RS_TRIES ran
 // out, or a floor load killed its item loop): once no 'J' item request came for SPIRE_RESUME_EQUIP_FALLBACK_MS, newserv
 // equips what is in the copy and names what is not (SPIRE_RESUME_EQUIP_MISSING_TEXT). Ends when the equip started, the
@@ -1952,6 +2015,12 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
         cr ? cr->savestate.items.size() : 0, cr ? cr->savestate.glass_index : -1);
     if (cr) {
       cr->resume_item_last = std::chrono::steady_clock::now(); // kwaliteit-1 r2 B-3b: the item loop is alive
+    }
+    if (ack) {
+      cr->resume_items_asked = std::max<uint32_t>(cr->resume_items_asked, index + 1);
+      if ((index + 1 == cr->savestate.items.size()) && !cr->resume_items_in) {
+        asio::co_spawn(*c->require_server_state()->io_context, spire_resume_items_watch(c, c->lobby), asio::detached);
+      }
     }
     if (ack) {
       const auto& item = cr->savestate.items[index];

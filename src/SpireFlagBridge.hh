@@ -395,6 +395,15 @@ std::vector<uint32_t> spire_resume_equip_targets(
 // only for a savestate that says what was equipped (has_equipped) and with r143 = 1 (available).
 constexpr uint64_t SPIRE_RESUME_EQUIP_FALLBACK_MS = 15000;
 bool spire_resume_equip_start_due(bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available);
+// kwaliteit-1 r2 (resume question, make_spire.py ss_write): whether the last item of a resume is in the run copy:
+// as many items like it as the savestate has (tools by kind, as they stack; mags by kind, as feeding changes them; the
+// rest by its 12 data1 bytes, which item_create2 makes it from)
+bool spire_resume_last_item_in(const SpireSavestate& ss, const PlayerInventory& inventory);
+// kwaliteit-1 r2: whether a resume still owes items to the run copy, so a 'V' must not replace the savestate it resumed
+// from (the run copy lacks them; a second resume after a crash would never give them again): the client was answered
+// with a resume of num_items items, and the quest has not asked for all of them yet (asked: the highest index asked + 1)
+// or the last one is not in the copy yet. items_in latches once newserv saw the last one in the copy.
+bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t asked, bool items_in, bool last_in_copy);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);

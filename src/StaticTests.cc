@@ -5976,6 +5976,29 @@ void run_static_tests() {
       expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, true, true, true)); // started already
       expect(!spire_resume_equip_start_due(true, 0, false, false, true)); // a file from before: "Equip your gear."
       expect(!spire_resume_equip_start_due(false, SPIRE_RESUME_EQUIP_FALLBACK_MS, false, true, false)); // r143 = 0
+      // kwaliteit-1 r2 (resume question): a 'V' while the resume still owes items keeps the savestate it resumed from
+      {
+        SpireSavestate three = rs;
+        three.items = {saved[0], saved[3], saved[2]}; // Saber, frame, Monomate x4 last
+        PlayerInventory part;
+        part.num_items = 1;
+        part.items[0].data = saved[0];
+        expect(!spire_resume_last_item_in(three, part));
+        expect(spire_savestate_items_owed(true, 3, 1, false, false)); // ss_write at the resumed room start: 1 of 3 asked
+        expect(spire_savestate_items_owed(true, 3, 3, false, false)); // all asked, the last not in the copy yet
+        PlayerInventory all = part;
+        all.num_items = 3;
+        all.items[1].data = saved[3];
+        all.items[2].data = saved[2];
+        all.items[2].data.data1[5] = 0x08; // the Monomates stacked onto ones the copy had: x8
+        expect(spire_resume_last_item_in(three, all));
+        expect(!spire_savestate_items_owed(true, 3, 3, false, true)); // all in: the 'V' stores
+        expect(!spire_savestate_items_owed(true, 3, 3, true, false)); // seen once, then used up: stores
+        expect(!spire_savestate_items_owed(false, 0, 0, false, true)); // a fresh start
+        SpireSavestate two_sabers = rs;
+        two_sabers.items = {saved[0], saved[0]};
+        expect(!spire_resume_last_item_in(two_sabers, part)); // one of two equal Sabers in: not yet
+      }
       // the run mag: equipped at the save point, so newserv equips it and its line is not sent
       SpireSavestate with_mag = rs;
       ItemData mag;
