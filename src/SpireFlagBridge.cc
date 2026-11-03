@@ -597,6 +597,10 @@ bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t
   return answered_resume && num_items && !items_in && ((asked < num_items) || !last_in_copy);
 }
 
+SpireSavestateVPlan spire_savestate_v_plan(bool owed) {
+  return SpireSavestateVPlan{.store = !owed, .follow_ledger = true, .record_boss = true, .burst_text = true};
+}
+
 bool spire_resume_equip_start_due(bool last_item_acked, uint64_t idle_ms, bool started, bool has_equipped, bool available) {
   return !started && has_equipped && available && (last_item_acked || (idle_ms >= SPIRE_RESUME_EQUIP_FALLBACK_MS));
 }
@@ -1846,58 +1850,62 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     return;
   }
   // kwaliteit-1 r2 (resume question): the quest's ss_write comes at the resumed room's start, while its 'J' item loop
-  // may still run; the run copy then lacks items the savestate has, so the savestate it resumed from stays
-  if (spire_savestate_items_owed(cr->answered_resume, cr->savestate.items.size(), cr->resume_items_asked,
-          cr->resume_items_in, spire_resume_last_item_in(cr->savestate, overlay->inventory))) {
-    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} not stored: the resume still owes items ({} of {} "
-        "asked); the savestate it resumed from stays", serial_number, quest_number, cr->resume_items_asked,
-        cr->savestate.items.size());
-    return;
+  // may still run; the run copy then lacks items the savestate has, so the savestate it resumed from stays. Critic r2
+  // N-3: only the store is skipped (spire_savestate_v_plan); K-3: with a slow item loop (up to 30 items) the resumed
+  // room's own 'V' is usually "not stored", which is expected: that savestate is the one it resumed from
+  uint32_t room_k = values[SPIRE_SS_K];
+  auto plan = spire_savestate_v_plan(spire_savestate_items_owed(cr->answered_resume, cr->savestate.items.size(),
+      cr->resume_items_asked, cr->resume_items_in, spire_resume_last_item_in(cr->savestate, overlay->inventory)));
+  if (!plan.store) {
+    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} room {} not stored (expected while the resume item loop "
+        "runs): the resume still owes items ({} of {} asked); the savestate it resumed from stays", serial_number,
+        quest_number, room_k, cr->resume_items_asked, cr->savestate.items.size());
   }
-  SpireSavestate ss;
-  ss.exists = true;
-  ss.run_id = run->run_id;
-  ss.episode = static_cast<uint8_t>(l->episode);
-  ss.quest_number = quest_number;
-  ss.start_room = cr->start_room;
-  ss.practice = cr->practice;
   // F6: the ledger follows the feed mirror (the overlay), unless an in-game 61 refreshed it; only its run mag comes back
   auto* led = spire_run_mag_ledger_for(c, run->run_id, false);
-  if (spire_run_mag_savestate_follow(
+  if (plan.follow_ledger && spire_run_mag_savestate_follow(
           led, spire_run_mag_overlay_refreshed(c, l), spire_run_mag_inventory_mags(overlay->inventory))) {
     c->log.info_f("Spire run mag: ledger of run {:08X} follows the fed mag {}", run->run_id,
         spire_run_mag_bytes_hex(*led->last_mirrored));
   }
-  std::vector<uint32_t> equipped; // kwaliteit-1: put on again at the resume (spire_resume_equip)
-  ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index,
-      led ? led->last_mirrored : std::nullopt, &equipped);
-  ss.equipped = std::move(equipped);
-  ss.level = overlay->disp.stats.level; // B-AF-3: the run copy's level, kept up by its 6x30 level-ups
-  ss.start_bonus = spire_start_level_run_bonus(c.get(), l->lobby_id, quest_number); // B-AF-7
-  if (led) {
-    ss.run_mag = *led;
+  if (plan.store) {
+    SpireSavestate ss;
+    ss.exists = true;
+    ss.run_id = run->run_id;
+    ss.episode = static_cast<uint8_t>(l->episode);
+    ss.quest_number = quest_number;
+    ss.start_room = cr->start_room;
+    ss.practice = cr->practice;
+    std::vector<uint32_t> equipped; // kwaliteit-1: put on again at the resume (spire_resume_equip)
+    ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index,
+        led ? led->last_mirrored : std::nullopt, &equipped);
+    ss.equipped = std::move(equipped);
+    ss.level = overlay->disp.stats.level; // B-AF-3: the run copy's level, kept up by its 6x30 level-ups
+    ss.start_bonus = spire_start_level_run_bonus(c.get(), l->lobby_id, quest_number); // B-AF-7
+    if (led) {
+      ss.run_mag = *led;
+    }
+    ss.values = std::move(values);
+    ss.time_usecs = phosg::now();
+    // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
+    bool replaced_old = false;
+    std::string filename = spire_savestate_store_rung(stem, spire_meta_ladder_quest_rung(quest_number),
+        spire_savestate_to_json(ss, serial_number), &replaced_old);
+    run->savestate_files.emplace(filename);
+    c->log.info_f("Spire savestate: stored {} in {}{}{}", spire_savestate_describe(ss), filename,
+        ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "",
+        replaced_old ? std::format("; {} of before removed (same difficulty)", spire_savestate_old_filename(stem)) : "");
   }
-  uint32_t room_k = values[SPIRE_SS_K];
-  ss.values = std::move(values);
-  ss.time_usecs = phosg::now();
-  // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
-  bool replaced_old = false;
-  std::string filename = spire_savestate_store_rung(stem, spire_meta_ladder_quest_rung(quest_number),
-      spire_savestate_to_json(ss, serial_number), &replaced_old);
-  run->savestate_files.emplace(filename);
-  c->log.info_f("Spire savestate: stored {} in {}{}{}", spire_savestate_describe(ss), filename,
-      ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "",
-      replaced_old ? std::format("; {} of before removed (same difficulty)", spire_savestate_old_filename(stem)) : "");
   // B-AF-1 (critic spel-af-1 S1): a boss counts as beaten once this client's run starts the room after it; its wave
   // clear may come from a child's 6x76 (Darvant, Pig Ray, Olga's first form) before the boss is dead
-  if (spire_meta_boss_room_before(room_k)) {
+  if (plan.record_boss && spire_meta_boss_room_before(room_k)) {
     spire_checkpoint_record_boss(l, c, serial_number, room_k - 1);
   }
   // F6 / bundle 2 S: the boss burst (F7, quest) from De Rol Le on: this client's 'V' of a boss room start is the
   // server's view of its boss door (the quest casts right after it). One line to this client only, once per room and
   // run (SpireClientRun); the boss rooms are spire-mag.json's BossRooms (no file: no text, no warning)
   try {
-    if ((room_k >= SPIRE_BOSS_BURST_FROM_K) && std::filesystem::exists(SPIRE_RUN_MAG_FILE)) {
+    if (plan.burst_text && (room_k >= SPIRE_BOSS_BURST_FROM_K) && std::filesystem::exists(SPIRE_RUN_MAG_FILE)) {
       auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
       if (spire_boss_burst_text_due(room_k, table.boss_rooms, cr->boss_burst_texts)) {
         spire_send_ticker(c, SPIRE_BOSS_BURST_TEXT);

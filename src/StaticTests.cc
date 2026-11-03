@@ -5995,6 +5995,15 @@ void run_static_tests() {
         expect(!spire_savestate_items_owed(true, 3, 3, false, true)); // all in: the 'V' stores
         expect(!spire_savestate_items_owed(true, 3, 3, true, false)); // seen once, then used up: stores
         expect(!spire_savestate_items_owed(false, 0, 0, false, true)); // a fresh start
+        // critic r2 N-3: a 'V' while items are owed skips only the store; the boss before the room still counts as
+        // beaten, the burst text still goes out and the ledger still follows the fed mag
+        auto kept = spire_savestate_v_plan(true);
+        expect(!kept.store);
+        expect(kept.record_boss);
+        expect(kept.burst_text);
+        expect(kept.follow_ledger);
+        auto stored = spire_savestate_v_plan(false);
+        expect(stored.store && stored.record_boss && stored.burst_text && stored.follow_ledger);
         SpireSavestate two_sabers = rs;
         two_sabers.items = {saved[0], saved[0]};
         expect(!spire_resume_last_item_in(two_sabers, part)); // one of two equal Sabers in: not yet

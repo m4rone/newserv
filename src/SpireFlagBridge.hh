@@ -404,6 +404,16 @@ bool spire_resume_last_item_in(const SpireSavestate& ss, const PlayerInventory& 
 // with a resume of num_items items, and the quest has not asked for all of them yet (asked: the highest index asked + 1)
 // or the last one is not in the copy yet. items_in latches once newserv saw the last one in the copy.
 bool spire_savestate_items_owed(bool answered_resume, size_t num_items, uint32_t asked, bool items_in, bool last_in_copy);
+// kwaliteit-1 r2 (critic r2 N-3): what a 'V' does: owed (spire_savestate_items_owed) only keeps the savestate it resumed
+// from (no store); the ledger still follows the fed mag, the boss before this room still counts as beaten (B-AF-1:
+// record_boss) and the boss burst text still goes out, so a resume with an item that does not fit loses no meta progress
+struct SpireSavestateVPlan {
+  bool store;
+  bool follow_ledger;
+  bool record_boss;
+  bool burst_text;
+};
+SpireSavestateVPlan spire_savestate_v_plan(bool owed);
 // Whether a 'V' may write: the client has a run copy (overlay), began its run ('B') and the run has not ended; the count
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
