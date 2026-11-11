@@ -290,7 +290,20 @@ void inventory_backup_write_file(const std::string& path, const InventoryBackup&
   }
 }
 
-std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep) {
+std::string inventory_backup_rotate(const std::string& dir, size_t keep) noexcept {
+  try {
+    auto names = inventory_backup_list(dir);
+    auto flags = (names.size() > keep) ? backup_flags_in(dir, names) : std::vector<InventoryBackupPickFlags>();
+    for (const auto& name : inventory_backup_files_to_delete(names, keep, flags)) {
+      std::filesystem::remove(dir + "/" + name);
+    }
+    return "";
+  } catch (const std::exception& e) {
+    return e.what();
+  }
+}
+
+std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep, std::string* rotate_error) {
   std::filesystem::create_directories(dir);
   std::string basename = inventory_backup_basename_for_time(b.time_usecs);
   std::string path = dir + "/" + basename;
@@ -299,10 +312,11 @@ std::string inventory_backup_save(const std::string& dir, const InventoryBackup&
     path = std::format("{}/{}.{}.json", dir, basename.substr(0, basename.size() - 5), z);
   }
   inventory_backup_write_file(path, b);
-  auto names = inventory_backup_list(dir);
-  auto flags = (names.size() > keep) ? backup_flags_in(dir, names) : std::vector<InventoryBackupPickFlags>();
-  for (const auto& name : inventory_backup_files_to_delete(names, keep, flags)) {
-    std::filesystem::remove(dir + "/" + name);
+  // Once the file is there its path goes back to the caller, whatever the rotation does (critic round 2, B2: a rotation
+  // that threw left a written backup no one tracked, which read as a hard stop after the next restart)
+  std::string error = inventory_backup_rotate(dir, keep);
+  if (rotate_error) {
+    *rotate_error = std::move(error);
   }
   return path;
 }
@@ -517,6 +531,25 @@ uint32_t inventory_provenance_own_units(const InventoryProvenance& prov, const I
   auto foreign_it = prov.foreign.find(item.id.load());
   uint32_t foreign = (foreign_it == prov.foreign.end()) ? 0 : foreign_it->second;
   return std::min<uint32_t>(seen_it->second - std::min(seen_it->second, foreign), entry_count(item));
+}
+
+uint32_t inventory_provenance_split_own_units(const InventoryProvenance& prov, const PlayerInventory& inventory,
+    const ItemData& item) {
+  uint32_t units = inventory_provenance_units(item);
+  if (item.data1[0] == 0x04) {
+    // What leaves the meseta counts as proven first, as in inventory_provenance_reconcile
+    return std::min(units, prov.seen_meseta - std::min(prov.seen_meseta, prov.foreign_meseta));
+  }
+  if (!is_tool(item)) {
+    return 0;
+  }
+  for (size_t z = 0; z < std::min<size_t>(inventory.num_items, inventory.items.size()); z++) {
+    const auto& slot = inventory.items[z].data;
+    if ((slot.id != item.id) && !memcmp(&slot.data1[0], &item.data1[0], 3)) {
+      return std::min(units, inventory_provenance_own_units(prov, slot));
+    }
+  }
+  return 0;
 }
 
 namespace {
@@ -741,7 +774,7 @@ InventoryRestoreDecision inventory_restore_decide(const std::string& dir, const 
   if (ret.refusal == R::NONE) {
     auto from = inventory_backup_restore_source(*ret.backup, boot_id);
     ret.source_kind = static_cast<int>(from.kind);
-    ret.plan = inventory_restore_missing(from.inventory, from.meseta, current, current_meseta, removed);
+    ret.plan = inventory_restore_missing(from.inventory, inventory_backup_restore_meseta(from), current, current_meseta, removed);
   }
   // He lost something at a hard end and played on: say that, instead of the refusal or the "nothing missing" of the
   // later game that stands in its place now
@@ -761,6 +794,17 @@ InventoryRestorePlan inventory_restore_take(InventoryBackup& backup, const Inven
   backup.restored = true;
   backup.restored_time_usecs = now_usecs;
   return plan;
+}
+
+InventoryRestoreTexts inventory_restore_texts(int source_kind) {
+  using K = InventoryBackupSource::Kind;
+  if (source_kind == static_cast<int>(K::INTERIM)) {
+    return {INVENTORY_RESTORE_NOTHING_INTERIM_TEXT, INVENTORY_RESTORE_OWN_ONLY_TEXT};
+  }
+  if (source_kind == static_cast<int>(K::EXIT)) {
+    return {INVENTORY_RESTORE_NOTHING_EXIT_TEXT, INVENTORY_RESTORE_OWN_ONLY_TEXT};
+  }
+  return {"Niets kwijt ten opzichte van\nde back-up.", nullptr}; // an import: its own state, Meseta included
 }
 
 const char* inventory_restore_refusal_text(InventoryRestoreRefusal r) {
@@ -847,6 +891,10 @@ InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, 
   return InventoryBackupSource{K::JOIN, b.inventory, b.disp.stats.meseta.load()};
 }
 
+uint32_t inventory_backup_restore_meseta(const InventoryBackupSource& from) {
+  return (from.kind == InventoryBackupSource::Kind::JOIN) ? from.meseta : 0;
+}
+
 void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
     bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count, const InventoryOwnership& own) {
   b.spire = b.spire || guard_covered;
@@ -892,7 +940,10 @@ bool inventory_backup_write_interim(const std::string& path, InventoryInterimSta
 InventoryLossVerdict inventory_loss_verdict(const InventoryBackup& b, bool session_alive, size_t missing_items,
     uint32_t missing_meseta, bool interim_is_end) {
   using V = InventoryLossVerdict;
-  if (b.restored || b.left_normally || b.spire || (!missing_items && !missing_meseta)) {
+  // A set-aside backup (LOST, UNMARKED) is refused by $restore, and LOST mostly comes from a living process (the next
+  // join, a drop in the lobby, SIGTERM), not a server stop: nothing to tell, and no Loss mark that pins it (round 2, M4)
+  if (b.restored || b.left_normally || b.spire || (b.set_aside != InventoryBackupSetAside::NONE) ||
+      (!missing_items && !missing_meseta)) {
     return V::NONE;
   }
   return (b.has_exit || !b.imported_from.empty() || session_alive || interim_is_end) ? V::RESTORABLE : V::SERVER_STOP;
@@ -1054,8 +1105,12 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
     inventory_backup_record_interim(b, p->inventory, p->disp.stats.meseta, false, b.time_usecs,
         inventory_backup_boot_id(), 1, InventoryOwnership());
     std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
-    c->inventory_backup_current = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
+    std::string rotate_error;
+    c->inventory_backup_current = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP, &rotate_error);
     open_backups[c->inventory_backup_current] = c;
+    if (!rotate_error.empty()) {
+      c->log.warning_f("Inventory backup: older backups in {} could not be rotated out: {}", dir, rotate_error);
+    }
     auto& interim = c->inventory_backup_interim;
     interim.written = true;
     interim.inventory = p->inventory;
@@ -1210,17 +1265,53 @@ void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, 
   }
 }
 
+void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id, bool client_drop_mode,
+    std::shared_ptr<const MapState::EnemyState> ene_st, std::shared_ptr<const MapState::ObjectState> obj_st) {
+  // The drop request of a compound enemy marks its alias target (reconcile_drop_request_with_map), so that is the
+  // entity whose mark is read and which counts once (critic round 2, M6)
+  if (ene_st && ene_st->alias_target_ene_st) {
+    ene_st = ene_st->alias_target_ene_st;
+  }
+  inventory_backup_note_leader_drop(l, floor, item_id,
+      ene_st ? static_cast<const void*>(ene_st.get()) : static_cast<const void*>(obj_st.get()),
+      client_drop_mode && (ene_st ? ((ene_st->server_flags & MapState::EnemyState::Flag::ITEM_DROPPED) != 0)
+                                  : (obj_st && obj_st->item_drop_checked)));
+}
+
+static void mark_dropped(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id, uint32_t own) {
+  if (l && l->item_exists(floor, item_id)) {
+    auto fi = l->find_item(floor, item_id);
+    fi->backup_origin.world = false;
+    fi->backup_origin.dropper = c;
+    fi->backup_origin.dropper_own = own;
+  }
+}
+
 void inventory_backup_note_dropped(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, const ItemData& item) {
   if (c->inventory_backup_current.empty()) {
     return;
   }
   try {
-    if (l && l->item_exists(floor, item.id)) {
-      auto fi = l->find_item(floor, item.id);
-      fi->backup_origin.world = false;
-      fi->backup_origin.dropper = c;
-      fi->backup_origin.dropper_own = inventory_provenance_own_units(c->inventory_backup_provenance, item);
+    mark_dropped(c, l, floor, item.id, inventory_provenance_own_units(c->inventory_backup_provenance, item));
+  } catch (const std::exception&) {
+  }
+}
+
+void inventory_backup_note_dropped_partial(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor,
+    const ItemData& item) {
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  try {
+    auto p = c->character_file(false, false);
+    if (!p) {
+      return;
     }
+    // The 6x29 that takes the units out follows this command: the source stack and the meseta are still there. What
+    // came in since the last subcommand is counted first (critic round 2, K5)
+    auto& prov = c->inventory_backup_provenance;
+    inventory_provenance_reconcile(prov, p->inventory, p->disp.stats.meseta);
+    mark_dropped(c, l, floor, item.id, inventory_provenance_split_own_units(prov, p->inventory, item));
   } catch (const std::exception&) {
   }
 }
@@ -1313,7 +1404,7 @@ void inventory_backup_on_login(std::shared_ptr<Client> c) {
     bool interim_is_end = inventory_backup_interim_is_end(b, inventory_backup_boot_id());
     auto from = inventory_backup_restore_source(b, inventory_backup_boot_id());
     const auto& source = from.inventory;
-    uint32_t source_meseta = from.meseta;
+    uint32_t source_meseta = inventory_backup_restore_meseta(from); // critic round 2, M1
     auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta, InventoryRemovals());
     auto verdict = inventory_loss_verdict(b, backup_session_alive(path), plan.items.size(), plan.meseta, interim_is_end);
     if (verdict == InventoryLossVerdict::NONE) {
@@ -1419,11 +1510,16 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
   }
 
   bool from_interim = (decision.source_kind == static_cast<int>(InventoryBackupSource::Kind::INTERIM));
+  auto texts = inventory_restore_texts(decision.source_kind);
   auto plan = decision.plan;
   if (plan.empty()) {
     c->log.info_f("Restore{}: nothing missing for {} against {}{}", check_only ? " check" : "", name, path,
         from_interim ? " (interim state after a hard stop)" : "");
-    return {from_interim ? INVENTORY_RESTORE_NOTHING_INTERIM_TEXT : "Niets kwijt ten opzichte van\nde back-up."};
+    std::vector<std::string> nothing = {texts.nothing};
+    if (texts.own_only) {
+      nothing.emplace_back(texts.own_only);
+    }
+    return nothing;
   }
 
   std::vector<std::string> lines;
@@ -1438,6 +1534,9 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
   }
   if (plan.meseta) {
     lines.emplace_back(std::format("{} Meseta", plan.meseta));
+  }
+  if (texts.own_only) {
+    lines.emplace_back(texts.own_only); // what it leaves out on purpose (critic round 2, M3)
   }
   if (check_only) {
     c->log.info_f("Restore check for {} against {}: {} items, {} Meseta (nothing dropped, nothing marked)",

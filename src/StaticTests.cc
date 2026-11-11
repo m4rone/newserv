@@ -9383,7 +9383,8 @@ void run_static_tests() {
       expect_eq(KbR::NONE, d.refusal);
       expect_eq(static_cast<int>(KbKind::EXIT), d.source_kind);
       expect_eq(0u, kb_plan_n(d.plan, KB_SABER));
-      expect_eq(100u, d.plan.meseta);
+      // 6cedb4b: 100 Meseta. Critic round 2, M1: no Meseta after an Exit (the server cannot see a bank deposit)
+      expect_eq(0u, d.plan.meseta);
       expect_eq(1u, kb_plan_n(d.plan, KB_FOUND)); // the enemy's item is proven his: Own names it in the Exit
       expect_eq(1u, b_exit.exit_own.units.size());
       expect_eq(0xCC000000u, b_exit.exit_own.units[0].first);
@@ -9396,7 +9397,188 @@ void run_static_tests() {
       expect_eq(KbR::NONE, d.refusal);
       expect_eq(0u, kb_plan_n(d.plan, KB_SABER));
       expect_eq(1u, kb_plan_n(d.plan, KB_HANDGUN));
-      expect_eq(200u, d.plan.meseta);
+      expect_eq(0u, d.plan.meseta); // 6cedb4b: 200 (critic round 2, M1)
+    });
+
+    // ---- kwaliteit-3 critic round 2: B2 (rotation), M1 (Meseta), M2 (6x5D), M3 (texts), M4 (set aside), M6 (alias)
+    k3_case("backup r2 B2: a join backup whose rotation fails is still the game's open backup, and its end is recorded", [&]() {
+      if (geteuid() == 0) {
+        return; // root lists a directory without the read bit
+      }
+      K3TempCwd temp_cwd("backup-r2-b2");
+      K3World w;
+      KbLive live;
+      kb_join(w, live);
+      std::string dir = std::filesystem::path(live.path).parent_path().string();
+      inventory_backup_on_game_end(live.p.c, live.l, true);
+      struct Writable {
+        std::string dir;
+        ~Writable() {
+          std::error_code ec;
+          std::filesystem::permissions(dir, std::filesystem::perms::owner_all, ec);
+        }
+      } writable{dir};
+      // A directory that can be written but not listed: the backup is written, then the rotation (directory_iterator)
+      // fails. 6cedb4b: inventory_backup_save threw, the join kept no path, and the file read as a hard stop later
+      std::filesystem::permissions(dir, std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+      std::string rotate_error;
+      std::string saved;
+      try {
+        InventoryBackup other = kb_backup();
+        saved = inventory_backup_save(dir, other, INVENTORY_BACKUP_KEEP, &rotate_error);
+      } catch (const std::exception&) {
+      }
+      expect(!saved.empty() && std::filesystem::exists(saved));
+      expect(!rotate_error.empty());
+      expect(!inventory_backup_rotate(dir, INVENTORY_BACKUP_KEEP).empty()); // never throws
+      // Through the join hook: the backup it wrote is the open one, so its end goes into it
+      live.p.c->inventory_backup_current.clear();
+      inventory_backup_on_game_join(live.p.c, live.l);
+      std::string second = live.p.c->inventory_backup_current;
+      expect(!second.empty() && std::filesystem::exists(second));
+      std::filesystem::permissions(dir, std::filesystem::perms::owner_all);
+      inventory_backup_on_game_end(live.p.c, live.l, true);
+      expect(kb_load(second).left_normally);
+    });
+
+    k3_case("backup r2 M1: after a hard stop or an Exit $restore gives no Meseta back; an import does", [&]() {
+      InventoryBackupSource from;
+      from.meseta = 700;
+      for (auto kind : {KbKind::EXIT, KbKind::INTERIM}) {
+        from.kind = kind;
+        expect_eq(0u, inventory_backup_restore_meseta(from));
+      }
+      from.kind = KbKind::JOIN;
+      expect_eq(700u, inventory_backup_restore_meseta(from));
+    });
+
+    k3_case("backup r2 M2: Meseta and a split stack he drops himself (6x5D, then 6x29) are his again when he picks them up; not B's", [&]() {
+      K3TempCwd temp_cwd("backup-r2-m2");
+      for (bool a_picks : {true, false}) {
+        KbTwo g;
+        kb_two(g, 500, 0);
+        KbLive& picker = a_picks ? g.a : g.b;
+        // 300 Meseta: 6x5D puts it on the floor, the inventory is untouched; the 6x29 (id FFFFFFFF) takes it out
+        ItemData m;
+        m.data1[0] = 0x04;
+        m.data2d = 300;
+        m.id = 0x00010010;
+        g.l->add_item(1, m, VectorXZF(), nullptr, nullptr, 0x00F);
+        inventory_backup_note_dropped_partial(g.a.p.c, g.l, 1, m);
+        kb_done(g.a);
+        g.a.ch->disp.stats.meseta = 200;
+        inventory_backup_note_removed(g.a.p.c, m);
+        kb_done(g.a);
+        kb_pick_up(g, picker, 0x00010010);
+        // One Monomate split off his stack of three (0x00010002) the same way, and picked up into the stack again
+        ItemData one;
+        for (size_t z = 0; z < g.a.ch->inventory.num_items; z++) {
+          if (g.a.ch->inventory.items[z].data.id == 0x00010002) {
+            one = g.a.ch->inventory.items[z].data;
+          }
+        }
+        one.data1[5] = 1;
+        one.id = 0x00010020;
+        g.l->add_item(1, one, VectorXZF(), nullptr, nullptr, 0x00F);
+        inventory_backup_note_dropped_partial(g.a.p.c, g.l, 1, one);
+        kb_done(g.a);
+        for (size_t z = 0; z < g.a.ch->inventory.num_items; z++) {
+          if (g.a.ch->inventory.items[z].data.id == 0x00010002) {
+            g.a.ch->inventory.items[z].data.data1[5] = 2;
+          }
+        }
+        inventory_backup_note_removed(g.a.p.c, one);
+        kb_done(g.a);
+        if (a_picks) {
+          kb_pick_up(g, g.a, 0x00010020, 0x00010002);
+        } else {
+          kb_pick_up(g, g.b, 0x00010020);
+        }
+        kb_bundle(g.a);
+        kb_bundle(g.b);
+        auto da = kb_load(g.a.path);
+        auto db = kb_load(g.b.path);
+        auto from_a = inventory_backup_restore_source(da, kb_next_boot);
+        auto from_b = inventory_backup_restore_source(db, kb_next_boot);
+        if (a_picks) {
+          // 6cedb4b: 200 Meseta and two Monomates proven his: the 6x5D left no origin on the floor item
+          expect_eq(500u, from_a.meseta);
+          expect_eq(500u, g.a.ch->disp.stats.meseta.load());
+          bool stack_named = false;
+          for (const auto& [id, units] : da.interim_own.units) {
+            stack_named |= (id == 0x00010002);
+          }
+          expect(!stack_named); // all three are proven his, as the default rule says
+          uint32_t monomates = 0;
+          for (size_t z = 0; z < from_a.inventory.num_items; z++) {
+            if (from_a.inventory.items[z].data.id == 0x00010002) {
+              monomates = from_a.inventory.items[z].data.data1[5];
+            }
+          }
+          expect_eq(3u, monomates);
+        } else {
+          expect_eq(200u, from_a.meseta);
+          expect_eq(0u, from_b.meseta); // what another player dropped is never proven B's
+          expect_eq(static_cast<size_t>(kb_b_inv.num_items), static_cast<size_t>(from_b.inventory.num_items));
+        }
+      }
+    });
+
+    k3_case("backup r2 M3: $restore says what it leaves out after a hard stop or an Exit, and no longer says nothing is lost", [&]() {
+      for (auto kind : {KbKind::INTERIM, KbKind::EXIT}) {
+        auto t = inventory_restore_texts(static_cast<int>(kind));
+        expect(t.own_only && (std::string(t.own_only).find("van een ander") != std::string::npos));
+        expect(std::string(t.own_only).find("Meseta") != std::string::npos);
+        expect(std::string(t.nothing).find("Niets kwijt") == std::string::npos);
+      }
+      auto t = inventory_restore_texts(static_cast<int>(KbKind::JOIN)); // an import gives back its own state
+      expect(!t.own_only);
+      expect_eq(std::string("Niets kwijt ten opzichte van\nde back-up."), std::string(t.nothing));
+    });
+
+    k3_case("backup r2 M4: a set-aside backup gets no loss text and no Loss mark at login", [&]() {
+      InventoryBackup b = kb_backup();
+      inventory_backup_record_interim(b, kb_penalty_card, 0, false, kb_time + 1000000, inventory_backup_boot_id(), 2,
+          InventoryOwnership());
+      for (auto aside : {InventoryBackupSetAside::LOST, InventoryBackupSetAside::UNMARKED}) {
+        b.set_aside = aside;
+        // 6cedb4b: SERVER_STOP for LOST (its text calls it a hard server stop), and the login wrote the Loss mark that pins it
+        expect(inventory_loss_verdict(b, false, 2, 500, false) == InventoryLossVerdict::NONE);
+      }
+      b.set_aside = InventoryBackupSetAside::NONE;
+      expect(inventory_loss_verdict(b, false, 2, 500, false) == InventoryLossVerdict::SERVER_STOP);
+    });
+
+    k3_case("backup r2 M6: in client drop mode the leader's item for a compound enemy counts once, through its alias target", [&]() {
+      K3World w;
+      auto l = std::make_shared<Lobby>(w.s, w.next_lobby_id++, true);
+      for (size_t floor = 0; floor < 2; floor++) {
+        l->floor_item_managers.emplace_back(l->lobby_id, floor);
+      }
+      auto put = [&](uint32_t id) {
+        ItemData item(KB_HANDGUN, 0);
+        item.id = id;
+        l->add_item(1, item, VectorXZF(), nullptr, nullptr, 0x00F);
+        return id;
+      };
+      auto world = [&](uint32_t id) { return l->find_item(1, id)->backup_origin.world; };
+      auto target = std::make_shared<MapState::EnemyState>();
+      auto alias = std::make_shared<MapState::EnemyState>();
+      alias->alias_target_ene_st = target;
+      target->server_flags |= MapState::EnemyState::Flag::ITEM_DROPPED; // reconcile_drop_request_with_map marks the target
+      // 6cedb4b: the alias itself was read, never marked, so the drop of a compound enemy was never the world's
+      inventory_backup_note_leader_drop(l, 1, put(0xCC100000), true, alias, nullptr);
+      expect(world(0xCC100000));
+      // a second item for the same compound enemy, through its target: of unknown origin
+      inventory_backup_note_leader_drop(l, 1, put(0xCC100001), true, target, nullptr);
+      expect(!world(0xCC100001));
+      // an enemy whose drop request the server never saw, and server drop mode (6x5F is not the server's own drop)
+      inventory_backup_note_leader_drop(l, 1, put(0xCC100002), true, std::make_shared<MapState::EnemyState>(), nullptr);
+      expect(!world(0xCC100002));
+      auto marked = std::make_shared<MapState::EnemyState>();
+      marked->server_flags |= MapState::EnemyState::Flag::ITEM_DROPPED;
+      inventory_backup_note_leader_drop(l, 1, put(0xCC100003), false, marked, nullptr);
+      expect(!world(0xCC100003));
     });
 
     k3_case("backup M2: a game whose end got lost inside a living server process is set aside; only a process that died leaves a hard stop", [&]() {

@@ -2122,6 +2122,8 @@ static void on_drop_partial_stack_t(std::shared_ptr<Client> c, SubcommandMessage
   item.decode_for_version(c->version());
   l->on_item_id_generated_externally(item.id);
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
+  // Inventory backup: his own split (also Meseta), with the proven units of its source (critic round 2, M2)
+  inventory_backup_note_dropped_partial(c, l, cmd.floor, item);
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -2283,11 +2285,7 @@ static void on_box_or_enemy_item_drop_t(std::shared_ptr<Client> c, SubcommandMes
   l->add_item(cmd.item.floor, item, cmd.item.pos, obj_st, ene_st, should_notify ? 0x100F : 0x000F);
   // Inventory backup: the leader's word for this item counts only for an enemy or box whose drop request the server
   // itself saw and marked (reconcile_drop_request_with_map), and once (InventoryBackup.hh, Provenance)
-  inventory_backup_note_leader_drop(l, cmd.item.floor, item.id,
-      ene_st ? static_cast<const void*>(ene_st.get()) : static_cast<const void*>(obj_st.get()),
-      (l->drop_mode == ServerDropMode::CLIENT) &&
-          (ene_st ? ((ene_st->server_flags & MapState::EnemyState::Flag::ITEM_DROPPED) != 0)
-                  : (obj_st && obj_st->item_drop_checked)));
+  inventory_backup_note_leader_drop(l, cmd.item.floor, item.id, l->drop_mode == ServerDropMode::CLIENT, ene_st, obj_st);
 
   auto name = s->data->describe_item(c->version(), item);
   l->log.info_f("Player {} (leader) created floor item {:08X} ({}){} at {}:({:g}, {:g})",

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "ItemData.hh"
+#include "Map.hh"
 #include "PlayerInventory.hh"
 #include "PlayerSubordinates.hh"
 
@@ -81,7 +82,8 @@ class ServerState;
 //   written, the client's next join came while the backup was still open, the client left without ever being in the
 //   game's lobby again, or the server stops (SIGTERM) while the backup belongs to no client in a game. So a later
 //   process never reads a game that in truth ended (perhaps with a 98, card saved) as a hard stop. If that rename
-//   fails as well it is an error line; that backup then does read as a hard stop after a restart.
+//   fails as well it is an error line; that backup then does read as a hard stop after a restart. A join backup that
+//   was written is always tracked, also when rotating out older ones fails right after (critic round 2, B2).
 // - A write that fails (full disk, I/O error) after something left the inventory leaves an interim state on disk that
 //   still holds it; and it stays that way for as long as the disk refuses, whatever he uses, sells or gives away
 //   (critic B3). The backup is then set aside as LOST at once (a rename, see InventoryBackupSetAside) and this game
@@ -118,7 +120,12 @@ constexpr size_t INVENTORY_BACKUP_KEEP = 20;
 constexpr uint64_t INVENTORY_BACKUP_INTERIM_USECS = 2000000;
 // What $restore says first when it works from the interim state of a game that ended in a hard server stop
 constexpr const char* INVENTORY_RESTORE_INTERIM_TEXT = "Stand van de laatste tussenstand\nvoor de harde serverstop.";
-constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten opzichte van\nde laatste tussenstand.";
+// Critic round 2, M3: after a hard stop or an Exit only what is proven his own comes back, so "nothing lost" is not
+// true when the state held something of another player; the texts say what is left out on purpose
+constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets terug te leggen uit\nde laatste tussenstand.";
+constexpr const char* INVENTORY_RESTORE_NOTHING_EXIT_TEXT = "Niets terug te leggen uit\nde back-up.";
+constexpr const char* INVENTORY_RESTORE_OWN_ONLY_TEXT =
+    "Wat je van een ander kreeg,\nkocht of uit de bank haalde,\nen Meseta komen niet terug.";
 
 // A backup that must never be restored from is set aside by renaming it, not by rewriting it (a rename in the same
 // directory needs no room, so it also works when the content can no longer be written): <time>.json becomes
@@ -207,8 +214,12 @@ std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std:
 // directory, fsync, rename, fsync of the directory (the pattern of spire_bridge_write_durable). Throws if the temp file
 // cannot be written or synced; the old file is then untouched
 void inventory_backup_write_file(const std::string& path, const InventoryBackup& b);
-// Writes a new backup into dir, deletes all but the newest keep, and returns the path written
-std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep);
+// Writes a new backup into dir, deletes all but the newest keep, and returns the path written. Throws only if the
+// backup itself was not written; a rotation that fails afterwards is reported in rotate_error (critic round 2, B2)
+std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep,
+    std::string* rotate_error = nullptr);
+// Deletes all but the newest keep backups in dir (inventory_backup_files_to_delete). Never throws: the error, or ""
+std::string inventory_backup_rotate(const std::string& dir, size_t keep) noexcept;
 // The index of the newest name that is not current_basename, or -1
 ssize_t inventory_backup_pick_previous(const std::vector<std::string>& sorted_names, const std::string& current_basename);
 // The backup $restore (and $restore check) uses, from names sorted oldest first and flags[z] for sorted_names[z]
@@ -258,6 +269,13 @@ enum class InventoryRestoreRefusal {
 InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game, bool protected_character,
     uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup, bool interim_is_end = false);
 const char* inventory_restore_refusal_text(InventoryRestoreRefusal r);
+// What $restore says for a source of this kind (InventoryBackupSource::Kind as int): when nothing is missing, and the
+// line on what it leaves out (null for an import, which gives back its own state)
+struct InventoryRestoreTexts {
+  const char* nothing = "";
+  const char* own_only = nullptr;
+};
+InventoryRestoreTexts inventory_restore_texts(int source_kind);
 // Whether the player played on in the game of b, so that an older hard-end backup no longer describes what he lost: it
 // ended with a 98, or its end state (Exit, else its interim state) differs from its join state in items or meseta, or
 // it has no end state at all, or it cannot be read (null), or it was set aside (LOST, UNMARKED: nothing was written
@@ -336,6 +354,10 @@ void inventory_provenance_credit(InventoryProvenance& prov, const PlayerInventor
 void inventory_provenance_reconcile(InventoryProvenance& prov, const PlayerInventory& inventory, uint32_t meseta);
 // How many of the units of item, as the last reconcile saw it in the inventory, are proven
 uint32_t inventory_provenance_own_units(const InventoryProvenance& prov, const ItemData& item);
+// The proven units of a partial stack drop (6x5D, before its 6x29): Meseta up to what of it is proven, a tool up to the
+// proven units of the stack it comes from (critic round 2, M2)
+uint32_t inventory_provenance_split_own_units(const InventoryProvenance& prov, const PlayerInventory& inventory,
+    const ItemData& item);
 // prov (reconciled with end) as it goes to disk: only what differs from the default rule against join
 InventoryOwnership inventory_provenance_ownership(const InventoryProvenance& prov, const PlayerInventory& join,
     uint32_t join_meseta, const PlayerInventory& end, uint32_t end_meseta);
@@ -367,6 +389,11 @@ struct InventoryBackupSource {
   uint32_t meseta = 0;
 };
 InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id);
+// The Meseta $restore and the login check work from (critic round 2, M1): none after a hard stop or an Exit. On the
+// GameCube a Meseta deposit in the bank reaches the server by no command the source knows of (6xBB/6xBD are BB and
+// Ep3 only), so the server's Meseta may already sit in the bank on the card; giving it back could make it twice. An
+// import keeps its Meseta. from.meseta itself stays the proven own Meseta
+uint32_t inventory_backup_restore_meseta(const InventoryBackupSource& from);
 // Puts inventory and meseta into b as its interim state and the guard mark into Spire (never back to false); count is
 // the number of this write within its game. own: what of it is proven the player's own
 void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
@@ -442,6 +469,14 @@ void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, 
 // c dropped item out of its inventory onto floor (6x2A; the server moved it itself). Call before
 // inventory_backup_note_removed: it reads how many units of it were proven c's own
 void inventory_backup_note_dropped(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, const ItemData& item);
+// 6x5D, a partial stack drop (also Meseta): the floor item remembers whose own drop it is, with the proven units of
+// the stack it was split from (critic round 2, M2)
+void inventory_backup_note_dropped_partial(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor,
+    const ItemData& item);
+// 6x5F: the leader's floor item for ene_st or obj_st; a compound enemy is checked and counted as its alias target
+// (critic round 2, M6)
+void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id, bool client_drop_mode,
+    std::shared_ptr<const MapState::EnemyState> ene_st, std::shared_ptr<const MapState::ObjectState> obj_st);
 // c picked up a floor item (item, with the origin the floor item carried) and its inventory holds it now
 void inventory_backup_note_picked_up(std::shared_ptr<Client> c, const ItemData& item, const InventoryFloorOrigin& origin);
 // $restore / $restore check: returns the lines to show the player
