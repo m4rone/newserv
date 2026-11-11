@@ -1,8 +1,8 @@
 # Audit 1, run 3 in newserv: rapport
 
-Tak spike/audit-1-run3, vanaf f612d6d. Commit 04b88fe. Patch voor SpireFlagBridge:
-`pso-roguelike/audit-1/new-features/roguelike/output/audit-1-a1-spireflagbridge.patch` (129 regels, 51 regels
-toegevoegd of weggehaald).
+Tak spike/audit-1-run3, vanaf f612d6d. Commits 04b88fe (run 3) en fee5a8b (de winkel voor Run III). Patch voor
+SpireFlagBridge: `pso-roguelike/audit-1/new-features/roguelike/output/audit-1-a1-spireflagbridge.patch` (207
+regels, 93 regels toegevoegd of weggehaald).
 
 ## Verdict
 
@@ -36,6 +36,36 @@ toegevoegd of weggehaald).
      - De Olga Flow-tekst noemt nu "Spire Run III" (:1681).
      - De oproepen van `spire_meta_ladder_menu_note` hebben nu vier argumenten. De verwachte zinnen zijn gelijk
        gebleven.
+
+## Ronde 2: de winkel en de statusregel
+
+- **fee5a8b, de winkel (SpireMeta).**
+  - Nieuwe vormen van `spire_shop_buy_refusal` en `spire_shop_next_price` met `std::array<uint8_t, 3>`.
+  - Een rung-item is ALREADY_OPEN pas als alle drie de runs de rung open hebben.
+  - RUNG_CLOSED geldt als geen van de drie runs de rung eronder open heeft.
+  - De vorm met twee runs (`uint8_t[2]`) blijft en beslist als voorheen.
+  - De test vergelijkt beide vormen voor elk item, zes upgrade-sets, alle rungparen, r3 tussen r1 en r2, kit2 en drie
+    saldo's. De uitkomsten zijn steeds gelijk.
+- **In de patch.**
+  - SpireFlagBridge.cc:3257: `open_rung` wordt een array van drie runs, ook na een aankoop. De logregel toont
+    "rungs open a/b/c".
+  - De statusregel staat nu in de pure functie `spire_checkpoint_status_text` (in de .hh gedeclareerd).
+    `spire_checkpoint_command` roept die aan.
+  - Een test daarvoor: k1, k31 en k32, alleen k32, alle 32, en een Run I-voorbeeld.
+- **Rood.**
+  - De nieuwe vorm met de beslissing van twee runs: `RED shop block: line 2894: !(R::NONE ==
+    spire_shop_buy_refusal(cat, 4, {}, 9999, hard_12))`.
+  - De statuslus met grens 31: exit=1 op `StaticTests.cc:1706: std::string("Rooms cleared: 1 31 32 - last: room
+    32") != spire_checkpoint_status_text(...)`.
+- **Groen.**
+  - Zonder patch (fee5a8b): exit=0, `-- All static tests passed`.
+  - Met de complete patch: exit=0, `-- All static tests passed`.
+  - De patch is getoetst gelijk aan de geteste boom (`cmp`). Daarna is alles teruggezet met `git checkout`.
+- **Apply-check.**
+  - Op spike/audit-1-run3: exit 0.
+  - Op m4rone/spike/veilig-1-ship: de patch alleen exit 0, en de stapel f612d6d + 04b88fe + fee5a8b + patch ook exit 0.
+- **Niet getest.** De aanroep in de winkelhandler zelf (SpireFlagBridge.cc:3257-3335) is doorgeefwerk zonder eigen
+  test; de beslissing zit in SpireMeta en is wel getest.
 
 ## Patch voor SpireFlagBridge (niet gecommit)
 
@@ -143,16 +173,13 @@ toegevoegd of weggehaald).
 
 ## Gezien maar niet gebouwd (voor observaties.md)
 
-- **Winkel.** Het karakter heeft Hard gewonnen in Run I en II, maar niet in Run III. De winkel weigert open_hard dan
-  met ALREADY_OPEN, dus Run III krijgt via de winkel nooit Hard.
-  - Waar: `spire_shop_item_refusal` (SpireMeta.cc:731-737) en `open_rung[2]` (SpireFlagBridge.cc:3257).
-  - Kosten: de array naar drie runs, in SpireFlagBridge.cc en SpireMeta.
+- **Winkel.** Opgelost in ronde 2: fee5a8b en de patch.
 - **Tekst.** "Spire Run III" verschijnt alleen als k30 in dezelfde game nieuw in het checkpoint komt.
   - Een gewonnen 'F' van Run II slaat k30 niet zelf op, anders dan k15 bij Run I (critic B-6).
   - Komt de vlag van Olga Flow niet vóór het baasrecord, dan ontbreekt de regel. De ontgrendeling zelf werkt wel.
   - Ik heb dit niet veranderd, omdat Run II gelijk moet blijven.
   - Waar: SpireFlagBridge.cc:3030 en :6973.
-- **Statusregel.** De regel tot en met k32 heeft geen static test. Waar: SpireFlagBridge.cc:7367.
+- **Statusregel.** Opgelost in ronde 2: `spire_checkpoint_status_text` met een test, in de patch.
 
 ## Niet gemeten
 
