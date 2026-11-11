@@ -9610,7 +9610,7 @@ void run_static_tests() {
     // Known gap B1 (output/systeem-8-itemveiligheid-critic.md B1; SpireFlagBridge.cc spire_guard_end_run, the base
     // game's 98 under AwaitingSave): what the base changes is pushed back at the next login, and an item taken from the
     // bank there is gone. Red on 3fe378d, fixed by 8-B1 on spike/veilig. One line turns it on.
-    constexpr bool SPIRE_E2E_KNOWN_GAP_B1 = false;
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B1 = true; // on spike/veilig: 8-B1 closes it (B-REGIE-21-5)
     if (SPIRE_E2E_KNOWN_GAP_B1) {
       e2e_case("the base game, the player takes an item from the bank there: after the base game exit and the next login the item is in the inventory or the bank (known gap B1)", [&]() {
         TempCwd temp_cwd;
