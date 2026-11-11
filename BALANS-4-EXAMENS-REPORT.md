@@ -11,6 +11,12 @@ verslagen baas en stuurt die score heel in 'K'; de server bewaart hem zoals gest
 examenveld van 'F' (bits 16-17) blijft wat het was: de twee ontgrendelstappen, door de quest afgeklemd op 2. De commit
 bevat daarom geen gedragswijziging: drie testcases, drie testbestanden en een commentaar in `src/SpireMeta.hh`.
 
+Aanvulling na de extra eis van de regie (questbytes): de quest zet het veld nu op 2 vast door zijn examenregister
+daar te laten stoppen, in plaats van het achteraf af te klemmen (quest 423c41d). Voor de server is dat hetzelfde:
+de 'F'-code en de score in 'K' zijn per afloop gelijk aan die van de eerste vorm, gemeten op het echte scoreblok
+(questrapport). Niets in deze repo is daarvoor gewijzigd. De quest stuurt niets wat de server zelf kan afleiden: er
+is geen nieuwe code, geen nieuw register en geen nieuw veld.
+
 ## Dekking
 
 Dit dekt: de score-rekening in de quest, de eindcode, het bewaarde record en de ontgrendelingen op de server, en de
