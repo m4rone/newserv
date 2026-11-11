@@ -7733,7 +7733,7 @@ void run_static_tests() {
       expect_eq(e2_k16.score, got.score);
       expect_eq(2, got.exams);
       // the next quest counts from the run's first room and says so (bit 22): its score is not corrected, and the
-      // exams are still the server's (here the quest claims one the run did not pass)
+      // exams are still the server's
       uint32_t from_start = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | 3000 | SPIRE_FINISH_FROM_START;
       got = spire_finish_seen(from_start, 1000, seen(2, 16, 16));
       expect_eq(0, got.exams);
@@ -7742,6 +7742,9 @@ void run_static_tests() {
       got = spire_finish_seen(from_start | (1 << 16), 4000, seen(2, 16, 19));
       expect_eq(1, got.exams);
       expect_eq(4000u, got.score);
+      got = spire_finish_seen(from_start | (2 << 16), 1000, seen(2, 16, 16)); // the bit does not make the exams the quest's
+      expect_eq(0, got.exams);
+      expect_eq(1000u, got.score);
       expect_eq(0x00400000u, SPIRE_FINISH_FROM_START);
       expect_eq(500u, SPIRE_SCORE_PER_ROOM);
       expect_eq(2000u, SPIRE_SCORE_PER_EXAM);

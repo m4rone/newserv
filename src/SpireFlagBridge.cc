@@ -7059,10 +7059,12 @@ SpireFinishSeen spire_finish_seen(uint32_t finish_value, uint32_t score, const S
   }
   uint8_t passed = std::min<uint8_t>(
       spire_meta_exams_passed(seen.episode, seen.start_room, seen.reached_room, finish.won), 2);
-  if ((seen.start_room <= 1) || (finish_value & SPIRE_FINISH_FROM_START)) {
+  if (seen.start_room <= 1) {
     ret.exams = std::max(finish.exams, passed);
   } else {
     ret.exams = finish.won ? finish.exams : passed;
+  }
+  if ((seen.start_room > 1) && !(finish_value & SPIRE_FINISH_FROM_START)) {
     ret.rooms_removed = seen.start_room - 1;
     ret.exams_removed = (ret.quest_exams > passed) ? (ret.quest_exams - passed) : 0;
     uint64_t base = static_cast<uint64_t>(SPIRE_SCORE_PER_ROOM) * ret.rooms_removed +

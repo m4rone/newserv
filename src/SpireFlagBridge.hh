@@ -697,12 +697,13 @@ struct SpireFinishSeen {
   uint32_t score_removed = 0;
 };
 // What a finished run gets. A run the server does not know (seen.known false) gets the 'F' and the score as sent.
-// - A run from room 1, or one whose quest counted from the run's first room (SPIRE_FINISH_FROM_START): the quest's
-//   exams or the exams the server saw it pass (spire_meta_exams_passed, at most 2), whichever is more (the quest counts
-//   a boss after a rest room as a regular room), and the score as sent. Such a run loses nothing it had before.
-// - A run from a later room without the bit: the exams the server saw it pass (a won run: both, as before), and the
-//   score less (start_room - 1) rooms and less the exams it did not pass (a boss room it did play stays a regular
-//   room: 2000 - 500 off each), times the pact multiplier. Exact: every term is a multiple of 4.
+// - A run from room 1: the quest's exams or the exams the server saw it pass (spire_meta_exams_passed, at most 2),
+//   whichever is more (the quest counts a boss after a rest room as a regular room), and the score as sent. Such a run
+//   loses nothing it had before, also when the server saw none of its rooms.
+// - A run from a later room: the exams the server saw it pass (a won run: both, as before), whatever the quest's field
+//   says, with or without SPIRE_FINISH_FROM_START. Without the bit also the score less (start_room - 1) rooms and less
+//   the exams it did not pass (a boss room it did play stays a regular room: 2000 - 500 off each), times the pact
+//   multiplier. Exact: every term is a multiple of 4. With the bit the score is the quest's.
 SpireFinishSeen spire_finish_seen(uint32_t finish_value, uint32_t score, const SpireRunSeen& seen);
 // The room index k an arrival on this floor in a game of this episode stores (SpireCheckpointArrivals), or 0.
 uint8_t spire_checkpoint_arrival_k(
