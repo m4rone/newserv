@@ -6420,10 +6420,13 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
 // v49: the run again ('I') makes every room of the game clear again for the new run
-// veilig-1: per game (lobby id), floor and room: the rooms whose players read SPIRE_STUCK_NOTICE_TEXT
+// veilig-1: per game (lobby id), floor and room: the rooms where a net counted a wave or event (2-M1: the watch may
+// then count the never-started waves behind it), and the rooms whose players read SPIRE_STUCK_NOTICE_TEXT
+static std::set<std::tuple<uint32_t, uint8_t, uint16_t>> spire_net_rooms;
 static std::set<std::tuple<uint32_t, uint8_t, uint16_t>> spire_stuck_noticed;
 static void spire_bridge_forget_room_clears(uint32_t lobby_id) {
   std::erase_if(spire_bridge_cleared_rooms, [lobby_id](uint64_t key) { return (key >> 32) == lobby_id; });
+  std::erase_if(spire_net_rooms, [lobby_id](const auto& key) { return std::get<0>(key) == lobby_id; });
   std::erase_if(spire_stuck_noticed, [lobby_id](const auto& key) { return std::get<0>(key) == lobby_id; });
 }
 static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, bool boss = false);
@@ -6776,6 +6779,10 @@ static asio::awaitable<void> spire_unhit_wave_wait(std::weak_ptr<Client> weak_c,
             ene_st->e_id, floor, quiet.count(), wave_number, room);
       }
     }
+    if (spire_net_rooms.size() > 4096) {
+      spire_net_rooms.clear();
+    }
+    spire_net_rooms.emplace(l->lobby_id, floor, room);
     recheck(c, l, floor, room, wave_number, false);
     co_return;
   }
@@ -6832,6 +6839,68 @@ static std::unordered_set<size_t> spire_dead_room_events(
   return ret;
 }
 
+// veilig-1 (2-M1): the chain behind a counted wave (SpireFlagBridge.hh)
+std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size) {
+  std::vector<uint32_t> ret;
+  spire_room_actions_hold(
+      action_stream, action_stream_size, 0, [](uint16_t) { return false; },
+      [&ret](uint32_t event_id) {
+        ret.emplace_back(event_id);
+        return false;
+      });
+  return ret;
+}
+
+std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events) {
+  std::vector<bool> counted(events.size(), false);
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (size_t z = 0; z < events.size(); z++) {
+      if (!events[z].finished && !counted[z]) {
+        continue;
+      }
+      for (uint32_t event_id : events[z].triggers) {
+        for (size_t y = 0; y < events.size(); y++) {
+          if ((events[y].event_id == event_id) && !events[y].started && !events[y].finished && !counted[y]) {
+            counted[y] = true;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  std::vector<size_t> ret;
+  for (size_t z = 0; z < events.size(); z++) {
+    if (counted[z]) {
+      ret.emplace_back(z);
+    }
+  }
+  return ret;
+}
+
+// The W-ids of the room's never-started events behind its finished ones; counted: W-ids taken as finished too
+static std::unordered_set<size_t> spire_unstarted_room_chain(
+    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, const std::unordered_set<size_t>& counted) {
+  std::vector<SpireRoomEvent> events;
+  std::vector<size_t> w_ids;
+  for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
+    const auto& ev_ver = ev_st->super_ev->version(v);
+    if (!ev_ver.set_entry || (ev_ver.set_entry->room != room)) {
+      continue;
+    }
+    events.emplace_back(SpireRoomEvent{.event_id = ev_ver.set_entry->event_id,
+        .started = !!(ev_st->flags & 0x06),
+        .finished = (ev_st->flags & 0x08) || counted.count(ev_st->w_id),
+        .triggers = spire_room_actions_triggers(ev_ver.action_stream, ev_ver.action_stream_size)});
+    w_ids.emplace_back(ev_st->w_id);
+  }
+  std::unordered_set<size_t> ret;
+  for (size_t z : spire_unstarted_chain(events)) {
+    ret.emplace(w_ids[z]);
+  }
+  return ret;
+}
+
 // Per (game, floor, room): the generation of the running watch; one watch per room
 static std::map<std::tuple<uint32_t, uint8_t, uint16_t>, uint64_t> spire_dead_event_waits;
 static uint64_t spire_dead_event_next_generation = 1;
@@ -6877,7 +6946,15 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
         both.emplace(w_id);
       }
     }
-    if (!both.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &both)) {
+    // veilig-1 (2-M1): behind a wave a net counted (in this room before, or `both` at this look) the clients start no
+    // next wave: the never-started events its trigger chain points at are counted with it
+    std::unordered_set<size_t> chain;
+    if (!both.empty() || spire_net_rooms.count(key)) {
+      chain = spire_unstarted_room_chain(l, v, floor, room, both);
+    }
+    std::unordered_set<size_t> counted = both;
+    counted.insert(chain.begin(), chain.end());
+    if (!counted.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &counted)) {
       // veilig-1 (2-M2): counted only at a look where the floor was quiet long enough with a client on it
       bool player_on_floor = false;
       auto quiet = spire_net_quiet(l, floor, &player_on_floor);
@@ -6888,7 +6965,7 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
       if (look.action == SpireNetAction::COUNT) {
         spire_dead_event_waits.erase(it);
         for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
-          if (!both.count(ev_st->w_id)) {
+          if (!counted.count(ev_st->w_id)) {
             continue;
           }
           const auto* set_entry = ev_st->super_ev->version(v).set_entry;
@@ -6898,9 +6975,18 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
             }
           }
           ev_st->flags |= 0x18; // all enemies killed, post-wave actions run (server's map state only)
-          l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} running without a living enemy and no fight on the floor for {} s; counted as finished",
-              set_entry->event_id.load(), room, floor, quiet.count());
+          if (both.count(ev_st->w_id)) {
+            l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} running without a living enemy and no fight on the floor for {} s; counted as finished",
+                set_entry->event_id.load(), room, floor, quiet.count());
+          } else {
+            l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} never started behind a wave the net counted, no fight on the floor for {} s; counted as finished (wave skipped)",
+                set_entry->event_id.load(), room, floor, quiet.count());
+          }
         }
+        if (spire_net_rooms.size() > 4096) {
+          spire_net_rooms.clear();
+        }
+        spire_net_rooms.emplace(key);
         spire_bridge_check_room_clear(c, l, floor, room, wave_number);
         co_return;
       }
@@ -6915,7 +7001,8 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
 // v43 (pc 2026-10-25 20:43, q921 room 7): the last wave's check ran before the clients' 6x67 started the chained elite
 // wave (event 117), so no started event was dead yet and the watch never ran; the elite never spawned and the room
 // stayed open. A room held by a trigger of an event not yet started gets the watch too: its first look (after
-// SPIRE_UNHIT_ENEMY_SECONDS) finds the event started or gives up, the second counts it as above.
+// SPIRE_UNHIT_ENEMY_SECONDS) finds the event started or gives up, the second counts it as above. veilig-1 (2-M1):
+// behind a wave a net counted the first look does not give up; it counts the never-started chain at a quiet look.
 static void spire_dead_event_watch(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
     uint16_t wave_number, bool waits_on_trigger) {
   try {

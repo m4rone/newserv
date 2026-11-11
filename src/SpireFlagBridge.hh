@@ -1130,6 +1130,23 @@ SpireNetLook spire_unhit_net_look(bool held_only_by_unhit, std::chrono::seconds 
 // veilig-1 (2-M2): this net too counts only at a look where the floor was quiet for SPIRE_UNHIT_QUIET_SECONDS with a
 // client on it (spire_unhit_net_look), so an elite nobody hit yet is not counted while the room is being fought.
 bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies);
+// veilig-1 (2-M1): a net that counts a wave finishes it on the server only. The clients still see its enemy alive, so
+// they never run the wave's trigger_event (0C) and never send the 6x67 of the next wave: the room stayed open for
+// good (the watch looked once and gave up). The wave events of one room as the watch sees them: started (0004 or
+// 0002), finished (0008, or counted by a net at this look) and the events its post-wave actions trigger.
+// spire_unstarted_chain returns the indexes of the events that never started and that only a finished event's
+// trigger still points at, followed through the chain (the wave after the next, a chained elite wave). After a net
+// counted a wave of the room, the watch counts those as finished too at a look that would let a net count (floor
+// quiet, a client on it): the waves behind the unreachable enemy are skipped and the room clears.
+struct SpireRoomEvent {
+  uint32_t event_id = 0;
+  bool started = false;
+  bool finished = false;
+  std::vector<uint32_t> triggers;
+};
+std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
+// The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
+std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,

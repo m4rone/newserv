@@ -2436,6 +2436,30 @@ void run_static_tests() {
     expect(spire_wave_held_only_by_unhit(wave(3)));
   }
 
+  phosg::log_info_f("-- Spire bridge: behind a wave a net counted the room goes on (veilig-1, 2-M1)");
+  {
+    using E = SpireRoomEvent;
+    using V = std::vector<size_t>;
+    // fields: event id, started, finished, the events its post-wave actions trigger
+    // k2 (Forest 1 B, room 10): 111 -> 112 -> 113. An enemy of wave 2 sits in a warp; the net counted it, so 112 is
+    // finished on the server only. The clients never send the 6x67 of 113: it is counted too and the room clears.
+    expect(V{2} == spire_unstarted_chain({E{111, false, true, {112}}, E{112, false, true, {113}}, E{113, false, false, {}}}));
+    // the elite room (room 7): 114 -> 115 -> 116 -> 117 (the chained elite); counted in 115: 116 and 117 go with it
+    expect((V{2, 3}) == spire_unstarted_chain({E{114, false, true, {115}}, E{115, false, true, {116}},
+                           E{116, false, false, {117}}, E{117, false, false, {}}}));
+    // the next wave started (the clients did send its 6x67): nothing is skipped
+    expect(spire_unstarted_chain({E{111, false, true, {112}}, E{112, true, false, {113}}, E{113, false, false, {}}}).empty());
+    // a never-started event no finished event points at (the elite wave on the normal path) is not in the chain
+    expect(spire_unstarted_chain({E{111, false, true, {112}}, E{112, false, true, {}}, E{119, false, false, {}}}).empty());
+    // the last wave counted: nothing behind it
+    expect(spire_unstarted_chain({E{101, false, true, {102}}, E{102, false, true, {}}}).empty());
+    expect(spire_unstarted_chain({}).empty());
+    // the triggers of a post-wave action stream, as make_map writes it: 0C <event id> ..., 01 stop
+    const uint8_t stream[] = {0x0C, 0x71, 0x00, 0x00, 0x00, 0x0C, 0x75, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x77, 0x00, 0x00, 0x00};
+    expect((std::vector<uint32_t>{113, 117}) == spire_room_actions_triggers(stream, sizeof(stream)));
+    expect(spire_room_actions_triggers(stream, 0).empty());
+  }
+
   phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");
   {
     using X = SpireRunOverExit;
