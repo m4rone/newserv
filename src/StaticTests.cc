@@ -8362,6 +8362,54 @@ void run_static_tests() {
       must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
     });
 
+    // The opening up to the quest load, without it: the login 61 of the real character and the game with the quest
+    auto before_quest_load = [&](World& w, const GCCharacter& real) {
+      Started r;
+      r.p = connect(w, real);
+      client_sends(w, r.p, 0x61, r.p.ch->as_61());
+      expect(run_bool(w, r.p, spire_guard_restore_if_needed(r.p.c)));
+      r.server_real = std::make_shared<PSOBBCharacterFile>(*r.p.c->character_file(false, false));
+      r.l = new_game(w);
+      r.l->clients[0] = r.p.c;
+      r.p.c->lobby_client_id = 0;
+      r.p.c->lobby = r.l;
+      return r;
+    };
+    e2e_case("a protected character: the quest load is refused, no snapshot, no marker, no run copy", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      w.s->data->spire_blocked_characters.emplace_back(SERIAL, "Eindtest");
+      const GCCharacter real = real_character();
+      auto r = before_quest_load(w, real);
+      auto& p = r.p;
+      must(p.c->is_spire_protected(), "the character is not protected in this setup");
+      must(!spire_create_battle_overlay(p.c, r.l), "a protected character got a run");
+      must(!p.c->has_overlay(), "a protected character got a run copy");
+      must(server_holds(p, *r.server_real), "the server's character data of a protected character changed");
+      expect_real(p.ch->memory, real, "after the refused quest load of a protected character");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      for (const auto& entry : std::filesystem::directory_iterator(SPIRE_BRIDGE_DIRECTORY)) {
+        must(!entry.path().string().ends_with(".snapshot.json"), "the guard wrote a snapshot file for a protected character");
+      }
+    });
+    e2e_case("the snapshot cannot be written: the quest load is refused, no run copy, the real character untouched", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = before_quest_load(w, real);
+      auto& p = r.p;
+      // the guard's directory is gone and a file stands in its place: no snapshot can be written
+      std::filesystem::remove_all(SPIRE_BRIDGE_DIRECTORY);
+      phosg::save_file(SPIRE_BRIDGE_DIRECTORY, "not a directory");
+      must(!spire_create_battle_overlay(p.c, r.l), "the run started without a stored snapshot");
+      must(!p.c->has_overlay(), "a run copy was made without a stored snapshot");
+      must(server_holds(p, *r.server_real), "the server's character data changed at a quest load that was refused");
+      expect_real(p.ch->memory, real, "after the quest load that could not store its snapshot");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+    });
+
     expect_eq(0u, e2e_failed);
   }
 
