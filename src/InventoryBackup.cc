@@ -658,12 +658,15 @@ bool same_content(const PlayerInventory& a, uint32_t a_meseta, const PlayerInven
 } // namespace
 
 bool inventory_backup_played_on(const InventoryBackup* b) {
-  if (!b || (b->set_aside == InventoryBackupSetAside::LOST)) {
-    return true; // unreadable, or what is on disk is not what happened: nobody knows what he did in that game
+  if (!b || (b->set_aside != InventoryBackupSetAside::NONE)) {
+    // unreadable, or set aside (LOST, UNMARKED): what is on disk is not how that game ended, and nothing was written
+    // into it after it got its name. Nobody knows what he did in that game
+    return true;
   }
-  if (b->spire) {
-    return false;
-  }
+  // A game the Spire guard covered counts like every other game (critic round 2, B1). The guard puts back the run, not
+  // the game: before the run starts and after the return to the base ('O') the real character plays in that same game,
+  // with bank, shop and partner. So its 98 counts as played on, and without a 98 the server's own view of the real
+  // character at the end (Exit or interim state; never the run copy) is compared with the join, as for any game
   if (b->left_normally) {
     return true;
   }
@@ -692,8 +695,8 @@ InventoryBackupListing inventory_backup_read_all(const std::string& dir, const s
     }
     if (b) {
       b->set_aside = set_aside;
-      // The name carries the Spire mark its content could not take: $restore refuses it as a Spire backup, the login
-      // check leaves it to the guard, and it never counts as a game he played on in (critic M1)
+      // The name carries the Spire mark its content could not take: $restore refuses it as a Spire backup and the
+      // login check leaves it to the guard (critic M1). It does count as a game he played on in (round 2, B1)
       b->spire = b->spire || (set_aside == InventoryBackupSetAside::UNMARKED);
     }
     ret.flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());

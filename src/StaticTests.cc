@@ -8815,10 +8815,11 @@ void run_static_tests() {
         expect_eq(KbR::SPIRE_BACKUP, d.refusal);
         expect_eq(aside, d.path);
         expect(d.plan.empty());
-        // the login check leaves it to the guard, and it is not a game he played on in
+        // the login check leaves it to the guard. It is a game he played on in (critic round 2, B1): nothing was
+        // written into it after it was set aside, so nobody knows how the real character left that game
         expect(d.backup->spire);
         expect(inventory_loss_verdict(*d.backup, false, 2, 500, false) == InventoryLossVerdict::NONE);
-        expect(!inventory_backup_played_on(d.backup.get()));
+        expect(inventory_backup_played_on(d.backup.get()));
         std::filesystem::remove(aside);
       }
     });
@@ -9255,10 +9256,16 @@ void run_static_tests() {
         SOLD_98, // he sold the Handgun and left with a 98
         SOLD_EXIT, // he sold the Handgun and his connection dropped
         NOTHING_EXIT, // a join that changed nothing and dropped (a reconnect loop)
-        SPIRE_98, // a guarded Spire run, left with a 98
+        // Guarded Spire games (critic round 2, B1). The real character plays in such a game too: in Pioneer 2 before
+        // the run and in the base after it. Until round 2 none of them counted as played on
+        SPIRE_98, // a guarded Spire run, left with a 98: the server has no end state of the real character
+        SPIRE_98_GAVE, // the critic's sequence: in the base after the run he banks the Handgun (6x29), then a 98
+        SPIRE_EXIT_GAVE, // the same, and his connection drops in the base
+        SPIRE_EXIT_SAME, // his connection drops in the run; the server saw the real character end as it joined
         NONE, // no second game: he types $restore in the game right after the stop
       };
-      for (Second second : {Second::NONE, Second::SOLD_98, Second::SOLD_EXIT, Second::NOTHING_EXIT, Second::SPIRE_98}) {
+      for (Second second : {Second::NONE, Second::SOLD_98, Second::SOLD_EXIT, Second::NOTHING_EXIT, Second::SPIRE_98,
+               Second::SPIRE_98_GAVE, Second::SPIRE_EXIT_GAVE, Second::SPIRE_EXIT_SAME}) {
         KbTempDir tmp("b2");
         std::string dir = tmp.root + "/42.test";
         // Game 1 stops hard with an enemy's item in its interim state. His card keeps what he joined with; the next
@@ -9276,14 +9283,22 @@ void run_static_tests() {
           InventoryBackup second_backup = kb_backup();
           second_backup.time_usecs = kb_time + 600000000;
           auto g2 = kb_open(dir, second_backup, kb_new_boot);
-          bool sold = (second == Second::SOLD_98) || (second == Second::SOLD_EXIT);
+          bool guarded = (second == Second::SPIRE_98) || (second == Second::SPIRE_98_GAVE) ||
+              (second == Second::SPIRE_EXIT_GAVE) || (second == Second::SPIRE_EXIT_SAME);
+          bool sold = (second == Second::SOLD_98) || (second == Second::SOLD_EXIT) ||
+              (second == Second::SPIRE_98_GAVE) || (second == Second::SPIRE_EXIT_GAVE);
+          if (guarded) {
+            // the guard's snapshot at the run start puts the Spire mark on disk (inventory_backup_note_guarded)
+            expect(inventory_backup_write_interim(g2.path, g2.state, kb_join_inv, 500, true, kb_time + 600500000, kb_new_boot));
+          }
           if (sold) {
-            expect(inventory_backup_write_interim(g2.path, g2.state, after_sale, 560, false, kb_time + 601000000, kb_new_boot));
+            expect(inventory_backup_write_interim(g2.path, g2.state, after_sale, 560, guarded, kb_time + 601000000, kb_new_boot));
             card = after_sale;
           }
           b = kb_load(g2.path);
-          bool normal = (second == Second::SOLD_98) || (second == Second::SPIRE_98);
-          inventory_backup_record_end(b, normal, second == Second::SPIRE_98, normal ? nullptr : &card, sold ? 560 : 500);
+          expect_eq(guarded, b.spire);
+          bool normal = (second == Second::SOLD_98) || (second == Second::SPIRE_98) || (second == Second::SPIRE_98_GAVE);
+          inventory_backup_record_end(b, normal, guarded, normal ? nullptr : &card, sold ? 560 : 500);
           inventory_backup_write_file(g2.path, b);
         }
         // The login before the next game: which backup the login check reads (inventory_backup_on_login's own steps)
@@ -9298,8 +9313,9 @@ void run_static_tests() {
         switch (second) {
           case Second::NONE:
           case Second::NOTHING_EXIT:
-          case Second::SPIRE_98:
-            // nothing happened to the character since the stop: game 1 is still what he lost
+          case Second::SPIRE_EXIT_SAME:
+            // nothing happened to the character since the stop: game 1 is still what he lost. For the guarded game
+            // that is what the server itself saw: no 98, and the real character ended as it joined
             expect_eq(KbR::NONE, d.refusal);
             expect_eq(g1.path, d.path);
             expect_eq(static_cast<int>(KbKind::INTERIM), d.source_kind);
@@ -9308,6 +9324,12 @@ void run_static_tests() {
             expect(!listing.flags[0].superseded);
             expect_eq(0, login_pick);
             break;
+          case Second::SPIRE_98:
+          case Second::SPIRE_98_GAVE:
+            // 6cedb4b: a guarded game never counted, so game 1 stayed restorable and gave the Handgun back that sits
+            // in his bank (or with his partner) since the base. Now a guarded game's 98 counts like any other 98:
+            // the server cannot prove the base left the character alone, so game 1 has expired, also for SPIRE_98
+            [[fallthrough]];
           case Second::SOLD_98:
             // a5fa1dc: game 1 again, and the Handgun he sold in game 2 comes back with the found item
             expect_eq(KbR::SUPERSEDED, d.refusal);
@@ -9317,6 +9339,7 @@ void run_static_tests() {
             // the login check reads game 2 now (a 98: nothing to say), no longer game 1
             expect_eq(1, login_pick);
             break;
+          case Second::SPIRE_EXIT_GAVE:
           case Second::SOLD_EXIT:
             // game 2 stands in its place: its Exit is what he has, so nothing is missing, and he is told why
             expect_eq(KbR::SUPERSEDED, d.refusal);

@@ -53,8 +53,9 @@ class ServerState;
 // - Retention: an unrestored backup with a Loss mark or an import is never rotated out, and $restore picks it before
 //   later join backups, so a burst of joins (a reconnect loop) cannot push the pre-loss state away.
 // - That preference ends once the player played on (critic B2, 2026-11-11): a later game, other than the current
-//   one, that ended with a 98 or whose end state differs from its join. What he sold, gave away or used there would
-//   come back. $restore then says so (SUPERSEDED) instead of silently working from that old state, and the login
+//   one, that ended with a 98 or whose end state differs from its join; a guarded Spire game counts like any other
+//   (round 2, B1: in the base after the run he banks, sells and hands over as the real character). What he sold, gave
+//   away or used there would come back. $restore then says so (SUPERSEDED) instead of silently working from that old state, and the login
 //   check no longer tells him to type $restore for it.
 //
 // Interim state (B-REGIE-20-4, 2026-11-11: a hard server stop in the middle of a game left only the join inventory on
@@ -259,8 +260,11 @@ InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game,
 const char* inventory_restore_refusal_text(InventoryRestoreRefusal r);
 // Whether the player played on in the game of b, so that an older hard-end backup no longer describes what he lost: it
 // ended with a 98, or its end state (Exit, else its interim state) differs from its join state in items or meseta, or
-// it has no end state at all, or it cannot be read (null). A game the Spire guard covered never counts: the guard
-// puts the real character back as it joined. A join that changed nothing (a reconnect loop) does not count either
+// it has no end state at all, or it cannot be read (null), or it was set aside (LOST, UNMARKED: nothing was written
+// into it after that). A join that changed nothing (a reconnect loop) does not count. A game the Spire guard covered is
+// no exception (critic round 2, B1): the real character plays in that game before the run and after the return to the
+// base, so its 98 counts; only a guarded game that ended without a 98 and in which the server saw the real character
+// end as it joined (a run that never changed it) does not count, by the same rule as every other game
 bool inventory_backup_played_on(const InventoryBackup* b);
 // Every backup of one character as $restore and the login check see it: names oldest first, backups[z] (null if
 // unreadable) and flags[z] for names[z]. superseded is set for every backup with a later one, other than
