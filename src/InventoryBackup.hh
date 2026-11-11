@@ -75,6 +75,12 @@ class ServerState;
 //   state: $restore uses it like an Exit and says so; the next login treats it like an Exit. A backup without Interim
 //   (written by an older server, or lost before its first write) is refused as before (UNKNOWN_END). Interim of the
 //   running process is never used: that game is still open or lost its end inside this process, as before.
+// - A write that fails (full disk, I/O error) after something left the inventory leaves an interim state on disk that
+//   still holds it; and it stays that way for as long as the disk refuses, whatever he uses, sells or gives away
+//   (critic B3). The backup is then set aside as LOST at once (a rename, see InventoryBackupSetAside) and this game
+//   has no backup any more: $restore refuses it (NOT_UPDATED), as it refused every hard stop before interim states
+//   existed. If the rename fails too, that is logged as an error and every later change tries both again. A write
+//   that fails with nothing having left the inventory only delays what came in: the state on disk is older, not wrong.
 //
 // Provenance (kwaliteit-3 critic B1, 2026-11-11: A drops an item he had at the join, B picks it up, hard stop; A's card
 // still holds it, B's interim state holds it too, and $restore gave it to B a second time):
@@ -104,6 +110,22 @@ constexpr const char* INVENTORY_BACKUP_SET_ASIDE_SUFFIX = ".unmarked";
 // What $restore says first when it works from the interim state of a game that ended in a hard server stop
 constexpr const char* INVENTORY_RESTORE_INTERIM_TEXT = "Stand van de laatste tussenstand\nvoor de harde serverstop.";
 constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten opzichte van\nde laatste tussenstand.";
+
+// A backup that must never be restored from is set aside by renaming it, not by rewriting it (a rename in the same
+// directory needs no room, so it also works when the content can no longer be written): <time>.json becomes
+// <time><suffix>. The name still ends in .json, so the backup stays in inventory_backup_list at its place in time:
+// $restore sees it as that game and refuses it, and never silently works from an older game instead.
+// LOST (critic B3): something left the inventory and the interim state could not be written after it, so what is on
+// disk still holds it
+enum class InventoryBackupSetAside {
+  NONE = 0,
+  LOST,
+};
+constexpr const char* INVENTORY_BACKUP_LOST_SUFFIX = ".lost.json";
+// The kind a backup's file name says
+InventoryBackupSetAside inventory_backup_set_aside_kind(const std::string& name);
+// Renames the backup at path (<...>.json) to <...><suffix>; returns the new path, or "" if the rename failed
+std::string inventory_backup_set_aside_as(const std::string& path, const char* suffix);
 
 // What of an end state (interim state or Exit) is proven the player's own, as differences from the default rule (see
 // Provenance above)
@@ -141,6 +163,8 @@ struct InventoryBackup {
   uint64_t interim_boot = 0; // inventory_backup_boot_id of the server process that wrote it
   uint32_t interim_count = 0; // how many interim states this game wrote, this one included
   InventoryOwnership interim_own; // what of the interim state is proven the player's own (see Provenance above)
+  // From the file name, never in the file: inventory_backup_read_all sets it
+  InventoryBackupSetAside set_aside = InventoryBackupSetAside::NONE;
 };
 
 phosg::JSON inventory_backup_to_json(const InventoryBackup& b);
@@ -211,6 +235,7 @@ enum class InventoryRestoreRefusal {
   LEFT_NORMALLY,
   UNKNOWN_END,
   SUPERSEDED, // a hard-end backup with a Loss mark exists, but the player played on after it (critic B2)
+  NOT_UPDATED, // set aside as LOST: what is on disk misses a removal (critic B3)
 };
 // backup: the newest backup of this character made before the current game, or null. protected_character does not
 // refuse (regie pso-regie-10: Wakiru may restore); it is a parameter so the static test pins that.
@@ -336,6 +361,9 @@ struct InventoryInterimState {
   bool guard_covered = false;
   uint32_t count = 0;
   bool failed = false; // the last write failed (logged once per streak, retried at every later call)
+  // A write failed after something left the inventory and none succeeded since: what is on disk still holds it
+  bool removal_unwritten = false;
+  bool set_aside_failed = false; // and the backup could not be set aside either (logged once per streak)
 };
 // Whether inventory, meseta and the guard mark differ from what state last wrote (true if it wrote nothing yet)
 bool inventory_backup_interim_changed(const InventoryInterimState& state, const PlayerInventory& inventory,

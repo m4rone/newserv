@@ -9275,6 +9275,69 @@ void run_static_tests() {
       }
     });
 
+    k3_case("backup B3: an interim write that fails after a removal sets the backup aside: it stays listed and $restore refuses it", [&]() {
+      K3TempCwd temp_cwd("backup-b3");
+      K3World w;
+      KbLive live;
+      kb_join(w, live);
+      std::string dir = std::filesystem::path(live.path).parent_path().string();
+      std::string character_id = kb_load(live.path).character_id;
+      auto decide = [&]() {
+        return inventory_restore_decide(dir, "", kb_next_boot, true, false, false, live.p.serial_number, character_id,
+            kb_penalty_card, 0, InventoryRemovals());
+      };
+      // The disk stops taking writes: the name of the temp file is taken by a directory, so opening it fails (as it
+      // fails with ENOSPC on a full disk), while a rename in the directory still works
+      std::filesystem::create_directory(live.path + ".tmp");
+      // A pick-up whose bundle cannot be written: nothing left the inventory, the state on disk is older, not wrong
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      inventory_backup_flush_interim(live.p.c);
+      expect(live.p.c->inventory_backup_interim.failed && !live.p.c->inventory_backup_interim.removal_unwritten);
+      expect_eq(live.path, live.p.c->inventory_backup_current);
+      expect_eq(1u, kb_load(live.path).interim_count);
+      expect_eq(KbR::NONE, decide().refusal);
+      // He drops the Handgun (6x2A): it left the inventory and the write fails. What is on disk still holds it
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      inventory_backup_note_removed(live.p.c, ItemData(KB_HANDGUN, 0));
+      std::string aside = live.path.substr(0, live.path.size() - 5) + INVENTORY_BACKUP_LOST_SUFFIX;
+      expect(!std::filesystem::exists(live.path));
+      expect(std::filesystem::exists(aside));
+      expect(live.p.c->inventory_backup_current.empty());
+      inventory_backup_after_command(live.p.c);
+      auto names = inventory_backup_list(dir);
+      expect_eq(1u, names.size()); // still listed, under its new name
+      expect_eq(std::filesystem::path(aside).filename().string(), names[0]);
+      expect_eq(1u, kb_n(kb_load(aside).interim_inventory, KB_HANDGUN)); // the stale state
+      // The hard stop. a5fa1dc: $restore gives the Handgun back from that stale state
+      auto d = decide();
+      expect_eq(KbR::NOT_UPDATED, d.refusal);
+      expect(d.plan.empty());
+      expect_eq(aside, d.path);
+      expect_eq("Die back-up kon niet worden\nbijgewerkt: niet herstelbaar.", inventory_restore_refusal_text(d.refusal));
+      // and it is not an end state for the login check either
+      expect(!inventory_backup_interim_is_end(*d.backup, kb_next_boot));
+
+      // The same in a directory where a rename fails too (read-only): logged as an error, the backup keeps its name,
+      // and the first write that works again puts the true state on disk
+      if (geteuid() != 0) {
+        kb_join(w, live);
+        std::string second_dir = std::filesystem::path(live.path).parent_path().string();
+        std::filesystem::permissions(second_dir, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+        inventory_backup_note_removed(live.p.c, ItemData(KB_MONOMATE_3, 0));
+        live.ch->inventory = kb_inv({KB_SABER, KB_FRAME}, 2);
+        inventory_backup_after_command(live.p.c);
+        auto& state = live.p.c->inventory_backup_interim;
+        expect(state.failed && state.removal_unwritten && state.set_aside_failed);
+        expect_eq(live.path, live.p.c->inventory_backup_current);
+        std::filesystem::permissions(second_dir, std::filesystem::perms::owner_all);
+        inventory_backup_flush_interim(live.p.c);
+        expect(!state.failed && !state.removal_unwritten && !state.set_aside_failed);
+        auto after = kb_load(live.path);
+        expect_eq(2u, after.interim_inventory.num_items + 0u);
+        expect(inventory_backup_interim_is_end(after, kb_next_boot));
+      }
+    });
+
     expect_eq(0u, k3_failed);
   }
 

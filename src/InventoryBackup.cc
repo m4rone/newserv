@@ -191,6 +191,23 @@ std::vector<std::string> inventory_backup_list(const std::string& dir) {
   return ret;
 }
 
+InventoryBackupSetAside inventory_backup_set_aside_kind(const std::string& name) {
+  if (name.ends_with(INVENTORY_BACKUP_LOST_SUFFIX)) {
+    return InventoryBackupSetAside::LOST;
+  }
+  return InventoryBackupSetAside::NONE;
+}
+
+std::string inventory_backup_set_aside_as(const std::string& path, const char* suffix) {
+  if (!path.ends_with(".json") || (inventory_backup_set_aside_kind(path) != InventoryBackupSetAside::NONE)) {
+    return "";
+  }
+  std::string aside = path.substr(0, path.size() - 5) + suffix;
+  std::error_code ec;
+  std::filesystem::rename(path, aside, ec);
+  return ec ? "" : aside;
+}
+
 bool inventory_backup_pinned(const InventoryBackupPickFlags& f) {
   return (f.imported || f.loss) && !f.restored;
 }
@@ -602,6 +619,9 @@ InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game,
   if (!backup) {
     return R::NO_BACKUP;
   }
+  if (backup->set_aside == InventoryBackupSetAside::LOST) {
+    return R::NOT_UPDATED; // before anything its content says: the content is what could not be written
+  }
   if ((backup->serial_number != serial_number) || (backup->character_id != character_id)) {
     return R::OTHER_CHARACTER;
   }
@@ -629,8 +649,8 @@ bool same_content(const PlayerInventory& a, uint32_t a_meseta, const PlayerInven
 } // namespace
 
 bool inventory_backup_played_on(const InventoryBackup* b) {
-  if (!b) {
-    return true;
+  if (!b || (b->set_aside == InventoryBackupSetAside::LOST)) {
+    return true; // unreadable, or what is on disk is not what happened: nobody knows what he did in that game
   }
   if (b->spire) {
     return false;
@@ -652,10 +672,17 @@ InventoryBackupListing inventory_backup_read_all(const std::string& dir, const s
   ret.names = inventory_backup_list(dir);
   for (const auto& name : ret.names) {
     std::unique_ptr<InventoryBackup> b;
+    auto set_aside = inventory_backup_set_aside_kind(name);
     try {
       b = std::make_unique<InventoryBackup>(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(dir + "/" + name))));
     } catch (const std::exception& e) {
       ret.unreadable.emplace_back(name + ": " + e.what());
+      if (set_aside != InventoryBackupSetAside::NONE) {
+        b = std::make_unique<InventoryBackup>(); // its name says enough: it is that game, and it is refused
+      }
+    }
+    if (b) {
+      b->set_aside = set_aside;
     }
     ret.flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());
     ret.backups.emplace_back(std::move(b));
@@ -743,6 +770,8 @@ const char* inventory_restore_refusal_text(InventoryRestoreRefusal r) {
       return "Onbekend hoe je vorige game eindigde:\nniet herstelbaar.";
     case InventoryRestoreRefusal::SUPERSEDED:
       return "Na dat verlies speelde je verder:\nniet meer herstelbaar.";
+    case InventoryRestoreRefusal::NOT_UPDATED:
+      return "Die back-up kon niet worden\nbijgewerkt: niet herstelbaar.";
   }
   return "";
 }
@@ -777,7 +806,8 @@ uint64_t inventory_backup_boot_id() {
 bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id) {
   // An interim state that does not say what of it is proven the player's own (written before provenance existed) is
   // never an end state: it would give back what another player's card still holds (critic B1)
-  return b.has_interim && b.interim_own.present && !b.has_exit && !b.left_normally && (b.interim_boot != boot_id);
+  return b.has_interim && b.interim_own.present && !b.has_exit && !b.left_normally && (b.interim_boot != boot_id) &&
+      (b.set_aside == InventoryBackupSetAside::NONE);
 }
 
 InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id) {
@@ -885,6 +915,8 @@ const char* inventory_restore_refusal_name(InventoryRestoreRefusal r) {
       return "end of previous game unknown";
     case InventoryRestoreRefusal::SUPERSEDED:
       return "played on after the hard end";
+    case InventoryRestoreRefusal::NOT_UPDATED:
+      return "backup set aside: a removal could not be written";
   }
   return "?";
 }
@@ -1038,6 +1070,8 @@ void inventory_backup_flush_interim(std::shared_ptr<Client> c) {
     }
     uint64_t usecs = phosg::now() - start;
     state.failed = false;
+    state.removal_unwritten = false;
+    state.set_aside_failed = false;
     c->log.info_f("Inventory backup: interim state {} written ({} items, {} Meseta{}, {} us)", state.count,
         p->inventory.num_items, p->disp.stats.meseta.load(), state.guard_covered ? ", Spire run" : "", usecs);
     if (usecs > 50000) {
@@ -1049,13 +1083,31 @@ void inventory_backup_flush_interim(std::shared_ptr<Client> c) {
           c->inventory_backup_current, e.what(), INVENTORY_BACKUP_INTERIM_USECS / 1000000);
     }
     state.failed = true;
+    // Critic B3: after a removal the state on disk still holds what left. Never restore from it
+    if (c->inventory_backup_interim_urgent || state.removal_unwritten) {
+      state.removal_unwritten = true;
+      std::string path = c->inventory_backup_current;
+      std::string aside = inventory_backup_set_aside_as(path, INVENTORY_BACKUP_LOST_SUFFIX);
+      if (!aside.empty()) {
+        c->log.error_f("Inventory backup: a removal could not be written into {}; set aside as {}, $restore will refuse it and this game has no backup any more",
+            path, aside);
+        open_backups.erase(path);
+        c->inventory_backup_current.clear();
+        c->inventory_backup_interim = InventoryInterimState();
+      } else if (!state.set_aside_failed) {
+        state.set_aside_failed = true;
+        c->log.error_f("Inventory backup: a removal could not be written into {} and the backup could not be set aside either: after a hard stop now $restore would give back what left the inventory",
+            path);
+      }
+    }
   }
 }
 
 void inventory_backup_after_command(std::shared_ptr<Client> c) {
   if (c->inventory_backup_interim_urgent) {
-    c->inventory_backup_interim_urgent = false;
+    // the mark stays up during the write: a write that fails now fails after a removal (critic B3)
     inventory_backup_flush_interim(c);
+    c->inventory_backup_interim_urgent = false;
   }
 }
 
