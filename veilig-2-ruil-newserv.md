@@ -1,6 +1,6 @@
 # Veilig-2 (newserv): ruil via het ruilvenster en verkoop, daarna valt een Wii weg zonder 98
 
-Tak spike/veilig-ruil, start 37bd1f8. Fix-commit 5df8eb7 (gelezen met git rev-parse).
+Tak spike/veilig-ruil, start 37bd1f8. Eerste fix 5df8eb7 was te breed (zie Correctie); de correctie volgt op dfc7961.
 
 ## Nameting op 37bd1f8
 - Ruil op V3 (CommandFormats.hh:2479-2490, de volgorde zoals newserv hem beschrijft; niet op de Wii gemeten):
@@ -17,68 +17,73 @@ Tak spike/veilig-ruil, start 37bd1f8. Fix-commit 5df8eb7 (gelezen met git rev-pa
 - Verkoop op V3: alleen een 6x29; de Meseta die de winkel betaalt ziet de server niet.
 - Vóór de fix raakte geen van die berichten de momentopname (K7 volgde alleen 6x2A/6x5D/6x59/6x5A).
 
-## Fix
-- Elke 6x29 die de server afhandelt bij een speler wiens momentopname volgt (zelfde voorwaarde als K7) haalt het
-  gewiste item of de Meseta uit die momentopname (`spire_guard_note_delete`, SpireFlagBridge.cc:5637; aanroep
-  ReceiveSubcommands.cc:4633), behalve de 6x29 direct na zijn eigen 6x5D (die nam K7 al; aanroep 2134).
-- Hoort de 6x29 bij een item uit zijn openstaande ruillijst, dan is wat eruit ging het tegoed van die regel
-  (`spire_guard_delete_apply`, 5537).
-- Bij de uitvoering (ReceiveCommands.cc:5371, `spire_guard_note_trade_executed`, SpireFlagBridge.cc:5675): eerst
-  alles afnemen, dan geven. Een regel zonder 6x29 vooraf wordt dan afgenomen; B's momentopname krijgt elke regel van
-  A met hoogstens zijn tegoed (`spire_guard_trade_give`, 5582). Annuleren (D4, 5391/5404): niets terug.
+## Correctie (orchestrator, na 5df8eb7)
+5df8eb7 liet elke 6x29 de momentopname verkleinen. Op V3 stuurt de client 6x29 ook bij een verkoop, een bankstorting,
+het voeren van de mag en mogelijk de tekker (CommandFormats.hh:4052): daar is geen tweede speler en dus geen dubbelrisico,
+maar het item ging na wegvallen zonder 98 verloren, en een geannuleerde ruil kostte het item ook. Dat is nieuw verlies
+op een echt karakter. Nieuwe regel: de momentopname volgt alleen wat tussen spelers verhuist. K7 (val en opraap) is niet
+aangeraakt; de 6x5D-markering uit 5df8eb7 is weer weg, zodat 6x2A/6x5D/6x59/6x5A gelijk zijn aan 37bd1f8.
+
+## Fix (na de correctie)
+- Een 6x29 verandert de momentopname nooit (`spire_guard_delete_apply` geeft 0; aanroep ReceiveSubcommands.cc:4633
+  via `spire_guard_note_delete`): verkoop, bank, mag, tekker en de eigen 6x29 van een ruil vóór de uitvoering.
+- Alleen bij de uitvoering (beide D2's, D3 verstuurd; ReceiveCommands.cc:5371, `spire_guard_note_trade_executed`):
+  elke kant verliest precies de items en Meseta van zijn D0-lijst (voor zover zijn momentopname ze heeft: het tegoed),
+  en de andere kant krijgt elke regel met hoogstens dat tegoed. Eerst alles afnemen, dan geven.
+- Annuleren (D4): verandert niets. De D4-aanroepen uit 5df8eb7 zijn weg.
 
 ## Keuzes (met reden)
-1. Elke gevolgde 6x29 is verlies, niet alleen een ruil: een verkoop is een 6x29 alleen, en een gevoerde mag kost het
-   item echt. Strenger: afnemen kan nooit iets dubbel maken.
-2. De 6x29 na een 6x5D wordt overgeslagen, maar alleen de eerstvolgende en alleen bij dezelfde soort en hoeveelheid.
-   Reden: K7 nam hem al bij de 6x5D; een blijvende markering zou later een verkoop kunnen inslikken.
-3. B krijgt pas iets bij de uitvoering (beide D2's), niet bij zijn eigen 6x5E/6x2B: dat is het enige moment waarop de
-   server zag dat het van A's ruil kwam. Hoogstens wat A's momentopname verloor.
-4. Een regel zonder 6x29 vóór de uitvoering (Meseta zonder eigen 6x29, of een latere 6x29) wordt bij de uitvoering
-   afgenomen; een late 6x29 daarvan wordt één keer overgeslagen, zodat er geen tweede gelijk item uit gaat.
-5. Geannuleerde ruil na A's 6x29: wat A's momentopname verloor blijft weg, B krijgt niets (strenger).
-6. Item dat niet in A's momentopname zit (in de basis gekocht): geen tegoed, B krijgt niets.
-7. Meseta: het minimum (A verliest hoogstens wat zijn momentopname had, B krijgt hoogstens dat). Meseta uit een
-   verkoop telt nooit mee.
-8. Valt B weg vóór de uitvoering, of volgt B's momentopname niet: B krijgt niets; A verloor het wel.
-9. Waar het geldt: dezelfde voorwaarde als K7 (Normal of Solo, alleen AwaitingSave), dus ook buiten de basisgame.
+1. 6x29 alleen telt niet: geen tweede speler, dus geen dubbel; het item komt terug zoals vóór de fix, net als de kaart
+   die ook niet geschreven werd. Meseta uit een verkoop telt niet mee.
+2. Koppeling: de D0-lijst die de server bij de uitvoering zelf in de D3 naar de ander stuurt. Daar is de koppeling altijd
+   te zien; de 6x29 en de 6x5E/6x2B van de clients worden niet gebruikt.
+3. Volgt B's momentopname niet (andere game-modus, geen bestand, ander karakter): B krijgt niets en A verliest het wel.
+   Dit is de enige plek waar het strenger mag.
+4. Item dat niet in A's momentopname zit (in de basis gekocht): tegoed 0, B krijgt niets; A's momentopname verandert niet.
+5. Meseta: het minimum (A verliest hoogstens wat zijn momentopname had, B krijgt hoogstens dat, nooit boven 999999).
+6. Een niet-stapelbaar item: eerst exact (zoals K7), anders het eerste van dezelfde soort.
+7. Waar het geldt: dezelfde voorwaarde als K7 (Normal of Solo, alleen AwaitingSave).
+8. `spire_guard_delete_apply` en de 6x29-aanroep blijven bestaan, ook al doen ze nu niets. Reden: de regel voor de
+   6x29 staat op één plek die de server ook echt doorloopt, en de tests roepen dezelfde functie aan als 5df8eb7 (dus
+   echt rood daar). Kosten: één JSON-lees per 6x29, alleen in een gevolgde game.
 
-## Rood zonder de fix, groen erna
-Rood: tijdelijk `return 0;` in `spire_guard_delete_apply` en `spire_guard_trade_take_rest`, en
-`side.items.clear(); return 0;` in `spire_guard_trade_give` (= 37bd1f8: niets gevolgd), plus een niet-afbrekende
-expect in het nieuwe blok (op de plek van drie commentaarregels, dus dezelfde regelnummers). Letterlijk uit de rode run:
-- (a) `RED src/StaticTests.cc:2463 0u != count(a_after, sword)` (3x, alle drie A-kaarten),
-  `2464 1u != count(a_after, sword) + count(b_after_trade, sword)` (3x: het zwaard bestond twee keer),
-  `2465 1u != count(a_after, shield) + ...` (3x, de andere richting).
-- (b) `RED src/StaticTests.cc:2470 1u != count(b_after, sword)` (4x, alle B-kaarten). De regel "niet dubbel met A's
-  herstel ook" (2472) was ook zonder fix 1 (B verloor het dan) en blijft 1.
-- (c) `RED src/StaticTests.cc:2480 1u != spire_guard_delete_apply(&snap, nullptr, ...)` en
-  `2484 0u != count(a_after, sword)` (3x): het verkochte zwaard kwam terug.
-- Meseta en de rest: 2498, 2501-2503 (Meseta-minimum), 2517-2523 (afname bij uitvoering), 2545-2550 (stapel, tegoed),
-  2579 (een andere 6x29 na een 6x5D wordt wel gevolgd).
-Groen: `build/newserv run-static-tests` exit 0, laatste regel `-- All static tests passed`, 0 keer `RED`.
-(d) De secties 8-B2, 8-B1, K7 en Veilig-2 lopen mee (log-regels 104-107); 16 keer `GUARD E2E`, 0 keer `FAILED`.
+## Rood op 5df8eb7, groen erna
+Rood: de bronnen van 5df8eb7 (SpireFlagBridge.cc/.hh, ReceiveSubcommands.cc, ReceiveCommands.cc) met het nieuwe
+testblok, waarvan de expects tijdelijk niet afbreken (op de plek van drie commentaarregels, dus dezelfde regelnummers).
+Letterlijk uit de rode run (`RED src/StaticTests.cc:<regel> <expect>`):
+- (c) verkoop: `2481 0u != spire_guard_delete_apply(&snap, nullptr, ...)` en `2486 1u != count(a_after, sword)` (3x,
+  alle drie kaarten): op 5df8eb7 was het verkochte zwaard weg. De Meseta-regel 2487 (1000, verkoopprijs telt niet) was
+  ook op 5df8eb7 groen.
+- (e) bankstorting: `2496`, `2497` (item en 300 Meseta afgenomen), `2501 1u != count(a_after, sword)` (3x),
+  `2502 1000u != a_after.second.stats.meseta.load()` (3x).
+- (f) geannuleerde ruil: `2510 0u != spire_guard_delete_apply(&snap, &a_side, ...)` en
+  `2512 1u != count(after_login(snap, card), sword)` (3x).
+- (g) mag voeren: `2526`, `2527 !(spire_guard_same_state(...))`, `2528 4u != ...data1[5]`.
+- (a) en (b) zijn op 5df8eb7 en erna groen (2463-2472: het zwaard en het schild bestaan elk één keer).
+De rode run van de eerste fix (tegen 37bd1f8, met stubs) staat in de geschiedenis van dit bestand (dfc7961);
+(a) en (b) waren toen rood op 2463-2465 en 2470.
+Groen (6ac4c46): `build/newserv run-static-tests` exit 0, `-- All static tests passed`, 0 keer `RED`.
+(d) 8-B2, 8-B1, K7 en Veilig-2 lopen mee; 16 keer `GUARD E2E`, 0 keer `FAILED`.
 
 ## Wat de speler merkt
-Ruilt hij in de basis een item of Meseta met zijn partner via het ruilvenster en valt een van beiden weg zonder het
-spel te verlaten, dan staat het na de volgende login bij precies één van hen. Verkoopt hij iets en valt hij weg, dan
-krijgt hij het item niet terug (en de verkoopprijs ook niet). Wordt een ruil afgebroken nadat zijn Wii het item al wiste
-en valt hij dan weg, dan is het weg. Netjes verlaten (98) houdt alles zoals het spel het opsloeg.
+Ruilt hij in de basis items of Meseta met zijn partner via het ruilvenster en valt een van beiden weg zonder het spel te
+verlaten, dan staat het na de volgende login bij precies één van hen. Valt hij weg na een verkoop, een bankstorting of
+het voeren van de mag, dan heeft hij na de login het item terug zoals vóór deze levering (de verkoopprijs niet). Wordt
+een ruil afgebroken, dan houdt hij zijn items. Netjes verlaten (98) houdt alles zoals het spel het opsloeg.
 
 ## Build en checks
-- `build/newserv help | head -1`: `newserv-5df8eb7 built 2026-11-11 21:42:39.000000 UTC`
+- `build/newserv help | head -1` (na de rapport-commit opnieuw gebouwd): zie de regel hieronder
 - `build/newserv run-static-tests`: exit 0; GUARD E2E 16, FAILED 0
 - `git diff --quiet ee0fa66 HEAD -- src/SpireDrops.cc src/SpireDrops.hh`: exit 0 (gelijk)
+- K7-valafhandeling: `git diff 37bd1f8 HEAD -- src/SpireFlagBridge.cc` heeft 0 verwijderde regels; ReceiveSubcommands.cc verschilt van 37bd1f8 alleen in de 6x29-aanroep
 
 ## Dekking
 Deze opdracht dekt: items en Meseta die via het ruilvenster tussen partners wisselen of verkocht worden, gevolgd door
 wegvallen zonder 98. Niet gedekt: de bank (B-REGIE-20-13) en wat de Wii werkelijk opslaat (alleen de Wii).
 
 ## Onzekerheid en gezien, niet gebouwd
-- De volgorde (6x29 vóór D2) komt uit newserv's eigen beschrijving, niet uit een Wii-meting. De fix is in beide
-  volgordes nooit dubbel (keuze 4), alleen strenger.
-- Gooit `remove_item` in 6x29 (server-inventaris loopt uit de pas met de client), dan komt de handler niet bij de
-  bewaker en neemt hij niets af (bestaand gedrag, ReceiveSubcommands.cc:4630).
+- De volgorde (6x29 vóór D2) komt uit newserv's eigen beschrijving, niet uit een Wii-meting. De fix gebruikt de 6x29
+  niet meer, dus de volgorde doet er niet toe.
 - Een gebruikt verbruiksitem (6x27) volgt de momentopname nog niet: na wegvallen zonder 98 komt een Monomate terug.
-  Nooit dubbel met een ander, dus niet gebouwd. Hoe V3 de tekker afhandelt (6xB8 alleen BB hier) is niet nagemeten:
-  wist de client daar met een 6x29, dan verliest de momentopname het wapen (strenger, nooit dubbel).
+  Nooit dubbel met een ander, dus niet gebouwd.
+- K7 laat de momentopname nog bij de val verliezen (6x2A/6x5D); die correctie bouwt een andere bouwer in veilig-1.
