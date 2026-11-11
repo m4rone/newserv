@@ -16,6 +16,7 @@
 #include "PSOEncryption.hh"
 #include "Text.hh"
 #include "QuestScript.hh"
+#include "ReceiveCommands.hh"
 #include "ReceiveSubcommands.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -7804,6 +7805,14 @@ void run_static_tests() {
         }
         return ret;
       }
+      // how many sent commands hold this text
+      size_t count_containing(const std::string& part) const {
+        size_t ret = 0;
+        for (const auto& data : this->sent) {
+          ret += (data.find(part) != std::string::npos) ? 1 : 0;
+        }
+        return ret;
+      }
     };
     struct K3TestState : ServerState {
       K3TestState() = default;
@@ -7854,11 +7863,11 @@ void run_static_tests() {
         p.c->character_file(true, false); // a GC client's character data: an empty file, nothing is read
         return p;
       }
-      void join(K3Player& p, std::shared_ptr<Lobby> l, const PlayerInventory& run_copy) {
+      void join(K3Player& p, std::shared_ptr<Lobby> l, const PlayerInventory& run_copy, uint8_t slot = 0) {
         p.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
         p.c->character_file(false, true)->inventory = run_copy;
-        p.c->lobby_client_id = 0;
-        l->clients[0] = p.c;
+        p.c->lobby_client_id = slot;
+        l->clients[slot] = p.c;
         p.c->lobby = l;
       }
       void leave(K3Player& p, std::shared_ptr<Lobby> l) {
@@ -8071,6 +8080,250 @@ void run_static_tests() {
       expect_eq(1000u + 3 * 500 + 2000, rec.best_score);
       expect_eq(1u, rec.runs); // the resume is no new run
       w.leave(p, l2);
+    });
+
+    k3_case("plek 2: a client alone off the leader's slot gets no half resume, reads what to do and keeps its savestate", [&]() {
+      // the rule: the only client in the game, and not on the leader's slot
+      expect(spire_alone_off_leader_slot(0, 1u << 1, 1));
+      expect(spire_alone_off_leader_slot(0, 1u << 3, 3));
+      expect(spire_alone_off_leader_slot(1, 1u << 0, 0)); // LeaderClient 1
+      expect(!spire_alone_off_leader_slot(0, 1u << 0, 0)); // alone on the leader's slot
+      expect(!spire_alone_off_leader_slot(0, (1u << 0) | (1u << 1), 1)); // the leader is there
+      expect(!spire_alone_off_leader_slot(0, (1u << 1) | (1u << 2), 1)); // two clients and no leader
+      expect(!spire_alone_off_leader_slot(0, 0, 1));
+      expect(!spire_alone_off_leader_slot(0, 1u << 2, 1)); // another client's slot
+      const std::string text = SPIRE_SAVESTATE_ALONE_TEXT;
+      expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+
+      K3TempCwd temp_cwd("slot2");
+      K3World w;
+      const uint32_t REQ = SPIRE_BRIDGE_REQUEST_REGISTER;
+      const uint32_t BEGIN = static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24;
+      const uint32_t J_K20_REST = (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (2 << 8) | 20;
+      auto file_of = [](const K3Player& p) {
+        return p.stem() + ".savestate.normal.json";
+      };
+      auto answer_of = [](const K3Player& p) {
+        return p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER).back();
+      };
+      // Spire Run II (K0 16) played by these clients together up to the start of k20 (rest), then all gone without a
+      // run end: each has a savestate of that run there
+      auto play_to_k20 = [&](std::vector<K3Player*> players) {
+        auto l = w.game(922, Episode::EP2);
+        for (size_t z = 0; z < players.size(); z++) {
+          w.join(*players[z], l, k3_inventory({0x00, 0x02}), z);
+        }
+        for (auto* p : players) {
+          k3_reg(*p, l, REQ, BEGIN | (16 << 8) | 16);
+          k3_v_write(*p, l, 17, 0);
+          k3_v_write(*p, l, 20, 2);
+        }
+        for (auto* p : players) {
+          w.leave(*p, l);
+        }
+      };
+      // a fresh run in the room quest of k20: its 'B', the 'V' of k20 and of k21
+      auto fresh_run = [&](K3Player& p, std::shared_ptr<const Lobby> l) {
+        k3_reg(p, l, REQ, BEGIN | (16 << 8) | 20);
+        k3_v_write(p, l, 20, 2);
+        k3_v_write(p, l, 21, 0);
+      };
+
+      // alone in the room quest's game on the second slot (lobby client id 1), the leader's slot 0 empty
+      {
+        auto p = w.player();
+        play_to_k20({&p});
+        std::string saved = phosg::load_file(file_of(p));
+        expect(spire_savestate_matches(spire_savestate_from_json(saved), 2, 20, 2, 0));
+        auto l = w.game(960, Episode::EP2);
+        w.join(p, l, k3_inventory({0x00}), 1);
+        k3_reg(p, l, REQ, J_K20_REST);
+        uint32_t answer = answer_of(p);
+        k3_reg(p, l, REQ, J_K20_REST); // asked again (make_spire.py rs_begin: a second caller while the first waits)
+        size_t told = p.ch->count_containing(text);
+        bool same_after_j = phosg::load_file(file_of(p)) == saved;
+        fresh_run(p, l);
+        bool same_after_v = std::filesystem::is_regular_file(file_of(p)) && (phosg::load_file(file_of(p)) == saved);
+        auto end = k3_quest_end(21, false, false, 0, 10); // the run dies in k21: a true end deletes its run's savestates
+        k3_reg(p, l, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_SCORE) << 24) | end.score);
+        k3_reg(p, l, REQ, end.finish);
+        bool same_after_f = std::filesystem::is_regular_file(file_of(p)) && (phosg::load_file(file_of(p)) == saved);
+        phosg::log_info_f("   K3 measure: alone on slot 1 with a savestate of k20 rest: 'J' answer {:08X} ({}), told \"{}\" "
+            "{} time(s); savestate file as it was after the 'J': {}, after a fresh 'B' and two 'V': {}, after the run end: {}",
+            answer, (answer & SPIRE_RESUME_ANSWER_RESUME) ? "resume" : "fresh", text, told, same_after_j ? "yes" : "NO",
+            same_after_v ? "yes" : "NO", same_after_f ? "yes" : "NO");
+        expect_eq(SPIRE_RESUME_ANSWER_TAG, answer); // fresh: no saved item goes out for a run that cannot begin
+        expect_eq(1u, told);
+        expect(same_after_j);
+        expect(same_after_v);
+        expect(same_after_f);
+        w.leave(p, l);
+      }
+
+      // two clients, the leader on slot 0: both resume as before, and nobody is told anything
+      {
+        auto p1 = w.player();
+        auto p2 = w.player();
+        play_to_k20({&p1, &p2});
+        auto l = w.game(960, Episode::EP2);
+        w.join(p1, l, k3_inventory({0x00}), 0);
+        w.join(p2, l, k3_inventory({0x00}), 1);
+        k3_reg(p1, l, REQ, J_K20_REST);
+        k3_reg(p2, l, REQ, J_K20_REST);
+        phosg::log_info_f("   K3 measure: two clients, the leader on slot 0: 'J' answers {:08X} and {:08X}, told {} and {} time(s)",
+            answer_of(p1), answer_of(p2), p1.ch->count_containing(text), p2.ch->count_containing(text));
+        expect_eq(SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | 1, answer_of(p1) & 0xFF000FFF);
+        expect_eq(SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | 1, answer_of(p2) & 0xFF000FFF);
+        expect_eq(0u, p1.ch->count_containing(text) + p2.ch->count_containing(text));
+        w.leave(p1, l);
+        w.leave(p2, l);
+      }
+
+      // two clients and no leader (slots 1 and 2): as before, a fresh run that is told nothing and stores its 'V'
+      {
+        auto p1 = w.player();
+        auto p2 = w.player();
+        play_to_k20({&p1, &p2});
+        std::string saved = phosg::load_file(file_of(p1));
+        auto l = w.game(960, Episode::EP2);
+        w.join(p1, l, k3_inventory({0x00}), 1);
+        w.join(p2, l, k3_inventory({0x00}), 2);
+        k3_reg(p1, l, REQ, J_K20_REST);
+        fresh_run(p1, l);
+        bool replaced = phosg::load_file(file_of(p1)) != saved;
+        phosg::log_info_f("   K3 measure: two clients on slots 1 and 2: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}",
+            answer_of(p1), p1.ch->count_containing(text), replaced ? "yes" : "no");
+        expect_eq(SPIRE_RESUME_ANSWER_TAG, answer_of(p1));
+        expect_eq(0u, p1.ch->count_containing(text));
+        expect(replaced);
+        w.leave(p1, l);
+        w.leave(p2, l);
+      }
+
+      // alone on slot 1 in a room quest its savestate does not fit (k19): as before
+      {
+        auto p = w.player();
+        play_to_k20({&p});
+        std::string saved = phosg::load_file(file_of(p));
+        auto l = w.game(959, Episode::EP2);
+        w.join(p, l, k3_inventory({0x00}), 1);
+        k3_reg(p, l, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (0 << 8) | 19);
+        k3_reg(p, l, REQ, BEGIN | (16 << 8) | 19);
+        k3_v_write(p, l, 19, 0);
+        bool replaced = phosg::load_file(file_of(p)) != saved;
+        phosg::log_info_f("   K3 measure: alone on slot 1 in the room quest of k19: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}",
+            answer_of(p), p.ch->count_containing(text), replaced ? "yes" : "no");
+        expect_eq(SPIRE_RESUME_ANSWER_TAG, answer_of(p));
+        expect_eq(0u, p.ch->count_containing(text));
+        expect(replaced);
+        w.leave(p, l);
+      }
+    });
+
+    k3_case("new run: \"Start a new run\" asks what the quest board asks and tells the leader the board's line", [&]() {
+      K3TempCwd temp_cwd("newrun");
+      K3World w;
+      // the board's line as one ticker line
+      const std::string text = spire_ticker_line(QUEST_NOT_UNLOCKED_TEXT);
+      expect_eq(std::string("This quest has not been unlocked for all players in this game."), text);
+      expect(text.size() <= SPIRE_BRIDGE_TEXT_MAX);
+      // the quest index: Spire Run I Hard with the AvailableIf the quest's build.sh --ladder writes for q981
+      auto quest = [](uint32_t quest_number, const char* available_if) {
+        auto vq = std::make_shared<VersionedQuest>();
+        vq->meta.quest_number = quest_number;
+        vq->meta.version = Version::GC_V3;
+        vq->meta.language = Language::ENGLISH;
+        vq->meta.episode = Episode::EP1;
+        if (available_if) {
+          vq->meta.available_expression = ResourceDASM::Expression::Node::parse(available_if);
+        }
+        return std::make_shared<Quest>(vq);
+      };
+      auto index = std::make_shared<QuestIndex>(
+          nullptr, temp_cwd.dir.string(), std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), true);
+      index->quests_by_number.emplace(981, quest(981, "V_Difficulty == 1 && SPIRE_RUN1 >= 1"));
+      w.s->data->quest_index = index;
+      w.s->data->spire_base_quest_number = 925;
+      // a base game on Hard that came from a run of q981, running the base quest
+      auto base_game = [&]() {
+        auto l = std::make_shared<Lobby>(w.s, w.next_lobby_id++, true);
+        l->episode = Episode::EP1;
+        l->mode = GameMode::NORMAL;
+        l->difficulty = Difficulty::HARD;
+        l->quest = quest(925, nullptr);
+        l->quest_flag_values = std::make_unique<QuestFlags>();
+        spire_static_test_base_run_quest(l, 981);
+        return l;
+      };
+      // Run I open on Hard for this character (meta.json BaseRung, as the rung test above)
+      auto open_hard = [](const K3Player& p) {
+        phosg::save_file(spire_meta_filename_for(p.serial_number, &p.c->character_file(false, false)->disp),
+            std::format("{{\"SerialNumber\":{},\"Flags\":[],\"BaseRung\":{{\"1\":1}}}}", p.serial_number));
+      };
+      // the 6x73 that sends a client out of the game (as $exit in a quest)
+      auto sent_out = [](const K3Player& p) {
+        size_t ret = 0;
+        for (const auto& data : p.ch->sent) {
+          ret += ((data.size() == 8) && (data[0] == 0x60) && (data[4] == 0x73)) ? 1 : 0;
+        }
+        return ret;
+      };
+      auto new_run = [&](K3Player& p, std::shared_ptr<const Lobby> l) {
+        // the base quest's 6x77 through the bridge's entry, which takes this one code from a quest it does not bridge
+        expect(spire_bridge_handle_register(p.c, l, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BASE_NEW_RUN_VALUE));
+      };
+      // in the base game a client holds its real character: no run copy
+      auto seat = [](K3Player& p, std::shared_ptr<Lobby> l, uint8_t slot) {
+        p.c->lobby_client_id = slot;
+        l->clients[slot] = p.c;
+        p.c->lobby = l;
+      };
+
+      // the leader has Hard open, the partner (who came into the base game before its quest started) has not
+      {
+        auto leader = w.player();
+        auto partner = w.player();
+        open_hard(leader);
+        auto l = base_game();
+        seat(leader, l, 0);
+        seat(partner, l, 1);
+        expect_eq(1, spire_meta_ladder_rung_for_client(leader.c, 1));
+        expect_eq(0, spire_meta_ladder_rung_for_client(partner.c, 1));
+        bool unlocked = quest_unlocked_for_all_players(l, index->get(981));
+        new_run(leader, l);
+        phosg::log_info_f("   K3 measure: base game on Hard from q981, leader with Hard open, partner without: the board's test "
+            "says {}; after \"Start a new run\" sent out of the game: leader {}, partner {}; \"{}\" to the leader {} time(s), "
+            "to the partner {} time(s)", unlocked ? "unlocked for all" : "NOT unlocked for all", sent_out(leader),
+            sent_out(partner), text, leader.ch->count_containing(text), partner.ch->count_containing(text));
+        expect(!unlocked);
+        expect_eq(0u, sent_out(leader) + sent_out(partner)); // nobody leaves the base game
+        expect_eq(1u, leader.ch->count_containing(text));
+        expect_eq(0u, partner.ch->count_containing(text));
+        w.leave(leader, l);
+        w.leave(partner, l);
+      }
+
+      // both have Hard open: the new run starts as before (both are sent out once, nobody reads the line)
+      {
+        auto leader = w.player();
+        auto partner = w.player();
+        open_hard(leader);
+        open_hard(partner);
+        auto l = base_game();
+        seat(leader, l, 0);
+        seat(partner, l, 1);
+        bool unlocked = quest_unlocked_for_all_players(l, index->get(981));
+        new_run(leader, l);
+        phosg::log_info_f("   K3 measure: the same with Hard open for both: the board's test says {}; sent out of the game: "
+            "leader {}, partner {}; the line {} time(s)", unlocked ? "unlocked for all" : "NOT unlocked for all",
+            sent_out(leader), sent_out(partner), leader.ch->count_containing(text) + partner.ch->count_containing(text));
+        expect(unlocked);
+        expect_eq(1u, sent_out(leader));
+        expect_eq(1u, sent_out(partner));
+        expect_eq(0u, leader.ch->count_containing(text) + partner.ch->count_containing(text));
+        w.leave(leader, l);
+        w.leave(partner, l);
+      }
     });
 
     k3_case("4: 'C' 6 with the teleporter bit names Sega's teleporter; without it every line is the one of before", [&]() {

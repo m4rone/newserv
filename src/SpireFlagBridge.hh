@@ -499,6 +499,16 @@ std::string spire_savestate_store_rung(
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
+// kwaliteit-3 plek 2: whether a client is the only one in its game and does not stand on the leader's slot
+// (SpireFollowLeader's LeaderClient, else 0; occupied_slots: bit z = lobby client slot z is taken). The quest gives such
+// a client the follower's part, which starts no run (make_spire.py 83d3f9c: ui_ready sends Ready and waits for the
+// leader's clock, and with run.min_players 2 nobody starts alone), so a resume answer would hand out the saved items
+// for a run that never begins, and a run end after it would delete the savestate. For such a client with a savestate
+// that fits the quest the 'J' start answer stays fresh, as before; new: the player reads once what to do
+// (SPIRE_SAVESTATE_ALONE_TEXT) and no 'V' of that client in that game replaces the savestate. With two clients in the
+// game, or the one client on the leader's slot, nothing changes.
+bool spire_alone_off_leader_slot(uint8_t leader_slot, uint32_t occupied_slots, uint8_t client_slot);
+constexpr const char* SPIRE_SAVESTATE_ALONE_TEXT = "Your saved run stays saved. Leave this game and make a new one to go on.";
 // The ack of an item request: index + 1 (| SPIRE_RESUME_ITEM_GLASS for the Glass item), 0 = no item sent (the run
 // ended, this client was not answered with a resume, or no such item).
 uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index);
@@ -1062,6 +1072,8 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
 void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
+void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
 // (spire_equip_missing_text), in its turn in the client's order; the item is looked at again when the line goes.
 // Called by the equip check (spire_equip_item_send, after the client's answer and SPIRE_EQUIP_CHECK_DELAY) and for the
@@ -1213,6 +1225,10 @@ void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
 // the run quest the base came from (q921 if the base game was made at the counter), where the quest starts as at the
 // counter: the guard takes a fresh snapshot of the real character and the run copy gets its start level (v52).
 // v59: the code is 'O' sub 2 (r248 = 'O' << 24 | 2 << 16; the run end's own 'O' is sub 0), so 'Z' stays free.
+// kwaliteit-3: the run quest must be available to every client, as at the quest board
+// (quest_unlocked_for_all_players, ReceiveCommands.hh): asked in the base game at the 'O' sub 2, where a refusal sends
+// nobody out and the leader reads the board's line (QUEST_NOT_UNLOCKED_TEXT, one ticker line), and once more in the
+// new run's game right before its quest starts (the line to that game's leader, no quest started).
 constexpr uint8_t SPIRE_BASE_NEW_RUN_SUB = 2;
 constexpr uint32_t SPIRE_BASE_NEW_RUN_VALUE = (static_cast<uint32_t>('O') << 24) | (SPIRE_BASE_NEW_RUN_SUB << 16);
 constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;

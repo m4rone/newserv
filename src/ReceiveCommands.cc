@@ -2880,6 +2880,10 @@ static void on_10_quest_categories(std::shared_ptr<Client> c, uint32_t item_id) 
   }
 }
 
+bool quest_unlocked_for_all_players(std::shared_ptr<const Lobby> l, std::shared_ptr<const Quest> q) {
+  return l->quest_include_condition()(q) == QuestIndex::IncludeState::AVAILABLE;
+}
+
 static void on_10_quest_menu(std::shared_ptr<Client> c, uint32_t item_id) {
   if (is_ep3(c->version())) {
     throw std::runtime_error("Episode 1/2/4 quests cannot be downloaded by Ep3 clients");
@@ -2916,8 +2920,8 @@ static void on_10_quest_menu(std::shared_ptr<Client> c, uint32_t item_id) {
       send_lobby_message_box(c, "$C7A quest is already\nin progress.");
       return;
     }
-    if (l->quest_include_condition()(q) != QuestIndex::IncludeState::AVAILABLE) {
-      send_lobby_message_box(c, "$C7This quest has not\nbeen unlocked for\nall players in this\ngame.");
+    if (!quest_unlocked_for_all_players(l, q)) {
+      send_lobby_message_box(c, std::string("$C7") + QUEST_NOT_UNLOCKED_TEXT);
       return;
     }
     set_lobby_quest(l, q);
