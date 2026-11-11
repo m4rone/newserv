@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <format>
+#include <random>
 #include <unistd.h>
 
 #include "Channel.hh"
@@ -4086,6 +4087,118 @@ void run_static_tests() {
     expect(spire_drops_filter_item(cfg, *pmt, it, ramar, false, pity, 5) != nullptr);
     expect((it.data1[1] >= 0x06) && (it.data1[1] <= 0x09));
     phosg::log_info_f("Spire RAmar Lv1 fallback weapon: {:02X}{:02X}", it.data1[1], it.data1[2]);
+  }
+
+  phosg::log_info_f("-- Spire drops BALANS-4 174: the boss weapon beats the equipped weapon for every archetype");
+  {
+    auto pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    JSONLevelTable level_table(phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    // config.example.json's boss grind and Hit: Dragon (k4) +10, De Rol Le (k8) +18
+    auto cfg = SpireDropsConfig::from_json(phosg::JSON::parse(
+        "{\"BossGrindBase\": 2, \"BossGrindPerK\": 2, \"BossHitBase\": 10, \"BossHitPerK\": 4}"));
+    auto weapon = [](uint8_t group, uint8_t index, uint8_t grind) {
+      ItemData ret;
+      ret.data1[0] = 0x00;
+      ret.data1[1] = group;
+      ret.data1[2] = index;
+      ret.data1[3] = grind;
+      return ret;
+    };
+    auto stats = [&](uint8_t cls, uint16_t atp, uint16_t ata, uint16_t mst) {
+      SpireDropPlayer p;
+      p.char_class = cls;
+      p.now = level_table.base_stats_for_class(cls);
+      p.now.atp = atp;
+      p.now.ata = ata;
+      p.now.mst = mst;
+      p.ahead = p.now;
+      return p;
+    };
+    // Strength: ATPMin + ATPMax + 4 x grind. Saber 40-55, +10: 135; Handgun 20-30, +15: 110
+    expect_eq(135u, spire_drops_weapon_strength(*pmt, weapon(0x01, 0x00, 10)));
+    expect_eq(110u, spire_drops_weapon_strength(*pmt, weapon(0x06, 0x00, 15)));
+    expect_eq(0u, spire_drops_weapon_strength(*pmt, ItemData()));
+    // The plan's stats (pso-roguelike sim/plan-spire.json level_x4, Sega's level table plus the run's mag) and weapon
+    // (plan gear) at Dragon (k4, Lv10) and De Rol Le (k8, Lv15), per class
+    struct Case {
+      uint32_t k;
+      uint8_t cls;
+      uint16_t atp, ata, mst;
+    };
+    const Case cases[] = {
+        {4, 0, 94, 93, 70}, {4, 1, 78, 81, 78}, {4, 2, 104, 89, 0}, {4, 9, 89, 104, 0},
+        {4, 3, 54, 120, 50}, {4, 11, 55, 121, 59}, {4, 4, 64, 114, 0}, {4, 5, 59, 117, 0},
+        {4, 10, 44, 63, 93}, {4, 6, 35, 71, 95}, {4, 7, 31, 48, 117}, {4, 8, 28, 47, 112},
+        {8, 0, 162, 128, 86}, {8, 1, 141, 110, 99}, {8, 2, 176, 119, 0}, {8, 9, 156, 142, 0},
+        {8, 3, 107, 162, 66}, {8, 11, 108, 167, 83}, {8, 4, 118, 153, 0}, {8, 5, 112, 157, 0},
+        {8, 10, 61, 86, 151}, {8, 6, 48, 100, 155}, {8, 7, 41, 68, 185}, {8, 8, 36, 67, 177}};
+    auto plan_weapon = [&](uint32_t k, uint8_t cls) {
+      if (char_class_is_hunter(cls)) {
+        return weapon(0x01, 0x00, (k == 4) ? 10 : 25); // Saber
+      } else if (char_class_is_ranger(cls)) {
+        return (k == 4) ? weapon(0x06, 0x00, 15) : weapon(0x06, 0x01, 10); // Handgun, Autogun
+      }
+      return weapon(0x0A, 0x00, 0); // Cane
+    };
+    constexpr uint32_t draws = 2000;
+    for (const auto& c : cases) {
+      SpireDropPlayer p = stats(c.cls, c.atp, c.ata, c.mst);
+      p.carried = spire_drops_weapon_strength(*pmt, plan_weapon(c.k, c.cls));
+      SpireDropPlayer before = p;
+      before.carried = 0; // the old choice: every group
+      std::mt19937 rng(174 + c.k * 16 + c.cls); // fixed seed
+      uint32_t better_now = 0, better_before = 0;
+      for (uint32_t z = 0; z < draws; z++) {
+        uint32_t r = rng();
+        for (bool now : {true, false}) {
+          uint32_t pity = 0;
+          ItemData it;
+          spire_drops_filter_item(cfg, *pmt, it, now ? p : before, true, pity, r, c.k);
+          expect(!it.empty() && !pmt->is_item_rare(it));
+          expect_eq(SpireWeaponFit::NOW, spire_drops_weapon_fit(*pmt, it, p));
+          (now ? better_now : better_before) += (spire_drops_weapon_strength(*pmt, it) > p.carried);
+        }
+      }
+      phosg::log_info_f("Spire 174 k{} {}: boss weapon stronger than the plan weapon {}/{} before, {}/{} now", c.k,
+          name_for_char_class(c.cls), better_before, draws, better_now, draws);
+      if (char_class_is_hunter(c.cls)) {
+        expect(better_now * 10 >= draws * 7); // at least 70%
+      }
+      expect(better_now >= better_before); // no archetype worse than before
+    }
+    // No group beats the equipped weapon (a strong rare one): the old choice, the same weapon for the same random
+    for (const auto& c : cases) {
+      SpireDropPlayer p = stats(c.cls, c.atp, c.ata, c.mst);
+      for (uint32_t r = 0; r < 64; r++) {
+        ItemData a = spire_drops_pick_weapon(*pmt, p, r, 10, 100000), b = spire_drops_pick_weapon(*pmt, p, r);
+        expect((a.data1[1] == b.data1[1]) && (a.data1[2] == b.data1[2]));
+      }
+    }
+    // A class with one group he can equip now (a FOnewearl with MST 50 and no ATP or ATA: only the Cane): the Cane
+    // whether it beats the equipped weapon or not
+    SpireDropPlayer one = stats(8, 0, 0, 50);
+    for (uint32_t r = 0; r < 16; r++) {
+      for (uint32_t carried : {0u, 1u, 100000u}) {
+        ItemData w = spire_drops_pick_weapon(*pmt, one, r, 10, carried);
+        expect((w.data1[1] == 0x0A) && (w.data1[2] == 0x00));
+      }
+    }
+    // Items 25-27 (not a boss) pick as before: the equipped weapon plays no part
+    {
+      SpireDropPlayer p = stats(0, 94, 93, 70);
+      p.carried = spire_drops_weapon_strength(*pmt, plan_weapon(4, 0));
+      SpireDropPlayer before = p;
+      before.carried = 0;
+      for (uint32_t r = 0; r < 64; r++) {
+        uint32_t pity = cfg.pity_drops;
+        ItemData a, b;
+        a.data1[0] = b.data1[0] = 0x03; // a Monomate, after PityDrops drops without a weapon
+        spire_drops_filter_item(cfg, *pmt, a, p, false, pity, r, 4);
+        pity = cfg.pity_drops;
+        spire_drops_filter_item(cfg, *pmt, b, before, false, pity, r, 4);
+        expect((a.data1[0] == 0x00) && (a.data1[1] == b.data1[1]) && (a.data1[2] == b.data1[2]));
+      }
+    }
   }
 
   phosg::log_info_f("-- Spire drops B-BEL-4: a kept weapon with a special comes identified (no Tekker in a run)");
