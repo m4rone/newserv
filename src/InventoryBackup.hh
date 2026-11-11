@@ -50,9 +50,33 @@ class ServerState;
 //   tells the player in the lobby to type $restore in a normal game (inventory_loss_verdict). It never restores itself.
 // - Retention: an unrestored backup with a Loss mark or an import is never rotated out, and $restore picks it before
 //   later join backups, so a burst of joins (a reconnect loop) cannot push the pre-loss state away.
+//
+// Interim state (B-REGIE-20-4, 2026-11-11: a hard server stop in the middle of a game left only the join inventory on
+// disk and $restore refused it):
+// - While the game runs, the backup carries Interim: the server's view of the real character's inventory and meseta at
+//   one moment, with the time and the server process (Boot) that wrote it. It is written at the join, at once whenever
+//   the server sees something leave the inventory (every inventory_backup_note_removed and
+//   inventory_backup_note_meseta_removed: drop, trade, sale, bank, use, mag feed, shop meseta) and when the Spire guard
+//   takes its snapshot (the Spire mark must be on disk before the run copy exists), and every
+//   INVENTORY_BACKUP_INTERIM_USECS for everything else that changed (pick-ups and other gains). Every write is the whole
+//   file: temp file, fsync, rename, fsync of the directory.
+// - An interim state is always a state the inventory really was in. What left the inventory is never in it any more
+//   (so a hard stop cannot give it back); what came in less than one interval before the stop may be missing from it.
+// - The end of the game (Exit or a 98) removes Interim again: a game that ended leaves the same file as before.
+// - After a hard stop (no Exit, no 98, and Boot is not the running server process) the interim state counts as the end
+//   state: $restore uses it like an Exit and says so; the next login treats it like an Exit. A backup without Interim
+//   (written by an older server, or lost before its first write) is refused as before (UNKNOWN_END). Interim of the
+//   running process is never used: that game is still open or lost its end inside this process, as before.
 
 constexpr const char* INVENTORY_BACKUP_DIRECTORY = "system/inventory-backups";
 constexpr size_t INVENTORY_BACKUP_KEEP = 20;
+// How long a change that only adds to the inventory may wait for its interim write (what a hard stop can cost at most)
+constexpr uint64_t INVENTORY_BACKUP_INTERIM_USECS = 2000000;
+// A backup whose Spire mark could not be written is renamed to <name>.json + this: inventory_backup_list skips it
+constexpr const char* INVENTORY_BACKUP_SET_ASIDE_SUFFIX = ".unmarked";
+// What $restore says first when it works from the interim state of a game that ended in a hard server stop
+constexpr const char* INVENTORY_RESTORE_INTERIM_TEXT = "Stand van de laatste tussenstand\nvoor de harde serverstop.";
+constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten opzichte van\nde laatste tussenstand.";
 
 struct InventoryBackup {
   uint32_t serial_number = 0;
@@ -73,6 +97,13 @@ struct InventoryBackup {
   uint64_t loss_time_usecs = 0;
   uint32_t loss_items = 0;
   uint32_t loss_meseta = 0;
+  // Interim state (see above): only while the game has no end in the file
+  bool has_interim = false;
+  PlayerInventory interim_inventory;
+  uint32_t interim_meseta = 0;
+  uint64_t interim_time_usecs = 0;
+  uint64_t interim_boot = 0; // inventory_backup_boot_id of the server process that wrote it
+  uint32_t interim_count = 0; // how many interim states this game wrote, this one included
 };
 
 phosg::JSON inventory_backup_to_json(const InventoryBackup& b);
@@ -93,7 +124,9 @@ bool inventory_backup_pinned(const InventoryBackupPickFlags& f);
 // sorted_names[z], if present) are pinned is never deleted and does not count against keep
 std::vector<std::string> inventory_backup_files_to_delete(const std::vector<std::string>& sorted_names, size_t keep,
     const std::vector<InventoryBackupPickFlags>& flags = {});
-// Writes path atomically (temp file, fsync, rename)
+// Writes path so that a crash or power loss leaves either the old file or the new one: temp file in the same
+// directory, fsync, rename, fsync of the directory (the pattern of spire_bridge_write_durable). Throws if the temp file
+// cannot be written or synced; the old file is then untouched
 void inventory_backup_write_file(const std::string& path, const InventoryBackup& b);
 // Writes a new backup into dir, deletes all but the newest keep, and returns the path written
 std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep);
@@ -139,8 +172,9 @@ enum class InventoryRestoreRefusal {
 };
 // backup: the newest backup of this character made before the current game, or null. protected_character does not
 // refuse (regie pso-regie-10: Wakiru may restore); it is a parameter so the static test pins that.
+// interim_is_end: inventory_backup_interim_is_end of backup (its interim state stands in for the missing end).
 InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game, bool protected_character,
-    uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup);
+    uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup, bool interim_is_end = false);
 const char* inventory_restore_refusal_text(InventoryRestoreRefusal r);
 // After the refusals: in check mode returns nothing to drop and leaves the backup as it is; otherwise marks the backup
 // restored (once per backup) and returns plan
@@ -150,9 +184,51 @@ const char* inventory_restore_refusal_name(InventoryRestoreRefusal r);
 
 // The end of a game, written into its backup. normal: a 98. guard_covered: the Spire guard took its snapshot for this
 // character in this game (it restores the run itself). Otherwise inventory (the server's view at the end, null if
-// unknown) becomes Exit
+// unknown) becomes Exit. A recorded end (98 or Exit) removes the interim state
 void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_covered, const PlayerInventory* inventory,
     uint32_t meseta);
+
+// Interim state (see the top of this file)
+// This server process, as written into Interim.Boot: its start time in microseconds, never 0
+uint64_t inventory_backup_boot_id();
+// Whether the interim state of b stands in for the end of its game: the file has no end (no Exit, no 98) and the
+// process that wrote the interim state is not boot_id, so no end can come any more (a hard stop)
+bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id);
+// The state $restore and the login check compare the character with: Exit, else the interim state after a hard stop,
+// else the join inventory (an import, or a game whose older connection is still open)
+struct InventoryBackupSource {
+  enum class Kind {
+    JOIN = 0,
+    EXIT,
+    INTERIM,
+  };
+  Kind kind = Kind::JOIN;
+  const PlayerInventory* inventory = nullptr;
+  uint32_t meseta = 0;
+};
+InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id);
+// Puts inventory and meseta into b as its interim state and the guard mark into Spire (never back to false); count is
+// the number of this write within its game
+void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
+    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count);
+// What one open backup last put on disk as its interim state; the server keeps one per client, a static test one per
+// simulated game
+struct InventoryInterimState {
+  bool written = false;
+  PlayerInventory inventory;
+  uint32_t meseta = 0;
+  bool guard_covered = false;
+  uint32_t count = 0;
+  bool failed = false; // the last write failed (logged once per streak, retried at every later call)
+};
+// Whether inventory, meseta and the guard mark differ from what state last wrote (true if it wrote nothing yet)
+bool inventory_backup_interim_changed(const InventoryInterimState& state, const PlayerInventory& inventory,
+    uint32_t meseta, bool guard_covered);
+// Writes the interim state into the backup at path if it changed (inventory_backup_interim_changed) and returns
+// whether it wrote. It reads the file first, so the marks others wrote into it (Loss) stay, and never writes into a
+// backup that already has its end. Throws if the file cannot be read or written; state and the file are then as before
+bool inventory_backup_write_interim(const std::string& path, InventoryInterimState& state,
+    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id);
 
 // What the next login does with the backup $restore would use, given what is missing from it in the 61.
 // session_alive: an older connection of this character is still in that game (its Exit is still to come).
@@ -161,8 +237,9 @@ enum class InventoryLossVerdict {
   RESTORABLE, // tell the player to type $restore in a normal game
   SERVER_STOP, // lost, but the game ended without any end state (crash or SIGKILL): $restore refuses it
 };
+// interim_is_end: inventory_backup_interim_is_end of b (missing_* are then counted against the interim state).
 InventoryLossVerdict inventory_loss_verdict(const InventoryBackup& b, bool session_alive, size_t missing_items,
-    uint32_t missing_meseta);
+    uint32_t missing_meseta, bool interim_is_end = false);
 // The lobby text for a verdict (empty for NONE); uses %s for a literal $ (add_color)
 std::string inventory_loss_text(InventoryLossVerdict v, size_t missing_items, uint32_t missing_meseta);
 
@@ -176,8 +253,16 @@ void inventory_backup_note_guarded(std::shared_ptr<Client> c);
 void inventory_backup_on_login(std::shared_ptr<Client> c);
 // SIGTERM/SIGINT: writes Exit for every client still in a game; returns how many
 size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s);
+// Both also write the interim state at once if the inventory already shows the removal, and mark the client so
+// inventory_backup_after_command writes it if the removal follows later in the same command
 void inventory_backup_note_removed(std::shared_ptr<Client> c, const ItemData& item);
 void inventory_backup_note_meseta_removed(std::shared_ptr<Client> c, uint64_t meseta);
+// Writes the interim state of c's current game now if it changed. Never throws (a failure is logged)
+void inventory_backup_flush_interim(std::shared_ptr<Client> c);
+// Renames the backup at path out of the *.json list (INVENTORY_BACKUP_SET_ASIDE_SUFFIX); returns whether that worked
+bool inventory_backup_set_aside(const std::string& path);
+// After every command of c (on_command): writes the interim state if something left the inventory in that command
+void inventory_backup_after_command(std::shared_ptr<Client> c);
 // $restore / $restore check: returns the lines to show the player
 std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bool check_only);
 

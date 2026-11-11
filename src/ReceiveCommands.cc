@@ -5372,6 +5372,10 @@ static asio::awaitable<void> on_D2_V3_BB(std::shared_ptr<Client> c, Channel::Mes
     complete_trade_for_side(target_c, c);
     c->pending_item_trade.reset();
     target_c->pending_item_trade.reset();
+    // Inventory backup: both sides of a trade the server executed itself (BB) go to disk now, what was given and what
+    // was received; on V3 each client's own 6x29 and create-item commands follow and write theirs
+    inventory_backup_flush_interim(c);
+    inventory_backup_flush_interim(target_c);
   }
   co_return;
 }
@@ -6110,6 +6114,8 @@ asio::awaitable<void> on_command(std::shared_ptr<Client> c, std::unique_ptr<Chan
     auto fn = handlers[msg->command & 0xFF][static_cast<size_t>(c->version())];
     if (fn) {
       co_await fn(c, *msg);
+      // Inventory backup: what left the inventory in this command is on disk before the next one (InventoryBackup.hh)
+      inventory_backup_after_command(c);
     } else {
       c->log.warning_f("Unknown command: size={:04X} command={:04X} flag={:08X}", msg->data.size(), msg->command, msg->flag);
       throw std::invalid_argument("unimplemented command");

@@ -221,6 +221,10 @@ public:
   // the server saw leave the inventory since then (see InventoryBackup.hh)
   std::string inventory_backup_current;
   InventoryRemovals inventory_backup_removals;
+  // The interim state last written into inventory_backup_current, and whether something left the inventory in the
+  // command being handled (B-REGIE-20-4, see InventoryBackup.hh)
+  InventoryInterimState inventory_backup_interim;
+  bool inventory_backup_interim_urgent = false;
   // The Spire guard took its snapshot for this client in its current game; the login hard-end text went out already
   bool inventory_backup_guarded = false;
   bool inventory_loss_told = false;

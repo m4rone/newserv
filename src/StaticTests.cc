@@ -8153,6 +8153,565 @@ void run_static_tests() {
       expect(!spire_map_has_boss_teleporter(empty, Version::GC_V3, 2));
     });
 
+    // ---- Inventory backup, interim state (B-REGIE-20-4): a hard server stop in the middle of a game. "The process
+    // dies" is here: the file as it is on disk at that moment, with no Exit in it, read again by a server process with
+    // another boot id. The test character is the one of tests/inventory-backup-pre-interim-*.json, three files that
+    // the code of 054db56 wrote (before interim states existed): the join, the same game after a disconnect, and after
+    // a 98
+    using KbR = InventoryRestoreRefusal;
+    using KbKind = InventoryBackupSource::Kind;
+    const uint64_t kb_old_boot = 1792930000000000ULL; // the server process that stops hard
+    const uint64_t kb_new_boot = 1792940000000000ULL; // the one that runs after it
+    const uint64_t kb_time = 1792930061000000ULL;
+    const uint64_t KB_SABER = 0x0001000000000000, KB_FRAME = 0x0101000000000000, KB_MONOMATE_3 = 0x0300000000030000,
+                   KB_MONOMATE_2 = 0x0300000000020000, KB_HANDGUN = 0x0006000000000000, KB_FOUND = 0x0034001A00000000;
+    auto kb_inv = [](const std::vector<uint64_t>& codes, size_t equipped) {
+      PlayerInventory i;
+      i.language = Language::ENGLISH;
+      i.num_items = codes.size();
+      for (size_t z = 0; z < codes.size(); z++) {
+        i.items[z].state = (z < equipped) ? 2 : 1;
+        i.items[z].flags = (z < equipped) ? 0x00000008 : 0;
+        i.items[z].data = ItemData(codes[z], 0);
+        i.items[z].data.id = 0x00010000 + z;
+      }
+      return i;
+    };
+    // how many items of this type (data1[0-2]) an inventory or a restore plan holds
+    auto kb_n = [](const PlayerInventory& inv, uint64_t code) {
+      ItemData ref(code, 0);
+      size_t n = 0;
+      for (size_t z = 0; z < inv.num_items; z++) {
+        n += !memcmp(&inv.items[z].data.data1[0], &ref.data1[0], 3);
+      }
+      return n;
+    };
+    auto kb_plan_n = [](const InventoryRestorePlan& plan, uint64_t code) {
+      ItemData ref(code, 0);
+      size_t n = 0;
+      for (const auto& item : plan.items) {
+        n += !memcmp(&item.data1[0], &ref.data1[0], 3);
+      }
+      return n;
+    };
+    const auto kb_join_inv = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN}, 2);
+    const auto kb_penalty_card = kb_inv({KB_SABER, KB_FRAME}, 2); // one thing a card may hold: only what was equipped
+    auto kb_backup = [&]() {
+      InventoryBackup b;
+      b.serial_number = 42;
+      b.disp.visual.name.encode("TestK3", Language::ENGLISH);
+      b.disp.stats.level = 11;
+      b.disp.stats.meseta = 500;
+      b.character_id = spire_guard_character_id(b.disp);
+      b.time_usecs = kb_time;
+      b.inventory = kb_join_inv;
+      return b;
+    };
+    struct KbTempDir {
+      std::string root;
+      explicit KbTempDir(const char* tag)
+          : root(std::format("{}/newserv-static-backup-interim-{}-{}", std::filesystem::temp_directory_path().string(),
+                tag, getpid())) {
+        std::filesystem::remove_all(this->root);
+        std::filesystem::create_directories(this->root);
+      }
+      ~KbTempDir() {
+        std::filesystem::remove_all(this->root);
+      }
+    };
+    struct KbGame {
+      std::string path;
+      InventoryInterimState state;
+    };
+    // what inventory_backup_on_game_join does: the join backup with its first interim state, in one write
+    auto kb_open = [&](const std::string& dir, InventoryBackup b, uint64_t boot_id) {
+      KbGame g;
+      inventory_backup_record_interim(b, b.inventory, b.disp.stats.meseta, false, b.time_usecs, boot_id, 1);
+      g.path = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
+      g.state.written = true;
+      g.state.inventory = b.inventory;
+      g.state.meseta = b.disp.stats.meseta;
+      g.state.count = 1;
+      return g;
+    };
+    auto kb_load = [](const std::string& path) {
+      return inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
+    };
+    struct KbAfterStop {
+      InventoryBackup backup;
+      InventoryRestoreRefusal refusal = InventoryRestoreRefusal::NONE;
+      InventoryBackupSource::Kind kind = InventoryBackupSource::Kind::JOIN;
+      InventoryRestorePlan plan;
+    };
+    // $restore (inventory_restore_command's own steps) in the server process boot_id, for a card that holds this
+    auto kb_restore = [&](const std::string& path, uint64_t boot_id, const PlayerInventory& card, uint32_t card_meseta) {
+      KbAfterStop r;
+      r.backup = kb_load(path);
+      bool interim_is_end = inventory_backup_interim_is_end(r.backup, boot_id);
+      r.refusal = inventory_restore_refusal(true, false, false, 42, r.backup.character_id, &r.backup, interim_is_end);
+      auto from = inventory_backup_restore_source(r.backup, boot_id);
+      r.kind = from.kind;
+      r.plan = inventory_restore_missing(*from.inventory, from.meseta, card, card_meseta, InventoryRemovals());
+      return r;
+    };
+
+    k3_case("backup 1: a hard stop after something left the inventory never gives it back; what the server gave is there once", [&]() {
+      KbTempDir tmp("left");
+      auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
+      // The player drops the Handgun (6x2A): the server takes it out of the inventory and notes it, and the note writes
+      // the interim state at once (the hooks case below shows that the server does this before its handler returns)
+      auto after_drop = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      expect(inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      // The process dies. Whatever the card kept (only the equipped items, the state after the drop, or still the
+      // join state), the Handgun is not given back
+      struct Card {
+        PlayerInventory inventory;
+        uint32_t meseta;
+      };
+      for (const auto& card : {Card{kb_penalty_card, 0}, Card{after_drop, 500}, Card{kb_join_inv, 500}}) {
+        auto r = kb_restore(g.path, kb_new_boot, card.inventory, card.meseta);
+        expect(!r.backup.has_exit && !r.backup.left_normally);
+        expect_eq(KbR::NONE, r.refusal);
+        expect_eq(KbKind::INTERIM, r.kind);
+        expect_eq(0u, kb_plan_n(r.plan, KB_HANDGUN));
+      }
+      auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(1u, r.plan.items.size()); // the three Monomates, and the meseta
+      expect_eq(3u, r.plan.items[0].data1[5]);
+      expect_eq(500u, r.plan.meseta);
+      expect(kb_restore(g.path, kb_new_boot, after_drop, 500).plan.empty());
+      expect(kb_restore(g.path, kb_new_boot, kb_join_inv, 500).plan.empty());
+
+      // The other way round: the server puts an item into the inventory (a trade it executes, an item it creates) and
+      // that state is on disk. After the stop the item is in card plus plan exactly once, whatever the card kept
+      auto after_gift = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_FOUND}, 2);
+      expect(inventory_backup_write_interim(g.path, g.state, after_gift, 500, false, kb_time + 2000000, kb_old_boot));
+      for (const auto& card : {Card{kb_penalty_card, 0}, Card{after_gift, 500}}) {
+        auto gift = kb_restore(g.path, kb_new_boot, card.inventory, card.meseta);
+        expect_eq(KbR::NONE, gift.refusal);
+        expect_eq(1u, kb_n(card.inventory, KB_FOUND) + kb_plan_n(gift.plan, KB_FOUND));
+        expect_eq(0u, kb_plan_n(gift.plan, KB_HANDGUN));
+      }
+      // And a second $restore on the same backup gives nothing: the Restored mark is in the file before the drop
+      auto first = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      auto taken = inventory_restore_take(first.backup, first.plan, false, kb_time + 9000000);
+      expect_eq(1u, kb_plan_n(taken, KB_FOUND));
+      inventory_backup_write_file(g.path, first.backup);
+      expect_eq(KbR::ALREADY_RESTORED, kb_restore(g.path, kb_new_boot, kb_penalty_card, 0).refusal);
+    });
+
+    k3_case("backup 2: a hard stop after a pick-up whose bundle was written loses nothing", [&]() {
+      KbTempDir tmp("found");
+      auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
+      auto after_pickup = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      expect(inventory_backup_interim_changed(g.state, after_pickup, 500, false));
+      expect(inventory_backup_write_interim(g.path, g.state, after_pickup, 500, false, kb_time + 2000000, kb_old_boot));
+      expect(!inventory_backup_interim_changed(g.state, after_pickup, 500, false));
+      expect(!inventory_backup_write_interim(g.path, g.state, after_pickup, 500, false, kb_time + 4000000, kb_old_boot));
+      auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r.refusal);
+      expect_eq(KbKind::INTERIM, r.kind);
+      expect_eq(2u, r.backup.interim_count);
+      expect_eq(kb_time + 2000000, r.backup.interim_time_usecs);
+      expect_eq(kb_old_boot, r.backup.interim_boot);
+      // every item of the state at the stop is on the card or in the plan, once
+      for (uint64_t code : {KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}) {
+        expect_eq(1u, kb_n(kb_penalty_card, code) + kb_plan_n(r.plan, code));
+      }
+      expect_eq(3u, r.plan.items.size());
+      expect_eq(500u, r.plan.meseta);
+    });
+
+    k3_case("backup 3: a hard stop between a pick-up and its bundle leaves the interim state before it, whole", [&]() {
+      KbTempDir tmp("between");
+      auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
+      auto after_drop = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      expect(inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      // He picks up an item and 250 Meseta. The bundle is due (the timer writes it within the interval), but the
+      // process dies first: nothing of it reached the disk
+      auto after_pickup = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_FOUND}, 2);
+      expect(inventory_backup_interim_changed(g.state, after_pickup, 750, false));
+      auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r.refusal);
+      expect_eq(KbKind::INTERIM, r.kind);
+      // the state on disk is the one of the last write, byte for byte: no half item, nothing twice
+      expect_eq(2u, r.backup.interim_count);
+      expect(!memcmp(&r.backup.interim_inventory, &after_drop, sizeof(after_drop)));
+      expect_eq(500u, r.backup.interim_meseta);
+      expect_eq(1u, r.plan.items.size()); // the Monomates
+      expect_eq(500u, r.plan.meseta);
+      expect_eq(0u, kb_plan_n(r.plan, KB_HANDGUN)); // what he dropped before stays gone
+      // What is lost at most: what came into the inventory since the last write (here the item and the 250 Meseta),
+      // and the last write is never older than one interval plus the removals written in between
+      expect_eq(0u, kb_plan_n(r.plan, KB_FOUND));
+      expect_eq(2000000u, INVENTORY_BACKUP_INTERIM_USECS);
+    });
+
+    k3_case("backup 4: a half-written temp file beside a good backup is never read", [&]() {
+      KbTempDir tmp("temp");
+      std::string dir = tmp.root + "/42.test";
+      auto g = kb_open(dir, kb_backup(), kb_old_boot);
+      expect(!std::filesystem::exists(g.path + ".tmp")); // a finished write leaves no temp file
+      std::string good = phosg::load_file(g.path);
+      // the process died while it wrote the next state: half a file under the temp name
+      phosg::save_file(g.path + ".tmp", good.substr(0, good.size() / 2));
+      auto names = inventory_backup_list(dir);
+      expect_eq(1u, names.size());
+      expect_eq(std::filesystem::path(g.path).filename().string(), names[0]);
+      expect_eq(good, phosg::load_file(g.path));
+      auto loaded = kb_load(g.path);
+      expect(loaded.has_interim && !memcmp(&loaded.interim_inventory, &kb_join_inv, sizeof(kb_join_inv)));
+      // the next write replaces the stale temp file and the backup is whole again
+      auto after_drop = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      expect(inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 1000000, kb_new_boot));
+      expect(!std::filesystem::exists(g.path + ".tmp"));
+      expect_eq(2u, kb_load(g.path).interim_count);
+      expect_eq(1u, inventory_backup_list(dir).size());
+    });
+
+    k3_case("backup 5: a backup from before interim states loads as it did and is refused with the same text", [&]() {
+      for (const char* which : {"join", "exit", "left"}) {
+        std::string raw = phosg::load_file(std::format("tests/inventory-backup-pre-interim-{}.json", which));
+        auto b = inventory_backup_from_json(phosg::JSON::parse(raw));
+        expect(!b.has_interim);
+        expect(!inventory_backup_interim_is_end(b, kb_old_boot) && !inventory_backup_interim_is_end(b, kb_new_boot));
+        // the file format without an interim state is the one of before, byte for byte
+        expect_eq(raw, inventory_backup_to_json(b).serialize(phosg::JSON::SerializeOption::FORMAT));
+        expect_eq(42u, b.serial_number);
+        expect(!memcmp(&b.inventory, &kb_join_inv, sizeof(kb_join_inv)));
+      }
+      KbTempDir tmp("old");
+      // No end and no interim state (an older server stopped hard): refused as before, with the text of before
+      std::string join_path = tmp.root + "/join.json";
+      std::filesystem::copy_file("tests/inventory-backup-pre-interim-join.json", join_path);
+      auto r = kb_restore(join_path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::UNKNOWN_END, r.refusal);
+      expect_eq(KbKind::JOIN, r.kind);
+      expect_eq("Onbekend hoe je vorige game eindigde:\nniet herstelbaar.", inventory_restore_refusal_text(r.refusal));
+      expect(inventory_loss_verdict(r.backup, false, 2, 500, inventory_backup_interim_is_end(r.backup, kb_new_boot)) ==
+          InventoryLossVerdict::SERVER_STOP);
+      expect_eq("Je verloor 2 items en 500 Meseta bij een\nharde serverstop. %srestore kan\ndit niet terugzetten.",
+          inventory_loss_text(InventoryLossVerdict::SERVER_STOP, 2, 500));
+      // A backup with an Exit, and one with a 98: as before
+      std::string exit_path = tmp.root + "/exit.json";
+      std::filesystem::copy_file("tests/inventory-backup-pre-interim-exit.json", exit_path);
+      r = kb_restore(exit_path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r.refusal);
+      expect_eq(KbKind::EXIT, r.kind);
+      expect_eq(620u, r.plan.meseta);
+      expect_eq(2u, r.plan.items.size()); // two Monomates and the found item
+      std::string left_path = tmp.root + "/left.json";
+      std::filesystem::copy_file("tests/inventory-backup-pre-interim-left.json", left_path);
+      expect_eq(KbR::LEFT_NORMALLY, kb_restore(left_path, kb_new_boot, kb_penalty_card, 0).refusal);
+    });
+
+    k3_case("backup 6: a game with a removal and a pick-up that ends cleanly leaves the file of before, byte for byte", [&]() {
+      const auto after_drop = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      const auto at_end = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_2, KB_FOUND}, 2);
+      for (bool normal : {false, true}) {
+        KbTempDir tmp(normal ? "clean98" : "cleanexit");
+        auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
+        expect(phosg::load_file(g.path).find("\"Interim\"") != std::string::npos); // while the game runs
+        expect(inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+        expect(inventory_backup_write_interim(g.path, g.state, at_end, 620, false, kb_time + 3000000, kb_old_boot));
+        expect_eq(3u, kb_load(g.path).interim_count);
+        // the end, as inventory_backup_on_game_end records it: a disconnect or a server stop (Exit), or a 98
+        auto b = kb_load(g.path);
+        inventory_backup_record_end(b, normal, false, normal ? nullptr : &at_end, normal ? 0 : 620);
+        expect(!b.has_interim);
+        inventory_backup_write_file(g.path, b);
+        std::string before = phosg::load_file(
+            std::format("tests/inventory-backup-pre-interim-{}.json", normal ? "left" : "exit"));
+        std::string now = phosg::load_file(g.path);
+        expect_eq(before.size(), now.size());
+        expect(before == now);
+        // and an interim state never goes on top of an end
+        expect(!inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 5000000, kb_old_boot));
+        expect(before == phosg::load_file(g.path));
+      }
+    });
+
+    k3_case("backup 7: two players in one game, a hard stop at any moment: the item one drops and the other picks up exists at most once", [&]() {
+      KbTempDir tmp("two");
+      auto a = kb_open(tmp.root + "/42.a", kb_backup(), kb_old_boot);
+      InventoryBackup other = kb_backup();
+      other.serial_number = 43;
+      other.inventory = kb_inv({KB_SABER}, 1);
+      other.disp.stats.meseta = 0;
+      auto b = kb_open(tmp.root + "/43.b", other, kb_old_boot);
+      // both restore after a stop at this moment, with cards that kept only what was equipped
+      auto handguns = [&]() {
+        auto ra = kb_restore(a.path, kb_new_boot, kb_penalty_card, 0);
+        auto rb_backup = kb_load(b.path);
+        auto from = inventory_backup_restore_source(rb_backup, kb_new_boot);
+        auto rb_plan = inventory_restore_missing(*from.inventory, from.meseta, other.inventory, 0, InventoryRemovals());
+        expect(inventory_backup_interim_is_end(rb_backup, kb_new_boot));
+        return kb_plan_n(ra.plan, KB_HANDGUN) + kb_plan_n(rb_plan, KB_HANDGUN);
+      };
+      expect_eq(1u, handguns()); // A has it
+      auto a_after = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      expect(inventory_backup_write_interim(a.path, a.state, a_after, 500, false, kb_time + 1000000, kb_old_boot));
+      expect_eq(0u, handguns()); // it lies on the floor: A dropped it himself, nobody gets it back
+      auto b_after = kb_inv({KB_SABER, KB_HANDGUN}, 1);
+      expect(inventory_backup_interim_changed(b.state, b_after, 0, false));
+      expect_eq(0u, handguns()); // B picked it up, his bundle is not written yet: lost with the last bundle, never twice
+      expect(inventory_backup_write_interim(b.path, b.state, b_after, 0, false, kb_time + 3000000, kb_old_boot));
+      expect_eq(1u, handguns()); // B has it
+      // the two games write two files: neither write touched the other
+      expect_eq(2u, kb_load(a.path).interim_count);
+      expect_eq(2u, kb_load(b.path).interim_count);
+    });
+
+    k3_case("backup 8: a player who left the game before the hard stop is treated as before; a Loss mark survives interim writes", [&]() {
+      KbTempDir tmp("gone");
+      const auto after_drop = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      // a 98 before the stop: his card saved, nothing to restore
+      auto g = kb_open(tmp.root + "/42.left", kb_backup(), kb_old_boot);
+      expect(inventory_backup_write_interim(g.path, g.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      auto b = kb_load(g.path);
+      inventory_backup_record_end(b, true, false, nullptr, 0);
+      inventory_backup_write_file(g.path, b);
+      auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::LEFT_NORMALLY, r.refusal);
+      expect(!r.backup.has_interim);
+      // a disconnect before the stop: the Exit is the end, not an older interim state
+      auto d = kb_open(tmp.root + "/42.dropped", kb_backup(), kb_old_boot);
+      expect(inventory_backup_write_interim(d.path, d.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      b = kb_load(d.path);
+      auto exit_inv = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_2}, 2);
+      inventory_backup_record_end(b, false, false, &exit_inv, 480);
+      inventory_backup_write_file(d.path, b);
+      r = kb_restore(d.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r.refusal);
+      expect_eq(KbKind::EXIT, r.kind);
+      expect_eq(2u, r.plan.items[0].data1[5]);
+      expect_eq(480u, r.plan.meseta);
+      // the same process (the older connection still sits in the game, or the end was lost inside this process): the
+      // interim state is not an end, the backup is refused as before, and the login check reads the join state
+      auto open = kb_open(tmp.root + "/42.open", kb_backup(), kb_old_boot);
+      expect(inventory_backup_write_interim(open.path, open.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      r = kb_restore(open.path, kb_old_boot, kb_penalty_card, 0);
+      expect_eq(KbR::UNKNOWN_END, r.refusal);
+      expect_eq(KbKind::JOIN, r.kind);
+      expect(inventory_loss_verdict(r.backup, true, 2, 500, false) == InventoryLossVerdict::RESTORABLE);
+      expect(inventory_loss_verdict(r.backup, false, 2, 500, false) == InventoryLossVerdict::SERVER_STOP);
+      // after the stop the next login calls it restorable, and its Loss mark (written by that login into the same
+      // file) stays when anything writes the file again
+      r = kb_restore(open.path, kb_new_boot, kb_penalty_card, 0);
+      expect(inventory_loss_verdict(r.backup, false, r.plan.items.size(), r.plan.meseta, true) == InventoryLossVerdict::RESTORABLE);
+      r.backup.loss_time_usecs = kb_time + 60000000;
+      r.backup.loss_items = r.plan.items.size();
+      r.backup.loss_meseta = r.plan.meseta;
+      inventory_backup_write_file(open.path, r.backup);
+      auto marked = kb_load(open.path);
+      expect(marked.has_interim && (marked.loss_time_usecs == kb_time + 60000000) && (marked.interim_count == 2));
+      // (a live game: the Loss mark of a login on another connection, then the game's next interim write)
+      auto live = kb_open(tmp.root + "/42.live", kb_backup(), kb_old_boot);
+      b = kb_load(live.path);
+      b.loss_time_usecs = kb_time + 1;
+      b.loss_items = 2;
+      inventory_backup_write_file(live.path, b);
+      expect(inventory_backup_write_interim(live.path, live.state, after_drop, 500, false, kb_time + 1000000, kb_old_boot));
+      b = kb_load(live.path);
+      expect_eq(kb_time + 1, b.loss_time_usecs);
+      expect_eq(2u, b.loss_items);
+      expect_eq(2u, b.interim_count);
+    });
+
+    k3_case("backup 9: a $restore that a second hard stop interrupts gives nothing twice", [&]() {
+      KbTempDir tmp("twice");
+      std::string dir = tmp.root + "/42.test";
+      const uint64_t kb_third_boot = 1792950000000000ULL;
+      // game 1 stops hard with the found item in its interim state
+      auto g1 = kb_open(dir, kb_backup(), kb_old_boot);
+      auto with_found = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      expect(inventory_backup_write_interim(g1.path, g1.state, with_found, 500, false, kb_time + 2000000, kb_old_boot));
+      // game 2 (the next server process): the card kept the equipped items; $restore marks the backup, writes the mark
+      // and only then drops
+      InventoryBackup second = kb_backup();
+      second.time_usecs = kb_time + 600000000;
+      second.inventory = kb_penalty_card;
+      second.disp.stats.meseta = 0;
+      auto g2 = kb_open(dir, second, kb_new_boot);
+      auto r = kb_restore(g1.path, kb_new_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r.refusal);
+      auto taken = inventory_restore_take(r.backup, r.plan, false, kb_time + 601000000);
+      expect_eq(3u, taken.items.size());
+      inventory_backup_write_file(g1.path, r.backup);
+      // The second stop comes before he picked anything up: the items on the floor are gone with the game, and game 1
+      // is never restored again
+      expect_eq(KbR::ALREADY_RESTORED, kb_restore(g1.path, kb_third_boot, kb_penalty_card, 0).refusal);
+      auto r2 = kb_restore(g2.path, kb_third_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r2.refusal);
+      expect(r2.plan.empty()); // game 2's interim state never held them
+      // Or he picked them up and the bundle was written: game 2's interim state holds them, once
+      auto picked_up = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      expect(inventory_backup_write_interim(g2.path, g2.state, picked_up, 500, false, kb_time + 603000000, kb_new_boot));
+      r2 = kb_restore(g2.path, kb_third_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, r2.refusal);
+      expect_eq(KbKind::INTERIM, r2.kind);
+      for (uint64_t code : {KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}) {
+        expect_eq(1u, kb_n(kb_penalty_card, code) + kb_plan_n(r2.plan, code));
+      }
+      // and $restore in game 3 picks game 2's backup, not the restored one of game 1
+      auto names = inventory_backup_list(dir);
+      expect_eq(2u, names.size());
+      std::vector<InventoryBackupPickFlags> flags = {{false, true, false}, {false, false, false}};
+      expect_eq(1, inventory_backup_pick_restore(names, flags, "20261101-000000-000000.json"));
+      expect_eq(std::filesystem::path(g2.path).filename().string(), names[1]);
+    });
+
+    // ---- the same, through the server's own hooks with a real client in a real game (the backup directory is a
+    // relative path, so in a temp directory)
+    struct KbLive {
+      K3Player p;
+      std::shared_ptr<Lobby> l;
+      std::shared_ptr<PSOBBCharacterFile> ch;
+      std::string path;
+    };
+    auto kb_join = [&](K3World& w, KbLive& live) {
+      if (!live.p.c) {
+        live.p = w.player();
+        live.ch = live.p.c->character_file(false, false);
+        live.ch->disp.visual.name.encode("TestK3", Language::ENGLISH);
+        live.ch->disp.stats.meseta = 500;
+        live.ch->inventory = kb_join_inv;
+      }
+      live.l = std::make_shared<Lobby>(w.s, w.next_lobby_id++, true);
+      live.p.c->lobby_client_id = 0;
+      live.l->clients[0] = live.p.c;
+      live.p.c->lobby = live.l;
+      inventory_backup_on_game_join(live.p.c, live.l);
+      live.path = live.p.c->inventory_backup_current;
+      expect(!live.path.empty());
+    };
+    const uint64_t kb_next_boot = inventory_backup_boot_id() + 1; // any server process after this one
+
+    k3_case("backup hooks 1: the join writes the first interim state; what leaves the inventory is on disk before the command ends", [&]() {
+      K3TempCwd temp_cwd("backup-left");
+      K3World w;
+      KbLive live;
+      kb_join(w, live);
+      auto d = kb_load(live.path);
+      expect(d.has_interim && !d.has_exit && !d.left_normally && !d.spire);
+      expect_eq(1u, d.interim_count);
+      expect_eq(inventory_backup_boot_id(), d.interim_boot);
+      expect(!memcmp(&d.interim_inventory, &kb_join_inv, sizeof(kb_join_inv)));
+      expect_eq(500u, d.interim_meseta);
+      // this process still runs: not an end. Any later process: an end
+      expect(!inventory_backup_interim_is_end(d, inventory_backup_boot_id()));
+      expect(inventory_backup_interim_is_end(d, kb_next_boot));
+
+      // 6x2A (on_player_drop_item): the server removes the Handgun, then notes it. The note itself writes
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      inventory_backup_note_removed(live.p.c, ItemData(KB_HANDGUN, 0));
+      d = kb_load(live.path);
+      expect_eq(2u, d.interim_count);
+      expect_eq(0u, kb_n(d.interim_inventory, KB_HANDGUN));
+      auto r = kb_restore(live.path, kb_next_boot, kb_penalty_card, 0);
+      expect_eq(KbR::NONE, inventory_restore_refusal(true, false, false, live.p.serial_number, r.backup.character_id,
+                               &r.backup, inventory_backup_interim_is_end(r.backup, kb_next_boot)));
+      expect_eq(0u, kb_plan_n(r.plan, KB_HANDGUN));
+      inventory_backup_after_command(live.p.c);
+      expect_eq(2u, kb_load(live.path).interim_count); // nothing changed since: no second write
+
+      // 6x27 (on_use_item): the server notes the Monomate first and removes it after. The note finds nothing changed
+      // yet; the end of the command (on_command) writes
+      inventory_backup_note_removed(live.p.c, ItemData(0x0300000000010000, 0));
+      expect_eq(2u, kb_load(live.path).interim_count);
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_2}, 2);
+      inventory_backup_after_command(live.p.c);
+      d = kb_load(live.path);
+      expect_eq(3u, d.interim_count);
+      expect_eq(2u, d.interim_inventory.items[2].data.data1[5]);
+
+      // 6x5E (a shop purchase): the meseta that left
+      live.ch->disp.stats.meseta = 400;
+      inventory_backup_note_meseta_removed(live.p.c, 100);
+      d = kb_load(live.path);
+      expect_eq(4u, d.interim_count);
+      expect_eq(400u, d.interim_meseta);
+      expect_eq(500u, d.disp.stats.meseta.load()); // the join state itself is never rewritten
+      expect(!memcmp(&d.inventory, &kb_join_inv, sizeof(kb_join_inv)));
+
+      // a disconnect: Exit, and the interim state goes
+      inventory_backup_on_game_end(live.p.c, live.l, false);
+      d = kb_load(live.path);
+      expect(d.has_exit && !d.has_interim && !d.left_normally);
+      expect_eq(400u, d.exit_meseta);
+      expect(phosg::load_file(live.path).find("\"Interim\"") == std::string::npos);
+      expect(live.p.c->inventory_backup_current.empty());
+      // after the end nothing writes any more
+      live.ch->inventory = kb_join_inv;
+      inventory_backup_note_removed(live.p.c, ItemData(KB_HANDGUN, 0));
+      inventory_backup_after_command(live.p.c);
+      inventory_backup_flush_interim(live.p.c);
+      expect(!kb_load(live.path).has_interim);
+    });
+
+    k3_case("backup hooks 2: a pick-up waits for its bundle and the timer writes it within the interval", [&]() {
+      K3TempCwd temp_cwd("backup-found");
+      K3World w;
+      KbLive live;
+      kb_join(w, live);
+      // 6x59 (a pick-up): nothing notes it, and the end of the command does not write it
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      live.ch->disp.stats.meseta = 750;
+      inventory_backup_after_command(live.p.c);
+      auto d = kb_load(live.path);
+      expect_eq(1u, d.interim_count);
+      expect_eq(0u, kb_n(d.interim_inventory, KB_FOUND)); // a hard stop here loses the item and the 250 Meseta
+      // the timer of the game writes it
+      w.s->io_context->run_for(std::chrono::microseconds(INVENTORY_BACKUP_INTERIM_USECS + 400000));
+      d = kb_load(live.path);
+      expect_eq(2u, d.interim_count);
+      expect_eq(1u, kb_n(d.interim_inventory, KB_FOUND));
+      expect_eq(750u, d.interim_meseta);
+      auto r = kb_restore(live.path, kb_next_boot, kb_penalty_card, 0);
+      expect_eq(KbKind::INTERIM, r.kind);
+      expect_eq(1u, kb_plan_n(r.plan, KB_FOUND));
+      expect_eq(750u, r.plan.meseta);
+      // a 98: the card saved; LeftNormally and no interim state
+      inventory_backup_on_game_end(live.p.c, live.l, true);
+      d = kb_load(live.path);
+      expect(d.left_normally && !d.has_interim && !d.has_exit);
+    });
+
+    k3_case("backup hooks 3: the Spire guard's snapshot puts the Spire mark on disk at once; a backup that cannot take it is set aside", [&]() {
+      K3TempCwd temp_cwd("backup-guard");
+      K3World w;
+      KbLive live;
+      kb_join(w, live);
+      expect(!kb_load(live.path).spire);
+      // spire_guard_begin_run: snapshot stored, then this, then the run copy
+      inventory_backup_note_guarded(live.p.c);
+      auto d = kb_load(live.path);
+      expect(d.spire && d.has_interim);
+      expect_eq(2u, d.interim_count);
+      // a hard stop in the run: the guard restores it, $restore and the login check leave it alone
+      bool is_end = inventory_backup_interim_is_end(d, kb_next_boot);
+      expect(is_end);
+      expect_eq(KbR::SPIRE_BACKUP,
+          inventory_restore_refusal(true, false, false, live.p.serial_number, d.character_id, &d, is_end));
+      expect(inventory_loss_verdict(d, false, 2, 500, is_end) == InventoryLossVerdict::NONE);
+      inventory_backup_on_game_end(live.p.c, live.l, false);
+      d = kb_load(live.path);
+      expect(d.spire && d.has_exit && !d.has_interim);
+
+      // The next game's backup file cannot take the mark (here: it is unreadable). It leaves the *.json list, so no
+      // $restore ever reads an interim state of a guarded run that does not say Spire
+      kb_join(w, live);
+      std::string second = live.path;
+      std::string dir = std::filesystem::path(second).parent_path().string();
+      expect_eq(2u, inventory_backup_list(dir).size());
+      phosg::save_file(second, "{\"SerialNumber\": 5200, \"Inter");
+      inventory_backup_note_guarded(live.p.c);
+      expect(!std::filesystem::exists(second));
+      expect(std::filesystem::exists(second + INVENTORY_BACKUP_SET_ASIDE_SUFFIX));
+      expect_eq(1u, inventory_backup_list(dir).size());
+      expect(live.p.c->inventory_backup_current.empty());
+    });
+
     expect_eq(0u, k3_failed);
   }
 

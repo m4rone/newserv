@@ -76,6 +76,18 @@ phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
         {"Inventory", spire_guard_hex_encode(&b.exit_inventory, sizeof(b.exit_inventory))},
     }));
   }
+  // Added last and only when present: a backup without an interim state serializes byte for byte as it did before
+  if (b.has_interim) {
+    json.emplace("Interim", phosg::JSON::dict({
+        {"Time", b.interim_time_usecs},
+        {"TimeText", phosg::format_time(b.interim_time_usecs)},
+        {"Boot", b.interim_boot},
+        {"Count", b.interim_count},
+        {"Meseta", b.interim_meseta},
+        {"Items", items_json(b.interim_inventory)},
+        {"Inventory", spire_guard_hex_encode(&b.interim_inventory, sizeof(b.interim_inventory))},
+    }));
+  }
   return json;
 }
 
@@ -103,6 +115,15 @@ InventoryBackup inventory_backup_from_json(const phosg::JSON& json) {
     b.has_exit = true;
     b.exit_meseta = exit.get_int("Meseta");
     spire_guard_hex_decode(exit.get_string("Inventory"), &b.exit_inventory, sizeof(b.exit_inventory));
+  }
+  if (json.contains("Interim")) {
+    const auto& interim = json.at("Interim");
+    b.has_interim = true;
+    b.interim_time_usecs = interim.get_int("Time");
+    b.interim_boot = interim.get_int("Boot");
+    b.interim_count = interim.get_int("Count", 0);
+    b.interim_meseta = interim.get_int("Meseta");
+    spire_guard_hex_decode(interim.get_string("Inventory"), &b.interim_inventory, sizeof(b.interim_inventory));
   }
   return b;
 }
@@ -195,9 +216,20 @@ void inventory_backup_write_file(const std::string& path, const InventoryBackup&
     }
     offset += written;
   }
-  ::fsync(fd);
+  if (::fsync(fd) != 0) {
+    int error = errno;
+    ::close(fd);
+    throw std::runtime_error(std::format("cannot fsync {}: errno {}", temp, error));
+  }
   ::close(fd);
   std::filesystem::rename(temp, path);
+  // The rename itself is only durable once the directory is synced (as spire_bridge_write_durable does)
+  std::string dir = std::filesystem::path(path).parent_path().string();
+  int dir_fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    ::fsync(dir_fd);
+    ::close(dir_fd);
+  }
 }
 
 std::string inventory_backup_save(const std::string& dir, const InventoryBackup& b, size_t keep) {
@@ -329,7 +361,7 @@ InventoryRestorePlan inventory_restore_missing(const PlayerInventory& source, ui
 }
 
 InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game, bool,
-    uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup) {
+    uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup, bool interim_is_end) {
   using R = InventoryRestoreRefusal;
   if (!in_game) {
     return R::NOT_IN_GAME; // the items are dropped as floor items, which needs a game
@@ -352,7 +384,7 @@ InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game,
   if (backup->left_normally) {
     return R::LEFT_NORMALLY;
   }
-  if (!backup->has_exit && backup->imported_from.empty()) {
+  if (!backup->has_exit && backup->imported_from.empty() && !interim_is_end) {
     return R::UNKNOWN_END;
   }
   return R::NONE;
@@ -402,15 +434,81 @@ void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_cov
     b.exit_inventory = *inventory;
     b.exit_meseta = meseta;
   }
+  if (b.left_normally || b.has_exit) {
+    // The game has its end: the interim state is over, and the file is what it was before interim states existed
+    b.has_interim = false;
+    b.interim_inventory = PlayerInventory();
+    b.interim_meseta = 0;
+    b.interim_time_usecs = 0;
+    b.interim_boot = 0;
+    b.interim_count = 0;
+  }
+}
+
+uint64_t inventory_backup_boot_id() {
+  static const uint64_t boot_id = std::max<uint64_t>(phosg::now(), 1);
+  return boot_id;
+}
+
+bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id) {
+  return b.has_interim && !b.has_exit && !b.left_normally && (b.interim_boot != boot_id);
+}
+
+InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id) {
+  using K = InventoryBackupSource::Kind;
+  if (b.has_exit) {
+    return InventoryBackupSource{K::EXIT, &b.exit_inventory, b.exit_meseta};
+  }
+  if (inventory_backup_interim_is_end(b, boot_id)) {
+    return InventoryBackupSource{K::INTERIM, &b.interim_inventory, b.interim_meseta};
+  }
+  return InventoryBackupSource{K::JOIN, &b.inventory, b.disp.stats.meseta.load()};
+}
+
+void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
+    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count) {
+  b.spire = b.spire || guard_covered;
+  b.has_interim = true;
+  b.interim_inventory = inventory;
+  b.interim_meseta = meseta;
+  b.interim_time_usecs = now_usecs;
+  b.interim_boot = boot_id;
+  b.interim_count = count;
+}
+
+bool inventory_backup_interim_changed(const InventoryInterimState& state, const PlayerInventory& inventory,
+    uint32_t meseta, bool guard_covered) {
+  return !state.written || (state.meseta != meseta) || (state.guard_covered != guard_covered) ||
+      (memcmp(&state.inventory, &inventory, sizeof(inventory)) != 0);
+}
+
+bool inventory_backup_write_interim(const std::string& path, InventoryInterimState& state,
+    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id) {
+  if (!inventory_backup_interim_changed(state, inventory, meseta, guard_covered)) {
+    return false;
+  }
+  // Read first: the Loss mark of a later login of the same character lives in this file too
+  auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
+  if (b.has_exit || b.left_normally) {
+    return false; // the game has its end; an interim state never goes on top of it
+  }
+  inventory_backup_record_interim(b, inventory, meseta, guard_covered, now_usecs, boot_id, state.count + 1);
+  inventory_backup_write_file(path, b);
+  state.written = true;
+  state.inventory = inventory;
+  state.meseta = meseta;
+  state.guard_covered = guard_covered;
+  state.count++;
+  return true;
 }
 
 InventoryLossVerdict inventory_loss_verdict(const InventoryBackup& b, bool session_alive, size_t missing_items,
-    uint32_t missing_meseta) {
+    uint32_t missing_meseta, bool interim_is_end) {
   using V = InventoryLossVerdict;
   if (b.restored || b.left_normally || b.spire || (!missing_items && !missing_meseta)) {
     return V::NONE;
   }
-  return (b.has_exit || !b.imported_from.empty() || session_alive) ? V::RESTORABLE : V::SERVER_STOP;
+  return (b.has_exit || !b.imported_from.empty() || session_alive || interim_is_end) ? V::RESTORABLE : V::SERVER_STOP;
 }
 
 std::string inventory_loss_text(InventoryLossVerdict v, size_t missing_items, uint32_t missing_meseta) {
@@ -489,10 +587,25 @@ static bool backup_session_alive(const std::string& path) {
   return c && (c->inventory_backup_current == path);
 }
 
+// Every INVENTORY_BACKUP_INTERIM_USECS while c is in the game of the backup at path: writes the interim state if the
+// inventory changed (what came in since the last write; what went out was written at once)
+static asio::awaitable<void> interim_ticker(std::weak_ptr<Client> weak_c, std::string path) {
+  for (;;) {
+    co_await async_sleep(std::chrono::microseconds(INVENTORY_BACKUP_INTERIM_USECS));
+    auto c = weak_c.lock();
+    if (!c || (c->inventory_backup_current != path)) {
+      co_return;
+    }
+    inventory_backup_flush_interim(c);
+  }
+}
+
 void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
   open_backups.erase(c->inventory_backup_current);
   c->inventory_backup_current.clear();
   c->inventory_backup_removals = InventoryRemovals();
+  c->inventory_backup_interim = InventoryInterimState();
+  c->inventory_backup_interim_urgent = false;
   if (!l || !l->is_game()) {
     return;
   }
@@ -513,9 +626,22 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
     c->inventory_backup_guarded = false;
     b.inventory = p->inventory;
     b.disp = p->disp;
+    // The first interim state is the join itself, in the same write (B-REGIE-20-4)
+    inventory_backup_record_interim(b, p->inventory, p->disp.stats.meseta, false, b.time_usecs,
+        inventory_backup_boot_id(), 1);
     std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
     c->inventory_backup_current = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
     open_backups[c->inventory_backup_current] = c;
+    auto& interim = c->inventory_backup_interim;
+    interim.written = true;
+    interim.inventory = p->inventory;
+    interim.meseta = p->disp.stats.meseta;
+    interim.guard_covered = false;
+    interim.count = 1;
+    auto s = c->require_server_state();
+    if (s->io_context) {
+      asio::co_spawn(*s->io_context, interim_ticker(c, c->inventory_backup_current), asio::detached);
+    }
     c->log.info_f("Inventory backup: saved {} Lv{} ({} items, {} Meseta{}) to {}",
         p->disp.visual.name.decode(c->language()), p->disp.stats.level + 1, p->inventory.num_items,
         p->disp.stats.meseta.load(), c->is_spire_protected() ? ", protected character, read only" : "",
@@ -534,6 +660,8 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   open_backups.erase(path);
   bool guarded = c->inventory_backup_guarded;
   c->inventory_backup_guarded = false;
+  c->inventory_backup_interim = InventoryInterimState();
+  c->inventory_backup_interim_urgent = false;
   try {
     auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
     auto p = normal ? nullptr : c->character_file(false, false);
@@ -546,8 +674,71 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   }
 }
 
+bool inventory_backup_set_aside(const std::string& path) {
+  std::error_code ec;
+  std::filesystem::rename(path, path + INVENTORY_BACKUP_SET_ASIDE_SUFFIX, ec);
+  return !ec;
+}
+
+void inventory_backup_flush_interim(std::shared_ptr<Client> c) {
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  auto& state = c->inventory_backup_interim;
+  try {
+    auto p = c->character_file(false, false);
+    if (!p) {
+      return;
+    }
+    uint64_t start = phosg::now();
+    if (!inventory_backup_write_interim(c->inventory_backup_current, state, p->inventory, p->disp.stats.meseta,
+            c->inventory_backup_guarded, start, inventory_backup_boot_id())) {
+      return;
+    }
+    uint64_t usecs = phosg::now() - start;
+    state.failed = false;
+    c->log.info_f("Inventory backup: interim state {} written ({} items, {} Meseta{}, {} us)", state.count,
+        p->inventory.num_items, p->disp.stats.meseta.load(), state.guard_covered ? ", Spire run" : "", usecs);
+    if (usecs > 50000) {
+      c->log.warning_f("Inventory backup: the interim write took {} ms", usecs / 1000);
+    }
+  } catch (const std::exception& e) {
+    if (!state.failed) {
+      c->log.warning_f("Inventory backup: cannot write the interim state into {}: {} (retried every {} s)",
+          c->inventory_backup_current, e.what(), INVENTORY_BACKUP_INTERIM_USECS / 1000000);
+    }
+    state.failed = true;
+  }
+}
+
+void inventory_backup_after_command(std::shared_ptr<Client> c) {
+  if (c->inventory_backup_interim_urgent) {
+    c->inventory_backup_interim_urgent = false;
+    inventory_backup_flush_interim(c);
+  }
+}
+
 void inventory_backup_note_guarded(std::shared_ptr<Client> c) {
   c->inventory_backup_guarded = true;
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  // The Spire mark must be on disk before the run copy exists: after a hard stop the guard restores this game, and an
+  // interim state without the mark would let $restore give the same items a second time
+  inventory_backup_flush_interim(c);
+  if (!c->inventory_backup_interim.written || !c->inventory_backup_interim.guard_covered) {
+    // Not written. Take the backup out of $restore's reach instead (it stays on disk under another name)
+    std::string path = c->inventory_backup_current;
+    bool set_aside = inventory_backup_set_aside(path);
+    c->log.error_f("Inventory backup: the Spire mark could not be written into {}; {}", path,
+        set_aside ? "set aside as " + path + INVENTORY_BACKUP_SET_ASIDE_SUFFIX + ", $restore will not use it"
+                  : "and it could not be set aside either");
+    if (set_aside) {
+      open_backups.erase(path);
+      c->inventory_backup_current.clear();
+      c->inventory_backup_interim = InventoryInterimState();
+    }
+  }
 }
 
 static asio::awaitable<void> send_loss_text(std::weak_ptr<Client> weak_c, std::string text) {
@@ -583,17 +774,21 @@ void inventory_backup_on_login(std::shared_ptr<Client> c) {
     }
     std::string path = dir + "/" + names[index];
     auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
-    const auto& source = b.has_exit ? b.exit_inventory : b.inventory;
-    uint32_t source_meseta = b.has_exit ? b.exit_meseta : b.disp.stats.meseta.load();
+    // After a hard server stop the interim state stands in for the Exit that was never written
+    bool interim_is_end = inventory_backup_interim_is_end(b, inventory_backup_boot_id());
+    auto from = inventory_backup_restore_source(b, inventory_backup_boot_id());
+    const auto& source = *from.inventory;
+    uint32_t source_meseta = from.meseta;
     auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta, InventoryRemovals());
-    auto verdict = inventory_loss_verdict(b, backup_session_alive(path), plan.items.size(), plan.meseta);
+    auto verdict = inventory_loss_verdict(b, backup_session_alive(path), plan.items.size(), plan.meseta, interim_is_end);
     if (verdict == InventoryLossVerdict::NONE) {
       return;
     }
     std::string name = p->disp.visual.name.decode(c->language());
     c->log.warning_f("Inventory backup: login 61 of {} ({}) misses {} items and {} Meseta of {} ({} items, {} Meseta{}): {}",
         name, c->is_spire_protected() ? "protected character" : "character", plan.items.size(), plan.meseta, path,
-        source.num_items, source_meseta, b.has_exit ? ", Exit" : ", join",
+        source.num_items, source_meseta,
+        (from.kind == InventoryBackupSource::Kind::EXIT) ? ", Exit" : (interim_is_end ? ", interim state after a hard stop" : ", join"),
         (verdict == InventoryLossVerdict::RESTORABLE) ? "hard end, $restore told" : "server stop without an end state, not restorable");
     if (!b.loss_time_usecs) {
       b.loss_time_usecs = phosg::now();
@@ -627,10 +822,16 @@ size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s) {
 
 void inventory_backup_note_removed(std::shared_ptr<Client> c, const ItemData& item) {
   inventory_removals_add(c->inventory_backup_removals, item);
+  // Something left the inventory: that goes to disk at once, never with the next bundle (B-REGIE-20-4). Where the
+  // caller notes before it removes, the write follows at the end of the command (inventory_backup_after_command)
+  c->inventory_backup_interim_urgent = true;
+  inventory_backup_flush_interim(c);
 }
 
 void inventory_backup_note_meseta_removed(std::shared_ptr<Client> c, uint64_t meseta) {
   c->inventory_backup_removals.meseta += meseta;
+  c->inventory_backup_interim_urgent = true;
+  inventory_backup_flush_interim(c);
 }
 
 std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bool check_only) {
@@ -673,7 +874,11 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
     backup = std::move(loaded[index]);
   }
 
-  auto refusal = inventory_restore_refusal(in_game, spire_game, protected_character, serial, character_id, backup.get());
+  // A backup without an end whose interim state was written by a server process that is gone: a hard stop, and the
+  // interim state is the end state (B-REGIE-20-4)
+  bool interim_is_end = backup && inventory_backup_interim_is_end(*backup, inventory_backup_boot_id());
+  auto refusal = inventory_restore_refusal(in_game, spire_game, protected_character, serial, character_id, backup.get(),
+      interim_is_end);
   if (refusal != InventoryRestoreRefusal::NONE) {
     c->log.info_f("Restore{}: refused for {} ({}): {}{}", check_only ? " check" : "", name,
         protected_character ? "protected character" : "character", inventory_restore_refusal_name(refusal),
@@ -681,16 +886,24 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
     return {inventory_restore_refusal_text(refusal)};
   }
 
-  const auto& source = backup->has_exit ? backup->exit_inventory : backup->inventory;
-  uint32_t source_meseta = backup->has_exit ? backup->exit_meseta : backup->disp.stats.meseta.load();
+  auto from = inventory_backup_restore_source(*backup, inventory_backup_boot_id());
+  bool from_interim = (from.kind == InventoryBackupSource::Kind::INTERIM);
+  const auto& source = *from.inventory;
+  uint32_t source_meseta = from.meseta;
   auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta,
       c->inventory_backup_removals);
   if (plan.empty()) {
-    c->log.info_f("Restore{}: nothing missing for {} against {}", check_only ? " check" : "", name, path);
-    return {"Niets kwijt ten opzichte van\nde back-up."};
+    c->log.info_f("Restore{}: nothing missing for {} against {}{}", check_only ? " check" : "", name, path,
+        from_interim ? " (interim state after a hard stop)" : "");
+    return {from_interim ? INVENTORY_RESTORE_NOTHING_INTERIM_TEXT : "Niets kwijt ten opzichte van\nde back-up."};
   }
 
   std::vector<std::string> lines;
+  if (from_interim) {
+    lines.emplace_back(INVENTORY_RESTORE_INTERIM_TEXT);
+    c->log.info_f("Restore{}: {} ended in a hard server stop; using its interim state {} of {}",
+        check_only ? " check" : "", path, backup->interim_count, phosg::format_time(backup->interim_time_usecs));
+  }
   lines.emplace_back(check_only ? "Zou terugleggen:" : "Teruggelegd:");
   for (const auto& item : plan.items) {
     lines.emplace_back(s->data->describe_item(c->version(), item));
