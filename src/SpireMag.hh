@@ -300,6 +300,9 @@ struct SpireKitMagTexts {
   int kit_grind = -1; // the grind G of the 'C' 13, -1 = none came
   uint32_t kit_hp_mat = 0; // the hp_mat level of the kit ticker
   bool mag_c14_seen = false; // a 'C' 14 came since the last RESULT 1 and newserv sent SpireEquipItem for it
+  // kwaliteit-2 275: the kit line and the kit weapon's equip hint in one order, the kit line first
+  bool kit_pending = false; // the kit ticker is on its way (spire_kit_ticker_starts .. spire_kit_ticker_ends)
+  std::optional<uint32_t> equip_hint_held; // the hint waits for that ticker: the kit weapon's item id
 };
 // critic r2 (B-1, a slow leader): when the kit ticker is due, whether it waits one SPIRE_KIT_USE_TEXT_DELAY more for
 // the 'C' 13: only while none came and the server would equip (r143 = 1), so a bundle 9 quest's line does not follow
@@ -311,6 +314,19 @@ std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, u
 // At 'C' 13 (grind G): stores G and returns the bundle 9 kit line when the ticker already went out in the old form
 // (the quest's kit was slower than the ticker, e.g. a leader's long lean list), once; "" otherwise.
 std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind);
+// kwaliteit-2 275: SPIRE_EQUIP_KIT_MISSING_TEXT ("Equip your kit weapon: Item Pack > Equip.", SPIRE_EQUIP_CHECK_DELAY
+// after the SpireEquipItem of a 'C' 13) and the kit line (SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, or at a
+// late 'C' 13) came within a second or two of each other, in either order, and the second pushed the first off the
+// ticker. One order: the kit line first, the hint after it; each takes its turn (SpireFlagBridge.hh
+// spire_ticker_turn_delay), so the hint follows a gap later.
+// The kit ticker starts its wait (the 'M' START answer that makes it due): a hint that comes due meanwhile is held.
+void spire_kit_ticker_starts(SpireKitMagTexts& st);
+// The equip check found the kit weapon item_id unequipped. True: the hint takes its turn now. False: it is held until
+// the kit ticker ends (spire_kit_ticker_ends).
+bool spire_kit_equip_hint_due(SpireKitMagTexts& st, uint32_t item_id);
+// The kit ticker ended (its line went out, or none was due): the item id of the held hint, which takes its turn now;
+// nullopt when none is held.
+std::optional<uint32_t> spire_kit_ticker_ends(SpireKitMagTexts& st);
 // At 'C' 14: the evolution text drops its equip hint only when newserv sends SpireEquipItem for the mag (equip_sent);
 // the quest sends 'C' 14 also with r143 = 0 (critic r2).
 void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent);

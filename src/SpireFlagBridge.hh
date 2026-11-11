@@ -985,6 +985,10 @@ std::chrono::milliseconds spire_pack_line_delay(
 // line, in the same per-client order (next_free).
 std::chrono::milliseconds spire_run_mag_reminder_delay(
     std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
+// kwaliteit-2 275: a waiting line that already had its own delay (the kit line, the kit weapon's equip hint) takes its
+// turn in the same order: at once when the order is free at now, otherwise when the line before it had its gap.
+std::chrono::milliseconds spire_ticker_turn_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
 // kwaliteit-2 145: a line that goes at once and must stay readable (SPIRE_BOSS_BURST_TEXT) holds that order for
 // SPIRE_PACK_LINE_GAP from now: no waiting line planned after it goes sooner. Never moves next_free back.
 void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);

@@ -7037,6 +7037,81 @@ void run_static_tests() {
       expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text_take(kit_only, false));
     });
 
+    k2_case("275: the kit line first, the kit weapon's equip hint a gap after it", [&]() {
+      using namespace std::chrono;
+      const int64_t gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP).count();
+      steady_clock::time_point t0{seconds(2000)};
+      const std::string kit_b9 = "Your kit weapon is ground +10. Use your HP Materials now (Item Pack).";
+      {
+        // the usual start: 'M' START at t0, the 'C' 13 soon after, its equip check a second later (the game refused
+        // the 6x25), the kit ticker at t0 + 3 s
+        SpireKitMagTexts st;
+        steady_clock::time_point lane{};
+        spire_kit_ticker_starts(st);
+        expect(spire_kit_c13_take(st, 10).empty());
+        expect(!spire_kit_equip_hint_due(st, 0x00210017)); // held: the kit line has not gone out yet
+        auto kit_at = t0 + seconds(3);
+        expect_eq(int64_t(0), spire_ticker_turn_delay(lane, kit_at).count()); // the kit line on its own time
+        expect_eq(kit_b9, spire_kit_ticker_take(st, 5, 3));
+        auto held = spire_kit_ticker_ends(st);
+        expect(held.has_value());
+        expect_eq(0x00210017u, held.value_or(0));
+        expect_eq(gap, spire_ticker_turn_delay(lane, kit_at).count()); // the hint a gap after the kit line
+        expect(!spire_kit_ticker_ends(st).has_value()); // released once
+      }
+      {
+        // the equip check after the kit line (a 'C' 13 just before the ticker): due, and its turn is a gap after it
+        SpireKitMagTexts st;
+        steady_clock::time_point lane{};
+        spire_kit_ticker_starts(st);
+        spire_kit_c13_take(st, 10);
+        auto kit_at = t0 + seconds(3);
+        expect_eq(int64_t(0), spire_ticker_turn_delay(lane, kit_at).count());
+        expect_eq(kit_b9, spire_kit_ticker_take(st, 5, 3));
+        expect(!spire_kit_ticker_ends(st).has_value());
+        expect(spire_kit_equip_hint_due(st, 0x00210017));
+        expect_eq(gap - 200, spire_ticker_turn_delay(lane, kit_at + milliseconds(200)).count());
+      }
+      {
+        // a slow leader: the old kit line, the bundle 9 line at its late 'C' 13, then the hint: a gap between each
+        SpireKitMagTexts st;
+        steady_clock::time_point lane{};
+        spire_kit_ticker_starts(st);
+        expect_eq(int64_t(0), spire_ticker_turn_delay(lane, t0 + seconds(3)).count());
+        expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(st, 2, 2));
+        expect(!spire_kit_ticker_ends(st).has_value());
+        expect(!spire_kit_c13_take(st, 4).empty());
+        expect_eq(gap - 1000, spire_ticker_turn_delay(lane, t0 + seconds(4)).count()); // the late line at t0 + 3 s + gap
+        expect(spire_kit_equip_hint_due(st, 0x00210017));
+        expect_eq(2 * gap - 2000, spire_ticker_turn_delay(lane, t0 + seconds(5)).count()); // the hint a gap after that
+      }
+      {
+        // no kit ticker (a kit without HP Materials and grind): nothing to wait for
+        SpireKitMagTexts st;
+        steady_clock::time_point lane{};
+        expect(spire_kit_equip_hint_due(st, 0x00210017));
+        expect_eq(int64_t(0), spire_ticker_turn_delay(lane, t0).count());
+      }
+      {
+        // a kit ticker that ends without a line (its 'J' resumed the run) frees the held hint at once
+        SpireKitMagTexts st;
+        steady_clock::time_point lane{};
+        spire_kit_ticker_starts(st);
+        expect(!spire_kit_equip_hint_due(st, 0x00210017));
+        expect_eq(0x00210017u, spire_kit_ticker_ends(st).value_or(0));
+        expect_eq(int64_t(0), spire_ticker_turn_delay(lane, t0 + seconds(3)).count());
+      }
+      {
+        // the reminder of the kit's first mag (kwaliteit-2 145) stands in the same order: reminder, kit line, hint
+        steady_clock::time_point lane{};
+        expect_eq(gap, spire_run_mag_reminder_delay(lane, t0 + seconds(1)).count()); // at t0 + 1 s + gap
+        expect_eq(2 * gap - 2000, spire_ticker_turn_delay(lane, t0 + seconds(3)).count()); // the kit line a gap later
+        expect_eq(3 * gap - 2000, spire_ticker_turn_delay(lane, t0 + seconds(3)).count()); // the hint a gap after it
+      }
+      // both lines are those of before
+      expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."), std::string(SPIRE_EQUIP_KIT_MISSING_TEXT));
+    });
+
     expect_eq(0u, k2_failed);
   }
 

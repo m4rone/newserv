@@ -2431,6 +2431,13 @@ std::chrono::milliseconds spire_run_mag_reminder_delay(
   return spire_pack_line_delay(next_free, now);
 }
 
+std::chrono::milliseconds spire_ticker_turn_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
+  auto at = std::max(now, next_free);
+  next_free = at + SPIRE_PACK_LINE_GAP;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(at - now);
+}
+
 void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
   next_free = std::max(next_free, now + SPIRE_PACK_LINE_GAP);
 }
@@ -3044,8 +3051,42 @@ uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
 }
 
+// kwaliteit-2 275: SPIRE_EQUIP_KIT_MISSING_TEXT in its turn (spire_ticker_turn_delay), after the kit line. The weapon
+// is looked at again when the line goes: the player may have equipped it while it waited. Holds neither the client nor
+// its game while it waits. Never throws.
+static asio::awaitable<void> spire_equip_kit_hint_later(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t item_id, std::chrono::milliseconds delay) {
+  if (delay.count() > 0) {
+    co_await async_sleep(delay);
+  }
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  try {
+    auto character = c->character_file(false, true);
+    auto text = character ? spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, item_id, character->inventory) : std::nullopt;
+    if (text) {
+      spire_send_ticker(c, *text);
+    }
+    c->log.info_f("Spire equip: kit weapon {:08X} {}", item_id,
+        text ? std::format("still not equipped {} ms after its check; sent \"{}\"", delay.count(), *text)
+             : std::string("equipped (or gone) while its hint waited: no line"));
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire equip: kit weapon {:08X}; equip hint failed: {}", item_id, e.what());
+  }
+}
+
+static void spire_equip_kit_hint_in_turn(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t item_id) {
+  auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+  asio::co_spawn(*c->require_server_state()->io_context, spire_equip_kit_hint_later(c, l, item_id, delay), asio::detached);
+}
+
 // Route B F5/F6, bundle 2 S: SPIRE_KIT_USE_TEXT, SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, so the kit items
 // exist when it shows. By then the client's 'J' has told a resume (no kit) from a fresh start; once per client and run.
+// kwaliteit-2 275: the line takes its turn (spire_ticker_turn_delay), and when it ends, with or without a line, the
+// kit weapon's equip hint that was held for it takes the next (spire_kit_ticker_ends).
 static asio::awaitable<void> spire_kit_use_text_later(
     std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t hp_mat, uint32_t atp_grind) {
   co_await async_sleep(SPIRE_KIT_USE_TEXT_DELAY);
@@ -3069,6 +3110,19 @@ static asio::awaitable<void> spire_kit_use_text_later(
     cr = spire_client_run_for(c, l, true);
   }
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
+    // kwaliteit-2 275: behind a line that waits already (the reminder of the kit's first mag), not on top of it
+    auto turn = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+    if (turn.count() > 0) {
+      c.reset();
+      l.reset();
+      co_await async_sleep(turn);
+      c = weak_c.lock();
+      l = weak_l.lock();
+      if (!c || !l || (c->lobby.lock() != l)) {
+        co_return;
+      }
+      cr = spire_client_run_for(c, l, true);
+    }
     cr->kit_text_sent = true;
     // route B bundle 9 critic B-1: the bundle 9 form only after this client's 'C' 13 (the quest made the kit weapon +G
     // and gave no Monogrinders); a later 'C' 13 sends that line then (spire_equip_prompt_handle)
@@ -3082,6 +3136,9 @@ static asio::awaitable<void> spire_kit_use_text_later(
   } else {
     c->log.info_f("Spire shop: kit hp_mat {} atp_grind {}; no kit text ({})", hp_mat, atp_grind,
         cr->answered_resume ? "resumed: no kit" : "already sent in this run");
+  }
+  if (auto held = spire_kit_ticker_ends(cr->b9_texts)) {
+    spire_equip_kit_hint_in_turn(c, l, *held);
   }
 }
 
@@ -3213,6 +3270,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
   if ((refusal == SpireShopRefusal::NONE) &&
       spire_kit_use_text_due(sub == SPIRE_SHOP_START, kit_hp_mat, kit_atp_grind, false, false)) {
     if (auto cl = c->lobby.lock()) {
+      spire_kit_ticker_starts(spire_client_run_for(c, cl, true)->b9_texts); // kwaliteit-2 275
       asio::co_spawn(*c->require_server_state()->io_context,
           spire_kit_use_text_later(c, cl, kit_hp_mat, kit_atp_grind), asio::detached);
     }
@@ -3249,12 +3307,22 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, ui
     }
     if (auto character = c->character_file(false, true)) {
       auto text = spire_equip_missing_text(point, item_id, character->inventory);
-      if (text) {
-        spire_send_ticker(c, *text);
+      if (text && (point == SPIRE_PROMPT_KIT_GROUND)) {
+        // kwaliteit-2 275: the kit line first; the hint takes the turn after it
+        bool due = spire_kit_equip_hint_due(spire_client_run_for(c, l, true)->b9_texts, item_id);
+        if (due) {
+          spire_equip_kit_hint_in_turn(c, l, item_id);
+        }
+        c->log.info_f("Spire equip: {} {:08X} not equipped after {} ms; \"{}\" {}", what, item_id,
+            SPIRE_EQUIP_CHECK_DELAY.count(), *text, due ? "takes its turn" : "waits for the kit line");
+      } else {
+        if (text) {
+          spire_send_ticker(c, *text);
+        }
+        c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
+            text ? std::format("not equipped after {} ms; sent \"{}\"", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
+                 : std::string("equipped (or gone): no line"));
       }
-      c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
-          text ? std::format("not equipped after {} ms; sent \"{}\"", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
-               : std::string("equipped (or gone): no line"));
     }
   } catch (const std::exception& e) {
     if (c) { // critic r2: c is empty from c.reset() on, and stays so when the client left during the wait
@@ -3353,8 +3421,10 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
     // critic B-1: the kit ticker went out before this 'C' 13 in the old form: the bundle 9 line now, once
     std::string late = spire_kit_c13_take(cr->b9_texts, low);
     if (!late.empty()) {
-      spire_send_ticker(c, late);
-      c->log.info_f("Spire equip: 'C' 13 after the kit ticker; sent \"{}\"", late);
+      // kwaliteit-2 275: a gap after the old kit line it corrects, and before this 'C' 13's equip hint
+      auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+      spire_send_ticker_later(c, l, late, delay);
+      c->log.info_f("Spire equip: 'C' 13 after the kit ticker; \"{}\" in {} ms", late, delay.count());
     }
   }
   bool available = spire_equip_item_available_for(c);

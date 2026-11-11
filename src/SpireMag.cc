@@ -508,6 +508,25 @@ std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind) {
   return spire_kit_use_text(true, grind, st.kit_hp_mat);
 }
 
+void spire_kit_ticker_starts(SpireKitMagTexts& st) {
+  st.kit_pending = true;
+}
+
+bool spire_kit_equip_hint_due(SpireKitMagTexts& st, uint32_t item_id) {
+  if (!st.kit_pending) {
+    return true;
+  }
+  st.equip_hint_held = item_id;
+  return false;
+}
+
+std::optional<uint32_t> spire_kit_ticker_ends(SpireKitMagTexts& st) {
+  st.kit_pending = false;
+  auto ret = st.equip_hint_held;
+  st.equip_hint_held.reset();
+  return ret;
+}
+
 void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent) {
   if (equip_sent) {
     st.mag_c14_seen = true;
