@@ -920,6 +920,17 @@ bool spire_guard_restore_awaits_save(const char* where);
 // The marker step of a verified restore push outside a game: RestorePending goes, AwaitingSave is awaits_save, and the
 // overlay fingerprint (log only) stays only with AwaitingSave.
 void spire_guard_restore_verified_apply(SpireGuardSnapshot& snapshot, bool awaits_save);
+// Bank (regie, after a mutation of spoor intern that wiped the bank and still read "verified"): what a verified restore
+// covers. The verifying 61 carries the inventory and the disp, never the bank, and a GameCube client never sends its
+// bank on its own: the bank counter talks to the server on BB only (6xBB, 6xBD), so the one way the server sees it is
+// the 30 it asks for with GetExtendedPlayerInfo. The restore therefore cannot say that the client holds the right bank
+// after the push. What it can say, and now checks before it pushes: the character it is about to send holds the bank
+// the client sent in the 30 right before, byte for byte in the client's own form. If not, nothing is pushed and the
+// marker stays (the card is not written, so its bank survives).
+bool spire_guard_push_keeps_bank(const PlayerBank200BE& received, const PlayerBank200BE& to_send);
+// What the log says a verified restore checked. It names the bank as not checked, with the count and meseta of the
+// bank that was sent back, so no line reads as if the whole character was verified.
+std::string spire_guard_verified_scope(uint32_t bank_items, uint32_t bank_meseta);
 // Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
 // spire_guard_follow_real_progress if spire_guard_end_run saw the client leave a Normal or Solo game under
 // AwaitingSave, (v51) spire_guard_base_exit_follow if it saw the client leave a Spire game after a verified 'O', and

@@ -4554,6 +4554,16 @@ bool spire_guard_follow_real_progress(
   return true;
 }
 
+// Bank: see SpireFlagBridge.hh
+bool spire_guard_push_keeps_bank(const PlayerBank200BE& received, const PlayerBank200BE& to_send) {
+  return !memcmp(&received, &to_send, sizeof(received));
+}
+
+std::string spire_guard_verified_scope(uint32_t bank_items, uint32_t bank_meseta) {
+  return std::format("verified by the 61: level, EXP, items, meseta, material counters; bank NOT checked (a 61 carries no bank): sent back as the client held it, {} items, meseta {}",
+      bank_items, bank_meseta);
+}
+
 // 8-B2: see SpireFlagBridge.hh
 bool spire_guard_restore_awaits_save(const char* where) {
   return !strcmp(where, "game exit") || !strcmp(where, "login");
@@ -5300,7 +5310,7 @@ struct SpireGuardWatchdog {
 // base) checks the same and changes no marker and no file.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
     SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool after_game,
-    bool keep_marker = false) {
+    bool keep_marker = false, const std::string& scope = "") {
   if (!character) {
     c->log.warning_f("Spire guard: restore not verified for serial {:010}: no character in the 61; marker kept", serial_number);
     return false;
@@ -5332,15 +5342,15 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
     return false;
   }
   if (keep_marker) {
-    c->log.info_f("Spire guard: in-game restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; marker unchanged",
-        serial_number, level + 1, exp, items_str);
+    c->log.info_f("Spire guard: in-game restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; marker unchanged; {}",
+        serial_number, level + 1, exp, items_str, scope);
     return true;
   }
   spire_guard_restore_verified_apply(snapshot, after_game);
   spire_guard_save(filename, serial_number, snapshot);
-  c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}",
+  c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}; {}",
       serial_number, level + 1, exp, items_str,
-      after_game ? "marker kept until a login 61 shows the same" : "marker cleared");
+      after_game ? "marker kept until a login 61 shows the same" : "marker cleared", scope);
   return true;
 }
 
@@ -5467,12 +5477,25 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     snapshot.overlay_exp = info.character->disp.stats.exp;
     snapshot.overlay_meseta = info.character->disp.stats.meseta;
     snapshot.overlay_num_items = info.character->inventory.num_items;
+    // Bank: the character as the client sent it, in the client's own form, before anything is changed
+    PSOGCCharacterFile::Character received = *info.character;
     auto merged = info.character;
     uint8_t level_before = merged->disp.stats.level;
     auto visual = merged->disp.visual;
     merged->inventory = snapshot.inventory;
     merged->disp = snapshot.disp;
     merged->disp.visual = visual;
+    // Bank: the push must send the client's own bank back; no 61 can show afterwards whether it did
+    {
+      PSOGCCharacterFile::Character to_send = *merged;
+      if (!spire_guard_push_keeps_bank(received.bank, to_send.bank)) {
+        c->log.warning_f("Spire guard: the character to push for serial {:010} does not hold the bank the client sent ({} items, meseta {}; to push: {} items, meseta {}); nothing pushed, marker kept",
+            serial_number, received.bank.num_items.load(), received.bank.meseta.load(), to_send.bank.num_items.load(),
+            to_send.bank.meseta.load());
+        co_return false;
+      }
+    }
+    std::string scope = spire_guard_verified_scope(received.bank.num_items, received.bank.meseta);
 
     // Only the 61 requested after the push can verify the restore (v8): no earlier 61 and no 98 counts
     bool pushed = false;
@@ -5482,7 +5505,8 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     if (!pushed) {
       co_return false;
     }
-    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after, spire_guard_restore_awaits_save(where), in_game)) {
+    if (!spire_guard_verify_restore(
+            c, serial_number, filename, snapshot, after, spire_guard_restore_awaits_save(where), in_game, scope)) {
       co_return false;
     }
     co_return true;

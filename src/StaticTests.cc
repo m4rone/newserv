@@ -8336,6 +8336,10 @@ void run_static_tests() {
     auto no_marker = [](const SpireGuardSnapshot& snap) {
       return !snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save;
     };
+    // 8-B2: what a verified restore leaves, at the game exit and at login: the card is not written yet
+    auto awaiting_only = [](const SpireGuardSnapshot& snap) {
+      return !snap.run_in_progress && !snap.restore_pending && snap.awaiting_save;
+    };
     e2e_case("start, run copy, game exit: the 98, the restore before the lobby join, the next login", [&]() {
       TempCwd temp_cwd;
       auto w = make_world();
@@ -8406,9 +8410,29 @@ void run_static_tests() {
       expect_eq(0u, p2.ch->card_writes.size());
       expect(server_holds(p2, *r.server_real));
       snap = snapshot_on_disk(p2);
-      expect(no_marker(snap));
+      // 8-B2 (was no_marker): the restore at login leaves AwaitingSave, since the 97 goes out only after it
+      expect(awaiting_only(snap));
       expect(snapshot_is(snap, *r.server_real));
       expect(spire_guard_game_join_allowed(p2.c, false));
+
+      // 8-B2: the client drops before it wrote its card, so the card still holds the run copy. The login after that
+      // finds the marker open and pushes the real character again (with the marker closed it restored nothing)
+      p2.ch->open = false;
+      auto p3 = connect(w, r.run_copy);
+      client_sends(w, p3, 0x61, p3.ch->as_61());
+      expect(run_bool(w, p3, spire_guard_restore_if_needed(p3.c)));
+      expect_real(p3.ch->memory, real, "after the second login, the card still held the run copy");
+      expect_eq(1u, p3.ch->pushes);
+      expect(awaiting_only(snapshot_on_disk(p3)));
+      // this time the card is written. The next login's 61 equals the snapshot: the marker closes, nothing is pushed
+      p3.ch->open = false;
+      auto p4 = connect(w, p3.ch->memory);
+      client_sends(w, p4, 0x61, p4.ch->as_61());
+      expect(run_bool(w, p4, spire_guard_restore_if_needed(p4.c)));
+      expect_eq(0u, p4.ch->pushes);
+      expect_real(p4.ch->memory, real, "after the login whose card held the real character");
+      expect(no_marker(snapshot_on_disk(p4)));
+      expect(server_holds(p4, *r.server_real));
     });
     e2e_case("game exit, but the card kept the run copy: the next login pushes the real character again", [&]() {
       TempCwd temp_cwd;
@@ -8430,7 +8454,7 @@ void run_static_tests() {
       expect_eq(1u, p2.ch->pushes);
       expect(server_holds(p2, *r.server_real));
       snap = snapshot_on_disk(p2);
-      expect(no_marker(snap));
+      expect(awaiting_only(snap)); // 8-B2 (was no_marker): the login restore awaits the save too
       expect(snapshot_is(snap, *r.server_real));
     });
 
@@ -8456,10 +8480,47 @@ void run_static_tests() {
       expect_real(p2.ch->memory, real, "after the login that follows a refused game exit restore");
       expect_eq(1u, p2.ch->pushes);
       expect(server_holds(p2, *r.server_real));
-      expect(no_marker(snapshot_on_disk(p2)));
+      expect(awaiting_only(snapshot_on_disk(p2))); // 8-B2 (was no_marker): the login restore awaits the save too
     });
 
     expect_eq(0u, e2e_failed);
+
+    // Bank (regie): a restore never reads the bank back, so its log line may not read as if it did, and the push may
+    // never send another bank than the client's own
+    {
+      const GCCharacter real = real_character();
+      GCCharacter wiped = real;
+      wiped.bank = PlayerBank200BE();
+      GCCharacter one_item = real;
+      one_item.bank.items[1].data.data1[1] = 0x7F;
+      GCCharacter meseta = real;
+      meseta.bank.meseta = 1;
+      expect(!spire_guard_push_keeps_bank(real.bank, wiped.bank));
+      expect(!spire_guard_push_keeps_bank(real.bank, one_item.bank));
+      expect(!spire_guard_push_keeps_bank(real.bank, meseta.bank));
+      expect(spire_guard_push_keeps_bank(real.bank, real.bank));
+      // what the restore sends: the 30 turned into the server's form, inventory and disp replaced, turned back. The
+      // bank comes out as it went in, whatever the inventory and the disp become
+      {
+        auto bb = PSOBBCharacterFile::create_from_file(real);
+        GCCharacter received = *bb;
+        bb->inventory = PlayerInventory();
+        bb->disp = PlayerDispDataV4();
+        GCCharacter to_send = *bb;
+        expect(spire_guard_push_keeps_bank(received.bank, to_send.bank));
+        expect(spire_guard_push_keeps_bank(real.bank, to_send.bank)); // and it is the bank the client sent
+        bb->bank = PlayerBank200(); // the mutation: the bank wiped on the way
+        GCCharacter mutated = *bb;
+        expect(!spire_guard_push_keeps_bank(received.bank, mutated.bank));
+      }
+      // the log line of a verified restore names the bank as not checked, never as verified
+      std::string scope = spire_guard_verified_scope(3, 777000);
+      expect(scope.find("bank NOT checked") != std::string::npos);
+      expect(scope.find("3 items") != std::string::npos);
+      expect(scope.find("777000") != std::string::npos);
+      expect(scope.find("fully") == std::string::npos);
+      expect(spire_guard_verified_scope(0, 0).find("bank NOT checked") != std::string::npos);
+    }
   }
 
   phosg::log_info_f("-- All static tests passed");
