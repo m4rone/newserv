@@ -8843,6 +8843,164 @@ void run_static_tests() {
       must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the failed proof");
       must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
     });
+    // The base game (spire_base_game_request, spire_base_new_run). With a base quest on the server an 'O' after the run
+    // end never pushes in the run's game: the party leaves it (6x73), the game exit restores the real character, and the
+    // base game is a Normal game with the base quest. The base game's own creation and quest start
+    // (spire_base_game_join, spire_base_game_start: create_game_generic, set_lobby_quest) are not played here: the case
+    // builds that game as they leave it. "Start a new run" there sends the party out again, and the new run's quest load
+    // (on_quest_loaded: spire_create_battle_overlay) takes the snapshot again.
+    e2e_case("the base game: the run ends, 'O' sends the party to the base game, the game exit restores the real character, the base game, a new run from there and its game exit", [&]() {
+      TempCwd temp_cwd;
+      constexpr uint32_t BASE_QUEST = 987656;
+      auto w = make_world();
+      give_item_tables(w);
+      // the server's quests: the base quest (a Normal quest) and the run quest that "Start a new run" starts
+      auto index = std::make_shared<QuestIndex>(nullptr, "no-quests-here", std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), false);
+      auto base_vq = std::make_shared<VersionedQuest>();
+      base_vq->meta.quest_number = BASE_QUEST;
+      base_vq->meta.episode = Episode::EP1;
+      base_vq->meta.version = Version::GC_V3;
+      base_vq->meta.language = Language::ENGLISH;
+      auto base_quest = std::make_shared<Quest>(base_vq);
+      index->quests_by_number[BASE_QUEST] = base_quest;
+      auto rules = std::make_shared<BattleRules>();
+      rules->replace_char = true;
+      rules->char_level = 0;
+      auto run_vq = std::make_shared<VersionedQuest>();
+      run_vq->meta.quest_number = QUEST;
+      run_vq->meta.episode = Episode::EP1;
+      run_vq->meta.battle_rules = rules;
+      run_vq->meta.version = Version::GC_V3;
+      run_vq->meta.language = Language::ENGLISH;
+      auto run_quest = std::make_shared<Quest>(run_vq);
+      index->quests_by_number[SPIRE_BASE_DEFAULT_RUN_QUEST] = run_quest;
+      w.s->data->quest_index = index;
+      w.s->data->spire_base_quest_number = BASE_QUEST;
+
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      p.c->floor = 1;
+      spire_checkpoint_run_started(p.c);
+      auto server_and_snapshot_real = [&](const char* when, bool run_in_progress, bool restore_pending, bool awaiting_save) {
+        if (!server_holds(p, *r.server_real)) {
+          throw std::runtime_error(std::format("{}: the server's real character changed", when));
+        }
+        auto snap = snapshot_on_disk(p);
+        if (!snapshot_is(snap, *r.server_real)) {
+          throw std::runtime_error(std::format("{}: the snapshot is not the real character", when));
+        }
+        if ((snap.run_in_progress != run_in_progress) || (snap.restore_pending != restore_pending) || (snap.awaiting_save != awaiting_save)) {
+          throw std::runtime_error(std::format("{}: the marker is {}{}{}", when, snap.run_in_progress ? "RunInProgress " : "",
+              snap.restore_pending ? "RestorePending " : "", snap.awaiting_save ? "AwaitingSave" : ""));
+        }
+      };
+
+      // the run ends; the 'O' answers BASE_GAME and pushes nothing: the client still holds the run copy
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::BASE_GAME),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' with a base quest"));
+      expect_eq(0u, p.ch->pushes);
+      must(!memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)), "the 'O' of the base game changed what the client holds");
+      server_and_snapshot_real("after the 'O' of the base game", true, false, false);
+
+      // the client obeys the 6x73: the 98 carries the run copy, the 84's restore pushes the real character, the card gets it
+      client_sends(w, p, 0x98, p.ch->as_61());
+      must(!p.c->lobby.lock() && !p.c->has_overlay(), "the 98 left the client in the run's game or with its run copy");
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "the snapshot followed the run copy's 98 on the way to the base game");
+      must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore on the way to the base game was refused");
+      expect_real(p.ch->memory, real, "after the game exit on the way to the base game");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card on the way to the base game");
+      server_and_snapshot_real("after the game exit on the way to the base game", false, false, true);
+
+      // the base game, as spire_base_game_join and spire_base_game_start leave it: a Normal game with the base quest
+      auto base = std::make_shared<Lobby>(w.s, 0x7B02, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->quest = base_quest;
+      base->leader_id = 0;
+      base->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      base->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = base;
+      p.c->floor = 0;
+      must(!p.c->has_overlay(), "the client has a run copy in the base game");
+      expect_real(p.ch->memory, real, "in the base game");
+      server_and_snapshot_real("in the base game", false, false, true);
+
+      // "Start a new run" (the leader's 'O' sub 2): every client of the base game gets a 6x73, nothing is pushed
+      Seat seat;
+      seat.p = p;
+      std::vector<Seat*> alone{&seat};
+      must(spire_bridge_handle_register(p.c, base, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BASE_NEW_RUN_VALUE), "the bridge did not take the base game's new run");
+      drive_seats(w, alone, [&]() { return seat.exits_asked > 0; }, "the base game's 6x73 for the new run");
+      expect_eq(1u, seat.exits_asked);
+      expect_eq(1u, p.ch->pushes);
+      expect_real(p.ch->memory, real, "after the new run's 6x73 in the base game");
+      server_and_snapshot_real("after the new run's 6x73 in the base game", false, false, true);
+
+      // the base game's 98 carries the real character; the 84 that follows restores nothing that differs
+      seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+      must(!p.c->lobby.lock(), "the 98 left the client in the base game");
+      server_and_snapshot_real("after the base game's 98", false, false, true);
+      must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the base game exit"), "the base game exit was refused");
+      expect_real(p.ch->memory, real, "after the base game exit");
+      for (const auto& written : p.ch->card_writes) {
+        expect_real(written, real, "on the memory card after the base game exit");
+      }
+      server_and_snapshot_real("after the base game exit", false, false, true);
+
+      // the new run's Battle game and its quest load: the snapshot is taken again, the run copy is made
+      auto again = std::make_shared<Lobby>(w.s, 0x7B03, true);
+      again->episode = Episode::EP1;
+      again->mode = GameMode::BATTLE;
+      again->quest = run_quest;
+      again->leader_id = 0;
+      again->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      w.s->id_to_lobby.emplace(again->lobby_id, again);
+      again->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = again;
+      p.c->delete_overlay();
+      spire_checkpoint_run_started(p.c);
+      must(spire_create_battle_overlay(p.c, again), "the new run's quest load was refused");
+      must(p.c->has_overlay(), "no run copy in the new run");
+      expect_eq(0u, p.c->character_file(false, true)->disp.stats.level.load());
+      server_and_snapshot_real("at the new run's quest load", true, false, false);
+      wear_down(p, 0x05, 0x00830000, 6, 6543, 10);
+      must(server_holds(p, *r.server_real), "the new run changed the server's real character");
+
+      // the new run's game exit: the 98 carries its run copy, the restore pushes the real character, the card gets it
+      size_t pushes = p.ch->pushes;
+      size_t cards = p.ch->card_writes.size();
+      seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+      // the 98 makes the run copy the server's character data until the restore, as at any game exit
+      auto snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the new run's 98 is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after the new run's 98 is not the real character");
+      must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the new run's game exit"), "the new run's game exit restore was refused");
+      expect_real(p.ch->memory, real, "after the new run's game exit");
+      expect_eq(pushes + 1, p.ch->pushes);
+      expect_eq(cards + 1, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes.back(), real, "on the memory card after the new run's game exit");
+      server_and_snapshot_real("after the new run's game exit", false, false, true);
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes.back());
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game and the new run was refused");
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the base game and the new run");
+      must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the new run");
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
+    });
 
     expect_eq(0u, e2e_failed);
   }
