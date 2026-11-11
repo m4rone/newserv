@@ -7743,8 +7743,8 @@ void run_static_tests() {
     l->quest = std::make_shared<Quest>(vq);
     std::shared_ptr<const Lobby> cl = l;
 
-    // a GC client with a character; owned_start_level > 0 gives it a meta file with that start_level upgrade
-    auto make_client = [&](uint32_t serial_number, uint32_t owned_start_level) -> std::shared_ptr<Client> {
+    // a GC client with a character; upgrades (if any) are its meta file's shop upgrades
+    auto make_client = [&](uint32_t serial_number, const std::map<std::string, uint32_t>& upgrades) -> std::shared_ptr<Client> {
       auto c = std::make_shared<Client>(server, std::make_shared<QuietChannel>(), ServerBehavior::GAME_SERVER);
       auto login = std::make_shared<Login>();
       login->account = std::make_shared<Account>();
@@ -7752,9 +7752,9 @@ void run_static_tests() {
       login->gc_license->serial_number = serial_number;
       c->login = login;
       auto character = c->character_file(true, false); // an empty file, nothing is read
-      if (owned_start_level) {
+      if (!upgrades.empty()) {
         SpireMetaFile meta;
-        meta.upgrades["start_level"] = owned_start_level;
+        meta.upgrades = upgrades;
         spire_meta_save_file(spire_meta_filename_for(serial_number, &character->disp), serial_number, meta);
       }
       return c;
@@ -7764,8 +7764,8 @@ void run_static_tests() {
       l->clients[slot] = c;
       c->lobby = l;
     };
-    auto strong = make_client(4300, 3); // start_level 3 owned: +14 (the shipped Levels)
-    auto fresh = make_client(4301, 0); // owns nothing
+    auto strong = make_client(4300, {{"start_level", 3}}); // start_level 3 owned: +14 (the shipped Levels)
+    auto fresh = make_client(4301, {}); // owns nothing
     seat(strong, 0);
     seat(fresh, 1);
 
@@ -7821,6 +7821,80 @@ void run_static_tests() {
     s->data->spire_bridge_quest_numbers.clear();
     expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
     s->data->spire_bridge_quest_numbers.emplace(QUEST);
+
+    // The heat follows the quest's leader too (spire_heat_quest_bin): the game plays the rows of the H of the client in
+    // SpireFollowLeader's LeaderClient slot (else slot 0), whoever leads the game; with nobody in that slot the game's
+    // leader (l->leader_id), never an empty slot. hot owns every hp_mat and atp_grind level, fresh owns nothing.
+    {
+      auto repo = spire_shop_parse(shop_json);
+      std::map<std::string, uint32_t> hot_upgrades;
+      for (size_t z : {size_t(2), size_t(3)}) { // hp_mat, atp_grind
+        hot_upgrades[SPIRE_SHOP_ITEM_NAMES[z]] = repo.items[z].strength.size() - 1;
+      }
+      auto hot = make_client(4302, hot_upgrades);
+      uint8_t char_class = hot->character_file(true, false)->disp.visual.sh.char_class;
+      uint8_t rung = spire_meta_ladder_quest_rung(QUEST);
+      // the sidecar: one byte at 0 ('h' at H 0) that names the step, H 0..7
+      std::filesystem::create_directories(SPIRE_HEAT_PATCH_DIR);
+      phosg::save_file(std::format("{}/q{}.json", SPIRE_HEAT_PATCH_DIR, QUEST), std::format(
+          R"({{"Quest": {}, "BinSize": {}, "HeatMax": 7, "Fields": [{{"Offset": 0, "Width": 1, "Values": ["68", "A1", "A2", "A3", "A4", "A5", "A6", "A7"]}}]}})",
+          QUEST, bin_at(0).size()));
+      uint32_t hot_step = std::min<uint32_t>(spire_shop_heat(repo, char_class, spire_shop_strength(repo, hot_upgrades), rung), 7);
+      uint32_t fresh_step = std::min<uint32_t>(spire_shop_heat(repo, char_class, spire_shop_strength(repo, {}), rung), 7);
+      expect(hot_step >= 1);
+      expect_eq(0u, fresh_step);
+      auto heat_step_sent_to = [&](std::shared_ptr<Client> c) -> uint32_t {
+        auto sent = spire_heat_quest_bin(c, cl, quest_bin);
+        return (sent == quest_bin) ? 0 : (static_cast<uint8_t>(prs_decompress(*sent)[0]) - 0xA0);
+      };
+      // every client of the game gets the rows of one step, with either client as the game's leader
+      auto expect_game_step = [&](uint32_t step, const std::vector<std::shared_ptr<Client>>& seats) {
+        l->clients.fill(nullptr);
+        for (size_t slot = 0; slot < seats.size(); slot++) {
+          if (seats[slot]) {
+            seat(seats[slot], slot);
+          }
+        }
+        for (const auto& c : seats) {
+          if (c) {
+            expect_eq(step, heat_step_sent_to(c));
+          }
+        }
+      };
+      // hot in slot 0: its H, also when the client in slot 1 leads the game (slot 0 went to the lobby and came back)
+      l->leader_id = 0;
+      expect_game_step(hot_step, {hot, fresh});
+      l->leader_id = 1;
+      expect_game_step(hot_step, {hot, fresh});
+      // fresh in slot 0: H 0, also when hot leads the game
+      l->leader_id = 0;
+      expect_game_step(0, {fresh, hot});
+      l->leader_id = 1;
+      expect_game_step(0, {fresh, hot});
+      // SpireFollowLeader names slot 1: the client there is the measure
+      s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(1, 0);
+      for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+        l->leader_id = game_leader;
+        expect_game_step(hot_step, {fresh, hot});
+        expect_game_step(0, {hot, fresh});
+      }
+      // nobody in the quest leader's slot (SpireFollowLeader's slot 2 here, then slot 0): the game's leader
+      s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(2, 0);
+      l->leader_id = 0;
+      expect_game_step(hot_step, {hot, fresh});
+      l->leader_id = 1;
+      expect_game_step(0, {hot, fresh});
+      s->data->spire_follow_leader.reset();
+      l->leader_id = 1;
+      expect_game_step(hot_step, {nullptr, hot, fresh});
+      l->leader_id = 2;
+      expect_game_step(0, {nullptr, hot, fresh});
+      hot->lobby.reset();
+      l->clients.fill(nullptr);
+      seat(strong, 0);
+      seat(fresh, 1);
+      l->leader_id = 0;
+    }
 
     // the overlay follows the level each client's .bin carried (on_quest_loaded: spire_create_battle_overlay)
     expect_eq(bin_at(14), sent_to(strong));

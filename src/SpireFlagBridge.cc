@@ -4744,12 +4744,19 @@ struct SpireHeatLeader {
   std::string detail;
 };
 
-// The game leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
+// The quest leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
 // and the shop catalogue, start_level counted as the run copy this quest load gives it (spire_start_level_bonus_for_client),
 // plus the chosen heat (H_keuze), which the server does not know yet (0). Throws on a file error.
+// B-REGIE-20-5: the leader is the quest's, as the level floor and the resume take it: SpireFollowLeader's LeaderClient
+// (else lobby client 0); with nobody in that slot the game's leader (l->leader_id), never an empty slot.
 static SpireHeatLeader spire_heat_for_leader(std::shared_ptr<const Lobby> l) {
   SpireHeatLeader ret;
-  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
+  const auto& follow = l->require_server_state()->data->spire_follow_leader;
+  uint8_t leader_id = follow ? follow->first : 0;
+  if ((leader_id >= l->clients.size()) || !l->clients[leader_id]) {
+    leader_id = l->leader_id;
+  }
+  auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
   if (!leader || (leader->version() != Version::GC_V3) || !leader->login || !leader->login->gc_license) {
     ret.detail = "no GC leader";
     return ret;
