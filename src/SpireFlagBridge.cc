@@ -4655,7 +4655,8 @@ static std::optional<uint32_t> spire_resume_level_for_client(
 // B-REGIE-20-5: the trailing player's level floor (SpireMeta.hh spire_level_floor_char_level) for the quest .bin of a
 // client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
 // The leader is the quest's: SpireFollowLeader's LeaderClient (else lobby client 0), as spire_resume_level_for_client
-// takes it and whoever leads the game (l->leader_id), at the level its own .bin gets. Never throws.
+// takes it and whoever leads the game (l->leader_id), at the level its own .bin gets; with nobody in that slot the
+// game's leader, as the heat (spire_heat_for_leader), and with nobody there either no floor. Never throws.
 static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
     std::optional<uint32_t> resume_level, uint32_t bonus) {
   const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
@@ -4666,8 +4667,11 @@ static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Clie
   }
   const auto& follow = c->require_server_state()->data->spire_follow_leader;
   uint8_t leader_id = follow ? follow->first : 0;
+  if ((leader_id >= l->clients.size()) || !l->clients[leader_id]) {
+    leader_id = l->leader_id;
+  }
   auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
-  bool is_leader = !leader || (leader == c); // nobody in the leader's slot: nobody to follow
+  bool is_leader = !leader || (leader == c); // no leader in the game at all: nobody to follow
   std::optional<uint32_t> unused;
   uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
   uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,

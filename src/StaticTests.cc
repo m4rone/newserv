@@ -7815,6 +7815,24 @@ void run_static_tests() {
     seat(fresh, 1);
     l->leader_id = 1;
     expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    // nobody in the quest leader's slot: the game's leader (l->leader_id) is the measure, as for the heat
+    // (spire_heat_for_leader); the client with +14 in slot 1 leads the game, the client in slot 2 gets its floor
+    seat(strong, 1);
+    seat(fresh, 2);
+    l->leader_id = 1;
+    expect_eq(bin_at(14), sent_to(strong));
+    expect_eq(bin_at(12), sent_to(fresh));
+    // the client that owns nothing leads the game: both keep their own level
+    l->leader_id = 2;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    expect_eq(bin_at(14), sent_to(strong));
+    // nobody in the game leader's slot either: no floor
+    l->leader_id = 3;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    expect_eq(bin_at(14), sent_to(strong));
+    l->clients[1] = nullptr;
+    l->clients[2] = nullptr;
+    seat(fresh, 1);
     // a quest the guard does not cover: no floor, the quest's own .bin
     seat(strong, 0);
     l->leader_id = 0;
