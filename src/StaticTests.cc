@@ -8186,6 +8186,9 @@ void run_static_tests() {
       auto& p = r.p;
       ServerWrote seen;
       p.c->floor = 1; // a field floor
+      // the quest start (ReceiveCommands.cc calls this for every client of the game): an earlier run end of this game is
+      // forgotten. The cases reuse one game ID, which a server never does while it runs.
+      spire_checkpoint_run_started(p.c);
 
       // mid-run an 'O' is refused: nothing is pushed and the client keeps the run copy
       expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::RUN_NOT_OVER),
@@ -8251,6 +8254,112 @@ void run_static_tests() {
       expect_eq(0u, p2.ch->pushes);
       expect_real(p2.ch->memory, at_base, "after the login that follows the base");
       expect(no_marker(snapshot_on_disk(p2)));
+    });
+
+    e2e_case("run again: 'I' at the base takes the second snapshot of the real character, the new run copy is fresh, run 2's game exit restores the real character", [&]() {
+      TempCwd temp_cwd;
+      const GCCharacter real = real_character();
+      // a fresh run copy of this character, as Client::create_battle_overlay makes it at a quest load, without the guard
+      std::shared_ptr<PSOBBCharacterFile> fresh;
+      {
+        auto w0 = make_world();
+        auto p0 = connect(w0, real);
+        client_sends(w0, p0, 0x61, p0.ch->as_61());
+        auto rules = std::make_shared<BattleRules>();
+        rules->replace_char = true;
+        rules->char_level = 0;
+        p0.c->create_battle_overlay(rules, level_table);
+        fresh = std::make_shared<PSOBBCharacterFile>(*p0.c->character_file(false, true));
+      }
+      // what the client holds (its inventory and stats) against the server's character data
+      auto client_holds = [&](const Session& p, const PSOBBCharacterFile& want) {
+        PlayerInventory held = p.ch->memory.inventory;
+        Language language = p.ch->memory.inventory.language;
+        return spire_guard_same_state(held, p.ch->memory.disp.to_v4(language, language), want.inventory, want.disp);
+      };
+
+      auto w = make_world();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+      // the quest start (ReceiveCommands.cc calls this for every client of the game): an earlier run end of this game is
+      // forgotten. The cases reuse one game ID, which a server never does while it runs.
+      spire_checkpoint_run_started(p.c);
+      // run 1 ends, the return to base is proven on Pioneer 2
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      warp_to_base(w, r, seen);
+      expect_real(p.ch->memory, real, "at the base, before the run again");
+      expect_eq(1u, p.ch->pushes);
+
+      // 'I' on Pioneer 2: the snapshot is taken again from a 61 asked now, the run copy is made and pushed
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to 'I' at the base"));
+      // the second snapshot is the real character, never run 1's run copy and never the new one
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after 'I' is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the second snapshot is not the real character");
+      must(server_holds(p, *r.server_real), "the server's character data after 'I' is not the real character");
+      // the new run copy is a fresh one (Lv1, the quest's start), and it is what the client holds
+      must(p.c->has_overlay(), "no run copy after 'I'");
+      auto overlay = p.c->character_file(false, true);
+      expect_eq(0u, overlay->disp.stats.level.load());
+      expect_eq(300u, overlay->disp.stats.meseta.load());
+      must(spire_guard_same_state(overlay->inventory, overlay->disp, fresh->inventory, fresh->disp), "the new run copy is not a fresh one");
+      must(client_holds(p, *overlay), "the client does not hold the new run copy after 'I'");
+      must(memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)) != 0, "the client still holds run 1's items");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      // the push replaced the inventory and the stats alone: the rest of what the client holds is the real character's
+      must(!memcmp(&p.ch->memory.bank, &real.bank, sizeof(real.bank)), "the bank is not the real character's during run 2");
+      must((p.ch->memory.play_time_seconds == real.play_time_seconds) && (p.ch->memory.death_count == real.death_count) &&
+              (p.ch->memory.save_count == real.save_count), "the play time, death count or save count changed at 'I'");
+
+      // Run 2 wears its copy down in its own way
+      PlayerInventoryBE worn;
+      worn.language = Language::ENGLISH;
+      worn.num_items = 1;
+      worn.items[0].data.data1[0] = 0x00;
+      worn.items[0].data.data1[1] = 0x03;
+      worn.items[0].data.id = 0x00820000;
+      worn.items[0].flags = 0x0000000C;
+      overlay->inventory = worn;
+      overlay->disp.stats.level = overlay->disp.stats.level + 4;
+      overlay->disp.stats.exp = overlay->disp.stats.exp + 4321;
+      overlay->disp.stats.meseta = 120;
+      p.ch->memory.inventory = worn;
+      p.ch->memory.disp.stats = overlay->disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH).stats;
+      // the 'O' OK was used up by the 'I': a second 'I', with the run copy in memory, is refused and takes nothing
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NOT_RETURNED),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to a second 'I'"));
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "a second 'I' changed the snapshot");
+      must(server_holds(p, *r.server_real), "a second 'I' changed the server's character data");
+      expect_eq(2u, p.ch->pushes);
+
+      // Run 2 ends at the game exit: the 98 carries run copy 2, the restore before the lobby join pushes the snapshot
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->lobby.lock() && !p.c->has_overlay());
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      must(snapshot_is(snap, *r.server_real), "the snapshot after run 2's 98 is not the real character");
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit of the second run");
+      expect_eq(3u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after the game exit of the second run");
+      must(server_holds(p, *r.server_real), "the server's character data after run 2 is not the real character");
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the second run");
+      expect(no_marker(snapshot_on_disk(p2)));
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
     });
 
     expect_eq(0u, e2e_failed);
