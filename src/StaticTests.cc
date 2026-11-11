@@ -5624,8 +5624,18 @@ void run_static_tests() {
 
     // Deleted at every true end of its own run: dead, time up, Give up, won, also when a player is gone by then (regie
     // 2026-10-25: a finished run must never be resumed); only the run timer's "player left" (a disconnect) keeps it
-    expect(spire_savestate_end_deletes(false));
-    expect(!spire_savestate_end_deletes(true)); // run timer: player left (the partner's Wii froze)
+    expect(spire_savestate_end_deletes(false, false, 1, 0));
+    expect(!spire_savestate_end_deletes(true, false, 1, 0)); // run timer: player left (the partner's Wii froze)
+    // kwaliteit-3 6-M6: the partner's Wii drops while the other one lies down; that one's 'F' comes before the timer's
+    // next tick, with 1 of the timer's 2 clients: "player left" too, the savestates stay
+    expect(!spire_savestate_end_deletes(false, true, 1, 2));
+    expect(!spire_savestate_end_deletes(true, true, 1, 2)); // the tick came first, as before
+    // a true defeat (both down, the partner still in the game) and a solo run's end still delete
+    expect(spire_savestate_end_deletes(false, true, 2, 2));
+    expect(spire_savestate_end_deletes(false, true, 1, 1));
+    expect(spire_savestate_end_deletes(false, false, 1, 2)); // no run timer: no "player left" to mirror
+    expect(spire_run_timer_player_left(1, 2));
+    expect(!spire_run_timer_player_left(2, 2));
     {
       // the gone player's file is still deleted: it was written in the run, the present one is added, each once
       auto files = spire_savestate_end_files({"a.savestate.json", "b.savestate.json"}, {"a.savestate.json", ""});
@@ -5639,7 +5649,7 @@ void run_static_tests() {
     expect(!spire_savestate_is_of_run(read, 0x9999)); // a savestate of another run is not this game's to delete
     expect(!spire_savestate_is_of_run(read, 0));
     expect(!spire_savestate_is_of_run(SpireSavestate(), 0x1234));
-    if (spire_savestate_end_deletes(false) && spire_savestate_is_of_run(read, 0x1234)) {
+    if (spire_savestate_end_deletes(false, true, 2, 2) && spire_savestate_is_of_run(read, 0x1234)) {
       std::filesystem::remove(file);
     }
     expect(!std::filesystem::exists(file));

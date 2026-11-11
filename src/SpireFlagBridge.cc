@@ -746,8 +746,12 @@ bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_
   return !run_ended && has_overlay && began_run && (count == SPIRE_SAVESTATE_NUM_VALUES) && (num_values == count);
 }
 
-bool spire_savestate_end_deletes(bool player_left_end) {
-  return !player_left_end;
+bool spire_run_timer_player_left(size_t clients, size_t clients_at_start) {
+  return clients < clients_at_start;
+}
+
+bool spire_savestate_end_deletes(bool player_left_end, bool timer_running, size_t clients, size_t clients_at_start) {
+  return !player_left_end && !(timer_running && spire_run_timer_player_left(clients, clients_at_start));
 }
 
 std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& run_files,
@@ -1472,17 +1476,23 @@ bool spire_run_again_note_verified(std::shared_ptr<const Client> c, std::shared_
   return true;
 }
 
+// The game's run timer, if it runs: its clients at the start (defined with the timer below)
+static std::optional<size_t> spire_run_timer_clients_at_start(const Lobby* l);
+
 // A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run at every true
-// end, also of a client gone by then (regie 2026-10-25, reverses B-E01-181); the run timer's "player left" keeps them
+// end, also of a client gone by then (regie 2026-10-25, reverses B-E01-181); "player left" keeps them: the run timer's,
+// or (kwaliteit-3 6-M6) an end that came while the timer already counts fewer clients than at its start
 static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const char* why, bool player_left) {
   try {
     auto* run = spire_game_run_for(l);
     if (!run) {
       return;
     }
-    if (!spire_savestate_end_deletes(player_left)) {
-      l->log.info_f("Spire savestate: run over ({}) by a player who left; savestates of run {:08X} kept", why,
-          run->run_id);
+    auto at_start = spire_run_timer_clients_at_start(l.get());
+    size_t clients = l->count_clients();
+    if (!spire_savestate_end_deletes(player_left, at_start.has_value(), clients, at_start.value_or(0))) {
+      l->log.info_f("Spire savestate: run over ({}) by a player who left ({} of {} client(s)); savestates of run {:08X} kept",
+          why, clients, at_start.value_or(run->max_clients), run->run_id);
       return;
     }
     std::vector<std::string> present; // B-REGIE-18-6: every rung's file and the file of before; only this run's go
@@ -1790,8 +1800,9 @@ static void spire_run_timer_stop(const Lobby* l);
 static void spire_run_over(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> cl, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   auto l = std::const_pointer_cast<Lobby>(cl);
-  spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
+  // kwaliteit-3 6-M6: the end first, while the timer still runs (a partner gone keeps the savestates), then the stop
   auto& end = spire_run_mark_ended(l, "run over");
+  spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
   std::string msg = spire_bridge_message_text(value);
   auto s = c->require_server_state();
   size_t told = 0;
@@ -1830,6 +1841,11 @@ static void spire_run_timer_stop(const Lobby* l) {
   spire_run_timers.erase(l);
 }
 
+static std::optional<size_t> spire_run_timer_clients_at_start(const Lobby* l) {
+  auto it = spire_run_timers.find(l);
+  return (it == spire_run_timers.end()) ? std::nullopt : std::make_optional(it->second.clients_at_start);
+}
+
 static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, const Lobby* key, uint64_t generation) {
   for (;;) {
     co_await async_sleep(SPIRE_BRIDGE_TIMER_TICK);
@@ -1846,7 +1862,7 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     uint32_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t.start).count();
     size_t clients = l->count_clients();
     uint32_t cause = 0;
-    if (clients < t.clients_at_start) {
+    if (spire_run_timer_player_left(clients, t.clients_at_start)) {
       cause = SPIRE_BRIDGE_TIMER_PLAYER_LEFT;
     } else if (elapsed >= t.limit_s) {
       cause = SPIRE_BRIDGE_TIMER_TIME_UP;

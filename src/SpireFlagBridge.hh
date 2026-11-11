@@ -295,8 +295,8 @@ constexpr const char* SPIRE_BRIDGE_DIRECTORY = "system/spire-bridge";
 //   written after the run ended in the game or before the client's 'B'.
 // - Never consumed: a savestate stays until the next one replaces it or the run truly ends. Every run end in the game
 //   (the first 'X', 'F' or run timer end) deletes the savestate of each client in the game whose run id is the game's,
-//   unless the end is "player left" (run timer) or the game has fewer clients than its run had: a crash of one player
-//   must not cost the other one his savestate.
+//   unless the end is "player left": the run timer's, or any end while the run timer has fewer clients than at its
+//   start (spire_savestate_end_deletes): a crash of one player must not cost the other one his savestate.
 // - Resume: a room quest that starts after K0 writes 'J' << 24 | variant << 8 | k at its kit point and waits for 'DONE'.
 //   The server always answers that client: register SPIRE_RESUME_ANSWER_REGISTER = SPIRE_RESUME_ANSWER_TAG (fresh) or
 //   SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | item count, the values in SPIRE_RESUME_HEADER (value index -> register) before it, then
@@ -467,8 +467,13 @@ SpireSavestateVPlan spire_savestate_v_plan(bool owed);
 // matches.
 bool spire_savestate_write_allowed(bool run_ended, bool has_overlay, bool began_run, size_t num_values, uint32_t count);
 // Whether a run end deletes the game's savestates: every true end (dead, time up, Give up, won), also when a client of
-// the run is gone by then; only the run timer's "player left" (the disconnect itself, no true end) keeps them.
-bool spire_savestate_end_deletes(bool player_left_end);
+// the run is gone by then; only "player left" (the disconnect itself, no true end) keeps them. kwaliteit-3 6-M6: that is
+// the run timer's own end, or any end while the timer still runs and already has fewer clients than at its start (the
+// timer's next tick would say "player left"): the one left lying down sees "players < 2" within 15 frames and sends
+// 'K', 'F' and 'X' before that tick, so its 'F' was the first end and deleted both savestates.
+bool spire_savestate_end_deletes(bool player_left_end, bool timer_running, size_t clients, size_t clients_at_start);
+// The run timer's "player left": fewer clients in the game than when its 'S' started it.
+bool spire_run_timer_player_left(size_t clients, size_t clients_at_start);
 // The savestate files a true run end looks at: the files the run's clients wrote or were answered from (also of a
 // client gone by then) and the files of the clients still in the game; each once, never "".
 std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& run_files,
