@@ -1,0 +1,20 @@
+{
+  "Adopted": "unknown",
+  "BossesBeaten": [0x4, 0x8, 0xB, 0xF, 0x12],
+  "Flags": [
+    {"Difficulty": 0x0, "Flag": 0x380, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x381, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x382, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x383, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x384, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x385, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x386, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x387, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x388, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x38B, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x3A0, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x3A1, "Set": true},
+    {"Difficulty": 0x0, "Flag": 0x3A2, "Set": true}
+  ],
+  "SerialNumber": 0x1450
+}
