@@ -8410,6 +8410,354 @@ void run_static_tests() {
       expect_eq(0u, p.ch->card_writes.size());
     });
 
+    // Two players in one game (intern-1 b1, round 3). A seat is a client with what the server wrote to it; the driver
+    // serves every seat, so a command the server sends to the partner never waits. A client that is gone answers nothing.
+    constexpr uint32_t SERIAL_2 = 8765;
+    struct Seat {
+      Session p;
+      ServerWrote seen;
+      size_t exits_asked = 0; // 6x73 from the server
+    };
+    auto drive_seats = [&](World& w, const std::vector<Seat*>& seats, const std::function<bool()>& finished, const char* what) {
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      for (;;) {
+        w.s->io_context->restart();
+        size_t ran = w.s->io_context->poll();
+        if (answer_failed) {
+          auto e = answer_failed;
+          answer_failed = nullptr;
+          std::rethrow_exception(e);
+        }
+        bool handled = false;
+        for (Seat* seat : seats) {
+          auto inbox = std::move(seat->p.ch->inbox);
+          seat->p.ch->inbox.clear();
+          for (const auto& raw : inbox) {
+            handled = true;
+            const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+            if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+                (raw[sizeof(header)] == 0x77)) {
+              const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+              seat->seen.registers.emplace_back(reg.register_number.load(), reg.value.as_int.load());
+            } else if ((header.command == 0x60) && (raw.size() > sizeof(header)) && (raw[sizeof(header)] == 0x73)) {
+              seat->exits_asked++;
+            } else if (header.command == 0x95) {
+              seat->seen.asked_61++;
+            }
+            if (seat->p.ch->open) {
+              client_handles(w, seat->p, raw);
+            }
+          }
+        }
+        if (handled || ran) {
+          continue;
+        }
+        if (finished()) {
+          return;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+          throw std::runtime_error(std::format("the server did not get to {} within 15 seconds", what));
+        }
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(50));
+      }
+    };
+    auto seats_bool = [&](World& w, const std::vector<Seat*>& seats, asio::awaitable<bool> what, const char* name) {
+      std::optional<bool> result;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e, bool r) {
+        failed = e;
+        result = r;
+      });
+      drive_seats(w, seats, [&]() { return result.has_value(); }, name);
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+      return *result;
+    };
+    auto seats_void = [&](World& w, const std::vector<Seat*>& seats, asio::awaitable<void> what, const char* name) {
+      bool done = false;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e) {
+        failed = e;
+        done = true;
+      });
+      drive_seats(w, seats, [&]() { return done; }, name);
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+    };
+    auto seat_sends = [&](World& w, const std::vector<Seat*>& seats, Seat& from, uint8_t command, std::string data) {
+      seats_void(w, seats, on_command(from.p.c, std::make_unique<Channel::Message>(Channel::Message{.command = command, .flag = 0, .data = std::move(data)})), "the end of a client's command");
+    };
+    // a connection of another console: `connect` makes a login of its own for every connection
+    auto connect_as = [&](World& w, const GCCharacter& memory, uint32_t serial) {
+      Session p = connect(w, memory);
+      p.c->login->gc_license->serial_number = serial;
+      return p;
+    };
+    // The second player's real character: another name, class and section ID, other items and mag, five items instead
+    // of six, another level, EXP, meseta and stats, and a bank of two items with its own meseta
+    auto second_character = [&]() {
+      GCCharacter ch = real_character();
+      ch.inventory.hp_from_materials = 2;
+      ch.inventory.tp_from_materials = 1;
+      ch.inventory.items[0].data.data1[1] = 0x03;
+      ch.inventory.items[0].data.data1[3] = 0x02;
+      ch.inventory.items[1].data.data1[2] = 0x07;
+      ch.inventory.items[2].data.data1[2] = 0x09;
+      // the mag: another kind, level 50, other numbers, synchro 80, IQ 50
+      const uint8_t mag[12] = {0x02, 0x09, 0x32, 0x00, 0xD0, 0x07, 0xB8, 0x0B, 0xE8, 0x03, 0xF4, 0x01};
+      for (size_t x = 0; x < 12; x++) {
+        ch.inventory.items[MAG_SLOT].data.data1[x] = mag[x];
+      }
+      ch.inventory.items[MAG_SLOT].data.data2[0] = 0x50;
+      ch.inventory.items[MAG_SLOT].data.data2[1] = 0x32;
+      ch.inventory.items[4].data.data1[5] = 0x03; // three Monomates
+      ch.inventory.items[5] = ch.inventory.items[29]; // no sixth item
+      ch.inventory.num_items = 5;
+      for (size_t z = 0; z < 5; z++) {
+        ch.inventory.items[z].data.id = 0x00210000 + z;
+      }
+      PlayerDispDataV4 disp = ch.disp.to_v4(Language::ENGLISH, Language::ENGLISH);
+      disp.stats.char_stats.atp = 211;
+      disp.stats.char_stats.mst = 522;
+      disp.stats.char_stats.evp = 133;
+      disp.stats.char_stats.hp = 244;
+      disp.stats.char_stats.dfp = 155;
+      disp.stats.char_stats.ata = 96;
+      disp.stats.char_stats.lck = 17;
+      disp.stats.level = 23;
+      disp.stats.exp = 98765;
+      disp.stats.meseta = 1111;
+      disp.visual.name.encode("Tweede", Language::ENGLISH);
+      disp.visual.sh.char_class = 4;
+      disp.visual.sh.section_id = 7;
+      ch.disp = disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH);
+      ch.bank.items[0].data.data1[1] = 0x07;
+      ch.bank.items[1].data.data1[1] = 0x08;
+      ch.bank.items[2] = ch.bank.items[3]; // no third bank item
+      ch.bank.num_items = 2;
+      ch.bank.meseta = 5000;
+      ch.guild_card.guild_card_number = SERIAL_2;
+      ch.play_time_seconds = 1234;
+      ch.death_count = 1;
+      ch.save_count = 9;
+      return ch;
+    };
+    // a run wears a run copy down on the client and on the server's overlay: one run weapon, levels, EXP, meseta
+    auto wear_down = [&](Session& p, uint8_t weapon, uint32_t item_id, uint32_t levels, uint32_t exp, uint32_t meseta) {
+      auto overlay = p.c->character_file(false, true);
+      PlayerInventoryBE worn;
+      worn.language = Language::ENGLISH;
+      worn.num_items = 1;
+      worn.items[0].data.data1[0] = 0x00;
+      worn.items[0].data.data1[1] = weapon;
+      worn.items[0].data.id = item_id;
+      worn.items[0].flags = 0x0000000C;
+      overlay->inventory = worn;
+      overlay->disp.stats.level = overlay->disp.stats.level + levels;
+      overlay->disp.stats.exp = overlay->disp.stats.exp + exp;
+      overlay->disp.stats.meseta = meseta;
+      p.ch->memory.inventory = worn;
+      p.ch->memory.disp.stats = overlay->disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH).stats;
+    };
+    auto snapshot_files = [&]() {
+      size_t count = 0;
+      for (const auto& entry : std::filesystem::directory_iterator(SPIRE_BRIDGE_DIRECTORY)) {
+        count += entry.path().string().ends_with(".snapshot.json");
+      }
+      return count;
+    };
+
+    // A game that a client leaves while another stays makes its item creator again for the new leader
+    // (Lobby::reassign_leader_on_client_departure), from the tables a server always has; read before a case changes
+    // the working directory
+    auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    auto common_v3 = std::make_shared<JSONCommonItemSet>(phosg::JSON::parse(phosg::load_file("system/tables/common-table-v3-v4.json")));
+    auto armor_set = std::make_shared<ArmorShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/armor-shop-random-set.json")));
+    auto tool_set = std::make_shared<ToolShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/tool-shop-random-set.json")));
+    auto weapon_set = std::make_shared<WeaponShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/weapon-shop-random-set-normal.json")));
+    auto tekker_set = std::make_shared<TekkerAdjustmentSet>(phosg::JSON::parse(phosg::load_file("system/tables/tekker-adjustment-set.json")));
+    auto give_item_tables = [&](World& w) {
+      auto& data = *w.s->data;
+      data.item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = pmt_v3;
+      data.item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] =
+          std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+      data.common_item_sets["common-table-v3-v4"] = common_v3;
+      data.rare_item_sets["rare-table-v3"] = std::make_shared<RareItemSet>(phosg::JSON::dict());
+      data.armor_random_set = armor_set;
+      data.tool_random_set = tool_set;
+      data.weapon_random_sets[static_cast<size_t>(Difficulty::NORMAL)] = weapon_set;
+      data.tekker_adjustment_set = tekker_set;
+    };
+
+    // One of the two drops out mid-run, the other plays on, gets the server's run end and leaves through the 98
+    auto two_players = [&](bool leader_drops) {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      give_item_tables(w);
+      const GCCharacter real[2] = {real_character(), second_character()};
+      const uint32_t serial[2] = {SERIAL, SERIAL_2};
+      Seat seat[2];
+      std::vector<Seat*> both{&seat[0], &seat[1]};
+      std::shared_ptr<PSOBBCharacterFile> server_real[2];
+      std::string file[2];
+      for (size_t z = 0; z < 2; z++) {
+        seat[z].p = connect_as(w, real[z], serial[z]);
+      }
+      for (size_t z = 0; z < 2; z++) {
+        seat_sends(w, both, seat[z], 0x61, seat[z].p.ch->as_61());
+        must(seats_bool(w, both, spire_guard_restore_if_needed(seat[z].p.c), "the login"), "a login without a marker was refused");
+        expect_eq(0u, seat[z].p.ch->pushes);
+        server_real[z] = std::make_shared<PSOBBCharacterFile>(*seat[z].p.c->character_file(false, false));
+        file[z] = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial[z], spire_guard_character_id(server_real[z]->disp));
+      }
+      must(file[0] != file[1], "the two players share a snapshot file name");
+      must(!server_holds(seat[0].p, *server_real[1]) && !server_holds(seat[1].p, *server_real[0]), "the two characters of this case are not different");
+
+      // both in one game, the first as its leader; the quest start as ReceiveCommands.cc plays it for every client of the
+      // game: the earlier overlay goes, the run start, then the snapshot and the run copy
+      auto l = new_game(w);
+      l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      l->leader_id = 0;
+      l->rand_crypt = std::make_shared<MT19937Generator>(l->random_seed); // as create_game_generic gives every game
+      for (size_t z = 0; z < 2; z++) {
+        l->clients[z] = seat[z].p.c;
+        seat[z].p.c->lobby_client_id = z;
+        seat[z].p.c->lobby = l;
+      }
+      for (size_t z = 0; z < 2; z++) {
+        seat[z].p.c->delete_overlay();
+        spire_checkpoint_run_started(seat[z].p.c);
+        must(spire_create_battle_overlay(seat[z].p.c, l), "the quest load was refused for one of two players");
+      }
+      // each got its own snapshot of its own real character and its own run copy
+      expect_eq(2u, snapshot_files());
+      for (size_t z = 0; z < 2; z++) {
+        must(std::filesystem::is_regular_file(file[z]), "a player has no snapshot file under its own serial and character");
+        auto snap = spire_guard_load(file[z]);
+        must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker at the run start is not RunInProgress alone");
+        must(snapshot_is(snap, *server_real[z]), "a player's snapshot is not its own real character");
+        must(!snapshot_is(snap, *server_real[1 - z]), "a player's snapshot holds the other player's character");
+        must(!memcmp(&snap.disp.visual.name, &server_real[z]->disp.visual.name, sizeof(snap.disp.visual.name)), "a player's snapshot carries another name");
+        must(seat[z].p.c->has_overlay(), "a player got no run copy");
+        auto overlay = seat[z].p.c->character_file(false, true);
+        must(!memcmp(&overlay->disp.visual.name, &server_real[z]->disp.visual.name, sizeof(overlay->disp.visual.name)), "a player's run copy carries another name");
+        expect_eq(0u, overlay->disp.stats.level.load());
+        must(server_holds(seat[z].p, *server_real[z]), "the run copy changed a player's real character on the server");
+      }
+      must(seat[0].p.c->character_file(false, true) != seat[1].p.c->character_file(false, true), "the two players share one run copy");
+      wear_down(seat[0].p, 0x02, 0x00810000, 9, 54321, 0);
+      wear_down(seat[1].p, 0x04, 0x00A10000, 3, 777, 45);
+      const GCCharacter run_copy[2] = {seat[0].p.ch->memory, seat[1].p.ch->memory};
+      for (size_t z = 0; z < 2; z++) {
+        must(server_holds(seat[z].p, *server_real[z]), "the run changed a player's real character on the server");
+      }
+      // the leader's run start: the server's run timer counts two clients from here on ('S', SpireFlagBridge.hh)
+      must(spire_bridge_handle_register(seat[0].p.c, l, SPIRE_BRIDGE_REQUEST_REGISTER,
+               (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_START) << 24) | (5u << 16) | 3600u),
+          "the bridge did not take the leader's 'S'");
+
+      size_t gone = leader_drops ? 0 : 1;
+      size_t stays = 1 - gone;
+      auto stayer_untouched = [&](const std::string& file_before, const char* when) {
+        if ((phosg::load_file(file[stays]) != file_before) || (seat[stays].p.ch->pushes != 0) ||
+            memcmp(&seat[stays].p.ch->memory, &run_copy[stays], sizeof(GCCharacter)) || !seat[stays].p.c->has_overlay() ||
+            !server_holds(seat[stays].p, *server_real[stays])) {
+          throw std::runtime_error(std::format("{}: the player who stayed lost its snapshot file's content, its run copy or its real character on the server", when));
+        }
+      };
+      const std::string stays_file = phosg::load_file(file[stays]);
+
+      // one drops out (on_disconnect): nothing is restored, its marker stays RunInProgress with its real character
+      seat[gone].p.ch->open = false;
+      seats_void(w, both, on_disconnect(seat[gone].p.c), "the end of the disconnect");
+      must(!seat[gone].p.c->lobby.lock() && !l->clients[gone], "the dropped client is still in the game");
+      must((l->clients[stays] == seat[stays].p.c) && (seat[stays].p.c->lobby.lock() == l), "the player who stayed is no longer in the game");
+      expect_eq(stays, static_cast<size_t>(l->leader_id));
+      auto snap = spire_guard_load(file[gone]);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker of the dropped player is not RunInProgress alone");
+      must(snapshot_is(snap, *server_real[gone]), "the snapshot of the dropped player is not its real character");
+      expect_eq(0u, seat[gone].p.ch->pushes);
+      stayer_untouched(stays_file, "after the partner dropped out");
+
+      // The server ends the run for the one who stayed: the timer sees fewer clients than at the 'S' and writes
+      // r252 = 'E', cause 2 (player left). The guard is not part of that: no push, the marker and the run copy stay.
+      const uint32_t player_left = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 8) | SPIRE_BRIDGE_TIMER_PLAYER_LEFT;
+      auto told_run_end = [&](const Seat& s) {
+        for (const auto& reg : s.seen.registers) {
+          if ((reg.first == SPIRE_BRIDGE_TIMER_REGISTER) && ((reg.second >> 16) == player_left)) {
+            return true;
+          }
+        }
+        return false;
+      };
+      drive_seats(w, both, [&]() { return told_run_end(seat[stays]); }, "the run end for the player who stayed (r252, player left)");
+      must(!told_run_end(seat[gone]), "the run end was sent to the client that is gone");
+      stayer_untouched(stays_file, "after the server ended the run");
+      seat[gone].p.c.reset();
+
+      // the dropped player logs in again: a new connection whose 61 is the run copy its client kept
+      Seat back;
+      back.p = connect_as(w, run_copy[gone], serial[gone]);
+      std::vector<Seat*> now{&seat[stays], &back};
+      seat_sends(w, now, back, 0x61, back.p.ch->as_61());
+      must(!spire_guard_game_join_allowed(back.p.c, false), "a game join was allowed before the login restore");
+      must(seats_bool(w, now, spire_guard_restore_if_needed(back.p.c), "the login restore"), "the login restore of the dropped player was refused");
+      expect_real(back.p.ch->memory, real[gone], "after the login of the player who dropped out of a two-player game");
+      expect_eq(1u, back.p.ch->pushes);
+      expect_eq(0u, back.p.ch->card_writes.size());
+      must(server_holds(back.p, *server_real[gone]), "the server's character data of the dropped player is not its real character after the login");
+      snap = spire_guard_load(file[gone]);
+      must(!snap.run_in_progress && !snap.restore_pending, "the login restore left a run or a restore open");
+      must(snapshot_is(snap, *server_real[gone]), "the snapshot of the dropped player changed at its login");
+      expect_eq(2u, snapshot_files());
+      stayer_untouched(stays_file, "after the partner's login restore");
+      const std::string gone_file = phosg::load_file(file[gone]);
+      auto partner_untouched = [&](const char* when) {
+        if ((phosg::load_file(file[gone]) != gone_file) || (back.p.ch->pushes != 1) || !server_holds(back.p, *server_real[gone])) {
+          throw std::runtime_error(std::format("{}: the snapshot file or the server's character data of the player who dropped changed", when));
+        }
+        expect_real(back.p.ch->memory, real[gone], when);
+      };
+
+      // the one who stayed leaves through the 98 and gets its own real character before the lobby join
+      seat_sends(w, now, seat[stays], 0x98, seat[stays].p.ch->as_61());
+      must(!seat[stays].p.c->lobby.lock() && !seat[stays].p.c->has_overlay(), "the 98 left the player in the game or with its run copy");
+      snap = spire_guard_load(file[stays]);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the 98 is not RestorePending alone");
+      must(snapshot_is(snap, *server_real[stays]), "the snapshot after the 98 is not the real character of the player who stayed");
+      partner_untouched("after the 98 of the player who stayed");
+      must(seats_bool(w, now, spire_guard_restore_at_game_exit(seat[stays].p.c), "the game exit restore"), "the game exit restore was refused");
+      expect_real(seat[stays].p.ch->memory, real[stays], "after the game exit of the player who stayed in a two-player game");
+      expect_eq(1u, seat[stays].p.ch->pushes);
+      expect_eq(1u, seat[stays].p.ch->card_writes.size());
+      expect_real(seat[stays].p.ch->card_writes[0], real[stays], "on the memory card of the player who stayed");
+      must(server_holds(seat[stays].p, *server_real[stays]), "the server's character data of the player who stayed is not its real character after the game exit");
+      partner_untouched("after the game exit restore of the player who stayed");
+
+      // its next login shows the card's character and closes the marker; the partner's file is not part of it
+      seat[stays].p.ch->open = false;
+      Seat again;
+      again.p = connect_as(w, seat[stays].p.ch->card_writes[0], serial[stays]);
+      std::vector<Seat*> last{&back, &again};
+      seat_sends(w, last, again, 0x61, again.p.ch->as_61());
+      must(seats_bool(w, last, spire_guard_restore_if_needed(again.p.c), "the next login"), "the next login of the player who stayed was refused");
+      expect_eq(0u, again.p.ch->pushes);
+      expect_real(again.p.ch->memory, real[stays], "after the login that follows the two-player game");
+      must(no_marker(spire_guard_load(file[stays])), "the marker of the player who stayed is still open after its next login");
+      must(server_holds(again.p, *server_real[stays]), "the server's character data at the next login is not the real character");
+      partner_untouched("after the next login of the player who stayed");
+      expect_eq(2u, snapshot_files());
+    };
+    e2e_case("two players in one game: each its own snapshot and run copy; the follower drops, the leader plays on and leaves; each gets its own real character", [&]() {
+      two_players(false);
+    });
+    e2e_case("two players in one game, the leader drops: the follower leads on, gets the server's run end and leaves; each gets its own real character", [&]() {
+      two_players(true);
+    });
+
     expect_eq(0u, e2e_failed);
   }
 
