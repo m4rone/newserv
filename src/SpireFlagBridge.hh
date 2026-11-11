@@ -1157,22 +1157,34 @@ std::vector<SpireWaveEnemy> spire_wave_enemies(
 // veilig-1: the fight clock, per game and floor (a run fights one room at a time, and a player's hit names no room).
 // spire_fight_note sets it to now; spire_fight_quiet is the time since then, and a floor without a clock gets one at
 // now (0 s: a lost clock makes a net later, never sooner).
-void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now);
+// veilig-1 r2 (critic): an enemy out of reach that shoots (a Lily or a Garanz on a ledge) hits a player every few
+// seconds, so the floor is never quiet and the net never counted: the room stayed shut for good. Each floor therefore
+// keeps a second clock that only the enemies' side sets (a hit claim, 6x0A, 6xE4, 6x9C or 6x76 on an enemy, a child
+// included: the Pan Arms case); a player hit by an enemy (6x4A, 6x4B, 6x4C) or a player's death (6x4D) passes
+// enemy_side false and sets the floor clock only. spire_enemy_quiet is the time since the enemies' side last moved
+// (never less than spire_fight_quiet).
+void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now, bool enemy_side = true);
 std::chrono::seconds spire_fight_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now);
+std::chrono::seconds spire_enemy_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now);
 // Called by the subcommand handlers for every sign of a fight on floor (see above); a no-op outside a game with a
 // quest.
-void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor);
+void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor, bool enemy_side = true);
 // veilig-1: what a net does at a look, free of state for the static tests. STOP: the wave is no longer held only by
 // enemies never hit. WAIT: look again after `wait` (the floor was not quiet long enough; a look without a client on
 // the floor starts the clock again, so quiet is 0 there). COUNT: count them as defeated. notice: the floor was quiet
 // for SPIRE_STUCK_NOTICE_SECONDS, the players should read SPIRE_STUCK_NOTICE_TEXT.
+// veilig-1 r2: COUNT also after SPIRE_UNHIT_ENEMY_QUIET_SECONDS without one sign from the enemies' side (enemy_quiet,
+// spire_enemy_quiet), whatever hits the players take; the notice comes after SPIRE_STUCK_NOTICE_SECONDS of either
+// quiet, so players shot at from a ledge read why they wait.
+constexpr auto SPIRE_UNHIT_ENEMY_QUIET_SECONDS = std::chrono::seconds(300);
 enum class SpireNetAction { STOP, WAIT, COUNT };
 struct SpireNetLook {
   SpireNetAction action = SpireNetAction::STOP;
   std::chrono::seconds wait{0};
   bool notice = false;
 };
-SpireNetLook spire_unhit_net_look(bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor);
+SpireNetLook spire_unhit_net_look(
+    bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor, std::chrono::seconds enemy_quiet = std::chrono::seconds(0));
 // v42 (regie, pc 2026-10-25 12:32: q921 room 7 = k2 elite, "wave 3 done, room not clear: W-009 (event 117) is
 // running"; its only enemy, the elite Hildebear E-04D, never showed: no hit, no kill, no flag from either client while
 // the event had started at 12:29:48). Second net, for a started wave event without a living enemy: when the room

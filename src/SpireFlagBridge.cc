@@ -6818,55 +6818,85 @@ std::vector<SpireWaveEnemy> spire_wave_enemies(
   return ret;
 }
 
-// veilig-1: the fight clock (SpireFlagBridge.hh), per (game, floor)
-static std::map<std::pair<uint32_t, uint8_t>, std::chrono::steady_clock::time_point> spire_fight_clocks;
+// veilig-1: the fight clock (SpireFlagBridge.hh), per (game, floor); r2: with the enemies' side clock next to it
+struct SpireFightClock {
+  std::chrono::steady_clock::time_point floor; // any sign of a fight
+  std::chrono::steady_clock::time_point enemy; // a sign from the enemies' side only
+};
+static std::map<std::pair<uint32_t, uint8_t>, SpireFightClock> spire_fight_clocks;
 
-void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now, bool enemy_side) {
   if (spire_fight_clocks.size() > 4096) {
     spire_fight_clocks.clear(); // a lost clock starts again at the next look: a net later, never sooner
   }
-  spire_fight_clocks[std::make_pair(lobby_id, floor)] = now;
+  auto key = std::make_pair(lobby_id, floor);
+  auto it = spire_fight_clocks.find(key);
+  if (it == spire_fight_clocks.end()) {
+    spire_fight_clocks.emplace(key, SpireFightClock{now, now}); // a new clock starts both at now
+    return;
+  }
+  it->second.floor = now;
+  if (enemy_side) {
+    it->second.enemy = now;
+  }
 }
 
-std::chrono::seconds spire_fight_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+static std::chrono::seconds spire_quiet_since(
+    uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now, bool enemy_side) {
   auto it = spire_fight_clocks.find(std::make_pair(lobby_id, floor));
   if (it == spire_fight_clocks.end()) {
     spire_fight_note(lobby_id, floor, now);
     return std::chrono::seconds(0);
   }
-  if (now <= it->second) {
+  auto since = enemy_side ? it->second.enemy : it->second.floor;
+  if (now <= since) {
     return std::chrono::seconds(0);
   }
-  return std::chrono::duration_cast<std::chrono::seconds>(now - it->second);
+  return std::chrono::duration_cast<std::chrono::seconds>(now - since);
 }
 
-void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor) {
+std::chrono::seconds spire_fight_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+  return spire_quiet_since(lobby_id, floor, now, false);
+}
+
+std::chrono::seconds spire_enemy_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+  return spire_quiet_since(lobby_id, floor, now, true);
+}
+
+void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor, bool enemy_side) {
   if (l && l->is_game() && l->quest) {
-    spire_fight_note(l->lobby_id, floor, std::chrono::steady_clock::now());
+    spire_fight_note(l->lobby_id, floor, std::chrono::steady_clock::now(), enemy_side);
   }
 }
 
-SpireNetLook spire_unhit_net_look(bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor) {
+SpireNetLook spire_unhit_net_look(
+    bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor, std::chrono::seconds enemy_quiet) {
   SpireNetLook ret;
   if (!held_only_by_unhit) {
     return ret;
   }
   if (!player_on_floor) {
-    quiet = std::chrono::seconds(0); // nobody there to fight: the caller started the clock again
+    quiet = std::chrono::seconds(0); // nobody there to fight: the caller started the clocks again
+    enemy_quiet = std::chrono::seconds(0);
   }
-  ret.notice = (quiet >= SPIRE_STUCK_NOTICE_SECONDS);
-  if (quiet >= SPIRE_UNHIT_QUIET_SECONDS) {
+  // r2: an enemy out of reach that shoots keeps the floor clock young; the enemies' side clock still runs out
+  ret.notice = (std::max(quiet, enemy_quiet) >= SPIRE_STUCK_NOTICE_SECONDS);
+  if ((quiet >= SPIRE_UNHIT_QUIET_SECONDS) || (enemy_quiet >= SPIRE_UNHIT_ENEMY_QUIET_SECONDS)) {
     ret.action = SpireNetAction::COUNT;
     return ret;
   }
   ret.action = SpireNetAction::WAIT;
-  ret.wait = (ret.notice ? SPIRE_UNHIT_QUIET_SECONDS : SPIRE_STUCK_NOTICE_SECONDS) - quiet;
+  ret.wait = std::min(SPIRE_UNHIT_QUIET_SECONDS - quiet, SPIRE_UNHIT_ENEMY_QUIET_SECONDS - std::min(enemy_quiet, SPIRE_UNHIT_ENEMY_QUIET_SECONDS));
+  if (!ret.notice) {
+    ret.wait = std::min(ret.wait, SPIRE_STUCK_NOTICE_SECONDS - std::max(quiet, enemy_quiet));
+  }
   return ret;
 }
 
 // One look of a net at a floor: whether a GC client of the game stands on it, and how long the floor was quiet. A look
 // without a client there starts the clock again: time nobody could fight is no sign of an enemy out of reach.
-static std::chrono::seconds spire_net_quiet(std::shared_ptr<const Lobby> l, uint8_t floor, bool* player_on_floor) {
+static std::chrono::seconds spire_net_quiet(
+    std::shared_ptr<const Lobby> l, uint8_t floor, bool* player_on_floor, std::chrono::seconds* enemy_quiet) {
   *player_on_floor = false;
   for (const auto& lc : l->clients) {
     if (lc && (lc->version() == Version::GC_V3) && (lc->floor == floor)) {
@@ -6878,6 +6908,7 @@ static std::chrono::seconds spire_net_quiet(std::shared_ptr<const Lobby> l, uint
   if (!*player_on_floor) {
     spire_fight_note(l->lobby_id, floor, now);
   }
+  *enemy_quiet = spire_enemy_quiet(l->lobby_id, floor, now);
   return spire_fight_quiet(l->lobby_id, floor, now);
 }
 
@@ -6896,7 +6927,7 @@ static void spire_stuck_notice(std::shared_ptr<const Lobby> l, uint8_t floor, ui
       sent++;
     }
   }
-  l->log.info_f("Spire bridge: no fight on floor {:02X} for {} s while room {} is held only by enemies never hit; sent \"{}\" to {} client(s)",
+  l->log.info_f("Spire bridge: no fight on floor {:02X} (or no sign from the enemies) for {} s while room {} is held only by enemies never hit; sent \"{}\" to {} client(s)",
       floor, SPIRE_STUCK_NOTICE_SECONDS.count(), room, SPIRE_STUCK_NOTICE_TEXT, sent);
 }
 
@@ -6934,9 +6965,10 @@ static asio::awaitable<void> spire_unhit_wave_wait(std::weak_ptr<Client> weak_c,
     }
     Version v = c->version();
     bool player_on_floor = false;
-    auto quiet = spire_net_quiet(l, floor, &player_on_floor);
-    auto look = spire_unhit_net_look(
-        spire_wave_held_only_by_unhit(spire_wave_enemies(l->map_state, v, floor, room, wave_number)), quiet, player_on_floor);
+    std::chrono::seconds enemy_quiet{0};
+    auto quiet = spire_net_quiet(l, floor, &player_on_floor, &enemy_quiet);
+    auto look = spire_unhit_net_look(spire_wave_held_only_by_unhit(spire_wave_enemies(l->map_state, v, floor, room, wave_number)),
+        quiet, player_on_floor, enemy_quiet);
     if (look.action == SpireNetAction::STOP) {
       spire_unhit_waits.erase(it);
       l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} no longer held only by enemies never hit; not counted",
@@ -6954,8 +6986,8 @@ static asio::awaitable<void> spire_unhit_wave_wait(std::weak_ptr<Client> weak_c,
     for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
       if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8)) {
         ene_st->set_flags |= 8;
-        l->log.info_f("Spire bridge: E-{:03X} never hit and no fight on floor {:02X} for {} s under wave {} of room {}; counted as defeated",
-            ene_st->e_id, floor, quiet.count(), wave_number, room);
+        l->log.info_f("Spire bridge: E-{:03X} never hit and no fight on floor {:02X} for {} s (no sign from the enemies for {} s) under wave {} of room {}; counted as defeated",
+            ene_st->e_id, floor, quiet.count(), enemy_quiet.count(), wave_number, room);
       }
     }
     if (spire_net_rooms.size() > 4096) {
@@ -6983,8 +7015,8 @@ void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lo
     spire_bridge_note_fight(l, floor); // the defeat that led here
     uint64_t generation = spire_unhit_next_generation++;
     spire_unhit_waits[std::make_tuple(l->lobby_id, floor, room, wave_number)] = generation;
-    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} is held only by enemies never hit; counted as defeated after {} s without a fight on the floor, unless one is hit or another dies",
-        wave_number, room, floor, SPIRE_UNHIT_QUIET_SECONDS.count());
+    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} is held only by enemies never hit; counted as defeated after {} s without a fight on the floor or {} s without a sign from the enemies, unless one is hit or another dies",
+        wave_number, room, floor, SPIRE_UNHIT_QUIET_SECONDS.count(), SPIRE_UNHIT_ENEMY_QUIET_SECONDS.count());
     asio::co_spawn(*c->require_server_state()->io_context,
         spire_unhit_wave_wait(c, l, floor, room, wave_number, generation, recheck), asio::detached);
   } catch (const std::exception& e) {
@@ -7136,8 +7168,9 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
     if (!counted.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &counted)) {
       // veilig-1 (2-M2): counted only at a look where the floor was quiet long enough with a client on it
       bool player_on_floor = false;
-      auto quiet = spire_net_quiet(l, floor, &player_on_floor);
-      auto look = spire_unhit_net_look(true, quiet, player_on_floor);
+      std::chrono::seconds enemy_quiet{0};
+      auto quiet = spire_net_quiet(l, floor, &player_on_floor, &enemy_quiet);
+      auto look = spire_unhit_net_look(true, quiet, player_on_floor, enemy_quiet);
       if (look.notice) {
         spire_stuck_notice(l, floor, room);
       }

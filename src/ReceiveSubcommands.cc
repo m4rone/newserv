@@ -1732,7 +1732,8 @@ static void on_player_died(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   if (!l->is_game() || (cmd.header.client_id != c->lobby_client_id)) {
     return;
   }
-  spire_bridge_note_fight(l, c->floor); // veilig-1: a sign of a fight for the Spire nets
+  // veilig-1: a sign of a fight for the Spire nets; r2: from the players' side, so not for the enemies' side clock
+  spire_bridge_note_fight(l, c->floor, false);
 
   // Decrease MAG's synchro
   try {
@@ -1815,8 +1816,9 @@ static asio::awaitable<void> on_change_hp(std::shared_ptr<Client> c, SubcommandM
     co_return;
   }
   // veilig-1: a player hit by an enemy (6x4A, 6x4B, 6x4C; not 6x2F, any HP change) is a sign of a fight for the Spire nets
+  // r2: the players' side only; an enemy out of reach that shoots keeps the floor clock young, not the enemies' one
   if constexpr (std::is_same_v<CmdT, G_ClientIDHeader>) {
-    spire_bridge_note_fight(l, c->floor);
+    spire_bridge_note_fight(l, c->floor, false);
   }
 
   forward_subcommand(c, msg);

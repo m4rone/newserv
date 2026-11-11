@@ -2584,6 +2584,64 @@ void run_static_tests() {
     expect_eq(seconds(0), spire_fight_quiet(game, 5, t0 - seconds(1)));       // never negative
   }
 
+  phosg::log_info_f("-- Spire bridge: an enemy out of reach that shoots still lets the net count (veilig-1 r2)");
+  {
+    using A = SpireNetAction;
+    using std::chrono::seconds;
+    // A Lily or a Garanz on a ledge: nobody can hit it, it hits a player every 10 s. Those hits (6x4A/4B/4C, a death
+    // 6x4D) keep the floor clock young, so the net never counted and the room stayed shut. The enemies' side clock
+    // still runs out: the net counts within 300 s, and the notice comes at the first look.
+    const uint32_t game = 0xFFFFFF03;
+    const uint8_t floor = 5;
+    auto t0 = std::chrono::steady_clock::time_point(seconds(200000));
+    spire_fight_note(game, floor, t0); // the defeat that left the wave held only by the enemy on the ledge
+    auto look = spire_unhit_net_look(true, seconds(0), true, seconds(0));
+    auto at = t0 + look.wait;
+    auto next_hit = t0 + seconds(10);
+    int64_t counted_at = -1, notice_at = -1;
+    while (at <= t0 + seconds(600)) {
+      for (; next_hit <= at; next_hit += seconds(10)) {
+        spire_fight_note(game, floor, next_hit, false); // a player hit by the enemy on the ledge
+      }
+      expect(spire_fight_quiet(game, floor, at) < seconds(10));
+      look = spire_unhit_net_look(true, spire_fight_quiet(game, floor, at), true, spire_enemy_quiet(game, floor, at));
+      expect(look.action != A::STOP);
+      if (look.notice && (notice_at < 0)) {
+        notice_at = std::chrono::duration_cast<seconds>(at - t0).count();
+      }
+      if (look.action == A::COUNT) {
+        counted_at = std::chrono::duration_cast<seconds>(at - t0).count();
+        break;
+      }
+      at += std::max(look.wait, seconds(1));
+    }
+    phosg::log_info_f("never-hit net under player hits every 10 s: notice at {} s, counted at {} s", notice_at, counted_at);
+    expect(counted_at >= 0);
+    expect(counted_at <= 300);
+    expect_eq(SPIRE_STUCK_NOTICE_SECONDS.count(), notice_at);
+    // a sign from the enemies' side (a hit claim, 6x0A or 6xE4 on an enemy, also on a Pan Arms' Hidoom) starts both
+    // clocks again; a player hit only the floor clock
+    auto t1 = t0 + seconds(1000);
+    spire_fight_note(game, floor, t1);
+    spire_fight_note(game, floor, t1 + seconds(250), false);
+    expect_eq(seconds(50), spire_fight_quiet(game, floor, t1 + seconds(300)));
+    expect_eq(seconds(300), spire_enemy_quiet(game, floor, t1 + seconds(300)));
+    spire_fight_note(game, floor, t1 + seconds(290));
+    expect_eq(seconds(10), spire_enemy_quiet(game, floor, t1 + seconds(300)));
+    expect_eq(A::WAIT, spire_unhit_net_look(true, seconds(10), true, seconds(10)).action);
+    // the second limit itself, and nobody on the floor still never counts
+    expect_eq(A::WAIT, spire_unhit_net_look(true, seconds(5), true, SPIRE_UNHIT_ENEMY_QUIET_SECONDS - seconds(1)).action);
+    expect_eq(A::COUNT, spire_unhit_net_look(true, seconds(5), true, SPIRE_UNHIT_ENEMY_QUIET_SECONDS).action);
+    expect_eq(A::WAIT, spire_unhit_net_look(true, seconds(600), false, seconds(600)).action);
+    expect(spire_unhit_net_look(true, seconds(5), true, SPIRE_STUCK_NOTICE_SECONDS).notice);
+    expect_eq(A::STOP, spire_unhit_net_look(false, seconds(5), true, seconds(600)).action);
+    expect(SPIRE_UNHIT_QUIET_SECONDS < SPIRE_UNHIT_ENEMY_QUIET_SECONDS);
+    // a new clock starts both at now: a lost clock makes the net later, never sooner
+    expect_eq(seconds(0), spire_enemy_quiet(game, 7, t0));
+    spire_fight_note(game, 8, t0, false);
+    expect_eq(seconds(20), spire_enemy_quiet(game, 8, t0 + seconds(20)));
+  }
+
   phosg::log_info_f("-- Spire bridge: a hit on a child is a hit on its parent for the nets (veilig-1, 2-M2)");
   {
     // q921 k7 (Caves 3, room 50, wave 3): Guil Sharks and a Pan Arms. The players fight the Pan Arms as Hidoom and
