@@ -8107,6 +8107,152 @@ void run_static_tests() {
       expect(no_marker(snapshot_on_disk(p2)));
     });
 
+    // The return to base ('O') and the run again ('I'). The quest's write to register 248 goes in through
+    // spire_bridge_handle_register, as on_sync_quest_register hands a 6x77 over. The registers the server writes back
+    // (r41 with the answer, r248 'DONE') are kept, and the 61 requests are counted.
+    struct ServerWrote {
+      std::vector<std::pair<uint16_t, uint32_t>> registers;
+      size_t asked_61 = 0;
+    };
+    auto must = [](bool ok, const char* what) {
+      if (!ok) {
+        throw std::runtime_error(what);
+      }
+    };
+    // as `drive`, but it waits for the clock: the proof on Pioneer 2 (spire_base_return_prove) sleeps before its 61
+    auto drive_clock = [&](World& w, Session& p, ServerWrote& seen, const std::function<bool()>& finished, const char* what) {
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      for (;;) {
+        w.s->io_context->restart();
+        size_t ran = w.s->io_context->poll();
+        if (answer_failed) {
+          auto e = answer_failed;
+          answer_failed = nullptr;
+          std::rethrow_exception(e);
+        }
+        auto inbox = std::move(p.ch->inbox);
+        p.ch->inbox.clear();
+        for (const auto& raw : inbox) {
+          const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+          if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (raw[sizeof(header)] == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+            seen.registers.emplace_back(reg.register_number.load(), reg.value.as_int.load());
+          } else if (header.command == 0x95) {
+            seen.asked_61++;
+          }
+          client_handles(w, p, raw);
+        }
+        if (!inbox.empty() || ran) {
+          continue;
+        }
+        if (finished()) {
+          return;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+          throw std::runtime_error(std::format("the server did not get to {} within 15 seconds", what));
+        }
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(50));
+      }
+    };
+    // the quest writes a request and waits for r41 with the request's tag, then r248 'DONE'; returns r41
+    auto quest_asks = [&](World& w, Started& r, ServerWrote& seen, uint32_t request, const char* what) -> uint32_t {
+      size_t from = seen.registers.size();
+      must(spire_bridge_handle_register(r.p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, request), "the bridge did not take the quest's request");
+      const std::pair<uint16_t, uint32_t> done_write(SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+      drive_clock(w, r.p, seen, [&]() {
+        return std::find(seen.registers.begin() + from, seen.registers.end(), done_write) != seen.registers.end(); }, what);
+      for (size_t z = from; z < seen.registers.size(); z++) {
+        if ((seen.registers[z].first == SPIRE_BASE_RETURN_ANSWER_REGISTER) && ((seen.registers[z].second >> 24) == (request >> 24))) {
+          return seen.registers[z].second;
+        }
+      }
+      throw std::runtime_error(std::format("the server wrote no r41 for {}", what));
+    };
+    // the quest's warp to Pioneer 2 after an 'O' OK, and the server's proof there: a 61 asked on floor 0
+    auto warp_to_base = [&](World& w, Started& r, ServerWrote& seen) {
+      r.p.c->floor = 0;
+      size_t asked = seen.asked_61;
+      drive_clock(w, r.p, seen, [&]() { return seen.asked_61 > asked; }, "the proof's 61 on Pioneer 2");
+    };
+    const uint32_t run_over_request = static_cast<uint32_t>(SPIRE_BRIDGE_MSG_RUN_OVER) << 24;
+
+    e2e_case("the run ends, 'O' brings the real character back, proven on Pioneer 2; what the base changed follows at the game exit", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+
+      // mid-run an 'O' is refused: nothing is pushed and the client keeps the run copy
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::RUN_NOT_OVER),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to a mid-run 'O'"));
+      expect_eq(0u, p.ch->pushes);
+      must(!memcmp(&p.ch->memory, &r.run_copy, sizeof(r.run_copy)), "a refused 'O' changed what the client holds");
+
+      // the run ends ('X'); the 'O' that follows pushes the snapshot's inventory and disp into the client and answers OK
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      // the run adds nothing to the real character: the client holds exactly the character it logged in with
+      expect_real(p.ch->memory, real, "at the 'O' OK, before the warp to Pioneer 2");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      expect(server_holds(p, *r.server_real));
+      // the marker is the safety net and stays as it was; the print of the run copy is stored for the re-take
+      auto snap = snapshot_on_disk(p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect(snap.run_copy_print.exists);
+
+      warp_to_base(w, r, seen);
+      expect_real(p.ch->memory, real, "at the base, after the proof on Pioneer 2");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      snap = snapshot_on_disk(p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+
+      // In the base the player spends 300 meseta on two Dimates: the real character's own change, on top of nothing else
+      GCCharacter at_base = real;
+      at_base.disp.stats.meseta = 54021;
+      at_base.inventory.items[6].data.data1[0] = 0x03;
+      at_base.inventory.items[6].data.data1[2] = 0x01;
+      at_base.inventory.items[6].data.data1[5] = 0x02;
+      at_base.inventory.items[6].data.id = 0x00010006;
+      at_base.inventory.num_items = 7;
+      p.ch->memory = at_base;
+
+      // The game exit from the base: after a proven 'O' the snapshot follows the 98 (spire_guard_after_98), so the
+      // restore before the lobby join pushes the real character as the base left it, and the card gets that one
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->lobby.lock() && !p.c->has_overlay());
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      must(static_cast<uint32_t>(snap.inventory.num_items) == 7, "the snapshot did not follow the item bought in the base");
+      must(snap.disp.stats.meseta.load() == 54021, "the snapshot did not follow the meseta spent in the base");
+      must(snap.disp.stats.level.load() == 51 && snap.disp.stats.exp.load() == 1234567, "the snapshot's level or EXP changed at the base exit");
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, at_base, "after the game exit that follows the base");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], at_base, "on the memory card after the game exit that follows the base");
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && !snap.restore_pending && snap.awaiting_save);
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, at_base, "after the login that follows the base");
+      expect(no_marker(snapshot_on_disk(p2)));
+    });
+
     expect_eq(0u, e2e_failed);
   }
 
