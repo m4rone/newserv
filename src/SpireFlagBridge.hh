@@ -1455,12 +1455,15 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
 // replace_char and an owned start_level bonus a copy with the rule block's ba_set_char_level raised by the bonus
 // (spire_start_level_patch_bin), which the client applies at ba_start. Remembers the bonus for the client's overlay.
 // Never throws; on any doubt the quest's own .bin (and no bonus for the overlay).
+// B-REGIE-20-5: a client that is not the quest's leader (SpireFollowLeader's LeaderClient, else client 0) gets at
+// least its level for this quest load minus SPIRE_LEVEL_FLOOR_GAP (SpireMeta.hh), on a resume too; so does its overlay.
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
 
 // v53 (B-BASIS-54): the quest .bin set_lobby_quest sends this client, before spire_start_level_quest_bin: for a guarded
 // Spire quest with a heat patch (SpireMeta.hh SPIRE_HEAT_PATCH_DIR/q<N>.json) and a GC client, a copy with the override
-// rows of ONE heat step for the whole game: the leader's H = H_auto(class, P) as its 'M' START has it (start_level as
+// rows of ONE heat step for the whole game: the quest leader's (B-REGIE-20-5: SpireFollowLeader's LeaderClient, else
+// client 0; nobody there: the game's leader) H = H_auto(class, P) as its 'M' START has it (start_level as
 // this quest load gives its run copy) + the chosen heat (not known on the server yet: 0). Every client of the game gets
 // the same bytes (compressed once per .bin and step). H 0, no patch file, or any error (logged): the quest's own .bin,
 // which plays the H 0 rows. Never throws. v55: remembers the step it sent for the client's 'M' START (SpireHeatSent).

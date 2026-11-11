@@ -4747,6 +4747,38 @@ static std::optional<uint32_t> spire_resume_level_for_client(
   }
 }
 
+// B-REGIE-20-5: the trailing player's level floor (SpireMeta.hh spire_level_floor_char_level) for the quest .bin of a
+// client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
+// The leader is the quest's: SpireFollowLeader's LeaderClient (else lobby client 0), as spire_resume_level_for_client
+// takes it and whoever leads the game (l->leader_id), at the level its own .bin gets; with nobody in that slot the
+// game's leader, as the heat (spire_heat_for_leader), and with nobody there either no floor. Never throws.
+static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    std::optional<uint32_t> resume_level, uint32_t bonus) {
+  const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+  if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
+      !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
+      (c->version() != Version::GC_V3)) {
+    return std::nullopt;
+  }
+  const auto& follow = c->require_server_state()->data->spire_follow_leader;
+  uint8_t leader_id = follow ? follow->first : 0;
+  if ((leader_id >= l->clients.size()) || !l->clients[leader_id]) {
+    leader_id = l->leader_id;
+  }
+  auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
+  bool is_leader = !leader || (leader == c); // no leader in the game at all: nobody to follow
+  std::optional<uint32_t> unused;
+  uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
+  uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,
+      spire_start_level_bonus_for_client(leader, l), spire_resume_level_for_client(leader, l, &unused));
+  uint32_t level = spire_level_floor_char_level(own, leader_level, is_leader);
+  if (level > own) {
+    c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
+        SPIRE_LEVEL_FLOOR_GAP);
+  }
+  return (level > own) ? std::optional<uint32_t>(level) : std::nullopt;
+}
+
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
   spire_start_level_sent.erase(c.get());
@@ -4756,6 +4788,7 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     uint32_t quest_number = l->quest->meta.quest_number;
     uint32_t base = l->quest->meta.battle_rules->char_level;
     uint32_t level = std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+    level = spire_level_floor_for_client(c, l, resume_level, 0).value_or(level); // B-REGIE-20-5
     try {
       std::string bin = prs_decompress(*bin_contents);
       size_t count = spire_start_level_patch_bin(bin, base, level);
@@ -4775,13 +4808,14 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     }
   }
   uint32_t bonus = spire_start_level_bonus_for_client(c, l);
-  if (!bonus || !bin_contents) {
+  auto floor_level = bin_contents ? spire_level_floor_for_client(c, l, std::nullopt, bonus) : std::nullopt; // B-REGIE-20-5
+  if ((!bonus && !floor_level) || !bin_contents) {
     return bin_contents;
   }
   uint32_t quest_number = l->quest->meta.quest_number;
   try {
     uint32_t base = l->quest->meta.battle_rules->char_level;
-    uint32_t level = spire_start_level_char_level(base, bonus);
+    uint32_t level = floor_level.value_or(spire_start_level_char_level(base, bonus));
     std::string bin = prs_decompress(*bin_contents);
     size_t count = spire_start_level_patch_bin(bin, base, level);
     if (count != 1) {
@@ -4790,9 +4824,11 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
       return bin_contents;
     }
     auto ret = std::make_shared<const std::string>(prs_compress(bin));
-    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
+    // B-REGIE-20-5: a floored level reaches the overlay as an absolute level; the run's bonus stays the bought one
+    spire_start_level_sent[c.get()] = floor_level ? SpireStartLevelSent{l->lobby_id, quest_number, 0, level, bonus}
+        : SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
     c->log.info_f("Spire start level: q{} sent with the rule block's level Lv{} -> Lv{} (start_level +{})",
-        quest_number, base + 1, level + 1, level - base);
+        quest_number, base + 1, level + 1, floor_level ? bonus : (level - base));
     return ret;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire start level: q{} .bin not changed: {}; quest and overlay keep the quest's level",
@@ -4807,12 +4843,19 @@ struct SpireHeatLeader {
   std::string detail;
 };
 
-// The game leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
+// The quest leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
 // and the shop catalogue, start_level counted as the run copy this quest load gives it (spire_start_level_bonus_for_client),
 // plus the chosen heat (H_keuze), which the server does not know yet (0). Throws on a file error.
+// B-REGIE-20-5: the leader is the quest's, as the level floor and the resume take it: SpireFollowLeader's LeaderClient
+// (else lobby client 0); with nobody in that slot the game's leader (l->leader_id), never an empty slot.
 static SpireHeatLeader spire_heat_for_leader(std::shared_ptr<const Lobby> l) {
   SpireHeatLeader ret;
-  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
+  const auto& follow = l->require_server_state()->data->spire_follow_leader;
+  uint8_t leader_id = follow ? follow->first : 0;
+  if ((leader_id >= l->clients.size()) || !l->clients[leader_id]) {
+    leader_id = l->leader_id;
+  }
+  auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
   if (!leader || (leader->version() != Version::GC_V3) || !leader->login || !leader->login->gc_license) {
     ret.detail = "no GC leader";
     return ret;

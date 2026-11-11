@@ -920,6 +920,23 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
   return count;
 }
 
+// B-REGIE-20-5: the level floor of the trailing player (SpireMeta.hh)
+uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level) {
+  if (resume_level) {
+    return std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+  }
+  return spire_start_level_char_level(base_char_level, bonus);
+}
+
+uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level, bool is_leader) {
+  if (is_leader) {
+    return own_level;
+  }
+  uint32_t capped = std::min<uint32_t>(leader_level, SPIRE_START_LEVEL_LEVEL_CAP);
+  uint32_t floor = (capped > SPIRE_LEVEL_FLOOR_GAP) ? (capped - SPIRE_LEVEL_FLOOR_GAP) : 0;
+  return std::max<uint32_t>(own_level, floor);
+}
+
 // v53: the server-side heat steps (SpireMeta.hh)
 static std::string spire_heat_hex_bytes(const std::string& hex) {
   auto nibble = [&](char ch) -> uint8_t {

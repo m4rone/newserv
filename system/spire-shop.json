@@ -32,19 +32,19 @@
       "P": [0, 1, 2, 3, 4, 5]
     },
     "open_hard": {
-      "_what": "BaseRung 1 (Hard) for Spire Run I and II (B-BASIS-13). PNeeded: the end of the sim's meta-heat table (P 8), where H_auto is 4-7, about f 1.0 on the hardest Normal room (k3 HU 0.75 + 0.05 H, top of Normal at H 5).",
+      "_what": "BaseRung 1 (Hard) for Spire Run I and II (B-BASIS-13). PNeeded 8 is held on purpose: a recalibration of the sim does not move the threshold at which a rung opens (regie, 2026-11-11, balans 4). It was set as the end of the sim's meta-heat table (P 8) by the rule of pso-roguelike sim/curve_spire.py pneeded: the first P at which half the classes play Normal's top heat, the H at which the hardest Normal row reaches f 1.0. On the sim of balans 4 (pso-roguelike spike/balans d3b91e2: hardest Normal row f 0.80 + 0.05 H, top of Normal at H 4, uncapped H_auto 3-6 at P 8) that rule would give P 6.",
       "Max": 1,
       "Price": [60],
       "PNeeded": 8
     },
     "open_vh": {
-      "_what": "BaseRung 2 (Very Hard). PNeeded: the rule of open_hard on Hard's table (pso-roguelike sim/curve_spire.py pneeded): Hard's top is H 8 (its hardest row k3/k6 HU f 0.60 + 0.05 H reaches 1.0), and by that rule it would be P 29 (half the classes at H_auto >= 8), but the most strength anyone can own is 9 (kit_tier 2 + hp_mat 2 + atp_grind 5), so P 29 could never be bought while the refusal says more upgrades open it. Spoor beloningen B-BEL-3: P 9, everything bought; it also needs Hard open (won or bought) and costs 120 splinters, so Very Hard can be bought without a win.",
+      "_what": "BaseRung 2 (Very Hard). PNeeded: the rule of open_hard on Hard's table (pso-roguelike sim/curve_spire.py pneeded) gives a P nobody can own: on the sim of balans 4 (pso-roguelike spike/balans d3b91e2) Hard's top is H 6 (its hardest row f 0.70 + 0.05 H reaches 1.0) and half the classes play H_auto >= 6 from P 32 (before balans 4: top H 8, P 29), but the most strength anyone can own is 9 (kit_tier 2 + hp_mat 2 + atp_grind 5), so such a P could never be bought while the refusal says more upgrades open it. Spoor beloningen B-BEL-3: P 9, everything bought, held on purpose through the recalibration (regie, 2026-11-11); it also needs Hard open (won or bought) and costs 120 splinters, so Very Hard can be bought without a win.",
       "Max": 1,
       "Price": [120],
       "PNeeded": 9
     },
     "open_ult": {
-      "_what": "BaseRung 3 (Ultimate). PNeeded: the same rule on Very Hard's table: top H 5 (k3 HU f 0.75), half the classes at H_auto >= 5 from P 38, above the strength anyone can own (9). B-BEL-3: P 9 as open_vh; it also needs Very Hard open (won or bought) and costs 240 splinters, so all three rungs can be bought for 420 splinters without a win.",
+      "_what": "BaseRung 3 (Ultimate). PNeeded: the same rule on Very Hard's table gives no P at all on the sim of balans 4 (pso-roguelike spike/balans d3b91e2): top H 4 (hardest row f 0.80), and no P of 0-40 brings half the classes to H_auto >= 4, every cell of P 0-16 being 0 (before balans 4: top H 5, from P 38, above the strength anyone can own, 9). B-BEL-3: P 9 as open_vh, held on purpose through the recalibration (regie, 2026-11-11); it also needs Very Hard open (won or bought) and costs 240 splinters, so all three rungs can be bought for 420 splinters without a win.",
       "Max": 1,
       "Price": [240],
       "PNeeded": 9
@@ -57,40 +57,40 @@
     "PactTenths": 1
   },
   "MetaHeat": {
-    "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/basis-sim ec2f86e, E08-diepte/sim/scaling_lab.py meta_heat_for on sim/plan-spire.json (Normal, override rooms k1-k8), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column. The quest builds one override row set per H 0..7 (pso-roguelike spike/basis-quest economy.json meta_heat.H_max = the highest H here, slice 5) and plays H = r108 clamped to 0..7: a cell above 7 needs a new quest build, or it plays the H 7 rows.",
-    "_cap": "Route B F3 (B-BASIS-67): every HAuto (Normal) value is capped at 2, so HP stays at baseline (max(0, H - 2)) whatever the strength; nulls and the row layout are unchanged. The uncapped sim values are in git history (newserv f93e223).",
-    "_comment": "v54: one table per ladder rung. HAuto is Normal (q920-q922 and every quest outside the ladder); HAutoHard, HAutoVHard and HAutoUltimate are the tables of q981/q984, q982/q985 and q983/q986 (newserv spire_meta_ladder_quest_rung), from pso-roguelike spike/basis-ladder-heat quests/spire/data/economy-<rung>.json meta_heat (the same meta_heat_for on sim/plan-spire-<rung>.json, with the rung's DFP rows and HTD band), P 0-16, the catalogue's highest strength. The rung's Run I quest (q981-q983) carries heat rows H 0..H_max of its rung (Hard 4, Very Hard 3, Ultimate 3) as its heat patch; Run II (q984-q986) has no override room and plays H 0. A rung without its table plays H 0.",
+    "_source": "H_auto[class][P], P 0-8: pso-roguelike spike/balans d3b91e2 (balans 4: the sim calibrated on the level column the run plays), quests/spire/data/economy.json meta_heat.H_auto, from sim/curve_spire.py meta_heat_table (E08-diepte/sim meta_heat_for on sim/plan-spire.json, Normal's override rooms), with the Grass Assassin HTD floor 3 (ENEMY_HTD_FLOOR, variant I of B-BASIS-4), then capped (_cap). null = no H <= 20 keeps the band; the server then takes the last heat of the class at a lower P, and P past 8 takes the P 8 column. The quest data holds one override row set per H 0..6 (economy.json meta_heat.H_max, the highest uncapped H) and newserv writes the rows of the game's H into the .bin it sends (system/spire-heat/q<N>.json, at most its HeatMax). pso-roguelike quests/spire/check_meta_heat_sync.py (pc-build.sh) refuses a build whose economy files and these tables differ: after a new sim, derive the tables again by the rules here.",
+    "_cap": "Route B F3 (B-BASIS-67): every HAuto (Normal) value is capped at 2, so HP stays at baseline (max(0, H - 2)) whatever the strength; nulls and the row layout are unchanged. The uncapped sim values are pso-roguelike quests/spire/data/economy.json meta_heat.H_auto (those of the sim before balans 4: newserv f93e223).",
+    "_comment": "v54: one table per ladder rung. HAuto is Normal (q920-q922 and every quest outside the ladder); HAutoHard, HAutoVHard and HAutoUltimate are the tables of q981/q984, q982/q985 and q983/q986 (newserv spire_meta_ladder_quest_rung), from pso-roguelike spike/balans d3b91e2 quests/spire/data/economy-<rung>.json meta_heat (the same meta_heat_for on sim/plan-spire-<rung>.json, with the rung's DFP rows and HTD band), not capped, P 0-16, the catalogue's highest strength. The rung's Run I quest (q981-q983) carries heat rows H 0..H_max of its rung (Hard 4; Very Hard and Ultimate 0 since balans 4: every cell is 0, so no heat rows, no heat patch and H 0) as its heat patch; Run II (q984-q986) has no override room and plays H 0. A rung without its table plays H 0.",
     "HAuto": {
-      "HUmar": [0, 0, 0, 1, 2, 2, 2, 2, 2],
-      "HUnewearl": [0, 0, 1, 1, 2, 2, 2, 2, 2],
-      "HUcast": [0, 0, 1, 2, 2, 2, 2, 2, 2],
-      "HUcaseal": [0, 1, 1, 2, 2, 2, 2, 2, null],
-      "RAmar": [0, 0, 0, 0, 0, 1, 2, 2, 2],
-      "RAmarl": [0, 0, 1, 1, 2, 2, 2, 2, 2],
-      "RAcast": [0, 0, 0, 1, 1, 2, 2, 2, 2],
+      "HUmar": [0, 0, 0, 2, 2, 2, 2, 2, 2],
+      "HUnewearl": [0, 1, 2, 2, 2, 2, 2, null, null],
+      "HUcast": [0, 1, 2, 2, 2, 2, 2, 2, null],
+      "HUcaseal": [0, 1, 1, 2, 2, 2, 2, 2, 2],
+      "RAmar": [0, 0, 0, 0, 0, 2, 2, 2, 2],
+      "RAmarl": [0, 1, 2, 2, 2, 2, 2, 2, 2],
+      "RAcast": [0, 0, 0, 0, 2, 2, 2, 2, 2],
       "RAcaseal": [0, 1, 1, 2, 2, 2, 2, 2, 2],
-      "FOmar": [0, 0, 2, 2, 2, 2, 2, 2, 2],
-      "FOmarl": [0, 0, 2, 2, 2, 2, 2, 2, 2],
-      "FOnewm": [0, 0, 0, 0, 1, 1, 2, 2, 2],
-      "FOnewearl": [0, 1, 2, 2, 2, 2, 2, 2, 2]
+      "FOmar": [0, 1, 1, 1, 2, 2, 2, 2, 2],
+      "FOmarl": [0, 2, 2, 2, 2, 2, 2, 2, 2],
+      "FOnewm": [0, 0, 1, 1, 2, 2, 2, 2, 2],
+      "FOnewearl": [0, 0, 0, 2, 2, 2, 2, 2, 2]
     },
     "HAutoHard": {
-      "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
-      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
-      "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 4],
-      "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
-      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, null, 4, 4],
-      "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 4, 4, 4],
-      "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 4, 4],
-      "RAcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 3, 3, 3, 4, 4, 4, 4],
+      "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3],
+      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 4],
+      "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3],
+      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+      "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 3, 3],
+      "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+      "RAcaseal": [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3],
       "FOmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
       "FOnewm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "FOnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     },
     "HAutoVHard": {
       "HUmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3],
+      "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -107,12 +107,12 @@
       "HUnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "HUcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "HUcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+      "RAmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "RAmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "RAcast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "RAcaseal": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "FOmar": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+      "FOmarl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "FOnewm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       "FOnewearl": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     }

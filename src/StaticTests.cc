@@ -20,6 +20,7 @@
 #include "ReceiveSubcommands.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
+#include "Compression.hh"
 #include "CrashValueFilter.hh"
 #include "SpireBBATxGuard.hh"
 #include "SpireDraw.hh"
@@ -1521,6 +1522,104 @@ void run_static_tests() {
     std::string q921_rules = "head" + other + rule_block + "tail";
     expect_eq(1u, spire_start_level_patch_bin(q921_rules, 0, spire_start_level_char_level(0, 14)));
     expect_eq("head" + other + std::string("\x49\x0E\x00\x00\x00\xF8\x71", 7) + "tail", q921_rules);
+  }
+
+  phosg::log_info_f("-- Spire level floor: the trailing player loads a quest at the leader's level minus 2 at least (B-REGIE-20-5)");
+  {
+    expect_eq(2u, SPIRE_LEVEL_FLOOR_GAP);
+    // a client's own level for a quest load: the saved level of a resume, else the quest's level plus its bonus
+    expect_eq(0u, spire_quest_load_char_level(0, 0, std::nullopt));
+    expect_eq(14u, spire_quest_load_char_level(0, 14, std::nullopt));
+    expect_eq(37u, spire_quest_load_char_level(27, 10, std::nullopt));
+    expect_eq(22u, spire_quest_load_char_level(0, 14, 22)); // a resume: the saved level, the bonus is in it already
+    expect_eq(0u, spire_quest_load_char_level(27, 10, 0));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(0, 0, 5000));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(198, 5, std::nullopt));
+    // the trailing player below the floor: the leader's level minus 2
+    expect_eq(18u, spire_level_floor_char_level(0, 20, false)); // Lv1 next to a leader at Lv21: Lv19
+    expect_eq(18u, spire_level_floor_char_level(17, 20, false));
+    // on the floor and above it: its own level, never down
+    expect_eq(18u, spire_level_floor_char_level(18, 20, false));
+    expect_eq(19u, spire_level_floor_char_level(19, 20, false));
+    expect_eq(20u, spire_level_floor_char_level(20, 20, false));
+    expect_eq(45u, spire_level_floor_char_level(45, 20, false));
+    // the leader never changes, whatever level is passed as the leader's
+    expect_eq(0u, spire_level_floor_char_level(0, 20, true));
+    expect_eq(20u, spire_level_floor_char_level(20, 20, true));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_level_floor_char_level(SPIRE_START_LEVEL_LEVEL_CAP, 0, true));
+    // a solo player is its own leader
+    expect_eq(0u, spire_level_floor_char_level(0, 0, true));
+    expect_eq(7u, spire_level_floor_char_level(7, 7, true));
+    // a leader at a low level: the leader's level minus 2 never goes below Lv1 (0), and never wraps
+    expect_eq(0u, spire_level_floor_char_level(0, 0, false));
+    expect_eq(0u, spire_level_floor_char_level(0, 1, false));
+    expect_eq(0u, spire_level_floor_char_level(0, 2, false));
+    expect_eq(1u, spire_level_floor_char_level(0, 3, false));
+    expect_eq(5u, spire_level_floor_char_level(5, 1, false));
+    // the maximum level: the floor is at most the overlay's clamp minus 2, also for a level beyond it
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP - 2, spire_level_floor_char_level(0, SPIRE_START_LEVEL_LEVEL_CAP, false));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP - 2, spire_level_floor_char_level(0, 250, false));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP - 2, spire_level_floor_char_level(0, 0xFFFFFFFF, false));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP - 1,
+        spire_level_floor_char_level(SPIRE_START_LEVEL_LEVEL_CAP - 1, SPIRE_START_LEVEL_LEVEL_CAP, false));
+    expect_eq(SPIRE_START_LEVEL_LEVEL_CAP,
+        spire_level_floor_char_level(SPIRE_START_LEVEL_LEVEL_CAP, SPIRE_START_LEVEL_LEVEL_CAP, false));
+  }
+
+  phosg::log_info_f("-- Spire level floor: the quest .bin of two players, each patched to its own floored level (B-REGIE-20-5)");
+  {
+    // as spire_start_level_quest_bin builds it per client: each one's own level for the quest load, the floor against
+    // the leader's, the rule block patched to that level
+    struct Player {
+      uint32_t bonus;
+      std::optional<uint32_t> resume_level;
+    };
+    auto rule_block_for = [](uint32_t level) -> std::string {
+      return std::string("\x49", 1) + std::string{static_cast<char>(level & 0xFF), static_cast<char>((level >> 8) & 0xFF),
+                 static_cast<char>((level >> 16) & 0xFF), static_cast<char>((level >> 24) & 0xFF)} + "\xF8\x71";
+    };
+    std::string other = std::string("\x49\x00\x00\x00\x00\xF8\x70", 7); // ba_set_max_tech_level 0: untouched
+    auto bin_at = [&](uint32_t level) -> std::string {
+      return "head" + other + rule_block_for(level) + "tail";
+    };
+    auto bin_for = [&](uint32_t base, const Player& own, const Player& leader, bool is_leader) -> std::string {
+      uint32_t own_level = spire_quest_load_char_level(base, own.bonus, own.resume_level);
+      uint32_t leader_level = spire_quest_load_char_level(base, leader.bonus, leader.resume_level);
+      uint32_t level = spire_level_floor_char_level(own_level, leader_level, is_leader);
+      std::string bin = bin_at(base);
+      expect_eq(1u, spire_start_level_patch_bin(bin, base, level));
+      return bin;
+    };
+    // a run start (q921, Lv1): the leader owns start_level +14, the trailing player owns none
+    Player leader{14, std::nullopt};
+    Player trailing{0, std::nullopt};
+    expect_eq(bin_at(14), bin_for(0, leader, leader, true)); // the leader: Lv15, its own
+    expect_eq(bin_at(12), bin_for(0, trailing, leader, false)); // the trailing player: Lv13, not the quest's Lv1
+    expect_eq(bin_at(0), bin_for(0, trailing, trailing, true)); // the same player alone: the quest's Lv1
+    // the other way round: the leader owns none, so the partner with +14 keeps its own Lv15
+    expect_eq(bin_at(14), bin_for(0, leader, trailing, false));
+    // a room quest (Lv28): the leader owns +10, the trailing player +5, which is below the floor
+    expect_eq(bin_at(37), bin_for(27, Player{10, std::nullopt}, Player{10, std::nullopt}, true));
+    expect_eq(bin_at(35), bin_for(27, Player{5, std::nullopt}, Player{10, std::nullopt}, false));
+    // a resume: each one's saved level is the input (the bonus is in it already)
+    expect_eq(bin_at(30), bin_for(0, Player{14, 30}, Player{14, 30}, true));
+    expect_eq(bin_at(28), bin_for(0, Player{0, 11}, Player{14, 30}, false)); // saved Lv12 next to Lv31: Lv29
+    expect_eq(bin_at(29), bin_for(0, Player{0, 29}, Player{14, 30}, false)); // above the floor: its own
+    expect_eq(bin_at(33), bin_for(0, Player{0, 33}, Player{14, 30}, false)); // ahead of the leader: its own
+    // a partner without a savestate next to a leader that resumes: the floor of the leader's saved level
+    expect_eq(bin_at(28), bin_for(0, Player{5, std::nullopt}, Player{14, 30}, false));
+    // the overlay at the floor level is the class's own Lv13 (create_battle_overlay's replace_char path), as the .bin
+    auto level_table = std::make_shared<JSONLevelTable>(
+        phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    uint32_t floor_level = spire_level_floor_char_level(
+        spire_quest_load_char_level(0, trailing.bonus, trailing.resume_level),
+        spire_quest_load_char_level(0, leader.bonus, leader.resume_level), false);
+    for (uint8_t cls : {uint8_t(0), uint8_t(4), uint8_t(8), uint8_t(11)}) {
+      PlayerStats stats;
+      level_table->reset_to_base(stats, cls);
+      level_table->advance_to_level(stats, std::clamp<uint32_t>(floor_level, 0, 199), cls);
+      expect_eq(12u, static_cast<uint32_t>(stats.level));
+    }
   }
 
   phosg::log_info_f("-- Spire shop route B F3: +5 start levels per purchase, bought levels add no heat, kit_tier once");
@@ -10301,6 +10400,256 @@ void run_static_tests() {
     });
 
     expect_eq(0u, k3_failed);
+  }
+
+  phosg::log_info_f("-- Spire level floor: spire_start_level_quest_bin and the overlay for two clients of one game (B-REGIE-20-5)");
+  {
+    constexpr uint32_t QUEST = 987655;
+    // The bridge reads by relative paths (system/spire-bridge, system/spire-shop.json): this case runs in a temp
+    // directory with the real shop catalogue and level table, so no file of the server is touched
+    std::string shop_json = phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE);
+    auto level_table = std::make_shared<JSONLevelTable>(
+        phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    struct TempCwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-floor-{}", getpid());
+      TempCwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~TempCwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    } temp_cwd;
+    phosg::save_file(SPIRE_SHOP_CATALOGUE_FILE, shop_json);
+
+    struct QuietChannel : Channel {
+      bool open = true;
+      QuietChannel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return this->open;
+      }
+      virtual void disconnect() {
+        this->open = false;
+      }
+      virtual void send_raw(std::string&&) {}
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->data->level_table_v3 = level_table;
+    s->io_context = std::make_shared<asio::io_context>(1);
+    s->data->spire_bridge_quest_numbers.emplace(QUEST);
+    auto server = std::make_shared<GameServer>(s);
+    auto rules = std::make_shared<BattleRules>();
+    rules->replace_char = true;
+    rules->char_level = 0; // Lv1, as q921
+    auto vq = std::make_shared<VersionedQuest>();
+    vq->meta.quest_number = QUEST;
+    vq->meta.battle_rules = rules;
+    auto l = std::make_shared<Lobby>(s, 0x7A03, true);
+    l->episode = Episode::EP1;
+    l->mode = GameMode::BATTLE;
+    l->quest = std::make_shared<Quest>(vq);
+    std::shared_ptr<const Lobby> cl = l;
+
+    // a GC client with a character; upgrades (if any) are its meta file's shop upgrades
+    auto make_client = [&](uint32_t serial_number, const std::map<std::string, uint32_t>& upgrades) -> std::shared_ptr<Client> {
+      auto c = std::make_shared<Client>(server, std::make_shared<QuietChannel>(), ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = serial_number;
+      c->login = login;
+      auto character = c->character_file(true, false); // an empty file, nothing is read
+      if (!upgrades.empty()) {
+        SpireMetaFile meta;
+        meta.upgrades = upgrades;
+        spire_meta_save_file(spire_meta_filename_for(serial_number, &character->disp), serial_number, meta);
+      }
+      return c;
+    };
+    auto seat = [&](std::shared_ptr<Client> c, size_t slot) {
+      c->lobby_client_id = slot;
+      l->clients[slot] = c;
+      c->lobby = l;
+    };
+    auto strong = make_client(4300, {{"start_level", 3}}); // start_level 3 owned: +14 (the shipped Levels)
+    auto fresh = make_client(4301, {}); // owns nothing
+    seat(strong, 0);
+    seat(fresh, 1);
+
+    auto rule_block_for = [](uint32_t level) -> std::string {
+      return std::string("\x49", 1) + std::string{static_cast<char>(level & 0xFF), static_cast<char>((level >> 8) & 0xFF),
+                 static_cast<char>((level >> 16) & 0xFF), static_cast<char>((level >> 24) & 0xFF)} + "\xF8\x71";
+    };
+    auto bin_at = [&](uint32_t level) -> std::string {
+      return "head" + std::string("\x49\x00\x00\x00\x00\xF8\x70", 7) + rule_block_for(level) + "tail";
+    };
+    auto quest_bin = std::make_shared<const std::string>(prs_compress(bin_at(0)));
+    auto sent_to = [&](std::shared_ptr<Client> c) -> std::string {
+      return prs_decompress(*spire_start_level_quest_bin(c, cl, quest_bin));
+    };
+
+    // The floor follows the quest's leader: the client in the slot of SpireFollowLeader's LeaderClient (else slot 0),
+    // as the quest and the resume take it (spire_resume_level_for_client), whoever leads the game (l->leader_id).
+    // the client with +14 in slot 0: its own Lv15; the client in slot 1 gets Lv13 instead of the quest's Lv1
+    l->leader_id = 0;
+    expect_eq(bin_at(14), sent_to(strong));
+    expect_eq(bin_at(12), sent_to(fresh));
+    // the game's leader is the client in slot 1 (slot 0 went to the lobby and came back): slot 0 is the measure still
+    l->leader_id = 1;
+    expect_eq(bin_at(14), sent_to(strong));
+    expect_eq(bin_at(12), sent_to(fresh));
+    // SpireFollowLeader names slot 1: the client there owns nothing, so both keep their own level
+    s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(1, 0);
+    for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+      l->leader_id = game_leader;
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      expect_eq(bin_at(14), sent_to(strong));
+    }
+    s->data->spire_follow_leader.reset();
+    // the client that owns nothing in slot 0: it keeps the quest's own .bin, and its partner keeps its own Lv15
+    seat(fresh, 0);
+    seat(strong, 1);
+    for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+      l->leader_id = game_leader;
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      expect_eq(bin_at(14), sent_to(strong));
+    }
+    // alone in the game, in slot 0 and in slot 1 (nobody in the quest leader's slot): the quest's own .bin
+    l->clients[1] = nullptr;
+    l->leader_id = 0;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    l->clients[0] = nullptr;
+    seat(fresh, 1);
+    l->leader_id = 1;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    // nobody in the quest leader's slot: the game's leader (l->leader_id) is the measure, as for the heat
+    // (spire_heat_for_leader); the client with +14 in slot 1 leads the game, the client in slot 2 gets its floor
+    seat(strong, 1);
+    seat(fresh, 2);
+    l->leader_id = 1;
+    expect_eq(bin_at(14), sent_to(strong));
+    expect_eq(bin_at(12), sent_to(fresh));
+    // the client that owns nothing leads the game: both keep their own level
+    l->leader_id = 2;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    expect_eq(bin_at(14), sent_to(strong));
+    // nobody in the game leader's slot either: no floor
+    l->leader_id = 3;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    expect_eq(bin_at(14), sent_to(strong));
+    l->clients[1] = nullptr;
+    l->clients[2] = nullptr;
+    seat(fresh, 1);
+    // a quest the guard does not cover: no floor, the quest's own .bin
+    seat(strong, 0);
+    l->leader_id = 0;
+    s->data->spire_bridge_quest_numbers.clear();
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+    s->data->spire_bridge_quest_numbers.emplace(QUEST);
+
+    // The heat follows the quest's leader too (spire_heat_quest_bin): the game plays the rows of the H of the client in
+    // SpireFollowLeader's LeaderClient slot (else slot 0), whoever leads the game; with nobody in that slot the game's
+    // leader (l->leader_id), never an empty slot. hot owns every hp_mat and atp_grind level, fresh owns nothing.
+    {
+      auto repo = spire_shop_parse(shop_json);
+      std::map<std::string, uint32_t> hot_upgrades;
+      for (size_t z : {size_t(2), size_t(3)}) { // hp_mat, atp_grind
+        hot_upgrades[SPIRE_SHOP_ITEM_NAMES[z]] = repo.items[z].strength.size() - 1;
+      }
+      auto hot = make_client(4302, hot_upgrades);
+      uint8_t char_class = hot->character_file(true, false)->disp.visual.sh.char_class;
+      uint8_t rung = spire_meta_ladder_quest_rung(QUEST);
+      // the sidecar: one byte at 0 ('h' at H 0) that names the step, H 0..7
+      std::filesystem::create_directories(SPIRE_HEAT_PATCH_DIR);
+      phosg::save_file(std::format("{}/q{}.json", SPIRE_HEAT_PATCH_DIR, QUEST), std::format(
+          R"({{"Quest": {}, "BinSize": {}, "HeatMax": 7, "Fields": [{{"Offset": 0, "Width": 1, "Values": ["68", "A1", "A2", "A3", "A4", "A5", "A6", "A7"]}}]}})",
+          QUEST, bin_at(0).size()));
+      uint32_t hot_step = std::min<uint32_t>(spire_shop_heat(repo, char_class, spire_shop_strength(repo, hot_upgrades), rung), 7);
+      uint32_t fresh_step = std::min<uint32_t>(spire_shop_heat(repo, char_class, spire_shop_strength(repo, {}), rung), 7);
+      expect(hot_step >= 1);
+      expect_eq(0u, fresh_step);
+      auto heat_step_sent_to = [&](std::shared_ptr<Client> c) -> uint32_t {
+        auto sent = spire_heat_quest_bin(c, cl, quest_bin);
+        return (sent == quest_bin) ? 0 : (static_cast<uint8_t>(prs_decompress(*sent)[0]) - 0xA0);
+      };
+      // every client of the game gets the rows of one step, with either client as the game's leader
+      auto expect_game_step = [&](uint32_t step, const std::vector<std::shared_ptr<Client>>& seats) {
+        l->clients.fill(nullptr);
+        for (size_t slot = 0; slot < seats.size(); slot++) {
+          if (seats[slot]) {
+            seat(seats[slot], slot);
+          }
+        }
+        for (const auto& c : seats) {
+          if (c) {
+            expect_eq(step, heat_step_sent_to(c));
+          }
+        }
+      };
+      // hot in slot 0: its H, also when the client in slot 1 leads the game (slot 0 went to the lobby and came back)
+      l->leader_id = 0;
+      expect_game_step(hot_step, {hot, fresh});
+      l->leader_id = 1;
+      expect_game_step(hot_step, {hot, fresh});
+      // fresh in slot 0: H 0, also when hot leads the game
+      l->leader_id = 0;
+      expect_game_step(0, {fresh, hot});
+      l->leader_id = 1;
+      expect_game_step(0, {fresh, hot});
+      // SpireFollowLeader names slot 1: the client there is the measure
+      s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(1, 0);
+      for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+        l->leader_id = game_leader;
+        expect_game_step(hot_step, {fresh, hot});
+        expect_game_step(0, {hot, fresh});
+      }
+      // nobody in the quest leader's slot (SpireFollowLeader's slot 2 here, then slot 0): the game's leader
+      s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(2, 0);
+      l->leader_id = 0;
+      expect_game_step(hot_step, {hot, fresh});
+      l->leader_id = 1;
+      expect_game_step(0, {hot, fresh});
+      s->data->spire_follow_leader.reset();
+      l->leader_id = 1;
+      expect_game_step(hot_step, {nullptr, hot, fresh});
+      l->leader_id = 2;
+      expect_game_step(0, {nullptr, hot, fresh});
+      hot->lobby.reset();
+      l->clients.fill(nullptr);
+      seat(strong, 0);
+      seat(fresh, 1);
+      l->leader_id = 0;
+    }
+
+    // the overlay follows the level each client's .bin carried (on_quest_loaded: spire_create_battle_overlay)
+    expect_eq(bin_at(14), sent_to(strong));
+    expect_eq(bin_at(12), sent_to(fresh));
+    expect(spire_create_battle_overlay(strong, cl));
+    expect(spire_create_battle_overlay(fresh, cl));
+    expect_eq(14u, static_cast<uint32_t>(strong->character_file(false, true)->disp.stats.level));
+    expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+
+    for (const auto& c : {strong, fresh}) {
+      spire_static_test_forget(c, cl);
+      c->lobby.reset();
+    }
+    l->clients.fill(nullptr);
   }
 
   phosg::log_info_f("-- All static tests passed");
