@@ -7637,6 +7637,9 @@ void run_static_tests() {
       std::vector<std::string> inbox; // what the server sent and the client has not handled yet
       size_t pushes = 0;
       bool open = true;
+      // false: a push never reaches the save buffer (SetExtendedPlayerInfo is answered, nothing changes)
+      bool pushes_land = true;
+      size_t pushes_lost = 0;
       // The live player, for a case that plays it apart from `memory` (the save buffer, which a push writes): at a floor
       // change the client copies the live player's items and stats back over the save buffer
       std::optional<GCCharacter> live;
@@ -7753,8 +7756,12 @@ void run_static_tests() {
         // the code follows the 4-byte header and S_ExecuteCode_B2; SetExtendedPlayerInfo carries the character behind it
         std::string code = raw.substr(sizeof(header) + sizeof(S_ExecuteCode_B2));
         if ((code.size() >= set_fn->code.size() + sizeof(GCCharacter)) && code.starts_with(set_fn->code)) {
-          memcpy(static_cast<void*>(&p.ch->memory), code.data() + set_fn->code.size(), sizeof(GCCharacter));
-          p.ch->pushes++;
+          if (p.ch->pushes_land) {
+            memcpy(static_cast<void*>(&p.ch->memory), code.data() + set_fn->code.size(), sizeof(GCCharacter));
+            p.ch->pushes++;
+          } else {
+            p.ch->pushes_lost++;
+          }
         } else if (code.starts_with(get_fn->code)) {
           answer(w, p, 0x30, std::string(reinterpret_cast<const char*>(&p.ch->memory), sizeof(GCCharacter)));
         } else if (code.starts_with(bba_fn->code)) {
@@ -8376,6 +8383,92 @@ void run_static_tests() {
       expect_eq(0u, p2.ch->pushes);
       expect_real(p2.ch->memory, at_base, "after the login that follows the base");
       expect(no_marker(snapshot_on_disk(p2)));
+    });
+
+    // A push that never arrives: the client answers SetExtendedPlayerInfo, but its save buffer keeps the run copy, and
+    // the live player is the run copy as well. Every push is then refused, nothing is saved, and the real character
+    // stays in the snapshot until a push lands.
+    e2e_case("the run ends, the 'O' push never reaches the save buffer: refused; the game exit push is lost too; the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+      spire_checkpoint_run_started(p.c); // see the 'O' OK case: the cases reuse one game ID
+      p.ch->live = r.run_copy;
+      p.ch->pushes_land = false;
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::PUSH_NOT_VERIFIED),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' whose push never arrived"));
+      must(p.ch->pushes_lost >= 1, "the 'O' sent no push");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      must(!memcmp(&p.ch->memory, &r.run_copy, sizeof(r.run_copy)), "the save buffer changed without a push");
+      must(server_holds(p, *r.server_real), "the server's real character changed at an 'O' whose push never arrived");
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after a refused 'O' is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a refused 'O' is not the real character");
+
+      // the game exit: the 98 carries the run copy, the restore's push is lost too: refused (on_84 drops the client)
+      client_sends(w, p, 0x98, p.ch->as_61());
+      p.ch->live.reset(); // no player walks around outside a game
+      size_t lost = p.ch->pushes_lost;
+      must(!run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "a game exit restore whose push never arrived was verified");
+      must(p.ch->pushes_lost > lost, "the game exit restore sent no push");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after a refused game exit restore is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a refused game exit restore is not the real character");
+      p.ch->open = false;
+
+      // the next login: the card was never written (the run copy), and this time the push lands
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(!spire_guard_game_join_allowed(p2.c, false), "a game join was allowed before the login restore");
+      login_to_lobby(w, p2);
+      expect_real(p2.ch->memory, real, "after the login that follows two pushes that never arrived");
+      expect_eq(1u, p2.ch->pushes);
+      expect_eq(1u, p2.ch->card_writes.size());
+      expect_real(p2.ch->card_writes[0], real, "on the memory card after the login that follows two pushes that never arrived");
+      must(server_holds(p2, *r.server_real), "the server's character data after that login is not the real character");
+      restored_at_login(p2, *r.server_real);
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->card_writes[0], real, *r.server_real, "after the login whose card the restoring login wrote");
+    });
+    e2e_case("the login restore's push never reaches the save buffer: the login is dropped without 97, the marker stays; the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      r.p.ch->open = false;
+      run_void(w, r.p, on_disconnect(r.p.c));
+      r.p.c.reset();
+      auto p2 = connect(w, r.run_copy);
+      p2.ch->pushes_land = false;
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      std::string dropped;
+      try {
+        login_to_lobby(w, p2);
+      } catch (const std::exception& e) {
+        dropped = e.what();
+      }
+      must(dropped.find("without 97") != std::string::npos, "a login whose restore push never arrived was not dropped without 97");
+      must(!p2.ch->open, "a login whose restore push never arrived is still connected");
+      must(p2.ch->pushes_lost >= 1, "the login restore sent no push");
+      expect_eq(0u, p2.ch->pushes);
+      expect_eq(0u, p2.ch->card_writes.size());
+      auto snap = snapshot_on_disk(p2);
+      must(!snap.run_in_progress && snap.restore_pending, "the marker after a dropped login is not RestorePending");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a dropped login is not the real character");
+
+      // the next login: still the run copy on the card; the push lands now
+      auto p3 = next_login_is_real(w, r.run_copy, real, *r.server_real, "after the login that follows a dropped login", false);
+      restored_at_login(p3, *r.server_real);
+      p3.ch->open = false;
+      next_login_is_real(w, p3.ch->card_writes[0], real, *r.server_real, "after the login whose card the restoring login wrote");
     });
 
     e2e_case("run again: 'I' at the base takes the second snapshot of the real character, the new run copy is fresh, run 2's game exit restores the real character", [&]() {
