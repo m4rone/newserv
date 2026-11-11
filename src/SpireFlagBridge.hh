@@ -1075,9 +1075,10 @@ bool spire_drop_filter(std::shared_ptr<const Client> c, std::shared_ptr<const Lo
 // Hidoom and Migium). So the wave is counted only when nothing was fought on its floor for SPIRE_UNHIT_QUIET_SECONDS
 // (spire_bridge_note_fight: no hit claim, 6x0A, 6xE4, 6x9C or 6x76 on any enemy, no player hit by an enemy, none
 // died) while a client stands on that floor, and its enemies are still never hit. Then it counts them as defeated (set
-// flag 8 on the server's map state only), logs "E-xxx never hit and no fight on the floor for n s; counted as
-// defeated", and runs the normal wave check again (events finished, then the room clear). Enemies that were hit are
-// never touched. Not after the run ended. SPIRE_UNHIT_ENEMY_SECONDS stays the interval of the second net's looks.
+// flag 8 on the server's map state only), logs "E-xxx never hit and no fight on floor ff for n s under wave w of room
+// r; counted as defeated", and runs the normal wave check again (events finished, then the room clear). Enemies that
+// were hit are never touched. Not after the run ended. SPIRE_UNHIT_ENEMY_SECONDS stays the interval of the second
+// net's looks.
 constexpr auto SPIRE_UNHIT_ENEMY_SECONDS = std::chrono::seconds(30);
 constexpr auto SPIRE_UNHIT_QUIET_SECONDS = std::chrono::seconds(120);
 // veilig-1 (2-M1): once the floor was quiet this long under a wave or event a net watches, every client on the floor
