@@ -6985,6 +6985,38 @@ void run_static_tests() {
       }
     });
 
+    k2_case("145: the mag reminder waits its turn after the boss door line", [&]() {
+      using namespace std::chrono;
+      const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
+      steady_clock::time_point t0{seconds(1000)};
+      // a boss room start: the 'V' sends SPIRE_BOSS_BURST_TEXT at once, the NO_MAG of the same room start follows it
+      steady_clock::time_point lane{};
+      spire_ticker_hold(lane, t0);
+      auto arrives = t0 + milliseconds(20);
+      auto reminder = spire_run_mag_reminder_delay(lane, arrives);
+      expect(arrives + reminder >= t0 + gap); // the door line has the ticker for a whole gap
+      expect_eq(gap.count(), reminder.count());
+      // a pack line of that room start ('C' 16 from gw_retry) keeps the same distance from the reminder
+      expect_eq(2 * gap.count(), spire_pack_line_delay(lane, arrives).count());
+      // without a door line (the Dragon at k4, or its text went out before in this run) the reminder still comes with
+      // the lines of its room start, so it waits as long
+      steady_clock::time_point quiet{};
+      expect_eq(gap.count(), spire_run_mag_reminder_delay(quiet, t0).count());
+      // a second reminder (the run's first mag and a NO_MAG close together) follows the first after a gap
+      expect_eq(2 * gap.count(), spire_run_mag_reminder_delay(quiet, t0).count());
+      // the door line holds the order from its own moment on and never moves it back
+      steady_clock::time_point held{};
+      spire_ticker_hold(held, t0);
+      expect(held == t0 + gap);
+      spire_ticker_hold(held, t0 - seconds(10));
+      expect(held == t0 + gap);
+      spire_ticker_hold(held, t0 + seconds(1));
+      expect(held == t0 + seconds(1) + gap);
+      // the texts themselves are those of before
+      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack > Mag)"), std::string(SPIRE_RUN_MAG_REMINDER_TEXT));
+      expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
+    });
+
     expect_eq(0u, k2_failed);
   }
 

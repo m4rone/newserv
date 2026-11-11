@@ -229,7 +229,8 @@ public:
   bool spire_savestate_told = false;
   // critic spel-af-4b S-1: the line that the run waits on another difficulty went out in this session
   bool spire_savestate_elsewhere_told = false;
-  // kwaliteit-1 (SpireFlagBridge.hh SPIRE_PACK_LINE_GAP): when this client's next 'C' 15 / 'C' 16 line may go
+  // kwaliteit-1 (SpireFlagBridge.hh SPIRE_PACK_LINE_GAP): when this client's next 'C' 15 / 'C' 16 line may go;
+  // kwaliteit-2: the mag reminders wait in the same order, and the boss door line holds it (spire_ticker_hold)
   std::chrono::steady_clock::time_point spire_pack_line_free{};
 
   // File loading state

@@ -978,6 +978,16 @@ bool spire_bridge_is_pack_line(uint32_t value);
 // The delay for a pack line arriving at now; next_free (per client) moves to the moment the line after it may go
 std::chrono::milliseconds spire_pack_line_delay(
     std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
+// kwaliteit-2 145: the mag reminders go the same way, so they push no line aside. SPIRE_RUN_MAG_REMINDER_TEXT at a boss
+// room's NO_MAG arrives in the same frame as the 'V' that sent SPIRE_BOSS_BURST_TEXT (the quest: 'V', then its
+// room_start hook's 'Z' NO_MAG), and a direct send pushed that boss door line off the ticker; the run's first mag
+// (RESULT 1) arrives with the lines of its start or clear. The delay for a reminder arriving at now: that of a pack
+// line, in the same per-client order (next_free).
+std::chrono::milliseconds spire_run_mag_reminder_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
+// kwaliteit-2 145: a line that goes at once and must stay readable (SPIRE_BOSS_BURST_TEXT) holds that order for
+// SPIRE_PACK_LINE_GAP from now: no waiting line planned after it goes sooner. Never moves next_free back.
+void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
 // v62: the writer's last overview line as kept at its 'Q' (lobby and floor of that 'Q'); "" when none is kept, or the
 // client is in another game or on another floor now (a floor change ends it)
 struct SpireOverviewKept {

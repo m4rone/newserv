@@ -1922,6 +1922,8 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
       auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
       if (spire_boss_burst_text_due(room_k, table.boss_rooms, cr->boss_burst_texts)) {
         spire_send_ticker(c, SPIRE_BOSS_BURST_TEXT);
+        // kwaliteit-2 145: the NO_MAG reminder of this room start (and every waiting line after it) leaves it a gap
+        spire_ticker_hold(c->spire_pack_line_free, std::chrono::steady_clock::now());
         c->log.info_f("Spire bridge: boss room {} starts; sent \"{}\"", room_k, SPIRE_BOSS_BURST_TEXT);
       } else if (table.boss_rooms.count(room_k)) {
         c->log.info_f("Spire bridge: boss room {} starts again; burst text already sent in this run", room_k);
@@ -2422,6 +2424,15 @@ std::chrono::milliseconds spire_pack_line_delay(
   auto at = std::max(now + SPIRE_PACK_LINE_GAP, next_free);
   next_free = at + SPIRE_PACK_LINE_GAP;
   return std::chrono::duration_cast<std::chrono::milliseconds>(at - now);
+}
+
+std::chrono::milliseconds spire_run_mag_reminder_delay(
+    std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
+  return spire_pack_line_delay(next_free, now);
+}
+
+void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
+  next_free = std::max(next_free, now + SPIRE_PACK_LINE_GAP);
 }
 
 std::string spire_bridge_message_text(uint32_t value) {
@@ -3419,11 +3430,14 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           led ? spire_run_mag_lean_store_name(stored) : "no run: not stored");
     } else if (sub == SPIRE_RUN_MAG_NO_MAG) {
       bool issued = led && (led->issued_step >= 0);
+      std::chrono::milliseconds delay(0);
       if (issued) {
-        spire_send_ticker(c, SPIRE_RUN_MAG_REMINDER_TEXT);
+        // kwaliteit-2 145: after the boss door line of this room start ('V', spire_savestate_write), not on top of it
+        delay = spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+        spire_send_ticker_later(c, l, SPIRE_RUN_MAG_REMINDER_TEXT, delay);
       }
       c->log.info_f("Spire run mag: NO_MAG at room {} for serial {:010} in q{}{}", k, serial_number, quest_number,
-          issued ? "; reminder sent" : "; no mag issued in this run, no text");
+          issued ? std::format("; reminder in {} ms", delay.count()) : std::string("; no mag issued in this run, no text"));
     } else {
       bool created = value & 1;
       // B-REGIE-14-10: the answer issued the step already; before = the step issued before that answer
@@ -3457,7 +3471,9 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
         } catch (const std::exception&) {
         }
         if (before < 0) {
-          spire_send_ticker(c, spire_run_mag_reminder_text(offered_shell));
+          // kwaliteit-2 145: the run's first mag: its reminder waits its turn as the NO_MAG one does
+          spire_send_ticker_later(c, l, spire_run_mag_reminder_text(offered_shell),
+              spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now()));
         } else {
           // critic B-1: the 'C' 14 follows this RESULT 1 in the same quest frame; the text waits for it
           spire_client_run_for(c, l, true)->b9_texts.mag_c14_seen = false;
