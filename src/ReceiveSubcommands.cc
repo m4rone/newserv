@@ -3376,6 +3376,8 @@ static void check_wave_defeated(
   for (auto ene_st : l->map_state->enemy_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
     if (ene_st->super_ene->child_index) {
       l->log.info_f("E-{:03X} is a child of another enemy", ene_st->e_id);
+    } else if (!spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index)) {
+      l->log.info_f("E-{:03X} is a Dark Gunner control; not an enemy in the game", ene_st->e_id);
     } else if (!(ene_st->set_flags & 8)) {
       l->log.info_f("E-{:03X} is not defeated; cannot advance event to finished state", ene_st->e_id);
       all_enemies_defeated = false;

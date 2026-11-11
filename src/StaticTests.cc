@@ -2296,6 +2296,34 @@ void run_static_tests() {
     expect(!spire_drop_is_forbidden(frame));
   }
 
+  phosg::log_info_f("-- Spire bridge: a Dark Gunner control holds no wave (B-REGIE-21-17)");
+  {
+    // q976 room 31 wave 3: one control enemy (0x00A3) and five Dark Gunners of group 0
+    struct Member {
+      EnemyType type;
+      uint16_t child_index;
+      bool defeated;
+    };
+    std::vector<Member> wave{{EnemyType::DARK_GUNNER_CONTROL, 0, false}};
+    for (size_t z = 0; z < 5; z++) {
+      wave.emplace_back(Member{EnemyType::DARK_GUNNER, 0, true});
+    }
+    auto wave_undefeated = [&]() -> bool { // as the room clear check and the 6x76 wave check count
+      for (const auto& m : wave) {
+        if (spire_enemy_counts_for_wave(m.type, m.child_index) && !m.defeated) {
+          return true;
+        }
+      }
+      return false;
+    };
+    expect(!wave_undefeated()); // every gunner defeated, the control never: the wave is empty
+    wave[3].defeated = false;
+    expect(wave_undefeated()); // a living gunner still holds it
+    expect(spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 0));
+    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 1)); // a child counts through its parent
+    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER_CONTROL, 0));
+  }
+
   phosg::log_info_f("-- Spire bridge: an enemy never hit holds no wave forever (v36)");
   {
     using E = SpireWaveEnemy;
