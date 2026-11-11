@@ -7072,7 +7072,8 @@ std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& eve
       }
       for (uint32_t event_id : events[z].triggers) {
         for (size_t y = 0; y < events.size(); y++) {
-          if ((events[y].event_id == event_id) && !events[y].started && !events[y].finished && !counted[y]) {
+          if ((events[y].event_id == event_id) && !events[y].started && !events[y].finished && !events[y].is_boss &&
+              !counted[y]) {
             counted[y] = true;
             changed = true;
           }
@@ -7103,6 +7104,12 @@ static std::unordered_set<size_t> spire_unstarted_room_chain(
         .started = !!(ev_st->flags & 0x06),
         .finished = (ev_st->flags & 0x08) || counted.count(ev_st->w_id),
         .triggers = spire_room_actions_triggers(ev_ver.action_stream, ev_ver.action_stream_size)});
+    for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, ev_ver.set_entry->wave_number)) {
+      if (type_definition_for_enemy(ene_st->super_ene->type).is_boss()) {
+        events.back().is_boss = true; // r2: never counted through the chain
+        break;
+      }
+    }
     w_ids.emplace_back(ev_st->w_id);
   }
   std::unordered_set<size_t> ret;

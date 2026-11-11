@@ -2732,6 +2732,10 @@ void run_static_tests() {
     // the last wave counted: nothing behind it
     expect(spire_unstarted_chain({E{101, false, true, {102}}, E{102, false, true, {}}}).empty());
     expect(spire_unstarted_chain({}).empty());
+    // r2: an event with a boss never joins the chain (its boss would get flag 8 and the room clear while it lives)
+    expect(spire_unstarted_chain({E{1, false, true, {2}}, E{2, false, false, {}, true}}).empty());
+    expect(spire_unstarted_chain({E{1, false, true, {2}}, E{2, false, false, {3}, true}, E{3, false, false, {}}}).empty());
+    expect((V{1}) == spire_unstarted_chain({E{1, false, true, {2, 3}}, E{2, false, false, {}}, E{3, false, false, {}, true}}));
     // the triggers of a post-wave action stream, as make_map writes it: 0C <event id> ..., 01 stop
     const uint8_t stream[] = {0x0C, 0x71, 0x00, 0x00, 0x00, 0x0C, 0x75, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x77, 0x00, 0x00, 0x00};
     expect((std::vector<uint32_t>{113, 117}) == spire_room_actions_triggers(stream, sizeof(stream)));

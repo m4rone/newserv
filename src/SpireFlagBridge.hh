@@ -1207,11 +1207,15 @@ bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies
 // trigger still points at, followed through the chain (the wave after the next, a chained elite wave). After a net
 // counted a wave of the room, the watch counts those as finished too at a look that would let a net count (floor
 // quiet, a client on it): the waves behind the unreachable enemy are skipped and the room clears.
+// veilig-1 r2 (critic): an event with a boss among its enemies (is_boss) never joins the chain: counted, its boss would
+// get flag 8 and the room would clear while the boss lives (spire_bridge_check_room_clear only looks for a boss in the
+// net's own wave). Not reachable with today's maps; a later Sega floor could chain a boss wave behind a normal one.
 struct SpireRoomEvent {
   uint32_t event_id = 0;
   bool started = false;
   bool finished = false;
   std::vector<uint32_t> triggers;
+  bool is_boss = false;
 };
 std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
 // The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
