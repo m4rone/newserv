@@ -108,7 +108,8 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     change; none kept: "Take a step: your reward list opens."
 //   'C' 6 bits 16-23 = typeB << 4 | typeA (0 normal, 1 elite, 2 rest, 3 exam; typeB 0xF: one pipe), k = the room the
 //     pipes lead to: "The way is open: Room k <A> or Room k <B>. Walk close to a warp to read it." (normal / ELITE /
-//     REST / EXAM), one exam pipe "The way is open. Walk to the warp: Exam <boss>." (exams[k]; unknown: "Room k")
+//     REST / EXAM), one exam pipe "The way is open. Walk to the warp: Exam <boss>." (exams[k]; unknown: "Room k");
+//     kwaliteit-2: 0xF0, Sega's own teleporter out of a boss arena: "The way is open. Take the teleporter: Room k."
 //   'A' bits 16-23 = extra: type 0 normal "Room k. Next reward: <tag>." · 1 elite "Room k - Elite: harder foes, rare
 //     reward. Next reward: <tag>." (extra = tag index + 1; no tag name: without "Next reward") · 2 rest "Room k - Rest:
 //     no enemies, full HP, then the shop." (spire.json sign_rest; the same rest in every quest version, so also at

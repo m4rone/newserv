@@ -6259,7 +6259,9 @@ void run_static_tests() {
       expect_eq(std::string("The way is open. Walk to the warp: Exam Dragon."), spire_bridge_message_text(0x43F30604, with_names));
       expect_eq(std::string("The way is open. Walk to the warp: Exam Room 4."), spire_bridge_message_text(0x43F30604));
       expect_eq(std::string("The way is open. Walk to the warp: Exam Room 6."), spire_bridge_message_text(0x43F30606, with_names));
-      expect_eq(std::string("The way is open. Walk to the warp: Room 3 normal."), spire_bridge_message_text(0x43F00603));
+      // kwaliteit-2 197/202: 0xF0 is Sega's own teleporter; one pipe of another type keeps the two-pipe words
+      expect_eq(std::string("The way is open. Take the teleporter: Room 3."), spire_bridge_message_text(0x43F00603));
+      expect_eq(std::string("The way is open. Walk to the warp: Room 3 REST."), spire_bridge_message_text(0x43F20603));
       expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43050605)); // no such type
       expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43FF0605));
     });
@@ -6917,6 +6919,43 @@ void run_static_tests() {
     });
 
     expect_eq(0u, b9_failed);
+  }
+
+  phosg::log_info_f("-- Spire kwaliteit-2 (tekst en ux): what the player reads fits what happens, and no line pushes another aside");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did
+    size_t k2_failed = 0;
+    auto k2_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   K2 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        k2_failed++;
+        phosg::log_error_f("   K2 ({}) FAILED: {}", name, e.what());
+      }
+    };
+
+    k2_case("197/202: 'C' 6 at Sega's own teleporter out of a boss arena names the teleporter", [&]() {
+      // the quest's way_bits (make_spire.py): 0xF0 for a room whose one way on is Sega's exit warp; low byte k + 1.
+      // k18 (after Barba Ray) -> Room 19, k21 (after the Gol Dragon) -> Room 22, k27 (after the Gal Gryphon) -> Room 28
+      for (uint32_t k : {18, 21, 27}) {
+        phosg::log_info_f("   K2: 'C' 6 of k{} reads \"{}\"", k, spire_bridge_message_text(0x43F00600 | (k + 1)));
+      }
+      expect_eq(std::string("The way is open. Take the teleporter: Room 19."), spire_bridge_message_text(0x43F00613));
+      expect_eq(std::string("The way is open. Take the teleporter: Room 22."), spire_bridge_message_text(0x43F00616));
+      expect_eq(std::string("The way is open. Take the teleporter: Room 28."), spire_bridge_message_text(0x43F0061C));
+      for (uint32_t k = 1; k <= 0xFF; k++) {
+        std::string text = spire_bridge_message_text(0x43F00600 | k);
+        expect((text.find("warp") == std::string::npos) && (text.find("normal") == std::string::npos));
+        expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+      }
+      // the exam pipe before a boss and a choice of two keep their words
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 4."), spire_bridge_message_text(0x43F30604));
+      expect_eq(std::string("The way is open: Room 5 normal or Room 5 ELITE. Walk close to a warp to read it."),
+          spire_bridge_message_text(0x43100605));
+    });
+
+    expect_eq(0u, k2_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");

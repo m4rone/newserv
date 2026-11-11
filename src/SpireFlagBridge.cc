@@ -2200,6 +2200,12 @@ static std::string spire_text_way_open(uint32_t bits, uint32_t k, const SpireBri
       return spire_text_first_fitting({exam ? std::format("The way is open. Walk to the warp: Exam {}.", exam->boss) : "",
           std::format("The way is open. Walk to the warp: Exam Room {}.", k)});
     }
+    if (type_a == 0) {
+      // kwaliteit-2 197/202: 0xF0 is Sega's own teleporter out of a boss arena (ROUTEB8-PROTOCOL.md amendment; the
+      // quest's exit_warp rooms: after Barba Ray, the Gol Dragon and the Gal Gryphon). No pipe of ours stands there
+      // and nothing is chosen, so the line names the teleporter and no room type
+      return std::format("The way is open. Take the teleporter: Room {}.", k);
+    }
     // one pipe that is no exam: not in the contract; the two-pipe words for it (route-b-8 report, deviation 2)
     return std::format("The way is open. Walk to the warp: Room {} {}.", k, TYPE_WORDS[type_a]);
   }
