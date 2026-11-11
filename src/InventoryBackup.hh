@@ -100,6 +100,10 @@ class ServerState;
 //   player's own if the join inventory holds the same id with the same type, up to the units it had there; meseta up
 //   to the join meseta. An interim state without Own (written before provenance existed) is not an end state:
 //   refused as before (UNKNOWN_END).
+// - The same rule holds for an Exit (critic M4: after a dropped connection the Exit of the receiver held what the
+//   giver's card still holds). An Exit carries Own and OwnMeseta only where they differ from the default rule, so the
+//   file of a game without proven gains is byte for byte what it was; an Exit of before provenance reads by the
+//   default rule, which gives back what he joined with and still had, and nothing he got in that game.
 
 constexpr const char* INVENTORY_BACKUP_DIRECTORY = "system/inventory-backups";
 constexpr size_t INVENTORY_BACKUP_KEEP = 20;
@@ -154,6 +158,7 @@ struct InventoryBackup {
   bool has_exit = false;
   PlayerInventory exit_inventory;
   uint32_t exit_meseta = 0;
+  InventoryOwnership exit_own; // what of the Exit is proven the player's own (see Provenance above)
   // Loss mark (next login after a hard end): when the 61 first showed items or meseta of this backup missing
   uint64_t loss_time_usecs = 0;
   uint32_t loss_items = 0;
@@ -285,9 +290,10 @@ const char* inventory_restore_refusal_name(InventoryRestoreRefusal r);
 
 // The end of a game, written into its backup. normal: a 98. guard_covered: the Spire guard took its snapshot for this
 // character in this game (it restores the run itself). Otherwise inventory (the server's view at the end, null if
-// unknown) becomes Exit. A recorded end (98 or Exit) removes the interim state
+// unknown) becomes Exit. A recorded end (98 or Exit) removes the interim state. own: what of the Exit is proven the
+// player's own; null proves nothing beyond the default rule
 void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_covered, const PlayerInventory* inventory,
-    uint32_t meseta);
+    uint32_t meseta, const InventoryOwnership* own = nullptr);
 
 // Interim state (see the top of this file)
 // This server process, as written into Interim.Boot: its start time in microseconds, never 0
@@ -337,9 +343,9 @@ struct InventoryFloorOrigin {
   uint32_t dropper_own = 0; // how many of its units were proven the dropper's own at that moment
 };
 
-// The state $restore and the login check compare the character with: Exit, else the proven part of the interim state
-// after a hard stop (inventory_backup_own_state), else the join inventory (an import, or a game whose older connection
-// is still open)
+// The state $restore and the login check compare the character with: the proven part (inventory_backup_own_state) of
+// the Exit, else of the interim state after a hard stop, else the join inventory (an import, or a game whose older
+// connection is still open)
 struct InventoryBackupSource {
   enum class Kind {
     JOIN = 0,

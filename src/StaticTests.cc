@@ -8421,8 +8421,11 @@ void run_static_tests() {
       r = kb_restore(exit_path, kb_new_boot, kb_penalty_card, 0);
       expect_eq(KbR::NONE, r.refusal);
       expect_eq(KbKind::EXIT, r.kind);
-      expect_eq(620u, r.plan.meseta);
-      expect_eq(2u, r.plan.items.size()); // two Monomates and the found item
+      // An Exit of before provenance reads by the default rule (critic M4): what he joined with and still had, so the
+      // two Monomates and the 500 Meseta of the join; not the found item and the 120 Meseta he got in that game
+      expect_eq(500u, r.plan.meseta);
+      expect_eq(1u, r.plan.items.size());
+      expect_eq(2u, r.plan.items[0].data1[5]);
       std::string left_path = tmp.root + "/left.json";
       std::filesystem::copy_file("tests/inventory-backup-pre-interim-left.json", left_path);
       expect_eq(KbR::LEFT_NORMALLY, kb_restore(left_path, kb_new_boot, kb_penalty_card, 0).refusal);
@@ -9323,6 +9326,54 @@ void run_static_tests() {
             break;
         }
       }
+    });
+
+    k3_case("backup M4: after a dropped connection the Exit gives back only what is proven the player's own, like the interim state", [&]() {
+      K3TempCwd temp_cwd("backup-m4");
+      KbTwo g;
+      kb_two(g, 500, 100);
+      // A drops the Saber he had equipped at the join and 300 Meseta, B picks both up; B also picks up an enemy's item
+      kb_drop(g, g.a, 0x00010000);
+      kb_pick_up(g, g.b, 0x00010000);
+      ItemData dropped = kb_floor(g, 0, 0x00010010, 300);
+      g.a.ch->disp.stats.meseta = 200;
+      inventory_backup_note_removed(g.a.p.c, dropped);
+      kb_done(g.a);
+      kb_pick_up(g, g.b, 0x00010010);
+      kb_floor(g, KB_FOUND, 0xCC000000);
+      inventory_backup_note_floor_world(g.l, 1, 0xCC000000);
+      kb_pick_up(g, g.b, 0xCC000000);
+      // B's connection drops, then A's: the server writes each Exit
+      std::string b_dir = std::filesystem::path(g.b.path).parent_path().string();
+      std::string a_dir = std::filesystem::path(g.a.path).parent_path().string();
+      std::string character_id = kb_load(g.b.path).character_id;
+      inventory_backup_on_game_end(g.b.p.c, g.l, false);
+      inventory_backup_on_game_end(g.a.p.c, g.l, false);
+      auto b_exit = kb_load(g.b.path);
+      expect(b_exit.has_exit && !b_exit.has_interim);
+      expect_eq(1u, kb_n(b_exit.exit_inventory, KB_SABER)); // B's Exit holds the Saber and the 300 Meseta
+      expect_eq(400u, b_exit.exit_meseta);
+      // B's $restore, with a card that kept what B had equipped. a5fa1dc and before: the Saber and 400 Meseta, while
+      // A's card still holds the Saber
+      auto d = inventory_restore_decide(b_dir, "", kb_next_boot, true, false, false, g.b.p.serial_number, character_id,
+          kb_b_inv, 0, InventoryRemovals());
+      expect_eq(KbR::NONE, d.refusal);
+      expect_eq(static_cast<int>(KbKind::EXIT), d.source_kind);
+      expect_eq(0u, kb_plan_n(d.plan, KB_SABER));
+      expect_eq(100u, d.plan.meseta);
+      expect_eq(1u, kb_plan_n(d.plan, KB_FOUND)); // the enemy's item is proven his: Own names it in the Exit
+      expect_eq(1u, b_exit.exit_own.units.size());
+      expect_eq(0xCC000000u, b_exit.exit_own.units[0].first);
+      // A's game had removals only: his Exit names nothing, so its file is the one of before provenance
+      auto a_raw = phosg::load_file(g.a.path);
+      expect(a_raw.find("\"Own\"") == std::string::npos);
+      expect(a_raw.find("\"OwnMeseta\"") == std::string::npos);
+      d = inventory_restore_decide(a_dir, "", kb_next_boot, true, false, false, g.a.p.serial_number, character_id,
+          kb_penalty_card, 0, InventoryRemovals());
+      expect_eq(KbR::NONE, d.refusal);
+      expect_eq(0u, kb_plan_n(d.plan, KB_SABER));
+      expect_eq(1u, kb_plan_n(d.plan, KB_HANDGUN));
+      expect_eq(200u, d.plan.meseta);
     });
 
     k3_case("backup B3: an interim write that fails after a removal sets the backup aside: it stays listed and $restore refuses it", [&]() {

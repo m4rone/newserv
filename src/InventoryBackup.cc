@@ -100,11 +100,13 @@ phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
     }));
   }
   if (b.has_exit) {
-    json.emplace("Exit", phosg::JSON::dict({
+    auto exit = phosg::JSON::dict({
         {"Meseta", b.exit_meseta},
         {"Items", items_json(b.exit_inventory)},
         {"Inventory", spire_guard_hex_encode(&b.exit_inventory, sizeof(b.exit_inventory))},
-    }));
+    });
+    own_to_json(exit, b.exit_own, false); // only what differs from the default rule: nothing, for a game without gains
+    json.emplace("Exit", std::move(exit));
   }
   // Added last and only when present: a backup without an interim state serializes byte for byte as it did before
   if (b.has_interim) {
@@ -149,6 +151,7 @@ InventoryBackup inventory_backup_from_json(const phosg::JSON& json) {
     b.has_exit = true;
     b.exit_meseta = exit.get_int("Meseta");
     spire_guard_hex_decode(exit.get_string("Inventory"), &b.exit_inventory, sizeof(b.exit_inventory));
+    b.exit_own = own_from_json(exit);
   }
   if (json.contains("Interim")) {
     const auto& interim = json.at("Interim");
@@ -786,7 +789,7 @@ const char* inventory_restore_refusal_text(InventoryRestoreRefusal r) {
 }
 
 void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_covered, const PlayerInventory* inventory,
-    uint32_t meseta) {
+    uint32_t meseta, const InventoryOwnership* own) {
   b.spire = b.spire || guard_covered;
   if (normal) {
     b.left_normally = true;
@@ -794,6 +797,7 @@ void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_cov
     b.has_exit = true;
     b.exit_inventory = *inventory;
     b.exit_meseta = meseta;
+    b.exit_own = own ? *own : InventoryOwnership();
   }
   if (b.left_normally || b.has_exit) {
     // The game has its end: the interim state is over, and the file is what it was before interim states existed
@@ -822,7 +826,12 @@ bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id)
 InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id) {
   using K = InventoryBackupSource::Kind;
   if (b.has_exit) {
-    return InventoryBackupSource{K::EXIT, b.exit_inventory, b.exit_meseta};
+    // Not the Exit itself either: what the receiver got from another player is in it, and on the giver's card (M4)
+    InventoryBackupSource from;
+    from.kind = K::EXIT;
+    from.inventory = inventory_backup_own_state(b.inventory, b.disp.stats.meseta, b.exit_inventory, b.exit_meseta,
+        b.exit_own, from.meseta);
+    return from;
   }
   if (inventory_backup_interim_is_end(b, boot_id)) {
     // Not the interim state itself: only what of it is proven the player's own (critic B1)
@@ -1046,7 +1055,14 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   try {
     auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
     auto p = normal ? nullptr : c->character_file(false, false);
-    inventory_backup_record_end(b, normal, guarded, p ? &p->inventory : nullptr, p ? p->disp.stats.meseta.load() : 0);
+    InventoryOwnership own;
+    if (p) {
+      inventory_provenance_reconcile(c->inventory_backup_provenance, p->inventory, p->disp.stats.meseta);
+      own = inventory_provenance_ownership(c->inventory_backup_provenance, b.inventory, b.disp.stats.meseta, p->inventory,
+          p->disp.stats.meseta);
+    }
+    inventory_backup_record_end(b, normal, guarded, p ? &p->inventory : nullptr, p ? p->disp.stats.meseta.load() : 0,
+        p ? &own : nullptr);
     inventory_backup_write_file(path, b);
     c->log.info_f("Inventory backup: game ended {} ({}{})", normal ? "normally (98)" : "without a 98 (exit state saved)",
         path, b.spire ? ", Spire run" : "");
