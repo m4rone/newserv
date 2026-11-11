@@ -1072,6 +1072,8 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
 void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
+void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
 // (spire_equip_missing_text), in its turn in the client's order; the item is looked at again when the line goes.
 // Called by the equip check (spire_equip_item_send, after the client's answer and SPIRE_EQUIP_CHECK_DELAY) and for the
@@ -1223,6 +1225,10 @@ void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
 // the run quest the base came from (q921 if the base game was made at the counter), where the quest starts as at the
 // counter: the guard takes a fresh snapshot of the real character and the run copy gets its start level (v52).
 // v59: the code is 'O' sub 2 (r248 = 'O' << 24 | 2 << 16; the run end's own 'O' is sub 0), so 'Z' stays free.
+// kwaliteit-3: the run quest must be available to every client, as at the quest board
+// (quest_unlocked_for_all_players, ReceiveCommands.hh): asked in the base game at the 'O' sub 2, where a refusal sends
+// nobody out and the leader reads the board's line (QUEST_NOT_UNLOCKED_TEXT, one ticker line), and once more in the
+// new run's game right before its quest starts (the line to that game's leader, no quest started).
 constexpr uint8_t SPIRE_BASE_NEW_RUN_SUB = 2;
 constexpr uint32_t SPIRE_BASE_NEW_RUN_VALUE = (static_cast<uint32_t>('O') << 24) | (SPIRE_BASE_NEW_RUN_SUB << 16);
 constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;

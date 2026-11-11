@@ -16,6 +16,7 @@
 #include "PSOEncryption.hh"
 #include "Text.hh"
 #include "QuestScript.hh"
+#include "ReceiveCommands.hh"
 #include "ReceiveSubcommands.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -8216,6 +8217,112 @@ void run_static_tests() {
         expect_eq(0u, p.ch->count_containing(text));
         expect(replaced);
         w.leave(p, l);
+      }
+    });
+
+    k3_case("new run: \"Start a new run\" asks what the quest board asks and tells the leader the board's line", [&]() {
+      K3TempCwd temp_cwd("newrun");
+      K3World w;
+      // the board's line as one ticker line
+      const std::string text = spire_ticker_line(QUEST_NOT_UNLOCKED_TEXT);
+      expect_eq(std::string("This quest has not been unlocked for all players in this game."), text);
+      expect(text.size() <= SPIRE_BRIDGE_TEXT_MAX);
+      // the quest index: Spire Run I Hard with the AvailableIf the quest's build.sh --ladder writes for q981
+      auto quest = [](uint32_t quest_number, const char* available_if) {
+        auto vq = std::make_shared<VersionedQuest>();
+        vq->meta.quest_number = quest_number;
+        vq->meta.version = Version::GC_V3;
+        vq->meta.language = Language::ENGLISH;
+        vq->meta.episode = Episode::EP1;
+        if (available_if) {
+          vq->meta.available_expression = ResourceDASM::Expression::Node::parse(available_if);
+        }
+        return std::make_shared<Quest>(vq);
+      };
+      auto index = std::make_shared<QuestIndex>(
+          nullptr, temp_cwd.dir.string(), std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), true);
+      index->quests_by_number.emplace(981, quest(981, "V_Difficulty == 1 && SPIRE_RUN1 >= 1"));
+      w.s->data->quest_index = index;
+      w.s->data->spire_base_quest_number = 925;
+      // a base game on Hard that came from a run of q981, running the base quest
+      auto base_game = [&]() {
+        auto l = std::make_shared<Lobby>(w.s, w.next_lobby_id++, true);
+        l->episode = Episode::EP1;
+        l->mode = GameMode::NORMAL;
+        l->difficulty = Difficulty::HARD;
+        l->quest = quest(925, nullptr);
+        l->quest_flag_values = std::make_unique<QuestFlags>();
+        spire_static_test_base_run_quest(l, 981);
+        return l;
+      };
+      // Run I open on Hard for this character (meta.json BaseRung, as the rung test above)
+      auto open_hard = [](const K3Player& p) {
+        phosg::save_file(spire_meta_filename_for(p.serial_number, &p.c->character_file(false, false)->disp),
+            std::format("{{\"SerialNumber\":{},\"Flags\":[],\"BaseRung\":{{\"1\":1}}}}", p.serial_number));
+      };
+      // the 6x73 that sends a client out of the game (as $exit in a quest)
+      auto sent_out = [](const K3Player& p) {
+        size_t ret = 0;
+        for (const auto& data : p.ch->sent) {
+          ret += ((data.size() == 8) && (data[0] == 0x60) && (data[4] == 0x73)) ? 1 : 0;
+        }
+        return ret;
+      };
+      auto new_run = [&](K3Player& p, std::shared_ptr<const Lobby> l) {
+        // the base quest's 6x77 through the bridge's entry, which takes this one code from a quest it does not bridge
+        expect(spire_bridge_handle_register(p.c, l, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BASE_NEW_RUN_VALUE));
+      };
+      // in the base game a client holds its real character: no run copy
+      auto seat = [](K3Player& p, std::shared_ptr<Lobby> l, uint8_t slot) {
+        p.c->lobby_client_id = slot;
+        l->clients[slot] = p.c;
+        p.c->lobby = l;
+      };
+
+      // the leader has Hard open, the partner (who came into the base game before its quest started) has not
+      {
+        auto leader = w.player();
+        auto partner = w.player();
+        open_hard(leader);
+        auto l = base_game();
+        seat(leader, l, 0);
+        seat(partner, l, 1);
+        expect_eq(1, spire_meta_ladder_rung_for_client(leader.c, 1));
+        expect_eq(0, spire_meta_ladder_rung_for_client(partner.c, 1));
+        bool unlocked = quest_unlocked_for_all_players(l, index->get(981));
+        new_run(leader, l);
+        phosg::log_info_f("   K3 measure: base game on Hard from q981, leader with Hard open, partner without: the board's test "
+            "says {}; after \"Start a new run\" sent out of the game: leader {}, partner {}; \"{}\" to the leader {} time(s), "
+            "to the partner {} time(s)", unlocked ? "unlocked for all" : "NOT unlocked for all", sent_out(leader),
+            sent_out(partner), text, leader.ch->count_containing(text), partner.ch->count_containing(text));
+        expect(!unlocked);
+        expect_eq(0u, sent_out(leader) + sent_out(partner)); // nobody leaves the base game
+        expect_eq(1u, leader.ch->count_containing(text));
+        expect_eq(0u, partner.ch->count_containing(text));
+        w.leave(leader, l);
+        w.leave(partner, l);
+      }
+
+      // both have Hard open: the new run starts as before (both are sent out once, nobody reads the line)
+      {
+        auto leader = w.player();
+        auto partner = w.player();
+        open_hard(leader);
+        open_hard(partner);
+        auto l = base_game();
+        seat(leader, l, 0);
+        seat(partner, l, 1);
+        bool unlocked = quest_unlocked_for_all_players(l, index->get(981));
+        new_run(leader, l);
+        phosg::log_info_f("   K3 measure: the same with Hard open for both: the board's test says {}; sent out of the game: "
+            "leader {}, partner {}; the line {} time(s)", unlocked ? "unlocked for all" : "NOT unlocked for all",
+            sent_out(leader), sent_out(partner), leader.ch->count_containing(text) + partner.ch->count_containing(text));
+        expect(unlocked);
+        expect_eq(1u, sent_out(leader));
+        expect_eq(1u, sent_out(partner));
+        expect_eq(0u, leader.ch->count_containing(text) + partner.ch->count_containing(text));
+        w.leave(leader, l);
+        w.leave(partner, l);
       }
     });
 

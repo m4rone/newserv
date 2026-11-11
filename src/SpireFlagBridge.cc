@@ -5825,6 +5825,25 @@ static asio::awaitable<void> spire_base_game_start(
       co_return;
     }
   }
+  // kwaliteit-3: the same once more for the new run's game as it stands now (a client may have come into it from the
+  // lobby before this start). The base quest itself has no such test, as before.
+  if (game->mode == GameMode::BATTLE) {
+    bool unlocked = false;
+    try {
+      unlocked = quest_unlocked_for_all_players(game, q);
+    } catch (const std::exception& e) {
+      game->log.warning_f("Spire base game: q{} could not be tested for the clients of this game: {}", quest_number, e.what());
+    }
+    if (!unlocked) {
+      auto leader = (game->leader_id < game->max_clients) ? game->clients[game->leader_id] : nullptr;
+      if (leader) {
+        spire_send_ticker(leader, QUEST_NOT_UNLOCKED_TEXT);
+      }
+      game->log.info_f("Spire base game: q{} is not unlocked for every client of the new run's game {:08X} ({} client(s)); not started",
+          quest_number, game->lobby_id, game->count_clients());
+      co_return;
+    }
+  }
   set_lobby_quest(game, q, true);
   game->log.info_f("Spire base game: q{} started in {} game {:08X} with {} of {} client(s)", quest_number,
       (game->mode == GameMode::BATTLE) ? "the new run's Battle" : "the base", game->lobby_id, game->count_clients(),
@@ -5918,6 +5937,15 @@ static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby>
     if (!q) {
       spire_send_ticker(c, "No run quest on this server.");
       c->log.warning_f("Spire base game: 'O' sub 2 (new run): run quest q{} not found", run_quest_number);
+      return;
+    }
+    // kwaliteit-3: what the quest board asks (quest_unlocked_for_all_players), in the base game, whose difficulty and
+    // clients the new run's game gets: a client that came into the base game before its quest started may not have
+    // the run quest. Nobody is sent out; the leader reads the board's line.
+    if (!quest_unlocked_for_all_players(l, q)) {
+      spire_send_ticker(c, QUEST_NOT_UNLOCKED_TEXT);
+      c->log.info_f("Spire base game: 'O' sub 2 (new run): q{} is not unlocked for every client of base game {:08X} ({} client(s)); refused",
+          run_quest_number, l->lobby_id, l->count_clients());
       return;
     }
     size_t expected = std::max<size_t>(1, l->count_clients());
@@ -7690,6 +7718,10 @@ void spire_pvp_log_strip(std::shared_ptr<const Client> c, std::shared_ptr<Lobby>
   l->spire_pvp_logged_clients |= bit;
   l->log.info_f("Spire PvP: stripped {} player target(s) from 6x{:02X} of C-{:X} (no player damage in a Spire run)",
       count, subcommand, c->id);
+}
+
+void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number) {
+  spire_base_game_run_quests[l->lobby_id] = quest_number;
 }
 
 // kwaliteit-2 r2 (critic K7), for StaticTests. kwaliteit-3 6 (critic r2 K-4): every key a test client and its game left
