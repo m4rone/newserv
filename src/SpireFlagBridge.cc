@@ -5507,6 +5507,222 @@ void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lo
   }
 }
 
+// Veilig-2: see SpireFlagBridge.hh
+bool spire_guard_delete_is_partial_drop(const std::optional<ItemData>& partial_drop, const ItemData& deleted) {
+  if (!partial_drop || (partial_drop->primary_identifier() != deleted.primary_identifier())) {
+    return false;
+  }
+  if (deleted.primary_identifier() == 0x04000000) {
+    return partial_drop->data2d == deleted.data2d;
+  }
+  return partial_drop->data1[5] == deleted.data1[5];
+}
+
+// The entry of side that a 6x29 of item_id belongs to: an item by its item ID, meseta (0xFFFFFFFF) by its kind
+static std::optional<size_t> spire_guard_trade_entry_for(
+    const std::vector<ItemData>& items, const std::vector<bool>* seen, uint32_t item_id) {
+  bool meseta = (item_id == 0xFFFFFFFF);
+  for (size_t z = 0; z < items.size(); z++) {
+    if (seen && (*seen)[z]) {
+      continue;
+    }
+    bool is_meseta = (items[z].primary_identifier() == 0x04000000);
+    if (meseta ? is_meseta : (!is_meseta && (items[z].id == item_id))) {
+      return z;
+    }
+  }
+  return std::nullopt;
+}
+
+uint32_t spire_guard_delete_apply(SpireGuardSnapshot* snapshot, SpireGuardTradeSide* side,
+    const std::optional<ItemData>& partial_drop, uint32_t item_id, const ItemData& deleted,
+    const ItemData::StackLimits& limits) {
+  if (spire_guard_delete_is_partial_drop(partial_drop, deleted)) {
+    return 0; // K7 took it from the snapshot at the 6x5D
+  }
+  std::optional<size_t> entry;
+  if (side) {
+    side->seen.resize(side->items.size(), false);
+    side->credit.resize(side->items.size(), 0);
+    entry = spire_guard_trade_entry_for(side->items, &side->seen, item_id);
+    if (!entry) {
+      auto late = spire_guard_trade_entry_for(side->late, nullptr, item_id);
+      if (late) {
+        side->late.erase(side->late.begin() + *late);
+        return 0; // taken at the execution already
+      }
+    }
+  }
+  uint32_t taken = snapshot ? spire_guard_snapshot_take_drop(*snapshot, deleted, limits) : 0;
+  if (entry) {
+    side->seen[*entry] = true;
+    side->credit[*entry] += taken;
+  }
+  return taken;
+}
+
+uint32_t spire_guard_trade_take_rest(
+    SpireGuardSnapshot* giver, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  side.seen.resize(side.items.size(), false);
+  side.credit.resize(side.items.size(), 0);
+  uint32_t total = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    if (side.seen[z]) {
+      continue;
+    }
+    uint32_t taken = giver ? spire_guard_snapshot_take_drop(*giver, side.items[z], limits) : 0;
+    side.credit[z] += taken;
+    total += taken;
+    side.seen[z] = true;
+    side.late.emplace_back(side.items[z]);
+  }
+  return total;
+}
+
+size_t spire_guard_trade_give(SpireGuardSnapshot* taker, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  size_t ret = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    uint32_t credit = (z < side.credit.size()) ? side.credit[z] : 0;
+    if (taker && credit && spire_guard_snapshot_give_pickup(*taker, side.items[z], credit, limits)) {
+      ret++;
+    }
+  }
+  side.items.clear();
+  side.seen.clear();
+  side.credit.clear();
+  return ret;
+}
+
+// Veilig-2: each client's trade record (its pending trade's entries, and the entries taken at an execution) and the
+// 6x5D whose 6x29 comes next. Keyed by client address; the weak pointer makes a reused address count as no record.
+struct SpireGuardTradeRecord {
+  std::weak_ptr<Client> client;
+  const void* trade = nullptr; // the pending trade the entries belong to
+  SpireGuardTradeSide side;
+};
+static std::unordered_map<const Client*, SpireGuardTradeRecord> spire_guard_trade_records;
+struct SpireGuardPartialDrop {
+  std::weak_ptr<Client> client;
+  ItemData item;
+};
+static std::unordered_map<const Client*, SpireGuardPartialDrop> spire_guard_partial_drops;
+
+// c's trade record, with the entries of its pending trade (taken from its D0 list the first time this trade is seen)
+static SpireGuardTradeRecord& spire_guard_trade_record(std::shared_ptr<Client> c) {
+  std::erase_if(spire_guard_trade_records, [](const auto& it) { return it.second.client.expired(); });
+  auto& rec = spire_guard_trade_records[c.get()];
+  if (rec.client.lock() != c) {
+    rec = SpireGuardTradeRecord{};
+    rec.client = c;
+  }
+  const void* trade = c->pending_item_trade.get();
+  if (rec.trade != trade) {
+    rec.trade = trade;
+    rec.side.items = trade ? c->pending_item_trade->items : std::vector<ItemData>{};
+    rec.side.seen.assign(rec.side.items.size(), false);
+    rec.side.credit.assign(rec.side.items.size(), 0);
+  }
+  return rec;
+}
+
+void spire_guard_note_partial_drop(std::shared_ptr<Client> c, const ItemData& item) {
+  try {
+    std::erase_if(spire_guard_partial_drops, [](const auto& it) { return it.second.client.expired(); });
+    spire_guard_partial_drops[c.get()] = SpireGuardPartialDrop{c, item};
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to note a partial drop: {} (Veilig-2)", e.what());
+  }
+}
+
+void spire_guard_note_delete(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t item_id, const ItemData& deleted) {
+  try {
+    std::optional<ItemData> partial_drop;
+    auto pit = spire_guard_partial_drops.find(c.get());
+    if (pit != spire_guard_partial_drops.end()) {
+      if (pit->second.client.lock() == c) {
+        partial_drop = pit->second.item;
+      }
+      spire_guard_partial_drops.erase(pit); // only the very next 6x29 can be the partial drop's
+    }
+    SpireGuardTradeSide* side = nullptr;
+    if (c->pending_item_trade || spire_guard_trade_records.count(c.get())) {
+      side = &spire_guard_trade_record(c).side;
+    }
+    auto followed = spire_guard_floor_snapshot(c, l);
+    SpireGuardSnapshot* snapshot = followed ? &std::get<0>(*followed) : nullptr;
+    auto s = c->require_server_state();
+    const auto& limits = *s->data->item_stack_limits(c->version());
+    uint32_t taken = spire_guard_delete_apply(snapshot, side, partial_drop, item_id, deleted, limits);
+    if (!followed) {
+      return;
+    }
+    const auto& filename = std::get<1>(*followed);
+    uint32_t serial_number = std::get<2>(*followed);
+    if (!taken) {
+      c->log.info_f("Spire guard: delete {:08X} ({}) for serial {:010}: nothing taken from the snapshot (a partial drop's, taken at a trade's execution, or not in it) (Veilig-2)",
+          item_id, s->data->describe_item(c->version(), deleted), serial_number);
+      return;
+    }
+    spire_guard_save(filename, serial_number, *snapshot);
+    c->log.info_f("Spire guard: delete {:08X} ({}) for serial {:010}{}: the snapshot lost {} of it, now {} items meseta {} (Veilig-2)",
+        item_id, s->data->describe_item(c->version(), deleted), serial_number,
+        c->pending_item_trade ? " in a trade" : "", taken, snapshot->inventory.num_items, snapshot->disp.stats.meseta.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to follow a delete: {}; the snapshot stays (Veilig-2)", e.what());
+  }
+}
+
+void spire_guard_note_trade_executed(std::shared_ptr<Client> a, std::shared_ptr<Client> b, std::shared_ptr<Lobby> l) {
+  try {
+    auto& ra = spire_guard_trade_record(a);
+    auto& rb = spire_guard_trade_record(b);
+    auto fa = spire_guard_floor_snapshot(a, l);
+    auto fb = spire_guard_floor_snapshot(b, l);
+    SpireGuardSnapshot* sa = fa ? &std::get<0>(*fa) : nullptr;
+    SpireGuardSnapshot* sb = fb ? &std::get<0>(*fb) : nullptr;
+    auto s = a->require_server_state();
+    const auto& limits_a = *s->data->item_stack_limits(a->version());
+    const auto& limits_b = *s->data->item_stack_limits(b->version());
+    size_t a_gives = ra.side.items.size();
+    size_t b_gives = rb.side.items.size();
+    // all takes before any give: a give never lands in a snapshot before that snapshot's own entries are taken
+    uint32_t a_taken = spire_guard_trade_take_rest(sa, ra.side, limits_a);
+    uint32_t b_taken = spire_guard_trade_take_rest(sb, rb.side, limits_b);
+    size_t b_gained = spire_guard_trade_give(sb, ra.side, limits_b);
+    size_t a_gained = spire_guard_trade_give(sa, rb.side, limits_a);
+    ra.trade = nullptr; // the pending trades are reset after this; a new one at the same address is a new trade
+    rb.trade = nullptr;
+    if (fa && (a_taken || a_gained)) {
+      spire_guard_save(std::get<1>(*fa), std::get<2>(*fa), *sa);
+    }
+    if (fb && (b_taken || b_gained)) {
+      spire_guard_save(std::get<1>(*fb), std::get<2>(*fb), *sb);
+    }
+    a->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken at the execution, followed {}), gained {} entries (followed {}) (Veilig-2)",
+        b->lobby_client_id, a_gives, a_taken, fa ? "yes" : "no", a_gained, fa ? "yes" : "no");
+    b->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken at the execution, followed {}), gained {} entries (followed {}) (Veilig-2)",
+        a->lobby_client_id, b_gives, b_taken, fb ? "yes" : "no", b_gained, fb ? "yes" : "no");
+  } catch (const std::exception& e) {
+    a->log.warning_f("Spire guard: failed to follow a trade execution: {}; nothing gained (Veilig-2)", e.what());
+  }
+}
+
+void spire_guard_note_trade_cancelled(std::shared_ptr<Client> c) {
+  try {
+    auto it = spire_guard_trade_records.find(c.get());
+    if (it == spire_guard_trade_records.end()) {
+      return;
+    }
+    // what the snapshot lost at a 6x29 of this trade stays lost (less back, never more); the late entries stay
+    it->second.trade = nullptr;
+    it->second.side.items.clear();
+    it->second.side.seen.clear();
+    it->second.side.credit.clear();
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to note a trade cancel: {} (Veilig-2)", e.what());
+  }
+}
+
 // How long the guard waits for each client answer during a restore (30, the B3 of SetExtendedPlayerInfo, and the
 // verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
 // room for a slow Wii without letting a stuck login sit forever.
