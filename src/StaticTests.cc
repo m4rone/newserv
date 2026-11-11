@@ -9187,6 +9187,94 @@ void run_static_tests() {
       expect_eq(KbKind::JOIN, r.kind);
     });
 
+    // ---- kwaliteit-3 critic B2, M1, M2: which backup $restore is about. These cases call inventory_restore_decide,
+    // the function $restore itself calls, on a directory of backups
+    auto kb_decide = [&](const std::string& dir, const std::string& current_path, uint64_t boot_id,
+                         const PlayerInventory& card, uint32_t card_meseta) {
+      return inventory_restore_decide(dir, std::filesystem::path(current_path).filename().string(), boot_id, true, false,
+          false, 42, kb_backup().character_id, card, card_meseta, InventoryRemovals());
+    };
+
+    k3_case("backup B2: a hard-stop backup is refused once the player played on: a later game with a sale and a clean exit", [&]() {
+      const uint64_t kb_third_boot = 1792950000000000ULL;
+      const auto after_sale = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      enum class Second {
+        SOLD_98, // he sold the Handgun and left with a 98
+        SOLD_EXIT, // he sold the Handgun and his connection dropped
+        NOTHING_EXIT, // a join that changed nothing and dropped (a reconnect loop)
+        SPIRE_98, // a guarded Spire run, left with a 98
+        NONE, // no second game: he types $restore in the game right after the stop
+      };
+      for (Second second : {Second::NONE, Second::SOLD_98, Second::SOLD_EXIT, Second::NOTHING_EXIT, Second::SPIRE_98}) {
+        KbTempDir tmp("b2");
+        std::string dir = tmp.root + "/42.test";
+        // Game 1 stops hard with an enemy's item in its interim state. His card keeps what he joined with; the next
+        // login misses the found item and writes the Loss mark, which pins game 1
+        auto g1 = kb_open(dir, kb_backup(), kb_old_boot);
+        auto with_found = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+        expect(kb_found(g1, with_found, 500, {KB_FOUND}, 0, kb_time + 2000000, kb_old_boot));
+        auto b = kb_load(g1.path);
+        b.loss_time_usecs = kb_time + 60000000;
+        b.loss_items = 1;
+        inventory_backup_write_file(g1.path, b);
+        PlayerInventory card = kb_join_inv;
+        if (second != Second::NONE) {
+          // Game 2, in the next server process. He does not type $restore
+          InventoryBackup second_backup = kb_backup();
+          second_backup.time_usecs = kb_time + 600000000;
+          auto g2 = kb_open(dir, second_backup, kb_new_boot);
+          bool sold = (second == Second::SOLD_98) || (second == Second::SOLD_EXIT);
+          if (sold) {
+            expect(inventory_backup_write_interim(g2.path, g2.state, after_sale, 560, false, kb_time + 601000000, kb_new_boot));
+            card = after_sale;
+          }
+          b = kb_load(g2.path);
+          bool normal = (second == Second::SOLD_98) || (second == Second::SPIRE_98);
+          inventory_backup_record_end(b, normal, second == Second::SPIRE_98, normal ? nullptr : &card, sold ? 560 : 500);
+          inventory_backup_write_file(g2.path, b);
+        }
+        // The login before the next game: which backup the login check reads (inventory_backup_on_login's own steps)
+        auto listing = inventory_backup_read_all(dir, "");
+        ssize_t login_pick = inventory_backup_pick_restore(listing.names, listing.flags, "");
+        // Game 3 (or 2): he types $restore
+        InventoryBackup now_backup = kb_backup();
+        now_backup.time_usecs = kb_time + 1200000000;
+        now_backup.inventory = card;
+        auto now = kb_open(dir, now_backup, kb_third_boot);
+        auto d = kb_decide(dir, now.path, kb_third_boot, card, (card.num_items == 3) ? 560 : 500);
+        switch (second) {
+          case Second::NONE:
+          case Second::NOTHING_EXIT:
+          case Second::SPIRE_98:
+            // nothing happened to the character since the stop: game 1 is still what he lost
+            expect_eq(KbR::NONE, d.refusal);
+            expect_eq(g1.path, d.path);
+            expect_eq(static_cast<int>(KbKind::INTERIM), d.source_kind);
+            expect_eq(1u, d.plan.items.size());
+            expect_eq(1u, kb_plan_n(d.plan, KB_FOUND));
+            expect(!listing.flags[0].superseded);
+            expect_eq(0, login_pick);
+            break;
+          case Second::SOLD_98:
+            // a5fa1dc: game 1 again, and the Handgun he sold in game 2 comes back with the found item
+            expect_eq(KbR::SUPERSEDED, d.refusal);
+            expect(d.plan.empty());
+            expect_eq("Na dat verlies speelde je verder:\nniet meer herstelbaar.", inventory_restore_refusal_text(d.refusal));
+            expect(listing.flags[0].superseded && listing.flags[0].loss);
+            // the login check reads game 2 now (a 98: nothing to say), no longer game 1
+            expect_eq(1, login_pick);
+            break;
+          case Second::SOLD_EXIT:
+            // game 2 stands in its place: its Exit is what he has, so nothing is missing, and he is told why
+            expect_eq(KbR::SUPERSEDED, d.refusal);
+            expect(d.plan.empty());
+            expect_eq(0u, kb_plan_n(d.plan, KB_HANDGUN));
+            expect_eq(1, login_pick);
+            break;
+        }
+      }
+    });
+
     expect_eq(0u, k3_failed);
   }
 

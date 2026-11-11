@@ -52,6 +52,10 @@ class ServerState;
 //   tells the player in the lobby to type $restore in a normal game (inventory_loss_verdict). It never restores itself.
 // - Retention: an unrestored backup with a Loss mark or an import is never rotated out, and $restore picks it before
 //   later join backups, so a burst of joins (a reconnect loop) cannot push the pre-loss state away.
+// - That preference ends once the player played on (critic B2, 2026-11-11): a later game, other than the current
+//   one, that ended with a 98 or whose end state differs from its join. What he sold, gave away or used there would
+//   come back. $restore then says so (SUPERSEDED) instead of silently working from that old state, and the login
+//   check no longer tells him to type $restore for it.
 //
 // Interim state (B-REGIE-20-4, 2026-11-11: a hard server stop in the middle of a game left only the join inventory on
 // disk and $restore refused it):
@@ -150,6 +154,9 @@ struct InventoryBackupPickFlags {
   bool imported = false; // ImportedFrom set
   bool restored = false; // Restored mark set
   bool loss = false; // Loss mark set (the next login saw items missing after a hard end)
+  // The player played on in a later game that is not the current one (inventory_backup_played_on): a hard-end backup
+  // is then no longer what he lost (critic B2). Set by inventory_backup_read_all
+  bool superseded = false;
 };
 // Whether rotation must keep this backup and $restore prefers it: imported or loss-marked, and not yet restored
 bool inventory_backup_pinned(const InventoryBackupPickFlags& f);
@@ -168,7 +175,8 @@ ssize_t inventory_backup_pick_previous(const std::vector<std::string>& sorted_na
 // The backup $restore (and $restore check) uses, from names sorted oldest first and flags[z] for sorted_names[z]
 // (regie pso-regie-10): the newest pinned backup (imported or loss-marked, not yet restored) always wins over join
 // backups, also over later ones; otherwise the newest name that is not current_basename. Never current_basename; -1 if
-// nothing is left
+// nothing is left. A loss-marked backup that is superseded is not pinned any more (an imported one stays: importing is
+// the operator's own decision)
 ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_names,
     const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename);
 
@@ -202,6 +210,7 @@ enum class InventoryRestoreRefusal {
   ALREADY_RESTORED,
   LEFT_NORMALLY,
   UNKNOWN_END,
+  SUPERSEDED, // a hard-end backup with a Loss mark exists, but the player played on after it (critic B2)
 };
 // backup: the newest backup of this character made before the current game, or null. protected_character does not
 // refuse (regie pso-regie-10: Wakiru may restore); it is a parameter so the static test pins that.
@@ -209,6 +218,37 @@ enum class InventoryRestoreRefusal {
 InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game, bool protected_character,
     uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup, bool interim_is_end = false);
 const char* inventory_restore_refusal_text(InventoryRestoreRefusal r);
+// Whether the player played on in the game of b, so that an older hard-end backup no longer describes what he lost: it
+// ended with a 98, or its end state (Exit, else its interim state) differs from its join state in items or meseta, or
+// it has no end state at all, or it cannot be read (null). A game the Spire guard covered never counts: the guard
+// puts the real character back as it joined. A join that changed nothing (a reconnect loop) does not count either
+bool inventory_backup_played_on(const InventoryBackup* b);
+// Every backup of one character as $restore and the login check see it: names oldest first, backups[z] (null if
+// unreadable) and flags[z] for names[z]. superseded is set for every backup with a later one, other than
+// current_basename, that the player played on in
+struct InventoryBackupListing {
+  std::vector<std::string> names;
+  std::vector<std::unique_ptr<InventoryBackup>> backups;
+  std::vector<InventoryBackupPickFlags> flags;
+  std::vector<std::string> unreadable; // "<name>: <why>"
+};
+InventoryBackupListing inventory_backup_read_all(const std::string& dir, const std::string& current_basename);
+// What $restore does for a character whose backups are in dir, in the server process boot_id, in the game whose backup
+// is current_basename: the backup it is about, the refusal, and what is missing from it in current (the same steps
+// for $restore, $restore check and the static tests)
+struct InventoryRestoreDecision {
+  InventoryRestoreRefusal refusal = InventoryRestoreRefusal::NONE;
+  std::string path; // empty if there is no backup
+  std::unique_ptr<InventoryBackup> backup;
+  bool interim_is_end = false;
+  int source_kind = 0; // InventoryBackupSource::Kind
+  InventoryRestorePlan plan; // empty if refused
+  std::vector<std::string> unreadable;
+};
+InventoryRestoreDecision inventory_restore_decide(const std::string& dir, const std::string& current_basename,
+    uint64_t boot_id, bool in_game, bool spire_game, bool protected_character, uint32_t serial_number,
+    const std::string& character_id, const PlayerInventory& current, uint32_t current_meseta,
+    const InventoryRemovals& removed);
 // After the refusals: in check mode returns nothing to drop and leaves the backup as it is; otherwise marks the backup
 // restored (once per backup) and returns plan
 InventoryRestorePlan inventory_restore_take(InventoryBackup& backup, const InventoryRestorePlan& plan, bool check_only,

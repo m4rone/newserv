@@ -297,7 +297,7 @@ ssize_t inventory_backup_pick_restore(const std::vector<std::string>& sorted_nam
     const std::vector<InventoryBackupPickFlags>& flags, const std::string& current_basename) {
   for (ssize_t z = static_cast<ssize_t>(sorted_names.size()) - 1; z >= 0; z--) {
     if ((sorted_names[z] != current_basename) && (static_cast<size_t>(z) < flags.size()) &&
-        inventory_backup_pinned(flags[z])) {
+        inventory_backup_pinned(flags[z]) && (!flags[z].superseded || flags[z].imported)) {
       return z;
     }
   }
@@ -620,6 +620,97 @@ InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game,
   return R::NONE;
 }
 
+namespace {
+bool same_content(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta) {
+  return (a_meseta == b_meseta) &&
+      inventory_restore_missing(a, 0, b, 0, InventoryRemovals()).items.empty() &&
+      inventory_restore_missing(b, 0, a, 0, InventoryRemovals()).items.empty();
+}
+} // namespace
+
+bool inventory_backup_played_on(const InventoryBackup* b) {
+  if (!b) {
+    return true;
+  }
+  if (b->spire) {
+    return false;
+  }
+  if (b->left_normally) {
+    return true;
+  }
+  if (b->has_exit) {
+    return !same_content(b->inventory, b->disp.stats.meseta, b->exit_inventory, b->exit_meseta);
+  }
+  if (b->has_interim) {
+    return !same_content(b->inventory, b->disp.stats.meseta, b->interim_inventory, b->interim_meseta);
+  }
+  return true;
+}
+
+InventoryBackupListing inventory_backup_read_all(const std::string& dir, const std::string& current_basename) {
+  InventoryBackupListing ret;
+  ret.names = inventory_backup_list(dir);
+  for (const auto& name : ret.names) {
+    std::unique_ptr<InventoryBackup> b;
+    try {
+      b = std::make_unique<InventoryBackup>(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(dir + "/" + name))));
+    } catch (const std::exception& e) {
+      ret.unreadable.emplace_back(name + ": " + e.what());
+    }
+    ret.flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());
+    ret.backups.emplace_back(std::move(b));
+  }
+  bool played_on_later = false;
+  for (ssize_t z = static_cast<ssize_t>(ret.names.size()) - 1; z >= 0; z--) {
+    ret.flags[z].superseded = played_on_later;
+    if ((ret.names[z] != current_basename) && inventory_backup_played_on(ret.backups[z].get())) {
+      played_on_later = true;
+    }
+  }
+  return ret;
+}
+
+InventoryRestoreDecision inventory_restore_decide(const std::string& dir, const std::string& current_basename,
+    uint64_t boot_id, bool in_game, bool spire_game, bool protected_character, uint32_t serial_number,
+    const std::string& character_id, const PlayerInventory& current, uint32_t current_meseta,
+    const InventoryRemovals& removed) {
+  using R = InventoryRestoreRefusal;
+  InventoryRestoreDecision ret;
+  // Every backup is read (at most INVENTORY_BACKUP_KEEP plus the pinned ones) for its marks; an unreadable file has
+  // none, so it can only be picked as the newest one, and is then refused as missing
+  auto listing = inventory_backup_read_all(dir, current_basename);
+  ret.unreadable = std::move(listing.unreadable);
+  ssize_t index = inventory_backup_pick_restore(listing.names, listing.flags, current_basename);
+  // A hard-end backup with a Loss mark that the player played on after: not picked any more (critic B2)
+  bool expired = false;
+  for (size_t z = 0; z < listing.names.size(); z++) {
+    const auto& f = listing.flags[z];
+    expired |= (listing.names[z] != current_basename) && inventory_backup_pinned(f) && f.superseded && !f.imported;
+  }
+  if (index >= 0) {
+    ret.path = dir + "/" + listing.names[index];
+    ret.backup = std::move(listing.backups[index]);
+  }
+  // A backup without an end whose interim state was written by a server process that is gone: a hard stop, and the
+  // proven part of the interim state is the end state (B-REGIE-20-4, critic B1)
+  ret.interim_is_end = ret.backup && inventory_backup_interim_is_end(*ret.backup, boot_id);
+  ret.refusal = inventory_restore_refusal(in_game, spire_game, protected_character, serial_number, character_id,
+      ret.backup.get(), ret.interim_is_end);
+  if (ret.refusal == R::NONE) {
+    auto from = inventory_backup_restore_source(*ret.backup, boot_id);
+    ret.source_kind = static_cast<int>(from.kind);
+    ret.plan = inventory_restore_missing(from.inventory, from.meseta, current, current_meseta, removed);
+  }
+  // He lost something at a hard end and played on: say that, instead of the refusal or the "nothing missing" of the
+  // later game that stands in its place now
+  if (expired && (((ret.refusal != R::NONE) && (ret.refusal != R::NOT_IN_GAME) && (ret.refusal != R::SPIRE_GAME)) ||
+                     ((ret.refusal == R::NONE) && ret.plan.empty()))) {
+    ret.refusal = R::SUPERSEDED;
+    ret.plan = InventoryRestorePlan();
+  }
+  return ret;
+}
+
 InventoryRestorePlan inventory_restore_take(InventoryBackup& backup, const InventoryRestorePlan& plan, bool check_only,
     uint64_t now_usecs) {
   if (check_only) {
@@ -650,6 +741,8 @@ const char* inventory_restore_refusal_text(InventoryRestoreRefusal r) {
       return "Je vorige game is netjes afgesloten:\nniets te herstellen.";
     case InventoryRestoreRefusal::UNKNOWN_END:
       return "Onbekend hoe je vorige game eindigde:\nniet herstelbaar.";
+    case InventoryRestoreRefusal::SUPERSEDED:
+      return "Na dat verlies speelde je verder:\nniet meer herstelbaar.";
   }
   return "";
 }
@@ -790,6 +883,8 @@ const char* inventory_restore_refusal_name(InventoryRestoreRefusal r) {
       return "previous game ended normally";
     case InventoryRestoreRefusal::UNKNOWN_END:
       return "end of previous game unknown";
+    case InventoryRestoreRefusal::SUPERSEDED:
+      return "played on after the hard end";
   }
   return "?";
 }
@@ -1084,14 +1179,18 @@ void inventory_backup_on_login(std::shared_ptr<Client> c) {
       return;
     }
     std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
-    auto names = inventory_backup_list(dir);
-    auto flags = backup_flags_in(dir, names);
-    ssize_t index = inventory_backup_pick_restore(names, flags, "");
+    // The backup $restore would use; a hard-end backup the player played on after is not it any more (critic B2)
+    auto listing = inventory_backup_read_all(dir, "");
+    ssize_t index = inventory_backup_pick_restore(listing.names, listing.flags, "");
     if (index < 0) {
       return;
     }
-    std::string path = dir + "/" + names[index];
-    auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
+    std::string path = dir + "/" + listing.names[index];
+    if (!listing.backups[index]) {
+      c->log.warning_f("Inventory backup: login check cannot read {}", path);
+      return;
+    }
+    auto& b = *listing.backups[index];
     // After a hard server stop the interim state stands in for the Exit that was never written
     bool interim_is_end = inventory_backup_interim_is_end(b, inventory_backup_boot_id());
     auto from = inventory_backup_restore_source(b, inventory_backup_boot_id());
@@ -1167,36 +1266,15 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
   bool protected_character = c->is_spire_protected();
   // Only the typing player's own character: the directory comes from his own serial and character
   std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
-  auto names = inventory_backup_list(dir);
   std::string current = std::filesystem::path(c->inventory_backup_current).filename().string();
-  // Read every backup (at most INVENTORY_BACKUP_KEEP) for its Imported and Restored marks; an unreadable file has
-  // neither, so it can only be picked as the newest one, and is then refused as missing
-  std::vector<std::unique_ptr<InventoryBackup>> loaded;
-  std::vector<InventoryBackupPickFlags> flags;
-  for (const auto& backup_name : names) {
-    std::unique_ptr<InventoryBackup> b;
-    try {
-      b = std::make_unique<InventoryBackup>(inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(dir + "/" + backup_name))));
-    } catch (const std::exception& e) {
-      c->log.warning_f("Restore: cannot read {}/{}: {}", dir, backup_name, e.what());
-    }
-    flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());
-    loaded.emplace_back(std::move(b));
+  auto decision = inventory_restore_decide(dir, current, inventory_backup_boot_id(), in_game, spire_game,
+      protected_character, serial, character_id, p->inventory, p->disp.stats.meseta, c->inventory_backup_removals);
+  for (const auto& what : decision.unreadable) {
+    c->log.warning_f("Restore: cannot read {}/{}", dir, what);
   }
-  ssize_t index = inventory_backup_pick_restore(names, flags, current);
-
-  std::unique_ptr<InventoryBackup> backup;
-  std::string path;
-  if (index >= 0) {
-    path = dir + "/" + names[index];
-    backup = std::move(loaded[index]);
-  }
-
-  // A backup without an end whose interim state was written by a server process that is gone: a hard stop, and the
-  // interim state is the end state (B-REGIE-20-4)
-  bool interim_is_end = backup && inventory_backup_interim_is_end(*backup, inventory_backup_boot_id());
-  auto refusal = inventory_restore_refusal(in_game, spire_game, protected_character, serial, character_id, backup.get(),
-      interim_is_end);
+  auto& backup = decision.backup;
+  const std::string& path = decision.path;
+  auto refusal = decision.refusal;
   if (refusal != InventoryRestoreRefusal::NONE) {
     c->log.info_f("Restore{}: refused for {} ({}): {}{}", check_only ? " check" : "", name,
         protected_character ? "protected character" : "character", inventory_restore_refusal_name(refusal),
@@ -1204,12 +1282,8 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
     return {inventory_restore_refusal_text(refusal)};
   }
 
-  auto from = inventory_backup_restore_source(*backup, inventory_backup_boot_id());
-  bool from_interim = (from.kind == InventoryBackupSource::Kind::INTERIM);
-  const auto& source = from.inventory;
-  uint32_t source_meseta = from.meseta;
-  auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta,
-      c->inventory_backup_removals);
+  bool from_interim = (decision.source_kind == static_cast<int>(InventoryBackupSource::Kind::INTERIM));
+  auto plan = decision.plan;
   if (plan.empty()) {
     c->log.info_f("Restore{}: nothing missing for {} against {}{}", check_only ? " check" : "", name, path,
         from_interim ? " (interim state after a hard stop)" : "");
