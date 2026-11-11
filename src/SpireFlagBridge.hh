@@ -1142,14 +1142,30 @@ std::chrono::milliseconds spire_ticker_wake_delay(std::chrono::steady_clock::tim
 // clear (ctx.last_clear), "This was the last room: the gift is not given.": it arrives with the clear text and the
 // win lines, is said once and is never followed by a 'C' 16, so it must not be pushed aside.
 bool spire_bridge_line_waits(uint32_t value, const SpireBridgeTextContext& ctx);
+// kwaliteit-3 10-M1: the exam reward lines ('C' 10, and 'C' 12 with bit 23 set) go at once and hold the writer's order
+// (spire_ticker_hold) as the boss door line does: the evolution text of the same boss clear, SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY
+// after its RESULT 1, then takes its turn (spire_ticker_turn_delay) after it instead of pushing it aside.
+bool spire_bridge_line_holds(uint32_t value);
+// kwaliteit-3 10-M2: 'C' 2 (the reward overview at the reward wait point) and 'U' 0 ("You are back on your feet.") come
+// with the lines of a room clear; they take their turn (spire_ticker_turn_delay): at once when the order is free.
+bool spire_bridge_line_takes_turn(uint32_t value);
+// kwaliteit-3 10-M2: the turn of a line that goes not before now + not_before (the room clear text, a second after its
+// r251): then, or when the line before it had its gap. next_free moves to a gap after it, as spire_ticker_turn_delay.
+std::chrono::milliseconds spire_ticker_turn_from(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point now, std::chrono::milliseconds not_before);
 // v62: the writer's last overview line as kept at its 'Q' (lobby and floor of that 'Q'); "" when none is kept, or the
 // client is in another game or on another floor now (a floor change ends it)
 struct SpireOverviewKept {
   std::string line;
   uint32_t lobby_id = 0;
   uint32_t floor = 0;
+  // kwaliteit-3 10-M2: the 'Q' plans its line in the writer's order; until this moment (its turn + SPIRE_PACK_LINE_GAP)
+  // the line is waiting or on the ticker, so the 'C' 2 of the same reward wait sends it no second time
+  std::chrono::steady_clock::time_point stands_until{};
 };
 std::string spire_overview_kept_line(const SpireOverviewKept* kept, uint32_t lobby_id, uint32_t floor);
+// kwaliteit-3 10-M2: whether a 'C' 2 that names the kept overview sends it (false while the 'Q' line waits or stands)
+bool spire_overview_repeat_due(const SpireOverviewKept* kept, std::chrono::steady_clock::time_point now);
 // v62: the draw archetype of a character class (0 HU, 1 RA, 2 FO), -1 for none
 int spire_draw_archetype_for_class(uint8_t char_class);
 // v41 (B-E01-96, B-REGIE-9-1): lives are the quest's counter r172, never a Scape Doll; the Battle respawn to the city
@@ -1208,6 +1224,9 @@ SpireRunOverExit spire_run_over_exit_action(bool same_game, bool quest_in_progre
 // in a lobby then. Never throws.
 constexpr auto SPIRE_LOBBY_TEXT_DELAY = std::chrono::seconds(3);
 void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
+// kwaliteit-3 10-M3: the held texts go one by one, the first SPIRE_LOBBY_TEXT_DELAY after the lobby join and each next
+// one SPIRE_PACK_LINE_GAP after the one before; the moment of text index (0 = first), counted from the lobby join
+std::chrono::milliseconds spire_lobby_text_at(size_t index);
 
 // v57: the base game. The live player of a Battle game stays the run copy whatever the server pushes into the save
 // buffer (measured 2026-10-26: after 'O' OK and the warp the 61 on Pioneer 2 showed the run copy), and only leaving the
@@ -1217,6 +1236,9 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c);
 // The clients of one run share one base game (the first one in creates it, the quest starts when all are in or after
 // SPIRE_BASE_GAME_WAIT). A client that left meanwhile, or a base game that is gone or already started, is left alone.
 constexpr auto SPIRE_BASE_GAME_LOBBY_SETTLE = std::chrono::seconds(4);
+// kwaliteit-3 10-M3: how long a client with held_texts waiting stays in the lobby before the base game: the last of them
+// stands SPIRE_PACK_LINE_GAP (spire_lobby_text_at), and never shorter than SPIRE_BASE_GAME_LOBBY_SETTLE
+std::chrono::milliseconds spire_base_game_settle(size_t held_texts);
 constexpr auto SPIRE_BASE_GAME_WAIT = std::chrono::seconds(40);
 // v60: a client that was not the leader waits this many 500 ms polls for the leader's game before it makes one
 constexpr size_t SPIRE_BASE_GAME_LEADER_WAIT_POLLS = 40;

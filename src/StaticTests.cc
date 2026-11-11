@@ -6229,7 +6229,7 @@ void run_static_tests() {
     b8_case("'C' 2 shows the kept overview line until the next 'Q' or a floor change", [&]() {
       expect_eq(std::string("Take a step: your reward list opens."), spire_bridge_message_text(0x43000202));
       expect_eq(std::string("Take a step: your reward list opens."), spire_bridge_message_text(0x43000202, with_names));
-      SpireOverviewKept kept{"Rewards: Saber, Fire Shield, Lavis Cannon (rare). Walk to choose.", 7, 3};
+      SpireOverviewKept kept{"Rewards: Saber, Fire Shield, Lavis Cannon (rare). Walk to choose.", 7, 3, {}};
       expect_eq(kept.line, spire_overview_kept_line(&kept, 7, 3));
       expect(spire_overview_kept_line(&kept, 7, 4).empty()); // another floor
       expect(spire_overview_kept_line(&kept, 8, 3).empty()); // another game
@@ -8482,6 +8482,80 @@ void run_static_tests() {
       expect_eq(std::string("NONE"), z(b));
       w.leave(a, l);
       w.leave(b, l);
+    });
+
+    k3_case("10-M1: the exam reward holds the ticker; the mag evolution of that boss clear comes a gap after it", [&]() {
+      using namespace std::chrono;
+      const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
+      steady_clock::time_point t0{seconds(3000)};
+      // rewards.py exam_reward: 'Z' EXAM, its RESULT 1 at t0 (a mag before: the evolution text 500 ms later), then the
+      // 'C' 14 and the exam reward line a few frames after it: 'C' 10, or 'C' 12 with bit 23 set
+      for (uint32_t exam : {0x43000A00u, 0x43830A40u, 0x43830C40u, 0x43800C00u}) {
+        steady_clock::time_point lane{}, held{};
+        auto exam_at = t0 + milliseconds(50);
+        if (spire_bridge_line_holds(exam)) { // the handler's direct send of the line, then its hold
+          spire_ticker_hold(lane, held, exam_at);
+        }
+        auto evolve_at = t0 + duration_cast<milliseconds>(SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY);
+        auto evolve = spire_ticker_turn_delay(lane, evolve_at); // spire_run_mag_evolve_text_later
+        phosg::log_info_f("   K3 10-M1: {:08X} at +50 ms, the evolution text at +{} ms", exam,
+            duration_cast<milliseconds>(evolve_at + evolve - t0).count());
+        expect(evolve_at + evolve >= exam_at + gap);
+      }
+      // the relic gift's 'C' 12 (bit 23 clear) and other lines hold nothing
+      expect(spire_bridge_line_holds(0x43000A00));
+      expect(!spire_bridge_line_holds(0x43000C01));
+      expect(!spire_bridge_line_holds(0x43000200));
+      expect(!spire_bridge_line_holds(0x57000102));
+    });
+
+    k3_case("10-M2: room clear text, then the reward overview a gap later and once; 'U' 0 after them", [&]() {
+      using namespace std::chrono;
+      const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
+      const auto clear_delay = duration_cast<milliseconds>(SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY);
+      steady_clock::time_point t0{seconds(4000)};
+      // the leader's poll of r251 falls anywhere from t0 to t0 + 1.2 s; its 'Q' and the 'C' 2 of open_rewards follow
+      for (int64_t seen_ms : {0, 300, 600, 900, 1000, 1100, 1200}) {
+        steady_clock::time_point lane{};
+        // r251 at t0 (spire_bridge_room_clear_check): the clear text a second later, in the order
+        auto clear = spire_ticker_turn_from(lane, t0, clear_delay);
+        expect_eq(clear_delay.count(), clear.count());
+        auto q_at = t0 + milliseconds(seen_ms);
+        auto overview = spire_ticker_turn_delay(lane, q_at); // spire_draw_answer
+        SpireOverviewKept kept{"rewards", 7, 3, q_at + overview + gap};
+        phosg::log_info_f("   K3 10-M2: 'Q' at +{} ms: clear text at +{} ms, overview at +{} ms", seen_ms, clear.count(),
+            duration_cast<milliseconds>(q_at + overview - t0).count());
+        expect(q_at + overview >= t0 + clear + gap); // the clear text stands a gap before the overview
+        // the 'C' 2 of the same wait point, a few frames after the 'Q': no second overview
+        expect(spire_bridge_line_takes_turn(0x43000200));
+        expect(!spire_overview_repeat_due(&kept, q_at + milliseconds(100)));
+        // 'U' 0 of a player who lay down until the clear: after the overview
+        expect(spire_bridge_line_takes_turn(0x55000000));
+        auto up_at = q_at + milliseconds(200);
+        expect(up_at + spire_ticker_turn_delay(lane, up_at) >= q_at + overview + gap);
+        // PROMPT_SECONDS (20 s) later the quest's repeat of 'C' 2 sends the overview again
+        expect(spire_overview_repeat_due(&kept, q_at + seconds(20)));
+      }
+      expect(spire_overview_repeat_due(nullptr, t0)); // nothing kept: the 'C' 2 line of before
+      expect(!spire_bridge_line_takes_turn(0x55000001)); // "You are down": at once
+      expect(!spire_bridge_line_takes_turn(0x43000A00)); // the exam reward goes at once and holds (10-M1)
+      expect(!spire_bridge_line_takes_turn(0x57000102)); // a wave line
+    });
+
+    k3_case("10-M3: the lobby texts go one by one, and the base game waits until the last one has stood", [&]() {
+      using namespace std::chrono;
+      const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
+      for (size_t n = 1; n <= 8; n++) { // spire_defer_to_lobby keeps up to 8
+        for (size_t z = 1; z < n; z++) {
+          expect(spire_lobby_text_at(z) >= spire_lobby_text_at(z - 1) + gap);
+        }
+        auto settle = spire_base_game_settle(n);
+        phosg::log_info_f("   K3 10-M3: {} text(s): last at {} ms, base game at {} ms", n, spire_lobby_text_at(n - 1).count(),
+            settle.count());
+        expect(settle >= spire_lobby_text_at(n - 1) + gap);
+      }
+      expect_eq(duration_cast<milliseconds>(SPIRE_LOBBY_TEXT_DELAY).count(), spire_lobby_text_at(0).count());
+      expect_eq(duration_cast<milliseconds>(SPIRE_BASE_GAME_LOBBY_SETTLE).count(), spire_base_game_settle(0).count());
     });
 
     expect_eq(0u, k3_failed);

@@ -485,10 +485,33 @@ static asio::awaitable<void> spire_lobby_texts_send(std::weak_ptr<Client> weak_c
   }
   auto texts = std::move(it->second.texts);
   spire_lobby_texts.erase(it);
-  for (const auto& text : texts) {
-    send_text_message(c, text);
+  // kwaliteit-3 10-M3: one by one, a gap apart (spire_lobby_text_at), so none pushes the one before aside; the base
+  // game waits until the last one has stood (spire_base_game_settle)
+  for (size_t z = 0; z < texts.size(); z++) {
+    if (z) {
+      c = nullptr; // neither the client nor its lobby is held while it waits
+      l = nullptr;
+      co_await async_sleep(spire_lobby_text_at(z) - spire_lobby_text_at(z - 1));
+      c = weak_c.lock();
+      l = c ? c->lobby.lock() : nullptr;
+      if (!c || !l || l->is_game()) {
+        if (c) { // already in a game: the rest wait for the next lobby join, as above
+          for (size_t r = z; r < texts.size(); r++) {
+            spire_defer_to_lobby(c, texts[r]);
+          }
+        }
+        co_return;
+      }
+    }
+    send_text_message(c, texts[z]);
+    c->log.info_f("Spire bridge: held text {} of {} sent in the lobby", z + 1, texts.size());
   }
-  c->log.info_f("Spire bridge: {} held text(s) sent in the lobby", texts.size());
+}
+
+// kwaliteit-3 10-M3: how many texts c has waiting for the lobby (spire_base_game_settle)
+static size_t spire_lobby_texts_waiting(std::shared_ptr<Client> c) {
+  auto it = spire_lobby_texts.find(c.get());
+  return ((it == spire_lobby_texts.end()) || (it->second.client.lock() != c)) ? 0 : it->second.texts.size();
 }
 
 void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
@@ -1957,9 +1980,19 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
     if (spire_overview_entries.size() > 256) {
       std::erase_if(spire_overview_entries, [](const auto& e) { return e.second.client.expired(); });
     }
-    spire_overview_entries[c.get()] = SpireOverviewEntry{c, SpireOverviewKept{overview, l->lobby_id, c->floor}};
-    spire_send_ticker(c, overview);
-    c->log.info_f("Spire bridge: draw for serial {:010} in q{}: sent \"{}\"", serial_number, quest_number, overview);
+    // kwaliteit-3 10-M2: in its turn, a gap after the room clear text; the 'C' 2 of this wait point sends it no
+    // second time while it waits or stands (SpireOverviewKept::stands_until). When it goes it must still be the kept
+    // line of this game and floor (a Reroll's 'Q' replaces it, a floor change drops it).
+    auto now = std::chrono::steady_clock::now();
+    auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, now);
+    spire_overview_entries[c.get()] =
+        SpireOverviewEntry{c, SpireOverviewKept{overview, l->lobby_id, c->floor, now + delay + SPIRE_PACK_LINE_GAP}};
+    spire_ticker_line_in_turn(c, l, delay, [overview](std::shared_ptr<Client> wc, std::shared_ptr<const Lobby> wl) {
+      return (spire_overview_kept_line(spire_overview_kept_for(wc), wl->lobby_id, wc->floor) == overview) ? overview
+                                                                                                           : std::string();
+    });
+    c->log.info_f("Spire bridge: draw for serial {:010} in q{}: \"{}\" in its turn, {} ms", serial_number, quest_number,
+        overview, delay.count());
   }
 }
 
@@ -2642,6 +2675,40 @@ bool spire_bridge_line_waits(uint32_t value, const SpireBridgeTextContext& ctx) 
   bool last_gift = ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT) && (((value >> 8) & 0xFF) == 12) && !((value >> 23) & 1) &&
       ctx.last_clear;
   return spire_bridge_is_pack_line(value) || last_gift;
+}
+
+bool spire_bridge_line_holds(uint32_t value) {
+  if ((value >> 24) != SPIRE_BRIDGE_MSG_PROMPT) {
+    return false;
+  }
+  uint32_t point = (value >> 8) & 0xFF;
+  return (point == 10) || ((point == 12) && ((value >> 23) & 1));
+}
+
+bool spire_bridge_line_takes_turn(uint32_t value) {
+  uint8_t kind = value >> 24;
+  return ((kind == SPIRE_BRIDGE_MSG_PROMPT) && (((value >> 8) & 0xFF) == 2)) ||
+      ((kind == SPIRE_BRIDGE_MSG_DOWN) && !(value & 0xFF));
+}
+
+std::chrono::milliseconds spire_ticker_turn_from(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point now, std::chrono::milliseconds not_before) {
+  auto at = std::max(now + not_before, next_free);
+  next_free = at + SPIRE_PACK_LINE_GAP;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(at - now);
+}
+
+bool spire_overview_repeat_due(const SpireOverviewKept* kept, std::chrono::steady_clock::time_point now) {
+  return !kept || (now >= kept->stands_until);
+}
+
+std::chrono::milliseconds spire_lobby_text_at(size_t index) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(SPIRE_LOBBY_TEXT_DELAY + index * SPIRE_PACK_LINE_GAP);
+}
+
+std::chrono::milliseconds spire_base_game_settle(size_t held_texts) {
+  std::chrono::milliseconds settle = SPIRE_BASE_GAME_LOBBY_SETTLE;
+  return held_texts ? std::max(settle, spire_lobby_text_at(held_texts - 1) + SPIRE_PACK_LINE_GAP) : settle;
 }
 
 std::string spire_bridge_message_text(uint32_t value) {
@@ -3715,9 +3782,11 @@ static asio::awaitable<void> spire_run_mag_evolve_text_later(
   }
   auto* cr = spire_client_run_for(c, l, true);
   std::string text = spire_run_mag_evolve_text_take(cr->b9_texts, name, shell);
-  spire_send_ticker(c, text);
-  c->log.info_f("Spire run mag: evolution text{}: \"{}\"", cr->b9_texts.mag_c14_seen ? " after 'C' 14" : " (no 'C' 14)",
-      text);
+  // kwaliteit-3 10-M1: in its turn, after the exam reward line of the same boss clear (spire_bridge_line_holds)
+  auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+  spire_ticker_text_in_turn(c, l, delay, text);
+  c->log.info_f("Spire run mag: evolution text{} in {} ms: \"{}\"",
+      cr->b9_texts.mag_c14_seen ? " after 'C' 14" : " (no 'C' 14)", delay.count(), text);
 }
 
 // kwaliteit-2 145 / r2 (critic K3): a mag reminder in its turn (spire_run_mag_reminder_delay). It arrives a gap or more
@@ -4145,8 +4214,23 @@ bool spire_bridge_handle_register(
           c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; \"{}\" waits its turn, {} ms", value,
               serial_number, quest_number, msg, delay.count());
           return true;
+        } else if (spire_bridge_line_takes_turn(value)) { // kwaliteit-3 10-M2: 'C' 2 and 'U' 0 take their turn
+          auto now = std::chrono::steady_clock::now();
+          if (!text_ctx.overview.empty() && !spire_overview_repeat_due(spire_overview_kept_for(c), now)) {
+            c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; the overview of its 'Q' waits or "
+                "stands: not sent again", value, serial_number, quest_number);
+            return true;
+          }
+          auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, now);
+          spire_ticker_text_in_turn(c, l, delay, msg);
+          c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; \"{}\" in its turn, {} ms", value,
+              serial_number, quest_number, msg, delay.count());
+          return true;
         } else {
           spire_send_ticker(c, msg);
+          if (spire_bridge_line_holds(value)) { // kwaliteit-3 10-M1: the exam reward stays a gap (the mag evolution)
+            spire_ticker_hold(c->spire_pack_line_free, c->spire_ticker_held_until, std::chrono::steady_clock::now());
+          }
           sent = 1;
         }
         c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; sent \"{}\" to {} client(s)", value,
@@ -5889,8 +5973,9 @@ static asio::awaitable<void> spire_base_game_start(
       expected);
 }
 
-static asio::awaitable<void> spire_base_game_join(std::weak_ptr<Client> weak_c, uint32_t serial_number, SpireBaseGameMark mark) {
-  co_await async_sleep(SPIRE_BASE_GAME_LOBBY_SETTLE);
+static asio::awaitable<void> spire_base_game_join(
+    std::weak_ptr<Client> weak_c, uint32_t serial_number, SpireBaseGameMark mark, std::chrono::milliseconds settle) {
+  co_await async_sleep(settle); // kwaliteit-3 10-M3: spire_base_game_settle
   auto c = weak_c.lock();
   if (!c || !c->channel->connected()) {
     co_return;
@@ -6038,7 +6123,11 @@ void spire_base_game_after_lobby_join(std::shared_ptr<Client> c) {
   }
   auto mark = it->second;
   spire_base_game_marks.erase(it);
-  asio::co_spawn(*c->require_server_state()->io_context, spire_base_game_join(c, serial_number, mark), asio::detached);
+  // kwaliteit-3 10-M3: the lobby texts of this join (spire_deliver_lobby_texts, just before) stand first
+  auto settle = spire_base_game_settle(spire_lobby_texts_waiting(c));
+  c->log.info_f("Spire base game: serial {:010} goes to the base game in {} ms", serial_number, settle.count());
+  asio::co_spawn(*c->require_server_state()->io_context, spire_base_game_join(c, serial_number, mark, settle),
+      asio::detached);
 }
 
 // v49: the run again ('I', SpireFlagBridge.hh). The per-game state of a run lives further down
@@ -6747,7 +6836,11 @@ void spire_bridge_check_room_clear(
     for (const auto& lc : l->clients) {
       if (lc) {
         send_command_t(lc, 0x60, 0x00, cmd);
-        spire_send_ticker_later(lc, l, SPIRE_BRIDGE_ROOM_CLEAR_TEXT, SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY); // v36: after the r251
+        // v36: after the r251; kwaliteit-3 10-M2: in the order, so the overview of the 'Q' comes a gap after it
+        spire_ticker_text_in_turn(lc, l,
+            spire_ticker_turn_from(lc->spire_pack_line_free, std::chrono::steady_clock::now(),
+                SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY),
+            SPIRE_BRIDGE_ROOM_CLEAR_TEXT);
         sent++;
       }
     }
