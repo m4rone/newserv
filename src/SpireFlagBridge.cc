@@ -6420,8 +6420,11 @@ bool spire_guard_game_join_allowed(std::shared_ptr<Client> c, bool tell_client) 
 // runs, so entries of ended games are harmless; the set is cleared when it grows past 4096 entries.
 static std::unordered_set<uint64_t> spire_bridge_cleared_rooms;
 // v49: the run again ('I') makes every room of the game clear again for the new run
+// veilig-1: per game (lobby id), floor and room: the rooms whose players read SPIRE_STUCK_NOTICE_TEXT
+static std::set<std::tuple<uint32_t, uint8_t, uint16_t>> spire_stuck_noticed;
 static void spire_bridge_forget_room_clears(uint32_t lobby_id) {
   std::erase_if(spire_bridge_cleared_rooms, [lobby_id](uint64_t key) { return (key >> 32) == lobby_id; });
+  std::erase_if(spire_stuck_noticed, [lobby_id](const auto& key) { return std::get<0>(key) == lobby_id; });
 }
 static void spire_checkpoint_record_room(std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, bool boss = false);
 static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8_t floor, uint32_t value);
@@ -6606,17 +6609,113 @@ static bool spire_enemy_ever_hit(const MapState::EnemyState& ene_st) {
   return (ene_st.server_flags & MapState::EnemyState::Flag::ALL_HITS_MASK) || ene_st.total_damage || ene_st.game_flags;
 }
 
-static std::vector<SpireWaveEnemy> spire_wave_enemies(
-    std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
+std::vector<SpireWaveEnemy> spire_wave_enemies(
+    std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
   std::vector<SpireWaveEnemy> ret;
-  for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
+  auto ene_sts = map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number);
+  std::unordered_map<size_t, size_t> parent_index; // the parent's super id -> its entry in ret
+  for (const auto& ene_st : ene_sts) {
     if (ene_st->super_ene->child_index) {
       continue; // as in the wave check: a child counts through its parent
     }
+    parent_index.emplace(ene_st->super_ene->super_id, ret.size());
     ret.emplace_back(SpireWaveEnemy{.defeated = !!(ene_st->set_flags & 8), .ever_hit = spire_enemy_ever_hit(*ene_st),
         .is_boss = type_definition_for_enemy(ene_st->super_ene->type).is_boss()});
   }
+  // veilig-1: a hit on a child is a hit on its parent (the children follow their parent in the super map)
+  for (const auto& ene_st : ene_sts) {
+    size_t child_index = ene_st->super_ene->child_index;
+    if (!child_index || !spire_enemy_ever_hit(*ene_st) || (child_index > ene_st->super_ene->super_id)) {
+      continue;
+    }
+    auto it = parent_index.find(ene_st->super_ene->super_id - child_index);
+    if (it != parent_index.end()) {
+      ret[it->second].ever_hit = true;
+    }
+  }
   return ret;
+}
+
+// veilig-1: the fight clock (SpireFlagBridge.hh), per (game, floor)
+static std::map<std::pair<uint32_t, uint8_t>, std::chrono::steady_clock::time_point> spire_fight_clocks;
+
+void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+  if (spire_fight_clocks.size() > 4096) {
+    spire_fight_clocks.clear(); // a lost clock starts again at the next look: a net later, never sooner
+  }
+  spire_fight_clocks[std::make_pair(lobby_id, floor)] = now;
+}
+
+std::chrono::seconds spire_fight_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now) {
+  auto it = spire_fight_clocks.find(std::make_pair(lobby_id, floor));
+  if (it == spire_fight_clocks.end()) {
+    spire_fight_note(lobby_id, floor, now);
+    return std::chrono::seconds(0);
+  }
+  if (now <= it->second) {
+    return std::chrono::seconds(0);
+  }
+  return std::chrono::duration_cast<std::chrono::seconds>(now - it->second);
+}
+
+void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor) {
+  if (l && l->is_game() && l->quest) {
+    spire_fight_note(l->lobby_id, floor, std::chrono::steady_clock::now());
+  }
+}
+
+SpireNetLook spire_unhit_net_look(bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor) {
+  SpireNetLook ret;
+  if (!held_only_by_unhit) {
+    return ret;
+  }
+  if (!player_on_floor) {
+    quiet = std::chrono::seconds(0); // nobody there to fight: the caller started the clock again
+  }
+  ret.notice = (quiet >= SPIRE_STUCK_NOTICE_SECONDS);
+  if (quiet >= SPIRE_UNHIT_QUIET_SECONDS) {
+    ret.action = SpireNetAction::COUNT;
+    return ret;
+  }
+  ret.action = SpireNetAction::WAIT;
+  ret.wait = (ret.notice ? SPIRE_UNHIT_QUIET_SECONDS : SPIRE_STUCK_NOTICE_SECONDS) - quiet;
+  return ret;
+}
+
+// One look of a net at a floor: whether a GC client of the game stands on it, and how long the floor was quiet. A look
+// without a client there starts the clock again: time nobody could fight is no sign of an enemy out of reach.
+static std::chrono::seconds spire_net_quiet(std::shared_ptr<const Lobby> l, uint8_t floor, bool* player_on_floor) {
+  *player_on_floor = false;
+  for (const auto& lc : l->clients) {
+    if (lc && (lc->version() == Version::GC_V3) && (lc->floor == floor)) {
+      *player_on_floor = true;
+      break;
+    }
+  }
+  auto now = std::chrono::steady_clock::now();
+  if (!*player_on_floor) {
+    spire_fight_note(l->lobby_id, floor, now);
+  }
+  return spire_fight_quiet(l->lobby_id, floor, now);
+}
+
+// veilig-1 (2-M1): SPIRE_STUCK_NOTICE_TEXT to every GC client on the floor, once per room of a run
+static void spire_stuck_notice(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room) {
+  if (spire_stuck_noticed.size() > 4096) {
+    spire_stuck_noticed.clear();
+  }
+  if (!spire_stuck_noticed.emplace(l->lobby_id, floor, room).second) {
+    return;
+  }
+  size_t sent = 0;
+  for (const auto& lc : l->clients) {
+    if (lc && (lc->version() == Version::GC_V3) && (lc->floor == floor)) {
+      spire_send_ticker(lc, SPIRE_STUCK_NOTICE_TEXT);
+      sent++;
+    }
+  }
+  l->log.info_f("Spire bridge: no fight on floor {:02X} for {} s while room {} is held only by enemies never hit; sent \"{}\" to {} client(s)",
+      floor, SPIRE_STUCK_NOTICE_SECONDS.count(), room, SPIRE_STUCK_NOTICE_TEXT, sent);
 }
 
 // Per (game, floor, room, wave): the generation of the latest wait; a later defeat in the wave starts a new one
@@ -6625,47 +6724,61 @@ static uint64_t spire_unhit_next_generation = 1;
 
 static asio::awaitable<void> spire_unhit_wave_wait(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l,
     uint8_t floor, uint16_t room, uint16_t wave_number, uint64_t generation, SpireWaveCheck recheck) {
-  co_await async_sleep(SPIRE_UNHIT_ENEMY_SECONDS);
-  auto l = weak_l.lock();
-  if (!l || !l->is_game() || !l->map_state) {
-    co_return;
-  }
-  auto key = std::make_tuple(l->lobby_id, floor, room, wave_number);
-  auto it = spire_unhit_waits.find(key);
-  if ((it == spire_unhit_waits.end()) || (it->second != generation)) {
-    co_return; // another enemy of the wave died meanwhile: its own wait runs
-  }
-  spire_unhit_waits.erase(it);
-  auto c = weak_c.lock();
-  if (!c || (c->lobby.lock() != l)) {
-    c = nullptr;
-    for (const auto& lc : l->clients) {
-      if (lc && (lc->version() == Version::GC_V3)) {
-        c = lc;
-        break;
-      }
-    }
-    if (!c) {
+  auto wait = spire_unhit_net_look(true, std::chrono::seconds(0), true).wait;
+  for (;;) {
+    co_await async_sleep(wait);
+    auto l = weak_l.lock();
+    if (!l || !l->is_game() || !l->map_state) {
       co_return;
     }
-  }
-  if (spire_run_end_for(l)) {
-    co_return;
-  }
-  Version v = c->version();
-  if (!spire_wave_held_only_by_unhit(spire_wave_enemies(l, v, floor, room, wave_number))) {
-    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} no longer held only by enemies never hit; not counted",
-        wave_number, room, floor);
-    co_return;
-  }
-  for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
-    if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8) && !spire_enemy_ever_hit(*ene_st)) {
-      ene_st->set_flags |= 8;
-      l->log.info_f("Spire bridge: E-{:03X} never hit {} s after the rest of wave {} of room {}; counted as defeated",
-          ene_st->e_id, SPIRE_UNHIT_ENEMY_SECONDS.count(), wave_number, room);
+    auto key = std::make_tuple(l->lobby_id, floor, room, wave_number);
+    auto it = spire_unhit_waits.find(key);
+    if ((it == spire_unhit_waits.end()) || (it->second != generation)) {
+      co_return; // another enemy of the wave died meanwhile: its own wait runs
     }
+    auto c = weak_c.lock();
+    if (!c || (c->lobby.lock() != l)) {
+      c = nullptr;
+      for (const auto& lc : l->clients) {
+        if (lc && (lc->version() == Version::GC_V3)) {
+          c = lc;
+          break;
+        }
+      }
+    }
+    if (!c || spire_run_end_for(l)) {
+      spire_unhit_waits.erase(it);
+      co_return;
+    }
+    Version v = c->version();
+    bool player_on_floor = false;
+    auto quiet = spire_net_quiet(l, floor, &player_on_floor);
+    auto look = spire_unhit_net_look(
+        spire_wave_held_only_by_unhit(spire_wave_enemies(l->map_state, v, floor, room, wave_number)), quiet, player_on_floor);
+    if (look.action == SpireNetAction::STOP) {
+      spire_unhit_waits.erase(it);
+      l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} no longer held only by enemies never hit; not counted",
+          wave_number, room, floor);
+      co_return;
+    }
+    if (look.notice) {
+      spire_stuck_notice(l, floor, room);
+    }
+    if (look.action == SpireNetAction::WAIT) {
+      wait = std::max(look.wait, std::chrono::seconds(1));
+      continue;
+    }
+    spire_unhit_waits.erase(it);
+    for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
+      if (!ene_st->super_ene->child_index && !(ene_st->set_flags & 8)) {
+        ene_st->set_flags |= 8;
+        l->log.info_f("Spire bridge: E-{:03X} never hit and no fight on floor {:02X} for {} s under wave {} of room {}; counted as defeated",
+            ene_st->e_id, floor, quiet.count(), wave_number, room);
+      }
+    }
+    recheck(c, l, floor, room, wave_number, false);
+    co_return;
   }
-  recheck(c, l, floor, room, wave_number, false);
 }
 
 void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
@@ -6675,16 +6788,17 @@ void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lo
         !spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number) || spire_run_end_for(l)) {
       return;
     }
-    if (!spire_wave_held_only_by_unhit(spire_wave_enemies(l, c->version(), floor, room, wave_number))) {
+    if (!spire_wave_held_only_by_unhit(spire_wave_enemies(l->map_state, c->version(), floor, room, wave_number))) {
       return;
     }
     if (spire_unhit_waits.size() > 4096) {
       spire_unhit_waits.clear();
     }
+    spire_bridge_note_fight(l, floor); // the defeat that led here
     uint64_t generation = spire_unhit_next_generation++;
     spire_unhit_waits[std::make_tuple(l->lobby_id, floor, room, wave_number)] = generation;
-    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} is held only by enemies never hit; counted as defeated in {} s unless one is hit or another dies",
-        wave_number, room, floor, SPIRE_UNHIT_ENEMY_SECONDS.count());
+    l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} is held only by enemies never hit; counted as defeated after {} s without a fight on the floor, unless one is hit or another dies",
+        wave_number, room, floor, SPIRE_UNHIT_QUIET_SECONDS.count());
     asio::co_spawn(*c->require_server_state()->io_context,
         spire_unhit_wave_wait(c, l, floor, room, wave_number, generation, recheck), asio::detached);
   } catch (const std::exception& e) {
@@ -6711,7 +6825,7 @@ static std::unordered_set<size_t> spire_dead_room_events(
     if (!set_entry || (set_entry->room != room) || (ev_st->flags & 0x08) || !(ev_st->flags & 0x06)) {
       continue;
     }
-    if (spire_event_without_living_enemy(spire_wave_enemies(l, v, floor, room, set_entry->wave_number))) {
+    if (spire_event_without_living_enemy(spire_wave_enemies(l->map_state, v, floor, room, set_entry->wave_number))) {
       ret.emplace(ev_st->w_id);
     }
   }
@@ -6764,25 +6878,33 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
       }
     }
     if (!both.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &both)) {
-      spire_dead_event_waits.erase(it);
-      for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
-        if (!both.count(ev_st->w_id)) {
-          continue;
-        }
-        const auto* set_entry = ev_st->super_ev->version(v).set_entry;
-        for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, set_entry->wave_number)) {
-          if (!ene_st->super_ene->child_index) {
-            ene_st->set_flags |= 8;
-          }
-        }
-        ev_st->flags |= 0x18; // all enemies killed, post-wave actions run (server's map state only)
-        l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} running without a living enemy; counted as finished",
-            set_entry->event_id.load(), room, floor);
+      // veilig-1 (2-M2): counted only at a look where the floor was quiet long enough with a client on it
+      bool player_on_floor = false;
+      auto quiet = spire_net_quiet(l, floor, &player_on_floor);
+      auto look = spire_unhit_net_look(true, quiet, player_on_floor);
+      if (look.notice) {
+        spire_stuck_notice(l, floor, room);
       }
-      spire_bridge_check_room_clear(c, l, floor, room, wave_number);
-      co_return;
-    }
-    if (now.empty()) {
+      if (look.action == SpireNetAction::COUNT) {
+        spire_dead_event_waits.erase(it);
+        for (const auto& ev_st : l->map_state->event_states_for_floor(v, floor)) {
+          if (!both.count(ev_st->w_id)) {
+            continue;
+          }
+          const auto* set_entry = ev_st->super_ev->version(v).set_entry;
+          for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, set_entry->wave_number)) {
+            if (!ene_st->super_ene->child_index) {
+              ene_st->set_flags |= 8;
+            }
+          }
+          ev_st->flags |= 0x18; // all enemies killed, post-wave actions run (server's map state only)
+          l->log.info_f("Spire bridge: event {} of room {} on floor {:02X} running without a living enemy and no fight on the floor for {} s; counted as finished",
+              set_entry->event_id.load(), room, floor, quiet.count());
+        }
+        spire_bridge_check_room_clear(c, l, floor, room, wave_number);
+        co_return;
+      }
+    } else if (now.empty()) {
       spire_dead_event_waits.erase(it); // every started event has a living enemy again: the next wave check looks anew
       co_return;
     }
@@ -6814,8 +6936,8 @@ static void spire_dead_event_watch(std::shared_ptr<Client> c, std::shared_ptr<Lo
       l->log.info_f("Spire bridge: room {} on floor {:02X} waits on a chained event; watching it for a wave without a living enemy",
           room, floor);
     } else {
-      l->log.info_f("Spire bridge: room {} on floor {:02X} has {} started event(s) without a living enemy; counted as finished after {} s unless one is hit",
-          room, floor, seen.size(), SPIRE_UNHIT_ENEMY_SECONDS.count());
+      l->log.info_f("Spire bridge: room {} on floor {:02X} has {} started event(s) without a living enemy; counted as finished after two looks {} s apart and {} s without a fight on the floor",
+          room, floor, seen.size(), SPIRE_UNHIT_ENEMY_SECONDS.count(), SPIRE_UNHIT_QUIET_SECONDS.count());
     }
     asio::co_spawn(*c->require_server_state()->io_context,
         spire_dead_event_wait(c, l, floor, room, wave_number, generation, std::move(seen)), asio::detached);

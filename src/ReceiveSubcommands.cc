@@ -497,6 +497,7 @@ void forward_subcommand_with_entity_targets_transcode_and_track_hits_t(
       res.ene_st = ene_st;
       ene_st->set_last_hit_by_client_id(c->lobby_client_id);
       l->log.info_f("E-{:03X} last hit claimed", ene_st->e_id);
+      spire_bridge_note_fight(l, ene_st->super_ene->floor); // veilig-1: a sign of a fight for the Spire nets
       if (ene_st->alias_target_ene_st) {
         ene_st->alias_target_ene_st->set_last_hit_by_client_id(c->lobby_client_id);
         l->log.info_f("Alias target E-{:03X} last hit claimed", ene_st->alias_target_ene_st->e_id);
@@ -1731,6 +1732,7 @@ static void on_player_died(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   if (!l->is_game() || (cmd.header.client_id != c->lobby_client_id)) {
     return;
   }
+  spire_bridge_note_fight(l, c->floor); // veilig-1: a sign of a fight for the Spire nets
 
   // Decrease MAG's synchro
   try {
@@ -1811,6 +1813,10 @@ static asio::awaitable<void> on_change_hp(std::shared_ptr<Client> c, SubcommandM
   auto l = c->require_lobby();
   if (!l->is_game() || (cmd.client_id != c->lobby_client_id)) {
     co_return;
+  }
+  // veilig-1: a player hit by an enemy (6x4A, 6x4B, 6x4C; not 6x2F, any HP change) is a sign of a fight for the Spire nets
+  if constexpr (std::is_same_v<CmdT, G_ClientIDHeader>) {
+    spire_bridge_note_fight(l, c->floor);
   }
 
   forward_subcommand(c, msg);
@@ -3498,6 +3504,7 @@ static void on_set_entity_set_flag(std::shared_ptr<Client> c, SubcommandMessage&
     try {
       size_t enemy_index = cmd.header.entity_id - 0x1000;
       auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.floor, enemy_index);
+      spire_bridge_note_fight(l, cmd.floor); // veilig-1: a sign of a fight for the Spire nets
       if (ene_st->super_ene->child_index > 0) {
         if (ene_st->super_ene->child_index > enemy_index) {
           throw std::logic_error("enemy\'s child index is greater than enemy\'s absolute index");
@@ -3607,6 +3614,7 @@ static void on_update_enemy_state(std::shared_ptr<Client> c, SubcommandMessage& 
     throw std::runtime_error("mismatched enemy id/index");
   }
   auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.enemy_index);
+  spire_bridge_note_fight(l, ene_st->super_ene->floor); // veilig-1: a sign of a fight for the Spire nets
   uint32_t src_flags = is_big_endian(c->version()) ? bswap32(cmd.game_flags) : cmd.game_flags.load();
   if (src_flags & 0xD0000000) { // Don't allow player, object, or item flags to be set
     throw std::runtime_error("incorrect entity type flags in 6x0A command");
@@ -3669,6 +3677,7 @@ static void on_incr_enemy_damage(std::shared_ptr<Client> c, SubcommandMessage& m
     throw std::runtime_error("6xE4 received for non-enemy entity");
   }
   auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.header.entity_id & 0x0FFF);
+  spire_bridge_note_fight(l, ene_st->super_ene->floor); // veilig-1: a sign of a fight for the Spire nets
 
   c->log.info_f("E-{:03X} damage incremented by {} with factor {}; before hit, damage was {} (cmd) or {} (ene_st) and HP was {}/{}",
       ene_st->e_id,
@@ -3713,6 +3722,7 @@ static void on_set_enemy_status_effect_flags_ultimate(std::shared_ptr<Client> c,
   }
 
   auto ene_st = l->map_state->enemy_state_for_index(c->version(), cmd.header.entity_id - 0x1000);
+  spire_bridge_note_fight(l, ene_st->super_ene->floor); // veilig-1: a sign of a fight for the Spire nets
   if (!(ene_st->game_flags & cmd.status_effect_flags)) {
     ene_st->game_flags |= cmd.status_effect_flags;
     l->log.info_f("E-{:03X} updated to game_flags={:08X}", ene_st->e_id, ene_st->game_flags);
