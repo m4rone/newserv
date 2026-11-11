@@ -22,6 +22,11 @@
 // 1 = Dragon, 2 = De Rol Le) and a deathless team (bit 18) next to the won bit (23) and the seconds (low 16 bits).
 // kwaliteit-3 1: the exams are the first and the second boss of the run's episode (Episode 2: Barba Ray, Gol Dragon),
 // and for a run the server knows they are what the server saw the run pass (spire_finish_seen), not the quest's field.
+// balans-4 (B-REGIE-20-9): bits 16-17 are the unlock steps (0-2), not the number of exams in the run's score. The
+// quest's score ('K') counts every boss the run beat as an exam (score.py: 2000 each, up to four in an episode's run)
+// and says so with bit 22; the server keeps that score as sent (spire_finish_seen) and stores no exam count next to
+// it (records.json: BestScore). The quest caps the field at 2: bit 18 above it is the deathless bit. Nothing below
+// changes with it: every unlock hangs on step 1 or step 2, as before.
 // From that the server sets 0x380 (first run), 0x381/0x384/0x385 (Dragon: Iron man, Haste), 0x382/0x386/0x387/0x3A0
 // (De Rol Le: Bare, Hungry, payout win), 0x383/0x3A1 + the second kit of the class's archetype (0x388 HU, 0x389 RA,
 // 0x38A FO) for a deathless win, and 0x3A2 on a new best time; it delivers them at once and names what is new.
@@ -38,7 +43,7 @@ constexpr uint16_t SPIRE_META_FLAG_PAY_WIN = 0x03A0;
 constexpr uint16_t SPIRE_META_FLAG_PAY_DEATHLESS = 0x03A1;
 constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
 
-constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits
+constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits: the unlock steps, at most 2 (balans-4)
 constexpr uint32_t SPIRE_META_FINISH_DEATHLESS = 1 << 18;
 // Route B F2: the pacts the run carried, bits 19-21 of 'F' (the quest adds pacts << 19 before its score_keep jump, so a
 // lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 23 is the won bit; a

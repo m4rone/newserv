@@ -8406,6 +8406,341 @@ void run_static_tests() {
       expect(!spire_map_has_boss_teleporter(empty, Version::GC_V3, 2));
     });
 
+    // ---- balans-4 (B-REGIE-20-9): every boss a run beat is an exam in its score, not the first two; the unlocks keep
+    // their two steps, and what was saved before stays valid. The run end of the quest from this change on
+    // (pso-roguelike quests/spire/score.py score_and_persist): rooms and exams count from the run's first room; every
+    // boss room of the run the room counter got beyond is an exam (2000), every other room cleared a regular room
+    // (500); 'K' carries that score whole, bit 22 of 'F' says it counted from the first room, and bits 16-17 of 'F'
+    // carry at most two of the exams (the unlock steps; a 4 there would be the deathless bit). score_exams_max 2 is
+    // the quest before it (3991ce3): a third and a fourth boss scored as regular rooms. No lives, no meseta, no time
+    // bonus (3000 s), as k3_quest_end.
+    const std::vector<uint32_t> b4_bosses_ep1{4, 8, 11, 15}; // spire.json: Dragon, De Rol Le, Vol Opt, Dark Falz
+    const std::vector<uint32_t> b4_bosses_ep2{18, 21, 27, 30}; // spire-ep2.json: Barba Ray ... Olga Flow
+    auto b4_passed = [](const std::vector<uint32_t>& bosses, uint32_t first, uint32_t k_end) {
+      uint32_t ret = 0;
+      for (uint32_t b : bosses) {
+        ret += ((b >= first) && (b < k_end)) ? 1 : 0;
+      }
+      return ret;
+    };
+    auto b4_quest_end = [&](const std::vector<uint32_t>& bosses, uint32_t first, uint32_t k_end, bool won, bool deathless,
+                            uint32_t pacts, uint32_t kills, uint32_t score_exams_max) {
+      uint32_t passed = b4_passed(bosses, first, k_end);
+      uint32_t exams = std::min<uint32_t>(passed, score_exams_max);
+      uint32_t s = 100 * kills + 500 * ((k_end - first) - exams) + 2000 * exams;
+      K3QuestEnd ret;
+      ret.score = (s * (4 + pacts)) / 4;
+      ret.finish = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | SPIRE_FINISH_FROM_START | 3000 |
+          (std::min<uint32_t>(passed, 2) << SPIRE_META_FINISH_EXAMS_SHIFT) | (pacts << SPIRE_META_FINISH_PACTS_SHIFT) |
+          (won ? ((1u << 23) | (deathless ? SPIRE_META_FINISH_DEATHLESS : 0)) : 0);
+      return ret;
+    };
+    const uint32_t B4_ALL = 8; // more than a run has bosses
+
+    k3_case("balans-4: at every run end the server keeps the score with every exam and unlocks what it unlocked before", [&]() {
+      struct Ep {
+        uint8_t episode;
+        const std::vector<uint32_t>* bosses;
+        uint32_t first;
+        uint32_t last;
+      };
+      const std::vector<Ep> eps = {{1, &b4_bosses_ep1, 1, 15}, {2, &b4_bosses_ep2, 16, 30}};
+      size_t ends = 0, more = 0;
+      for (const auto& ep : eps) {
+        for (uint32_t k_end = ep.first; k_end <= ep.last + 1; k_end++) {
+          bool won = (k_end == ep.last + 1);
+          for (bool deathless : {false, true}) {
+            if (deathless && !won) {
+              continue;
+            }
+            for (uint32_t pacts : {0u, 3u}) {
+              uint32_t passed = b4_passed(*ep.bosses, ep.first, k_end);
+              auto now = b4_quest_end(*ep.bosses, ep.first, k_end, won, deathless, pacts, 10, B4_ALL);
+              auto before = b4_quest_end(*ep.bosses, ep.first, k_end, won, deathless, pacts, 10, 2);
+              // the 'F' code is the one of before, bit for bit: the field holds 0-2, and bit 18 above it is the
+              // deathless bit and nothing else (a fourth exam in the field would set it)
+              expect_eq(before.finish, now.finish);
+              expect_eq(std::min<uint32_t>(passed, 2) | ((won && deathless) ? 4u : 0u),
+                  (now.finish >> SPIRE_META_FINISH_EXAMS_SHIFT) & 7);
+              // the score: 1500 more per boss past the second (2000 instead of 500), times the pact multiplier
+              uint32_t past_second = (passed > 2) ? (passed - 2) : 0;
+              expect_eq(before.score + (1500 * past_second * (4 + pacts)) / 4, now.score);
+              more += past_second ? 1 : 0;
+              // a server from before this change (a5fa1dc) and one from before bit 22 read the same exams from it
+              auto decoded = spire_meta_decode_finish(now.finish);
+              expect_eq(won ? 2u : std::min<uint32_t>(passed, 2), static_cast<uint32_t>(decoded.exams));
+              expect_eq(pacts, static_cast<uint32_t>(decoded.pacts));
+              expect((decoded.won == won) && (decoded.deathless == deathless));
+              // the run the server knows, the run it saw nothing of but its start, and the run it does not know: the
+              // score is the quest's, and the unlock steps are the ones of before
+              uint8_t reached = std::min<uint32_t>(k_end, ep.last);
+              for (const SpireRunSeen& seen : {
+                       SpireRunSeen{.known = true, .episode = ep.episode, .start_room = static_cast<uint8_t>(ep.first), .reached_room = reached},
+                       SpireRunSeen{}}) {
+                auto got = spire_finish_seen(now.finish, now.score, seen);
+                expect_eq(now.score, got.score);
+                expect_eq(0u, got.score_removed);
+                expect_eq(now.finish, got.finish_value);
+                auto flags = spire_meta_flags_for_finish(spire_meta_decode_finish(got.finish_value), 0, false);
+                auto has = [&](uint16_t flag) {
+                  return std::find(flags.begin(), flags.end(), flag) != flags.end();
+                };
+                // one rule, written here on its own: step 1 from one boss on, step 2 from two on (a won run has both)
+                bool step1 = won || (passed >= 1), step2 = won || (passed >= 2);
+                expect(has(SPIRE_META_FLAG_FIRST_RUN));
+                expect_eq(step1, has(SPIRE_META_FLAG_DRAGON));
+                expect_eq(step1, has(SPIRE_META_FLAG_PACT_FIRST));
+                expect_eq(step1, has(SPIRE_META_FLAG_PACT_FIRST + 1));
+                expect_eq(step2, has(SPIRE_META_FLAG_DEROLLE));
+                expect_eq(step2, has(SPIRE_META_FLAG_PACT_FIRST + 2));
+                expect_eq(step2, has(SPIRE_META_FLAG_PACT_FIRST + 3));
+                expect_eq(step2, has(SPIRE_META_FLAG_PAY_WIN)); // opened only by a counted win (spire_meta_apply_finish)
+                expect_eq(won && deathless, has(SPIRE_META_FLAG_DEATHLESS_WIN));
+                expect_eq(won && deathless, has(SPIRE_META_FLAG_PAY_DEATHLESS));
+                expect_eq(won && deathless, has(SPIRE_META_FLAG_KIT2_FIRST)); // class 0: a hunter
+                expect_eq(flags, spire_meta_flags_for_finish(spire_meta_decode_finish(
+                                     spire_finish_seen(before.finish, before.score, seen).finish_value), 0, false));
+              }
+              // the server saw the run from its first room but none of its later rooms (no 'V' reached it): a run
+              // from room 1 keeps the quest's steps, a run from a later room gets what the server saw (kwaliteit-3 1);
+              // the score is the quest's either way
+              auto unseen = spire_finish_seen(now.finish, now.score,
+                  SpireRunSeen{.known = true, .episode = ep.episode, .start_room = static_cast<uint8_t>(ep.first),
+                      .reached_room = static_cast<uint8_t>(ep.first)});
+              expect_eq(now.score, unseen.score);
+              expect_eq(((ep.first == 1) || won) ? std::min<uint32_t>(won ? 2 : passed, 2) : 0u, static_cast<uint32_t>(unseen.exams));
+              ends++;
+            }
+          }
+        }
+      }
+      expect_eq(2u * (16 + 1) * 2, ends); // per episode 15 lost ends and a won end with and without a death, twice
+      expect(more > 0); // some ends passed a third boss
+      // the numbers of the report (10 kills, no pacts): a third and a fourth boss
+      expect_eq(9500u, b4_quest_end(b4_bosses_ep1, 1, 12, false, false, 0, 10, 2).score);
+      expect_eq(11000u, b4_quest_end(b4_bosses_ep1, 1, 12, false, false, 0, 10, B4_ALL).score);
+      expect_eq(11500u, b4_quest_end(b4_bosses_ep1, 1, 16, true, true, 0, 10, 2).score);
+      expect_eq(14500u, b4_quest_end(b4_bosses_ep1, 1, 16, true, true, 0, 10, B4_ALL).score);
+      expect_eq(14500u, b4_quest_end(b4_bosses_ep2, 16, 31, true, true, 0, 10, B4_ALL).score);
+      expect_eq(29000u, b4_quest_end(b4_bosses_ep2, 16, 31, true, true, 4, 10, B4_ALL).score);
+      // the server's own count of a run is every boss, as it was (spire_meta_exams_passed); only the unlock steps stop at 2
+      expect_eq(3, spire_meta_exams_passed(1, 1, 12, false));
+      expect_eq(4, spire_meta_exams_passed(2, 16, 30, true));
+    });
+
+    // the flags set on Normal, the payout flags left out: "0380 0381 ..."
+    auto b4_unlock_flags = [&](const K3Player& p) {
+      std::string ret;
+      auto file = spire_meta_load_file(spire_meta_filename_for(p.serial_number, &p.c->character_file(false, false)->disp));
+      for (const auto& [key, is_set] : file.flags) {
+        if (is_set && (key.first == 0) && (key.second < SPIRE_META_FLAG_PAY_WIN)) {
+          ret += std::format("{}{:04X}", ret.empty() ? "" : " ", key.second);
+        }
+      }
+      return ret;
+    };
+    // a whole run of the quest from this change on through the bridge: 'B', a 'V' per room start, 'K', 'F'
+    auto b4_play = [&](K3Player& p, std::shared_ptr<const Lobby> l, const std::vector<uint32_t>& bosses, uint32_t k0,
+                       uint32_t v_from, uint32_t reached, bool won, uint32_t pacts, uint32_t score_exams_max) {
+      for (uint32_t k = v_from; k <= reached; k++) {
+        k3_v_write(p, l, k, 0);
+      }
+      auto end = b4_quest_end(bosses, k0, won ? (reached + 1) : reached, won, won, pacts, 10, score_exams_max);
+      k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_SCORE) << 24) | end.score);
+      k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER, end.finish);
+      return end;
+    };
+
+    k3_case("balans-4: what a run of the new quest stores, through 'B', 'V', 'K' and 'F': the end screen's score, the flags of before", [&]() {
+      K3TempCwd temp_cwd("exams");
+      K3World w;
+      struct Run {
+        const char* name;
+        uint32_t quest_number;
+        Episode episode;
+        const std::vector<uint32_t>* bosses;
+        uint32_t k0;
+        uint32_t reached; // the room the client dies in (a won run: the last room)
+        bool won;
+        uint32_t pacts;
+        bool begin; // false: no 'B' reached the server, so it does not know the run
+        const char* flags; // on Normal, after the 'F'
+        uint32_t score; // what the end screen shows, and BestScore
+        uint32_t score_before; // the same run on the quest of 3991ce3
+      };
+      const char* none = "0380";
+      const char* step1 = "0380 0381 0384 0385";
+      const char* step2 = "0380 0381 0382 0384 0385 0386 0387";
+      const char* won1 = "0380 0381 0382 0383 0384 0385 0386 0387 0388 038B 03A0 03A1 03A2";
+      const char* won2 = "0380 0381 0382 0383 0384 0385 0386 0387 0388 038C 03A0 03A1 03A2";
+      const std::vector<Run> runs = {
+          {"Episode 1 q921 lost in k1", 921, Episode::EP1, &b4_bosses_ep1, 1, 1, false, 0, true, none, 1000, 1000},
+          {"Episode 1 q921 lost in k5, past the Dragon", 921, Episode::EP1, &b4_bosses_ep1, 1, 5, false, 0, true, step1, 4500, 4500},
+          {"Episode 1 q921 lost in k9, past De Rol Le", 921, Episode::EP1, &b4_bosses_ep1, 1, 9, false, 0, true, step2, 8000, 8000},
+          {"Episode 1 q921 lost in k12, past Vol Opt", 921, Episode::EP1, &b4_bosses_ep1, 1, 12, false, 0, true, step2, 11000, 9500},
+          {"Episode 1 q921 lost in k12, 2 pacts", 921, Episode::EP1, &b4_bosses_ep1, 1, 12, false, 2, true, step2, 16500, 14250},
+          {"Episode 1 q921 won deathless", 921, Episode::EP1, &b4_bosses_ep1, 1, 15, true, 0, true, won1, 14500, 11500},
+          {"Episode 2 q922 lost in k16", 922, Episode::EP2, &b4_bosses_ep2, 16, 16, false, 0, true, none, 1000, 1000},
+          {"Episode 2 q922 lost in k19, past Barba Ray", 922, Episode::EP2, &b4_bosses_ep2, 16, 19, false, 0, true, step1, 4000, 4000},
+          {"Episode 2 q922 lost in k22, past the Gol Dragon", 922, Episode::EP2, &b4_bosses_ep2, 16, 22, false, 0, true, step2, 7000, 7000},
+          {"Episode 2 q922 lost in k28, past the Gal Gryphon", 922, Episode::EP2, &b4_bosses_ep2, 16, 28, false, 0, true, step2, 11500, 10000},
+          {"Episode 2 q922 won deathless", 922, Episode::EP2, &b4_bosses_ep2, 16, 30, true, 0, true, won2, 14500, 11500},
+          {"Episode 1 q921 lost in k12, no 'B' seen", 921, Episode::EP1, &b4_bosses_ep1, 1, 12, false, 0, false, step2, 11000, 9500},
+      };
+      size_t wrong = 0;
+      for (const auto& run : runs) {
+        auto l = w.game(run.quest_number, run.episode);
+        auto p = w.player();
+        w.join(p, l, k3_inventory({0x00, 0x02}));
+        if (run.begin) {
+          k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER,
+              (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (run.k0 << 8) | run.k0);
+        }
+        auto end = b4_play(p, l, *run.bosses, run.k0, run.k0 + 1, run.reached, run.won, run.pacts, B4_ALL);
+        uint32_t before = b4_quest_end(*run.bosses, run.k0, run.won ? (run.reached + 1) : run.reached, run.won, run.won,
+            run.pacts, 10, 2).score;
+        std::string flags = k3_flags(p);
+        auto rec = spire_records_load(p.stem() + ".records.json");
+        bool ok = (flags == run.flags) && (end.score == run.score) && (rec.best_score == run.score) &&
+            (before == run.score_before) && (rec.best_time == (run.won ? 3000u : 0u)) &&
+            (rec.runs == (run.begin ? 1u : 0u)) && (rec.won == (run.won ? 1u : 0u));
+        wrong += ok ? 0 : 1;
+        phosg::log_info_f("   B4 measure: {}: quest 'F' {:08X}, end screen score {} (before: {}) -> flags {}; BestScore {}, "
+            "BestTime {}, Runs {}, Won {}{}", run.name, end.finish, end.score, before, flags, rec.best_score, rec.best_time,
+            rec.runs, rec.won, ok ? "" : std::format(" (EXPECTED flags {}; score and BestScore {}; before {})", run.flags,
+                                             run.score, run.score_before));
+        w.leave(p, l);
+      }
+      expect_eq(0u, wrong);
+    });
+
+    k3_case("balans-4: records, unlocks and a savestate from before load, show and lose nothing", [&]() {
+      // tests/spire-*-before-all-exams.json: the three files of one character as newserv a5fa1dc wrote them (through
+      // this bridge, 2026-11-11), on the quest of 3991ce3 (the first two bosses as exams): Spire Run I lost in k12
+      // (9500), Spire Run I won without a death (11500, 3000 s), then Spire Run II left at the start of k20, a rest
+      // room (the savestate). No room clear was sent, so the only splinters are the 13 of the won run's k15.
+      const std::string old_records = phosg::load_file("tests/spire-records-before-all-exams.json");
+      const std::string old_meta = phosg::load_file("tests/spire-meta-before-all-exams.json");
+      const std::string old_savestate = phosg::load_file("tests/spire-savestate-before-all-exams.json");
+      K3TempCwd temp_cwd("old-record");
+      K3World w;
+      const uint32_t REQ = SPIRE_BRIDGE_REQUEST_REGISTER;
+      auto p = w.player();
+      const std::string records_file = p.stem() + ".records.json";
+      const std::string meta_file = spire_meta_filename_for(p.serial_number, &p.c->character_file(false, false)->disp);
+      const std::string savestate_file = p.stem() + ".savestate.normal.json";
+      phosg::save_file(records_file, old_records);
+      phosg::save_file(meta_file, old_meta);
+      phosg::save_file(savestate_file, old_savestate);
+      auto top_keys = [](const std::string& json_text) {
+        std::string ret;
+        for (const auto& [key, value] : phosg::JSON::parse(json_text).as_dict()) {
+          ret += std::format("{}{}", ret.empty() ? "" : " ", key);
+        }
+        return ret;
+      };
+      auto sent_text = [&](const std::string& what) {
+        for (const auto& data : p.ch->sent) {
+          if (data.find(what) != std::string::npos) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      // it loads: the numbers of the old count are there as they were written
+      auto rec0 = spire_records_load(records_file);
+      expect_eq(11500u, rec0.best_score);
+      expect_eq(3000u, rec0.best_time);
+      expect_eq(3u, rec0.runs);
+      expect_eq(1u, rec0.won);
+      expect_eq(13u, rec0.splinters);
+      expect_eq(13u, rec0.splinters_total);
+      expect_eq(2u, rec0.credited.size()); // the two runs that ended
+      expect((rec0.per_difficulty.at(0).first == 1) && (rec0.per_difficulty.at(0).second == 3000));
+      auto meta0 = spire_meta_load_file(meta_file);
+      expect(meta0.exists && meta0.bosses_beaten.contains(15));
+      const std::string won_flags = "0380 0381 0382 0383 0384 0385 0386 0387 0388 038B";
+      expect_eq(won_flags, b4_unlock_flags(p));
+
+      // it shows, and the savestate from before resumes, in the room quest of k20 (rest) of the new quest: the Records
+      // board ('Y') names the old best score, the 'J' answer carries the run's first room, its rest bits and its
+      // one item. The run plays on and dies in k28, past the Gal Gryphon. The new quest counts from the run's first
+      // room k16: 9 regular rooms and 3 exams, 11500 with 10 kills (the old count: 10000)
+      auto l1 = w.game(960, Episode::EP2);
+      w.join(p, l1, k3_inventory({}));
+      k3_reg(p, l1, REQ, static_cast<uint32_t>(SPIRE_BRIDGE_REC_BOARD) << 24);
+      expect(sent_text("Best score: 11500 - best time: 50 min 0 s - runs: 3, won: 1"));
+      size_t answers_before = p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER).size();
+      k3_reg(p, l1, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (2 << 8) | 20);
+      auto answers = p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER);
+      expect_eq(answers_before + 1, answers.size());
+      expect_eq(0x4A105101u, answers.back());
+      k3_reg(p, l1, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 16) | (16 << 8) | 20);
+      auto resumed = b4_play(p, l1, b4_bosses_ep2, 16, 21, 28, false, 0, B4_ALL);
+      expect_eq(11500u, resumed.score);
+      expect_eq(10000u, b4_quest_end(b4_bosses_ep2, 16, 28, false, false, 0, 10, 2).score);
+      auto rec1 = spire_records_load(records_file);
+      expect_eq(11500u, rec1.best_score); // the same number as the old record: no new best, nothing lowered
+      expect_eq(3000u, rec1.best_time);
+      expect_eq(3u, rec1.runs); // the resume is no new run
+      expect_eq(1u, rec1.won);
+      expect(rec1.splinters >= rec0.splinters);
+      expect(rec1.splinters_total >= rec0.splinters_total);
+      expect_eq(3u, rec1.credited.size()); // the resumed run ended now
+      for (size_t z = 0; z < rec0.credited.size(); z++) {
+        expect_eq(rec0.credited[z].run_id, rec1.credited[z].run_id);
+        expect(rec0.credited[z].rooms == rec1.credited[z].rooms);
+        expect(rec0.credited[z].bosses == rec1.credited[z].bosses);
+        expect_eq(rec0.credited[z].base, rec1.credited[z].base);
+        expect((rec0.credited[z].won == rec1.credited[z].won) && (rec0.credited[z].bonus_paid == rec1.credited[z].bonus_paid));
+      }
+      expect_eq(won_flags, b4_unlock_flags(p)); // nothing new unlocks, nothing is taken
+      auto meta1 = spire_meta_load_file(meta_file);
+      for (uint8_t k : meta0.bosses_beaten) {
+        expect(meta1.bosses_beaten.contains(k));
+      }
+      // the files written now have the keys of the files from before and no other: a server from before reads them
+      expect_eq(top_keys(old_records), top_keys(phosg::load_file(records_file)));
+      expect_eq(top_keys(old_meta), top_keys(phosg::load_file(meta_file)));
+      w.leave(p, l1);
+
+      // a run of the new quest that scores less (lost in k12: 11000, which the old count made 9500): the old record
+      // stands
+      auto l2 = w.game(921, Episode::EP1);
+      w.join(p, l2, k3_inventory({0x00, 0x02}));
+      k3_reg(p, l2, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 8) | 1);
+      auto lost = b4_play(p, l2, b4_bosses_ep1, 1, 2, 12, false, 0, B4_ALL);
+      expect_eq(11000u, lost.score);
+      auto rec2 = spire_records_load(records_file);
+      expect_eq(11500u, rec2.best_score);
+      expect_eq(3000u, rec2.best_time);
+      expect_eq(4u, rec2.runs);
+      expect_eq(1u, rec2.won);
+      expect_eq(won_flags, b4_unlock_flags(p));
+      w.leave(p, l2);
+
+      // a won run of the new quest beats the old record: 14500 against 11500 for the same play
+      auto l3 = w.game(921, Episode::EP1);
+      w.join(p, l3, k3_inventory({0x00, 0x02}));
+      k3_reg(p, l3, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 8) | 1);
+      auto win = b4_play(p, l3, b4_bosses_ep1, 1, 2, 15, true, 0, B4_ALL);
+      expect_eq(14500u, win.score);
+      auto rec3 = spire_records_load(records_file);
+      expect_eq(14500u, rec3.best_score);
+      expect_eq(3000u, rec3.best_time); // the same seconds: no new best time
+      expect_eq(5u, rec3.runs);
+      expect_eq(2u, rec3.won);
+      expect((rec3.per_difficulty.at(0).first == 2) && (rec3.per_difficulty.at(0).second == 3000));
+      expect(rec3.splinters >= rec2.splinters);
+      expect_eq(won_flags, b4_unlock_flags(p));
+      expect_eq(top_keys(old_records), top_keys(phosg::load_file(records_file)));
+      expect_eq(top_keys(old_meta), top_keys(phosg::load_file(meta_file)));
+      k3_reg(p, l3, REQ, static_cast<uint32_t>(SPIRE_BRIDGE_REC_BOARD) << 24);
+      expect(sent_text("Best score: 14500 - best time: 50 min 0 s - runs: 5, won: 2"));
+      w.leave(p, l3);
+    });
+
     // ---- Inventory backup, interim state (B-REGIE-20-4): a hard server stop in the middle of a game. "The process
     // dies" is here: the file as it is on disk at that moment, with no Exit in it, read again by a server process with
     // another boot id. The test character is the one of tests/inventory-backup-pre-interim-*.json, three files that
