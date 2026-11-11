@@ -110,6 +110,10 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     pipes lead to: "The way is open: Room k <A> or Room k <B>. Walk close to a warp to read it." (normal / ELITE /
 //     REST / EXAM), one exam pipe "The way is open. Walk to the warp: Exam <boss>." (exams[k]; unknown: "Room k");
 //     kwaliteit-2: 0xF0, Sega's own teleporter out of a boss arena: "The way is open. Take the teleporter: Room k."
+//     kwaliteit-2 r2 (critic K5): the one exam way (0xF3) is Sega's boss teleporter where the quest put a TObjWarpBoss
+//     on the exit pipe's spot (every exit before a boss but Seaside's): "The way is open. Take the teleporter: Exam
+//     <boss>." when the game's map has that object on the writer's floor (SpireBridgeTextContext::boss_teleporter);
+//     a floor without one keeps "Walk to the warp". The code itself does not say which of the two stands there.
 //   'A' bits 16-23 = extra: type 0 normal "Room k. Next reward: <tag>." · 1 elite "Room k - Elite: harder foes, rare
 //     reward. Next reward: <tag>." (extra = tag index + 1; no tag name: without "Next reward") · 2 rest "Room k - Rest:
 //     no enemies, full HP, then the shop." (spire.json sign_rest; the same rest in every quest version, so also at
@@ -389,6 +393,11 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
 // id and not in *expected.
 std::vector<uint32_t> spire_resume_equip_targets(
     const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected = nullptr);
+// kwaliteit-2 r2: whether "Equip your gear: Item Pack > Equip." is true for this inventory: an item that was equipped
+// at the 'V' is still to equip (spire_resume_equip_targets) and newserv sends no SpireEquipItem for it (sent: the ids
+// it does send one for, each with its own check and line). Looked at when the line is planned and again when it goes.
+bool spire_resume_equip_missing_due(
+    const SpireSavestate& ss, const PlayerInventory& inventory, const std::vector<uint32_t>& sent);
 // kwaliteit-1 r2 (critic B-3b): whether newserv starts equipping a resume (spire_resume_equip) now: at the ack of the
 // last resume item, or, as the safety net when that ack never comes, once no 'J' item request came for
 // SPIRE_RESUME_EQUIP_FALLBACK_MS since the start answer or the latest one (the quest asks an unanswered item again after
@@ -959,8 +968,37 @@ struct SpireBridgeTextContext {
   int archetype = -1; // 'C' 10 and 'C' 12: the writer's archetype (0 HU, 1 RA, 2 FO), -1 = not known
   std::string overview; // 'C' 2: the writer's kept overview line (spire_overview_kept_line), "" = none
   bool last_clear = false; // kwaliteit-2 258: 'C' 12 relic gift: the writer is in the quest's last room (spire_gift_last_clear)
+  // kwaliteit-2 r2 (critic K5): 'C' 6: Sega's boss teleporter stands on the writer's floor (the exam exit is that
+  // teleporter, not a pipe of ours)
+  bool boss_teleporter = false;
 };
 std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);
+// kwaliteit-2 r2 (critic K5): TObjWarpBoss, Sega's teleporter to a boss arena, in a map's object list
+constexpr uint16_t SPIRE_BOSS_TELEPORTER_OBJECT_TYPE = 0x0019;
+// The context of a short-message code as spire_bridge_handle_register builds it for the writer: the names (text_table
+// keeps the draw table they point into), the archetype, the kept overview line, last_clear (only for the relic gift's
+// 'C' 12, bit 23 clear, from the writer's last stored 'V') and boss_teleporter (only for 'C' 6, from the game's map).
+// Exported for StaticTests (critic K7).
+SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t quest_number, uint32_t value, std::optional<SpireDrawTable>& text_table);
+// For StaticTests only (critic K7: a 'V' and a 'C' 12 through spire_bridge_handle_register): the state a 'B' (began)
+// and an answered run mag ASK (mag_issued) leave for this client in this game, without the files those two read and
+// write; the room of its last 'V' that passed spire_savestate_write_allowed (0: none); and forgetting all of it.
+void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
+uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
+// (spire_equip_missing_text), in its turn in the client's order; the item is looked at again when the line goes.
+// Called by the equip check (spire_equip_item_send, after the client's answer and SPIRE_EQUIP_CHECK_DELAY) and for the
+// kit weapon's hint held for the kit line. Exported for StaticTests.
+void spire_equip_missing_line_in_turn(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t point, uint32_t item_id);
+// The check after a SpireEquipItem, SPIRE_EQUIP_CHECK_DELAY after the client's answer (critic N-4): the item's line in
+// its turn when the item is still not equipped. kwaliteit-2 r2: for the game the equip was asked in (weak_l); a client
+// that left that game while the function call was out or during the wait gets no check and no line. `what` names the
+// item for the log; point as spire_equip_missing_text. Exported for StaticTests.
+asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
+    uint32_t item_id, std::string what, uint8_t point);
 // kwaliteit-2 258: a relic gift that does not fit ('C' 12, bit 23 clear) waits for the next room start (the quest's
 // gw_retry in its room_start hook). After the clear of a quest's last room no room start comes, and the quest's run_end
 // retries only the exam rare and extra, so that gift is never made: the line then says so instead of "it waits".
@@ -991,7 +1029,24 @@ std::chrono::milliseconds spire_ticker_turn_delay(
     std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
 // kwaliteit-2 145: a line that goes at once and must stay readable (SPIRE_BOSS_BURST_TEXT) holds that order for
 // SPIRE_PACK_LINE_GAP from now: no waiting line planned after it goes sooner. Never moves next_free back.
-void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now);
+// kwaliteit-2 r2: held_until (per client) keeps the end of that hold for the lines that were planned before it
+// (spire_ticker_wake_delay); it never moves back either.
+void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point& held_until, std::chrono::steady_clock::time_point now);
+// kwaliteit-2 r2: a waiting line looks again when its delay is over, at now. A boss door line that came after the line
+// was planned holds the ticker until held_until, and spire_ticker_hold only orders what is planned after it; so the
+// first waiting line that wakes inside the hold waits on until the hold ends, and every waiting line behind it moves
+// as far (shift, per client, the total so far; seen, per line, the total this line has followed: the client's shift
+// when the line was planned). The order of the waiting lines and the gaps between them stay as planned, and next_free
+// moves along for the lines planned later. Returns how much longer the line waits (it then asks again), 0: it goes now.
+std::chrono::milliseconds spire_ticker_wake_delay(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point held_until, std::chrono::milliseconds& shift, std::chrono::milliseconds& seen,
+    std::chrono::steady_clock::time_point now);
+// kwaliteit-2 r2 (critic K2): whether a short-message line waits its turn as a pack line does instead of going at
+// once: 'C' 15 and 'C' 16 (spire_bridge_is_pack_line), and the relic gift's 'C' 12 (bit 23 clear) at the quest's last
+// clear (ctx.last_clear), "This was the last room: the gift is not given.": it arrives with the clear text and the
+// win lines, is said once and is never followed by a 'C' 16, so it must not be pushed aside.
+bool spire_bridge_line_waits(uint32_t value, const SpireBridgeTextContext& ctx);
 // v62: the writer's last overview line as kept at its 'Q' (lobby and floor of that 'Q'); "" when none is kept, or the
 // client is in another game or on another floor now (a floor change ends it)
 struct SpireOverviewKept {

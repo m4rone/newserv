@@ -400,6 +400,54 @@ static void spire_send_ticker_later(
   asio::co_spawn(*c->require_server_state()->io_context, spire_send_ticker_later_co(c, l, text, delay), asio::detached);
 }
 
+// kwaliteit-2 r2: a waiting line, one that has a turn in the client's order (Client::spire_pack_line_free). It sleeps
+// the delay of its turn, then for as long as the order moved meanwhile (spire_ticker_wake_delay: a boss door line that
+// came after it was planned), and only then asks for its text: text_now sees the client as it is at that moment and
+// returns "" when the line is no longer true (critic K3). It holds neither the client nor its game while it waits; a
+// client that is gone or no longer in that game gets nothing. Never throws.
+using SpireTickerTextNow = std::function<std::string(std::shared_ptr<Client>, std::shared_ptr<const Lobby>)>;
+static asio::awaitable<void> spire_ticker_line_co(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
+    SpireTickerTextNow text_now, std::chrono::milliseconds delay, std::chrono::milliseconds seen_shift) {
+  for (;;) {
+    if (delay.count() > 0) {
+      co_await async_sleep(delay);
+    }
+    auto c = weak_c.lock();
+    auto l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    delay = spire_ticker_wake_delay(c->spire_pack_line_free, c->spire_ticker_held_until, c->spire_ticker_shift,
+        seen_shift, std::chrono::steady_clock::now());
+    if (delay.count() > 0) {
+      continue; // c and l are let go before the next wait
+    }
+    try {
+      std::string text = text_now(c, l);
+      if (!text.empty()) {
+        spire_send_ticker(c, text);
+      }
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire bridge: a waiting line failed: {}", e.what());
+    }
+    co_return;
+  }
+}
+
+// delay is the line's turn, taken just before from the client's order (spire_pack_line_delay,
+// spire_run_mag_reminder_delay or spire_ticker_turn_delay)
+static void spire_ticker_line_in_turn(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    std::chrono::milliseconds delay, SpireTickerTextNow text_now) {
+  asio::co_spawn(*c->require_server_state()->io_context,
+      spire_ticker_line_co(c, l, std::move(text_now), delay, c->spire_ticker_shift), asio::detached);
+}
+
+// a waiting line whose text stays true while it waits
+static void spire_ticker_text_in_turn(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    std::chrono::milliseconds delay, const std::string& text) {
+  spire_ticker_line_in_turn(c, l, delay, [text](std::shared_ptr<Client>, std::shared_ptr<const Lobby>) { return text; });
+}
+
 // Texts held for the lobby, per client. The weak_ptr tells a reused Client address from the client that earned them.
 struct SpireLobbyTexts {
   std::weak_ptr<Client> client;
@@ -572,6 +620,15 @@ std::vector<uint32_t> spire_resume_equip_targets(
     *expected = count;
   }
   return ret;
+}
+
+bool spire_resume_equip_missing_due(
+    const SpireSavestate& ss, const PlayerInventory& inventory, const std::vector<uint32_t>& sent) {
+  size_t expected = 0, handled = 0;
+  for (uint32_t id : spire_resume_equip_targets(ss, inventory, &expected)) {
+    handled += std::count(sent.begin(), sent.end(), id) ? 1 : 0;
+  }
+  return expected > handled;
 }
 
 static bool spire_resume_item_like(const ItemData& a, const ItemData& b) {
@@ -1923,7 +1980,8 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
       if (spire_boss_burst_text_due(room_k, table.boss_rooms, cr->boss_burst_texts)) {
         spire_send_ticker(c, SPIRE_BOSS_BURST_TEXT);
         // kwaliteit-2 145: the NO_MAG reminder of this room start (and every waiting line after it) leaves it a gap
-        spire_ticker_hold(c->spire_pack_line_free, std::chrono::steady_clock::now());
+        // kwaliteit-2 r2: a line that waits already and wakes inside this hold waits on (spire_ticker_wake_delay)
+        spire_ticker_hold(c->spire_pack_line_free, c->spire_ticker_held_until, std::chrono::steady_clock::now());
         c->log.info_f("Spire bridge: boss room {} starts; sent \"{}\"", room_k, SPIRE_BOSS_BURST_TEXT);
       } else if (table.boss_rooms.count(room_k)) {
         c->log.info_f("Spire bridge: boss room {} starts again; burst text already sent in this run", room_k);
@@ -2201,6 +2259,10 @@ static std::string spire_text_way_open(uint32_t bits, uint32_t k, const SpireBri
     if (type_a == 3) {
       // contract: the boss from exams[k]; unknown, or a line over the limit: "Room k" in its place
       const auto* exam = spire_text_exam(ctx, k);
+      if (ctx.boss_teleporter) { // kwaliteit-2 r2 (critic K5): Sega's boss teleporter stands there, no pipe of ours
+        return spire_text_first_fitting({exam ? std::format("The way is open. Take the teleporter: Exam {}.", exam->boss) : "",
+            std::format("The way is open. Take the teleporter: Exam Room {}.", k)});
+      }
       return spire_text_first_fitting({exam ? std::format("The way is open. Walk to the warp: Exam {}.", exam->boss) : "",
           std::format("The way is open. Walk to the warp: Exam Room {}.", k)});
     }
@@ -2438,8 +2500,34 @@ std::chrono::milliseconds spire_ticker_turn_delay(
   return std::chrono::duration_cast<std::chrono::milliseconds>(at - now);
 }
 
-void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free, std::chrono::steady_clock::time_point now) {
+void spire_ticker_hold(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point& held_until, std::chrono::steady_clock::time_point now) {
   next_free = std::max(next_free, now + SPIRE_PACK_LINE_GAP);
+  held_until = std::max(held_until, now + SPIRE_PACK_LINE_GAP);
+}
+
+std::chrono::milliseconds spire_ticker_wake_delay(std::chrono::steady_clock::time_point& next_free,
+    std::chrono::steady_clock::time_point held_until, std::chrono::milliseconds& shift, std::chrono::milliseconds& seen,
+    std::chrono::steady_clock::time_point now) {
+  if (shift > seen) { // a line before this one moved for a hold: this one follows as far
+    auto owed = shift - seen;
+    seen = shift;
+    return owed;
+  }
+  if (now < held_until) { // the first waiting line inside a hold that came after it was planned
+    auto more = std::chrono::ceil<std::chrono::milliseconds>(held_until - now);
+    shift += more;
+    seen = shift;
+    next_free += more;
+    return more;
+  }
+  return std::chrono::milliseconds(0);
+}
+
+bool spire_bridge_line_waits(uint32_t value, const SpireBridgeTextContext& ctx) {
+  bool last_gift = ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT) && (((value >> 8) & 0xFF) == 12) && !((value >> 23) & 1) &&
+      ctx.last_clear;
+  return spire_bridge_is_pack_line(value) || last_gift;
 }
 
 std::string spire_bridge_message_text(uint32_t value) {
@@ -3051,36 +3139,23 @@ uint32_t spire_shop_answer(uint8_t sub, SpireShopRefusal r) {
       ((r == SpireShopRefusal::NONE) ? 1 : 0);
 }
 
-// kwaliteit-2 275: SPIRE_EQUIP_KIT_MISSING_TEXT in its turn (spire_ticker_turn_delay), after the kit line. The weapon
-// is looked at again when the line goes: the player may have equipped it while it waited. Holds neither the client nor
-// its game while it waits. Never throws.
-static asio::awaitable<void> spire_equip_kit_hint_later(
-    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t item_id, std::chrono::milliseconds delay) {
-  if (delay.count() > 0) {
-    co_await async_sleep(delay);
-  }
-  auto c = weak_c.lock();
-  auto l = weak_l.lock();
-  if (!c || !l || (c->lobby.lock() != l)) {
-    co_return;
-  }
-  try {
-    auto character = c->character_file(false, true);
-    auto text = character ? spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, item_id, character->inventory) : std::nullopt;
-    if (text) {
-      spire_send_ticker(c, *text);
-    }
-    c->log.info_f("Spire equip: kit weapon {:08X} {}", item_id,
-        text ? std::format("still not equipped {} ms after its check; sent \"{}\"", delay.count(), *text)
-             : std::string("equipped (or gone) while its hint waited: no line"));
-  } catch (const std::exception& e) {
-    c->log.warning_f("Spire equip: kit weapon {:08X}; equip hint failed: {}", item_id, e.what());
-  }
-}
-
-static void spire_equip_kit_hint_in_turn(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t item_id) {
+// kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
+// (spire_equip_missing_text: the kit weapon, a resumed weapon, the run mag), in its turn in the client's order
+// (spire_ticker_turn_delay; the kit weapon's after the kit line). The item is looked at again when the line goes: the
+// player may have equipped it while the line waited, and then nothing is sent.
+void spire_equip_missing_line_in_turn(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t point, uint32_t item_id) {
   auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
-  asio::co_spawn(*c->require_server_state()->io_context, spire_equip_kit_hint_later(c, l, item_id, delay), asio::detached);
+  spire_ticker_line_in_turn(c, l, delay,
+      [point, item_id, delay](std::shared_ptr<Client> wc, std::shared_ptr<const Lobby>) -> std::string {
+        auto character = wc->character_file(false, true);
+        auto text = character ? spire_equip_missing_text(point, item_id, character->inventory) : std::nullopt;
+        wc->log.info_f("Spire equip: item {:08X} {}", item_id,
+            text ? std::format("still not equipped when its line's turn came (planned {} ms after its check); sent \"{}\"",
+                       delay.count(), *text)
+                 : std::string("equipped (or gone) while its line waited: no line"));
+        return text.value_or("");
+      });
 }
 
 // Route B F5/F6, bundle 2 S: SPIRE_KIT_USE_TEXT, SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, so the kit items
@@ -3112,7 +3187,8 @@ static asio::awaitable<void> spire_kit_use_text_later(
   if (spire_kit_use_text_due(true, hp_mat, atp_grind, cr->answered_resume, cr->kit_text_sent)) {
     // kwaliteit-2 275: behind a line that waits already (the reminder of the kit's first mag), not on top of it
     auto turn = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
-    if (turn.count() > 0) {
+    auto seen_shift = c->spire_ticker_shift;
+    while (turn.count() > 0) {
       c.reset();
       l.reset();
       co_await async_sleep(turn);
@@ -3122,6 +3198,9 @@ static asio::awaitable<void> spire_kit_use_text_later(
         co_return;
       }
       cr = spire_client_run_for(c, l, true);
+      // kwaliteit-2 r2: a boss door line that came while it waited moves it on (as spire_ticker_line_co)
+      turn = spire_ticker_wake_delay(c->spire_pack_line_free, c->spire_ticker_held_until, c->spire_ticker_shift,
+          seen_shift, std::chrono::steady_clock::now());
     }
     cr->kit_text_sent = true;
     // route B bundle 9 critic B-1: the bundle 9 form only after this client's 'C' 13 (the quest made the kit weapon +G
@@ -3138,7 +3217,7 @@ static asio::awaitable<void> spire_kit_use_text_later(
         cr->answered_resume ? "resumed: no kit" : "already sent in this run");
   }
   if (auto held = spire_kit_ticker_ends(cr->b9_texts)) {
-    spire_equip_kit_hint_in_turn(c, l, *held);
+    spire_equip_missing_line_in_turn(c, l, SPIRE_PROMPT_KIT_GROUND, *held);
   }
 }
 
@@ -3280,25 +3359,15 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       SPIRE_SHOP_ANSWER_REGISTER, answer);
 }
 
-// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only. Never throws; the
-// client's B3 answer is logged.
-static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, uint32_t item_id, std::string what,
-    uint8_t point) {
+// Critic N-4: the game can refuse the 6x25 of a SpireEquipItem quietly (F2 § 6); without it the item is still
+// unequipped in newserv's copy. SPIRE_EQUIP_CHECK_DELAY after the client's answer this looks, and plans the item's line
+// in its turn. kwaliteit-2 r2: weak_l is the game the equip was asked in, taken before the function call; a client that
+// left that game meanwhile (also while the call was out) gets no check and no line, wherever it is by then. Holds
+// neither the client nor its game while it waits. Never throws.
+asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
+    uint32_t item_id, std::string what, uint8_t point) {
+  std::shared_ptr<Client> c;
   try {
-    auto s = c->require_server_state();
-    auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
-    co_await prepare_client_for_patches(c);
-    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
-    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
-  } catch (const std::exception& e) {
-    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
-        e.what());
-  }
-  // critic N-4: the game can refuse the 6x25 quietly (F2 § 6); without it the item is still unequipped in the copy
-  try {
-    std::weak_ptr<Client> weak_c = c;
-    std::weak_ptr<Lobby> weak_l = c->lobby;
-    c.reset(); // the wait holds neither the client nor its game
     co_await async_sleep(SPIRE_EQUIP_CHECK_DELAY);
     auto l = weak_l.lock();
     c = weak_c.lock();
@@ -3311,24 +3380,44 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, ui
         // kwaliteit-2 275: the kit line first; the hint takes the turn after it
         bool due = spire_kit_equip_hint_due(spire_client_run_for(c, l, true)->b9_texts, item_id);
         if (due) {
-          spire_equip_kit_hint_in_turn(c, l, item_id);
+          spire_equip_missing_line_in_turn(c, l, point, item_id);
         }
         c->log.info_f("Spire equip: {} {:08X} not equipped after {} ms; \"{}\" {}", what, item_id,
             SPIRE_EQUIP_CHECK_DELAY.count(), *text, due ? "takes its turn" : "waits for the kit line");
       } else {
         if (text) {
-          spire_send_ticker(c, *text);
+          // kwaliteit-2 r2: in its turn, so it pushes no waiting line aside and is not pushed aside by one
+          spire_equip_missing_line_in_turn(c, l, point, item_id);
         }
         c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
-            text ? std::format("not equipped after {} ms; sent \"{}\"", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
+            text ? std::format("not equipped after {} ms; \"{}\" takes its turn", SPIRE_EQUIP_CHECK_DELAY.count(), *text)
                  : std::string("equipped (or gone): no line"));
       }
     }
   } catch (const std::exception& e) {
-    if (c) { // critic r2: c is empty from c.reset() on, and stays so when the client left during the wait
+    if (c) { // critic r2: c is empty until the wait is over, and stays so when the client left during the wait
       c->log.warning_f("Spire equip: {} {:08X}; equip check failed: {}", what, item_id, e.what());
     }
   }
+}
+
+// Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only, in the game weak_l
+// (the game the client is in when the equip is asked). Never throws; the client's B3 answer is logged.
+static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
+    uint32_t item_id, std::string what, uint8_t point) {
+  try {
+    auto s = c->require_server_state();
+    auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
+    co_await prepare_client_for_patches(c);
+    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
+    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
+        e.what());
+  }
+  std::weak_ptr<Client> weak_c = c;
+  c.reset(); // the check's wait holds neither the client nor its game
+  co_await spire_equip_check_later(weak_c, weak_l, item_id, std::move(what), point);
 }
 
 // kwaliteit-1 (observaties 209/216): after the last resume item, SpireEquipItem for each weapon and mag that was
@@ -3369,10 +3458,19 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
       }
     }
     if (ids.size() < expected) {
-      spire_send_ticker(c, SPIRE_RESUME_EQUIP_MISSING_TEXT);
-      c->log.info_f("Spire equip: resume: {} of {} equipped item(s) in the inventory copy after {} ms; sent \"{}\"",
+      // kwaliteit-2 r2: in its turn, and looked at again when it goes (spire_resume_equip_missing_due)
+      auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+      spire_ticker_line_in_turn(c, weak_l.lock(), delay,
+          [ss, ids](std::shared_ptr<Client> wc, std::shared_ptr<const Lobby>) -> std::string {
+            auto character = wc->character_file(false, true);
+            bool due = character && spire_resume_equip_missing_due(ss, character->inventory, ids);
+            wc->log.info_f("Spire equip: resume: \"{}\" {}", SPIRE_RESUME_EQUIP_MISSING_TEXT,
+                due ? "sent" : "not sent: every item of the save point is equipped or being equipped by now");
+            return due ? SPIRE_RESUME_EQUIP_MISSING_TEXT : "";
+          });
+      c->log.info_f("Spire equip: resume: {} of {} equipped item(s) in the inventory copy after {} ms; \"{}\" in {} ms",
           ids.size(), expected, SPIRE_RESUME_EQUIP_POLLS * SPIRE_RESUME_EQUIP_POLL_DELAY.count(),
-          SPIRE_RESUME_EQUIP_MISSING_TEXT);
+          SPIRE_RESUME_EQUIP_MISSING_TEXT, delay.count());
     }
     std::vector<std::pair<uint32_t, bool>> sends; // item id, is a mag
     if (auto character = c->character_file(false, true)) {
@@ -3394,7 +3492,7 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
       }
       c->log.info_f("Spire equip: resume; sending {} for the {} {:08X}", SPIRE_EQUIP_FUNCTION_NAME,
           is_mag ? "mag" : "weapon", id);
-      co_await spire_equip_item_send(std::move(c), id, is_mag ? "resumed mag" : "resumed weapon",
+      co_await spire_equip_item_send(std::move(c), l, id, is_mag ? "resumed mag" : "resumed weapon",
           is_mag ? SPIRE_PROMPT_RUN_MAG_REPLACED : SPIRE_EQUIP_RESUME_WEAPON);
     }
   } catch (const std::exception& e) {
@@ -3423,7 +3521,7 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
     if (!late.empty()) {
       // kwaliteit-2 275: a gap after the old kit line it corrects, and before this 'C' 13's equip hint
       auto delay = spire_ticker_turn_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
-      spire_send_ticker_later(c, l, late, delay);
+      spire_ticker_text_in_turn(c, l, delay, late);
       c->log.info_f("Spire equip: 'C' 13 after the kit ticker; \"{}\" in {} ms", late, delay.count());
     }
   }
@@ -3448,7 +3546,7 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
   } else {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for item {:08X}", point,
         what, low, serial_number, quest_number, SPIRE_EQUIP_FUNCTION_NAME, *item_id);
-    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, *item_id, what, point), asio::detached);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_item_send(c, l, *item_id, what, point), asio::detached);
   }
   return true;
 }
@@ -3482,6 +3580,23 @@ static asio::awaitable<void> spire_run_mag_evolve_text_later(
       text);
 }
 
+// kwaliteit-2 145 / r2 (critic K3): a mag reminder in its turn (spire_run_mag_reminder_delay). It arrives a gap or more
+// after the moment that asked for it, so the run copy is looked at again when it goes: with a mag equipped by then
+// (spire_run_mag_reminder_text_now) nothing is sent. Returns the planned delay, for the log.
+static std::chrono::milliseconds spire_run_mag_reminder_in_turn(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, const std::string& text) {
+  auto delay = spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+  spire_ticker_line_in_turn(c, l, delay, [text](std::shared_ptr<Client> wc, std::shared_ptr<const Lobby>) -> std::string {
+    auto character = wc->character_file(false, true);
+    std::string now_text = character ? spire_run_mag_reminder_text_now(text, character->inventory) : text;
+    if (now_text.empty()) {
+      wc->log.info_f("Spire run mag: a mag was equipped while the reminder waited: no line");
+    }
+    return now_text;
+  });
+  return delay;
+}
+
 // kwaliteit-2 276: the reminder of the run's first mag waits for that RESULT's 'C' 14 as the evolution text does; when
 // newserv equips the mag for it there is nothing to remind of. Otherwise it takes its turn (kwaliteit-2 145).
 static asio::awaitable<void> spire_run_mag_reminder_later(
@@ -3497,8 +3612,7 @@ static asio::awaitable<void> spire_run_mag_reminder_later(
     c->log.info_f("Spire run mag: first mag: its 'C' 14 came and newserv equips it; no reminder");
     co_return;
   }
-  auto delay = spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
-  spire_send_ticker_later(c, l, text, delay);
+  auto delay = spire_run_mag_reminder_in_turn(c, l, text);
   c->log.info_f("Spire run mag: first mag (no 'C' 14 equip); reminder in {} ms: \"{}\"", delay.count(), text);
 }
 
@@ -3523,8 +3637,8 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       std::chrono::milliseconds delay(0);
       if (issued) {
         // kwaliteit-2 145: after the boss door line of this room start ('V', spire_savestate_write), not on top of it
-        delay = spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
-        spire_send_ticker_later(c, l, SPIRE_RUN_MAG_REMINDER_TEXT, delay);
+        // kwaliteit-2 r2 (critic K3): looked at again when it goes; a mag equipped by then gets no "equip it"
+        delay = spire_run_mag_reminder_in_turn(c, l, SPIRE_RUN_MAG_REMINDER_TEXT);
       }
       c->log.info_f("Spire run mag: NO_MAG at room {} for serial {:010} in q{}{}", k, serial_number, quest_number,
           issued ? std::format("; reminder in {} ms", delay.count()) : std::string("; no mag issued in this run, no text"));
@@ -3687,6 +3801,86 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       detail, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
 }
 
+// kwaliteit-2 r2 (critic K5): whether Sega's boss teleporter (TObjWarpBoss, object type 0x0019) stands on the floor
+// this client is on, in the game's map (the quest's .dat as newserv loaded it). The quest puts it on the spot of the
+// exit pipe before a boss and leaves its own pipe out there (make_spire.py boss_tp); a floor without one (Seaside
+// before the Gal Gryphon) keeps the pipe. False without a map. Never throws.
+static bool spire_floor_has_boss_teleporter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    if (!l->map_state) {
+      return false;
+    }
+    for (const auto& obj_st : l->map_state->iter_object_states(c->version())) {
+      if (obj_st->super_obj && (obj_st->super_obj->floor == c->floor)) {
+        const auto* set_entry = obj_st->super_obj->version(c->version()).set_entry;
+        if (set_entry && (set_entry->base_type == SPIRE_BOSS_TELEPORTER_OBJECT_TYPE)) {
+          return true;
+        }
+      }
+    }
+  } catch (const std::exception&) {
+  }
+  return false;
+}
+
+// v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the writer's
+// archetype for 'C' 10 and its kept overview line for 'C' 2; bundle 9: 'C' 12 as 'C' 10
+SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t quest_number, uint32_t value, std::optional<SpireDrawTable>& text_table) {
+  SpireBridgeTextContext text_ctx;
+  uint8_t text_kind = value >> 24;
+  uint32_t text_point = (value >> 8) & 0xFF;
+  if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
+      ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12) ||
+                                                     (text_point == 15)))) {
+    text_table = spire_draw_table_for_text(c, quest_number);
+    text_ctx.draw = text_table ? &*text_table : nullptr;
+  }
+  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12))) {
+    auto character = c->character_file(false, false);
+    text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
+  }
+  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 2)) {
+    text_ctx.overview = spire_overview_kept_line(spire_overview_kept_for(c), l->lobby_id, c->floor);
+  }
+  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 6)) {
+    text_ctx.boss_teleporter = spire_floor_has_boss_teleporter(c, l); // kwaliteit-2 r2 (critic K5)
+  }
+  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 12) && !((value >> 23) & 1)) {
+    // kwaliteit-2 258: a relic gift that does not fit after the quest's last room has no room start to wait for
+    const auto* gift_cr = spire_client_run_for(c, l, false);
+    text_ctx.last_clear = gift_cr && spire_gift_last_clear(static_cast<uint8_t>(l->episode), gift_cr->v_room);
+  }
+  return text_ctx;
+}
+
+// kwaliteit-2 r2 (critic K7), for StaticTests: what a 'B' and an answered mag ASK leave behind for this client in this
+// game, without their files
+void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued) {
+  auto* run = spire_game_run_for(l);
+  if (!run) {
+    run = &spire_game_run_set(l, SpireGameRun{.run_id = spire_new_run_id(), .savestate_files = {}});
+  }
+  spire_client_run_for(c, l, true)->began = began;
+  if (mag_issued) {
+    if (auto* led = spire_run_mag_ledger_for(c, run->run_id, true)) {
+      led->issued_step = 0;
+    }
+  }
+}
+
+uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  const auto* cr = spire_client_run_for(c, l, false);
+  return cr ? cr->v_room : 0;
+}
+
+void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  spire_game_runs.erase(l->lobby_id);
+  spire_client_runs.erase(c.get());
+  spire_draw_inputs.erase(c.get());
+  spire_run_mag_store.erase(spire_run_mag_key(c));
+}
+
 bool spire_bridge_handle_register(
     std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
   if (!l->is_game() || !l->quest) {
@@ -3792,30 +3986,8 @@ bool spire_bridge_handle_register(
       if (spire_equip_prompt_handle(c, l, serial_number, quest_number, value)) {
         return true; // route B bundle 9: 'C' 13 and 'C' 14 have no text of their own
       }
-      // v62 (B-REGIE-16-13): what the bundle 8 texts name: the draw table's names for 'A', 'C' 6 and 'C' 10, the
-      // writer's archetype for 'C' 10 and its kept overview line for 'C' 2; bundle 9: 'C' 12 as 'C' 10
-      SpireBridgeTextContext text_ctx;
       std::optional<SpireDrawTable> text_table;
-      uint8_t text_kind = value >> 24;
-      uint32_t text_point = (value >> 8) & 0xFF;
-      if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
-          ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12) ||
-                                                         (text_point == 15)))) {
-        text_table = spire_draw_table_for_text(c, quest_number);
-        text_ctx.draw = text_table ? &*text_table : nullptr;
-      }
-      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12))) {
-        auto character = c->character_file(false, false);
-        text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
-      }
-      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 2)) {
-        text_ctx.overview = spire_overview_kept_line(spire_overview_kept_for(c), l->lobby_id, c->floor);
-      }
-      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 12) && !((value >> 23) & 1)) {
-        // kwaliteit-2 258: a relic gift that does not fit after the quest's last room has no room start to wait for
-        const auto* gift_cr = spire_client_run_for(c, l, false);
-        text_ctx.last_clear = gift_cr && spire_gift_last_clear(static_cast<uint8_t>(l->episode), gift_cr->v_room);
-      }
+      SpireBridgeTextContext text_ctx = spire_bridge_text_context_for(c, l, quest_number, value, text_table);
       std::string msg = spire_bridge_message_text(value, text_ctx);
       if (msg.empty() && ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT)) {
         return true; // v37: a retired wait point (3-5): no text, no log line
@@ -3832,10 +4004,13 @@ bool spire_bridge_handle_register(
               sent++;
             }
           }
-        } else if (spire_bridge_is_pack_line(value)) { // kwaliteit-1: spaced, so it pushes no line aside
-          spire_send_ticker_later(
-              c, l, msg, spire_pack_line_delay(c->spire_pack_line_free, std::chrono::steady_clock::now()));
-          sent = 1;
+        } else if (spire_bridge_line_waits(value, text_ctx)) { // kwaliteit-1: spaced, so it pushes no line aside
+          // kwaliteit-2 r2 (critic K2): also the relic gift's "not given" line of the last clear
+          auto delay = spire_pack_line_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+          spire_ticker_text_in_turn(c, l, delay, msg);
+          c->log.info_f("Spire bridge: message {:08X} for serial {:010} in q{}; \"{}\" waits its turn, {} ms", value,
+              serial_number, quest_number, msg, delay.count());
+          return true;
         } else {
           spire_send_ticker(c, msg);
           sent = 1;

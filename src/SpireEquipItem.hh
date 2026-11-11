@@ -77,6 +77,18 @@ inline std::optional<uint32_t> spire_equip_find_run_mag(const PlayerInventory& i
   return (mags == 1) ? ret : std::nullopt;
 }
 
+// kwaliteit-2 r2 (critic K3): a mag reminder ("... equip it") when it goes, a gap or more after the NO_MAG or RESULT
+// that asked for it: "" when newserv's copy shows a mag that is equipped by then, otherwise the text as planned.
+inline std::string spire_run_mag_reminder_text_now(const std::string& text, const PlayerInventory& inventory) {
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (!item.data.empty() && (item.data.data1[0] == 0x02) && item.is_equipped()) {
+      return "";
+    }
+  }
+  return text;
+}
+
 // Route B bundle 9 critic N-4: SpireEquipItem returns 1 also when the game refuses the 6x25 quietly (F2 § 6). newserv
 // waits SPIRE_EQUIP_CHECK_DELAY after the send for that client's 6x25 (on_equip_item marks the item equipped in its
 // copy); when the item is still there and not equipped, one line tells the player to equip it by hand.

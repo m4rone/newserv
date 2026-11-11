@@ -233,6 +233,10 @@ public:
   // kwaliteit-2: the mag reminders, the kit line and the kit weapon's equip hint wait in the same order
   // (spire_run_mag_reminder_delay, spire_ticker_turn_delay), and the boss door line holds it (spire_ticker_hold)
   std::chrono::steady_clock::time_point spire_pack_line_free{};
+  // kwaliteit-2 r2 (spire_ticker_wake_delay): until when the last boss door line holds that order, and how far the
+  // waiting lines moved in total for such holds; a line that was planned before a hold reads both when it wakes
+  std::chrono::steady_clock::time_point spire_ticker_held_until{};
+  std::chrono::milliseconds spire_ticker_shift{0};
 
   // File loading state
   std::unordered_map<std::string, std::shared_ptr<const std::string>> sending_files;

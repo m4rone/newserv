@@ -6,8 +6,10 @@
 #include <format>
 #include <unistd.h>
 
+#include "Channel.hh"
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
+#include "GameServer.hh"
 #include "InventoryBackup.hh"
 #include "Map.hh"
 #include "PSOEncryption.hh"
@@ -25,6 +27,7 @@
 #include "SpireMag.hh"
 #include "SpireMeta.hh"
 #include "SendCommands.hh"
+#include "ServerState.hh"
 
 void run_static_tests() {
   phosg::log_info_f("-- Quest opcode definitions");
@@ -6990,8 +6993,8 @@ void run_static_tests() {
       const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
       steady_clock::time_point t0{seconds(1000)};
       // a boss room start: the 'V' sends SPIRE_BOSS_BURST_TEXT at once, the NO_MAG of the same room start follows it
-      steady_clock::time_point lane{};
-      spire_ticker_hold(lane, t0);
+      steady_clock::time_point lane{}, lane_held{};
+      spire_ticker_hold(lane, lane_held, t0);
       auto arrives = t0 + milliseconds(20);
       auto reminder = spire_run_mag_reminder_delay(lane, arrives);
       expect(arrives + reminder >= t0 + gap); // the door line has the ticker for a whole gap
@@ -7005,13 +7008,16 @@ void run_static_tests() {
       // a second reminder (the run's first mag and a NO_MAG close together) follows the first after a gap
       expect_eq(2 * gap.count(), spire_run_mag_reminder_delay(quiet, t0).count());
       // the door line holds the order from its own moment on and never moves it back
-      steady_clock::time_point held{};
-      spire_ticker_hold(held, t0);
+      steady_clock::time_point held{}, held_until{};
+      spire_ticker_hold(held, held_until, t0);
       expect(held == t0 + gap);
-      spire_ticker_hold(held, t0 - seconds(10));
+      expect(held_until == t0 + gap);
+      spire_ticker_hold(held, held_until, t0 - seconds(10));
       expect(held == t0 + gap);
-      spire_ticker_hold(held, t0 + seconds(1));
+      expect(held_until == t0 + gap);
+      spire_ticker_hold(held, held_until, t0 + seconds(1));
       expect(held == t0 + seconds(1) + gap);
+      expect(held_until == t0 + seconds(1) + gap);
       // the texts themselves are those of before
       expect_eq(std::string("Your mag is in your pack: equip it (Item Pack > Mag)"), std::string(SPIRE_RUN_MAG_REMINDER_TEXT));
       expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
@@ -7110,6 +7116,466 @@ void run_static_tests() {
       }
       // both lines are those of before
       expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."), std::string(SPIRE_EQUIP_KIT_MISSING_TEXT));
+    });
+
+    // ---- round 2 (critic K2, K3, K5, K7 and round 1's "seen, not built")
+
+    k2_case("r2: a waiting line that wakes inside a later boss door line's hold waits on, the lines behind it follow", [&]() {
+      using namespace std::chrono;
+      const int64_t gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP).count();
+      steady_clock::time_point t0{seconds(3000)};
+      auto at = [&](int64_t ms) { return t0 + milliseconds(ms); };
+      {
+        // the start of a boss room quest: the reminder of the run's first mag is planned at t0 (due t0 + gap) and a
+        // pack line behind it (due t0 + 2 gap); the room's 'V' sends the boss door line 1 s later
+        steady_clock::time_point lane{}, held{};
+        milliseconds shift{0};
+        expect_eq(gap, spire_run_mag_reminder_delay(lane, t0).count());
+        milliseconds seen1 = shift;
+        expect_eq(2 * gap, spire_pack_line_delay(lane, t0).count());
+        milliseconds seen2 = shift;
+        spire_ticker_hold(lane, held, at(1000)); // holds until t0 + 1 s + gap
+        // the reminder wakes at t0 + gap, 1 s before the door line had its gap: it waits that second
+        expect_eq(int64_t(1000), spire_ticker_wake_delay(lane, held, shift, seen1, at(gap)).count());
+        expect_eq(int64_t(0), spire_ticker_wake_delay(lane, held, shift, seen1, at(gap + 1000)).count());
+        // the pack line wakes at t0 + 2 gap and follows as far, so it still goes a gap after the reminder
+        expect_eq(int64_t(1000), spire_ticker_wake_delay(lane, held, shift, seen2, at(2 * gap)).count());
+        expect_eq(int64_t(0), spire_ticker_wake_delay(lane, held, shift, seen2, at(2 * gap + 1000)).count());
+        // and a line planned after all this stands a gap behind the pack line's new moment
+        expect(lane == at(3 * gap + 1000));
+        expect_eq(int64_t(1000), shift.count());
+      }
+      {
+        // the pack line wakes while the reminder still waits out the hold: it follows, it does not pass
+        steady_clock::time_point lane{}, held{};
+        milliseconds shift{0};
+        spire_run_mag_reminder_delay(lane, t0); // due t0 + gap
+        milliseconds seen1 = shift;
+        spire_pack_line_delay(lane, t0); // due t0 + 2 gap
+        milliseconds seen2 = shift;
+        spire_ticker_hold(lane, held, at(gap - 1)); // a door line just before the reminder: holds until t0 + 2 gap - 1
+        expect_eq(gap - 1, spire_ticker_wake_delay(lane, held, shift, seen1, at(gap)).count()); // until t0 + 2 gap - 1
+        // a second door line while it waits on: one more wait at its next wake
+        spire_ticker_hold(lane, held, at(gap + 1000)); // until t0 + 2 gap + 1000
+        expect_eq(int64_t(1001), spire_ticker_wake_delay(lane, held, shift, seen1, at(2 * gap - 1)).count());
+        // the pack line wakes at its planned moment and follows both moves in one wait
+        expect_eq(gap + 1000, spire_ticker_wake_delay(lane, held, shift, seen2, at(2 * gap)).count());
+        expect_eq(int64_t(0), spire_ticker_wake_delay(lane, held, shift, seen1, at(2 * gap + 1000)).count()); // the reminder goes
+        expect_eq(int64_t(0), spire_ticker_wake_delay(lane, held, shift, seen2, at(3 * gap + 1000)).count()); // a gap after it
+        expect(lane == at(4 * gap + 1000));
+      }
+      {
+        // a hold from before the line was planned asks nothing more at the wake (spire_ticker_hold ordered it), and
+        // without a hold nothing moves
+        steady_clock::time_point lane{}, held{};
+        milliseconds shift{0};
+        spire_ticker_hold(lane, held, t0);
+        expect_eq(gap, spire_ticker_turn_delay(lane, t0).count());
+        milliseconds seen = shift;
+        expect_eq(int64_t(0), spire_ticker_wake_delay(lane, held, shift, seen, at(gap)).count());
+        steady_clock::time_point quiet{}, never{};
+        milliseconds none{0}, seen_none{0};
+        expect_eq(gap, spire_pack_line_delay(quiet, t0).count());
+        expect_eq(int64_t(0), spire_ticker_wake_delay(quiet, never, none, seen_none, at(gap)).count());
+        expect(quiet == at(2 * gap));
+        expect_eq(int64_t(0), none.count());
+      }
+    });
+
+    k2_case("r2 K2: the relic gift's \"not given\" line of the last clear waits its turn as a pack line does", [&]() {
+      SpireBridgeTextContext last, other;
+      last.last_clear = true;
+      for (uint32_t gift = 0; gift <= 5; gift++) {
+        expect(spire_bridge_line_waits(0x43000C00 | gift, last));
+        expect(!spire_bridge_line_waits(0x43000C00 | gift, other)); // any other clear: "it waits", at once as before
+      }
+      // the exam reward that shares 'C' 12 (bit 23 set) and the exam's 'C' 10 go at once, in the last room too
+      expect(!spire_bridge_line_waits(0x43830C40, last) && !spire_bridge_line_waits(0x43800C00, last));
+      expect(!spire_bridge_line_waits(0x43830A40, last) && !spire_bridge_line_waits(0x43000601, last));
+      // the pack lines of before wait in every room
+      expect(spire_bridge_line_waits(0x43000F01, last) && spire_bridge_line_waits(0x43001005, last));
+      expect(spire_bridge_line_waits(0x43000F01, other) && spire_bridge_line_waits(0x43001005, other));
+      expect(!spire_bridge_line_waits(0x4E000C01, last)); // another kind with the same bytes
+    });
+
+    // an inventory of items by data1[0] (0 weapon, 2 mag), id 0x00010000 + index
+    auto k2_inventory = [](std::initializer_list<std::pair<uint8_t, bool>> items) {
+      PlayerInventory inv;
+      size_t z = 0;
+      for (const auto& [type, equipped] : items) {
+        inv.items[z].data.data1[0] = type;
+        inv.items[z].data.data1[1] = 0x01;
+        inv.items[z].data.id = 0x00010000 + z;
+        inv.items[z].flags = equipped ? 0x00000008 : 0;
+        z++;
+      }
+      inv.num_items = z;
+      return inv;
+    };
+
+    k2_case("r2 K3: a mag reminder looks again when it goes: no \"equip it\" for a mag equipped meanwhile", [&]() {
+      const std::string text = SPIRE_RUN_MAG_REMINDER_TEXT;
+      expect_eq(text, spire_run_mag_reminder_text_now(text, k2_inventory({{0x00, true}, {0x02, false}})));
+      expect_eq(std::string(""), spire_run_mag_reminder_text_now(text, k2_inventory({{0x00, true}, {0x02, true}})));
+      expect_eq(std::string(""), spire_run_mag_reminder_text_now(SPIRE_RUN_MAG_REMINDER_SHELL_TEXT, k2_inventory({{0x02, true}})));
+      // no mag in the copy, or only a weapon equipped: the copy does not show an equipped mag, the line stays
+      expect_eq(text, spire_run_mag_reminder_text_now(text, k2_inventory({})));
+      expect_eq(text, spire_run_mag_reminder_text_now(text, k2_inventory({{0x00, true}})));
+    });
+
+    k2_case("r2: the equip lines look again when they go", [&]() {
+      // the mag of a 'C' 14 or a resume, and a resumed weapon: the line of before while the item is not equipped,
+      // none once its 6x25 came or the item is gone
+      auto inv = k2_inventory({{0x00, false}, {0x02, false}});
+      expect_eq(std::string("Equip your weapon: Item Pack > Equip."),
+          spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, inv).value_or(""));
+      expect_eq(std::string("Equip your mag: Item Pack > Mag."),
+          spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, inv).value_or(""));
+      auto worn = k2_inventory({{0x00, true}, {0x02, true}});
+      expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, worn).has_value());
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, worn).has_value());
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, k2_inventory({})).has_value());
+      // "Equip your gear": a savestate with a weapon and a mag that were equipped at the 'V'
+      SpireSavestate ss;
+      ss.exists = true;
+      ItemData weapon, mag;
+      weapon.data1[0] = 0x00;
+      weapon.data1[1] = 0x01;
+      mag.data1[0] = 0x02;
+      mag.data1[1] = 0x01;
+      ss.items = {weapon, mag};
+      ss.equipped = std::vector<uint32_t>{0, 1};
+      // planned: only the weapon is in the copy after the polls, newserv sends SpireEquipItem for it; the mag is missing
+      auto only_weapon = k2_inventory({{0x00, false}});
+      std::vector<uint32_t> sent = {0x00010000};
+      expect(spire_resume_equip_missing_due(ss, only_weapon, sent));
+      // when the line goes: still missing, so it is said
+      expect(spire_resume_equip_missing_due(ss, only_weapon, sent));
+      // the mag came late and nothing equips it: still true
+      expect(spire_resume_equip_missing_due(ss, k2_inventory({{0x00, false}, {0x02, false}}), sent));
+      expect(spire_resume_equip_missing_due(ss, k2_inventory({{0x00, true}, {0x02, false}}), sent));
+      // the mag came late and the player equipped it: nothing left that newserv does not handle, no line
+      expect(!spire_resume_equip_missing_due(ss, k2_inventory({{0x00, false}, {0x02, true}}), sent));
+      expect(!spire_resume_equip_missing_due(ss, k2_inventory({{0x00, true}, {0x02, true}}), sent));
+      // everything in the copy and sent for: never due
+      expect(!spire_resume_equip_missing_due(ss, k2_inventory({{0x00, false}, {0x02, false}}), {0x00010000, 0x00010001}));
+    });
+
+    k2_case("r2 K5: the exam exit through Sega's boss teleporter says teleporter, a pipe of ours says warp", [&]() {
+      SpireDrawTable named;
+      named.exams[4].boss = "Dragon";
+      named.exams[27].boss = "Gal Gryphon";
+      SpireBridgeTextContext tp, tp_named, pipe_named;
+      tp.boss_teleporter = true;
+      tp_named.boss_teleporter = true;
+      tp_named.draw = &named;
+      pipe_named.draw = &named;
+      // k3 -> the Dragon (0xF3, low byte 4): Sega's TObjWarpBoss stands on the exit pipe's spot
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Dragon."), spire_bridge_message_text(0x43F30604, tp_named));
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Room 4."), spire_bridge_message_text(0x43F30604, tp));
+      // k26 -> the Gal Gryphon: no boss teleporter on that floor, the pipe keeps its word
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Gal Gryphon."), spire_bridge_message_text(0x43F3061B, pipe_named));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Room 4."), spire_bridge_message_text(0x43F30604));
+      for (uint32_t k = 1; k <= 0xFF; k++) {
+        std::string text = spire_bridge_message_text(0x43F30600 | k, tp);
+        expect((text.find("warp") == std::string::npos) && (text.find("teleporter") != std::string::npos));
+        expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+      }
+      // a long boss name falls back to the room number, as the pipe's line does
+      SpireDrawTable long_named;
+      long_named.exams[4].boss = std::string(60, 'x');
+      SpireBridgeTextContext tp_long;
+      tp_long.boss_teleporter = true;
+      tp_long.draw = &long_named;
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Room 4."), spire_bridge_message_text(0x43F30604, tp_long));
+      // a teleporter on the floor changes no other line: a choice of two, Sega's exit warp, one pipe of another type
+      for (uint32_t value : {0x43100605u, 0x43F00613u, 0x43F20605u, 0x43000605u}) {
+        expect_eq(spire_bridge_message_text(value), spire_bridge_message_text(value, tp));
+      }
+      expect_eq(0x0019, SPIRE_BOSS_TELEPORTER_OBJECT_TYPE);
+    });
+
+    k2_case("r2 K7: a 'V', a NO_MAG and a 'C' 12 through spire_bridge_handle_register, and the lines that wait", [&]() {
+      using namespace std::chrono;
+      const auto gap = duration_cast<milliseconds>(SPIRE_PACK_LINE_GAP);
+      constexpr uint32_t QUEST = 987654;
+      // The bridge reads and writes by relative paths (system/spire-bridge, system/spire-mag.json): this case runs in
+      // a temp directory with the real mag table (its BossRooms), so no file of the server is touched
+      std::string mag_json = phosg::load_file(SPIRE_RUN_MAG_FILE);
+      auto mag_table = spire_mag_parse(mag_json);
+      expect(mag_table.boss_rooms.count(8) && mag_table.boss_rooms.count(15) && !mag_table.boss_rooms.count(14));
+      struct TempCwd {
+        std::filesystem::path old_cwd = std::filesystem::current_path();
+        std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-k2r2-{}", getpid());
+        TempCwd() {
+          std::filesystem::remove_all(this->dir);
+          std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+          std::filesystem::current_path(this->dir);
+        }
+        ~TempCwd() {
+          std::filesystem::current_path(this->old_cwd);
+          std::filesystem::remove_all(this->dir);
+        }
+      } temp_cwd;
+      phosg::save_file(SPIRE_RUN_MAG_FILE, mag_json);
+
+      // what a client is sent, with the moment
+      struct CaptureChannel : Channel {
+        std::vector<std::pair<steady_clock::time_point, std::string>> sent;
+        bool open = true;
+        CaptureChannel()
+            : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                  phosg::TerminalFormat::END, false, false) {}
+        virtual std::string default_name() const {
+          return "static-test";
+        }
+        virtual bool connected() const {
+          return this->open;
+        }
+        virtual void disconnect() {
+          this->open = false;
+        }
+        virtual void send_raw(std::string&& data) {
+          this->sent.emplace_back(steady_clock::now(), std::move(data));
+        }
+        virtual asio::awaitable<void> recv_raw(void*, size_t) {
+          throw std::logic_error("a static test client sends nothing");
+          co_return;
+        }
+        // when the first command with this text was sent
+        std::optional<steady_clock::time_point> when(const std::string& text) const {
+          for (const auto& [at, data] : this->sent) {
+            if (data.find(text) != std::string::npos) {
+              return at;
+            }
+          }
+          return std::nullopt;
+        }
+        size_t count(const std::string& text) const {
+          size_t ret = 0;
+          for (const auto& [at, data] : this->sent) {
+            ret += (data.find(text) != std::string::npos) ? 1 : 0;
+          }
+          return ret;
+        }
+      };
+      struct TestState : ServerState {
+        TestState() = default;
+      };
+      auto s = std::make_shared<TestState>();
+      s->data = std::make_shared<DataIndex>();
+      s->io_context = std::make_shared<asio::io_context>(1);
+      s->data->spire_bridge_quest_numbers.emplace(QUEST);
+      auto server = std::make_shared<GameServer>(s);
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      auto l = std::make_shared<Lobby>(s, 0x7A01, true);
+      l->episode = Episode::EP1;
+      l->mode = GameMode::BATTLE;
+      l->quest = std::make_shared<Quest>(vq);
+      std::shared_ptr<const Lobby> cl = l;
+
+      struct Player {
+        std::shared_ptr<CaptureChannel> ch;
+        std::shared_ptr<Client> c;
+      };
+      size_t next_slot = 0;
+      // a GC client in the game with a run copy holding an unequipped weapon (id 0x00010000) and mag (id 0x00010001)
+      auto join = [&]() {
+        Player p;
+        p.ch = std::make_shared<CaptureChannel>();
+        p.c = std::make_shared<Client>(server, p.ch, ServerBehavior::GAME_SERVER);
+        auto login = std::make_shared<Login>();
+        login->account = std::make_shared<Account>();
+        login->gc_license = std::make_shared<GCLicense>();
+        login->gc_license->serial_number = 4200 + next_slot;
+        p.c->login = login;
+        p.c->character_file(true, false); // a GC client's character data: an empty file, nothing is read
+        p.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
+        p.c->character_file(false, true)->inventory = k2_inventory({{0x00, false}, {0x02, false}});
+        p.c->lobby_client_id = next_slot;
+        l->clients[next_slot++] = p.c;
+        p.c->lobby = l;
+        return p;
+      };
+      auto leave = [&](Player& p) {
+        l->clients[p.c->lobby_client_id] = nullptr;
+        p.c->lobby.reset();
+      };
+      auto reg = [&](Player& p, uint16_t register_number, uint32_t value) {
+        expect(spire_bridge_handle_register(p.c, cl, register_number, value)); // taken by the bridge
+      };
+      // the quest's room start: SPIRE_SAVESTATE_NUM_VALUES values (the room first), then 'V' << 24 | count
+      auto v_write = [&](Player& p, uint32_t room, uint32_t num_values, uint32_t count) {
+        for (uint32_t z = 0; z < num_values; z++) {
+          reg(p, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == SPIRE_SS_K) ? room : 0);
+        }
+        reg(p, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(SPIRE_BRIDGE_SAVESTATE_WRITE) << 24) | count);
+      };
+      auto no_mag = [&](Player& p, uint32_t room) {
+        reg(p, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_RUN_MAG_TAG | (static_cast<uint32_t>(SPIRE_RUN_MAG_NO_MAG) << 16) | room);
+      };
+      auto equip = [&](Player& p, size_t index) {
+        p.c->character_file(false, true)->inventory.items[index].flags = 0x00000008;
+      };
+      auto run_until = [&](steady_clock::time_point until) {
+        s->io_context->restart();
+        s->io_context->run_for(until - steady_clock::now());
+      };
+      const uint32_t NUM = SPIRE_SAVESTATE_NUM_VALUES;
+      const std::string door = SPIRE_BOSS_BURST_TEXT, reminder = SPIRE_RUN_MAG_REMINDER_TEXT;
+      const std::string not_given = "Hoarder: inventory full. This was the last room: the gift is not given.";
+      const std::string waits = "Hoarder: inventory full. Make room, it waits.";
+      const std::string exam_waits = "Exam reward: 700 meseta. A rare still waits: make room.";
+      const std::string equip_weapon = SPIRE_EQUIP_WEAPON_MISSING_TEXT, equip_mag = SPIRE_EQUIP_MAG_MISSING_TEXT;
+
+      // -- e: the 'V' and the 'C' 12 (critic K7)
+      auto e = join();
+      // no 'B' yet: the 'V' is not allowed (spire_savestate_write_allowed) and leaves no room behind
+      spire_static_test_run_state(e.c, cl, false, false);
+      v_write(e, 15, NUM, NUM);
+      expect_eq(0u, spire_static_test_v_room(e.c, cl));
+      // its 'B' came, but a 'V' whose count does not fit is not allowed either
+      spire_static_test_run_state(e.c, cl, true, false);
+      v_write(e, 15, NUM - 1, NUM - 1);
+      expect_eq(0u, spire_static_test_v_room(e.c, cl));
+      v_write(e, 15, NUM - 1, NUM);
+      expect_eq(0u, spire_static_test_v_room(e.c, cl));
+      {
+        std::optional<SpireDrawTable> table;
+        expect(!spire_bridge_text_context_for(e.c, cl, QUEST, 0x43000C01, table).last_clear); // no room known: it waits
+      }
+      // room 14 (no boss room): allowed, the room is kept, no boss door line and no hold
+      v_write(e, 14, NUM, NUM);
+      expect_eq(14u, spire_static_test_v_room(e.c, cl));
+      expect_eq(0u, e.ch->count(door));
+      expect(e.c->spire_pack_line_free == steady_clock::time_point{});
+      expect(e.c->spire_ticker_held_until == steady_clock::time_point{});
+      // a relic gift that does not fit at room 14's clear waits for the next room start: said at once, as before
+      reg(e, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43000C01);
+      expect_eq(1u, e.ch->count(waits));
+      expect_eq(0u, e.ch->count(not_given));
+      // room 15, the last room of an Episode 1 quest and a boss room: the door line at once, and it holds the order
+      auto e_before_v = steady_clock::now();
+      v_write(e, 15, NUM, NUM);
+      expect_eq(15u, spire_static_test_v_room(e.c, cl));
+      expect_eq(1u, e.ch->count(door));
+      expect(e.c->spire_pack_line_free >= e_before_v + gap); // spire_ticker_hold ran in the 'V', before what follows it
+      expect(e.c->spire_ticker_held_until >= e_before_v + gap);
+      {
+        // last_clear is set for the relic gift's 'C' 12 (bit 23 clear) only
+        std::optional<SpireDrawTable> table;
+        expect(spire_bridge_text_context_for(e.c, cl, QUEST, 0x43000C01, table).last_clear);
+        expect(!spire_bridge_text_context_for(e.c, cl, QUEST, 0x43800C40, table).last_clear); // the exam reward's 'C' 12
+        expect(!spire_bridge_text_context_for(e.c, cl, QUEST, 0x43000A40, table).last_clear); // 'C' 10
+        expect(!spire_bridge_text_context_for(e.c, cl, QUEST, 0x43000F01, table).last_clear); // 'C' 15
+        expect(!spire_bridge_text_context_for(e.c, cl, QUEST, 0x43F30604, table).boss_teleporter); // a game without a map
+      }
+      // the exam reward that shares 'C' 12 goes at once in the last room too
+      reg(e, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43800C40);
+      expect_eq(1u, e.ch->count(exam_waits));
+      // the relic gift's 'C' 12 of the last clear: nothing at once, it waits its turn (critic K2)
+      auto e_gift_arrives = steady_clock::now();
+      reg(e, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43000C01);
+      expect_eq(0u, e.ch->count(not_given));
+      expect_eq(1u, e.ch->count(waits)); // only the one of room 14
+      expect(e.c->spire_pack_line_free >= e_gift_arrives + 2 * gap);
+
+      // -- a: a line that waits already, then a boss door line (round 1 "seen"); b: the mag equipped meanwhile (K3)
+      auto a = join();
+      auto b = join();
+      auto left = join(); // leaves the game while its line waits
+      auto gone = join(); // disconnects and is destroyed while its lines wait
+      auto g = join(); // an equip line behind a boss door line
+      auto h = join(); // the same, equipped while the line waits
+      for (auto* p : {&a, &b, &left, &gone, &g, &h}) {
+        spire_static_test_run_state(p->c, cl, true, true); // its 'B' came and a run mag was issued
+      }
+      auto t0 = steady_clock::now();
+      for (auto* p : {&a, &b, &left, &gone}) {
+        no_mag(*p, 8);
+        expect_eq(0u, p->ch->count(reminder)); // not at once: in its turn, a gap after it arrives
+        expect(p->c->spire_pack_line_free >= t0 + 2 * gap);
+      }
+      // g and h: the boss door line of room 8, and in the same moment the line of a weapon the game did not equip
+      for (auto* p : {&g, &h}) {
+        v_write(*p, 8, NUM, NUM);
+        expect_eq(1u, p->ch->count(door));
+        spire_equip_missing_line_in_turn(p->c, cl, SPIRE_EQUIP_RESUME_WEAPON, 0x00010000);
+        expect_eq(0u, p->ch->count(equip_weapon)); // not on top of the door line
+      }
+      spire_equip_missing_line_in_turn(gone.c, cl, SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001);
+      std::weak_ptr<Client> weak_gone = gone.c;
+      // the check after a SpireEquipItem: asked in this game for both; `stays` stays, `moved` is in another game by
+      // the time the client's answer is in and the check starts (it left while the function call was out)
+      auto stays = join();
+      auto moved = join();
+      auto l2 = std::make_shared<Lobby>(s, 0x7A02, true);
+      leave(moved);
+      l2->clients[0] = moved.c;
+      moved.c->lobby_client_id = 0;
+      moved.c->lobby = l2;
+      for (auto* p : {&stays, &moved}) {
+        asio::co_spawn(*s->io_context,
+            spire_equip_check_later(p->c, cl, 0x00010000, "resumed weapon", SPIRE_EQUIP_RESUME_WEAPON), asio::detached);
+      }
+
+      run_until(t0 + milliseconds(1000));
+      // a: the boss room's 'V' comes 1 s after the reminder was planned; the door line goes at once
+      auto a_before_v = steady_clock::now();
+      v_write(a, 8, NUM, NUM);
+      auto a_door = a.ch->when(door);
+      expect(a_door.has_value());
+      expect(a.c->spire_ticker_held_until >= a_before_v + gap);
+      equip(b, 1); // b puts its mag on while the reminder waits
+      equip(h, 0); // h puts its weapon on while the line waits
+      leave(left);
+      leave(gone);
+      spire_static_test_forget(gone.c, cl);
+      gone.c.reset(); // the last owner: the client is destroyed, its waiting lines hold only a weak_ptr
+      expect(weak_gone.expired());
+
+      run_until(t0 + gap + milliseconds(500));
+      // the old way sent a's reminder at t0 + gap, on top of the door line of t0 + 1 s; now it waits the hold out
+      expect_eq(0u, a.ch->count(reminder));
+      // K3: b's reminder was due at t0 + gap and found the mag equipped: no line; and none later either (below)
+      expect_eq(0u, b.ch->count(reminder));
+      // K2: e's "not given" line came in its turn, a gap or more after it arrived and after the door line
+      auto e_line = e.ch->when(not_given);
+      expect(e_line.has_value());
+      expect(*e_line >= e_gift_arrives + gap);
+      expect(*e_line >= *e.ch->when(door) + gap);
+      expect_eq(1u, e.ch->count(not_given));
+      // g: the equip line a gap after the door line; h: equipped by then, no line
+      auto g_line = g.ch->when(equip_weapon);
+      expect(g_line.has_value());
+      expect(*g_line >= *g.ch->when(door) + gap);
+      expect_eq(0u, h.ch->count(equip_weapon));
+      // the client that left the game got nothing, and nothing was sent to the one that is gone
+      expect_eq(0u, left.ch->count(reminder));
+      expect_eq(0u, gone.ch->count(reminder) + gone.ch->count(equip_mag));
+      // the equip check: the client still in the game it was asked in got its line (its order was free: at once after
+      // the check); the one that is in another game by then got no check, no line and no turn in its order
+      expect_eq(1u, stays.ch->count(equip_weapon));
+      expect_eq(0u, moved.ch->count(equip_weapon));
+      expect(moved.c->spire_pack_line_free == steady_clock::time_point{});
+
+      run_until(t0 + gap + milliseconds(1300));
+      // a's reminder went when the door line had its gap
+      auto a_line = a.ch->when(reminder);
+      expect(a_line.has_value());
+      expect(*a_line >= *a_door + gap);
+      expect_eq(1u, a.ch->count(reminder));
+      expect_eq(0u, b.ch->count(reminder));
+      expect_eq(0u, h.ch->count(equip_weapon));
+      expect_eq(0u, left.ch->count(reminder));
+
+      for (auto* p : {&e, &a, &b, &left, &g, &h, &stays, &moved}) {
+        spire_static_test_forget(p->c, cl);
+        p->c->lobby.reset();
+      }
+      l->clients.fill(nullptr);
+      l2->clients.fill(nullptr);
     });
 
     expect_eq(0u, k2_failed);
