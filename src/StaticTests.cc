@@ -8058,6 +8058,54 @@ void run_static_tests() {
       expect(snapshot_is(snap, *r.server_real));
       expect(spire_guard_game_join_allowed(p2.c, false));
     });
+    e2e_case("game exit, but the card kept the run copy: the next login pushes the real character again", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit restore");
+      auto snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && !snap.restore_pending && snap.awaiting_save);
+      // the console goes off before its card is written: the next login's 61 is the run copy again, under AwaitingSave
+      p.ch->open = false;
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login whose card still held the run copy");
+      expect_eq(1u, p2.ch->pushes);
+      expect(server_holds(p2, *r.server_real));
+      snap = snapshot_on_disk(p2);
+      expect(no_marker(snap));
+      expect(snapshot_is(snap, *r.server_real));
+    });
+
+    e2e_case("game exit, the client is gone before the restore: refused, the marker stays, the next login restores", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      client_sends(w, p, 0x98, p.ch->as_61());
+      // no answer can come: the restore is refused (on_84 then drops the client), nothing was pushed or saved
+      p.ch->open = false;
+      expect(!run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      auto snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(!spire_guard_game_join_allowed(p2.c, false));
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login that follows a refused game exit restore");
+      expect_eq(1u, p2.ch->pushes);
+      expect(server_holds(p2, *r.server_real));
+      expect(no_marker(snapshot_on_disk(p2)));
+    });
 
     expect_eq(0u, e2e_failed);
   }
