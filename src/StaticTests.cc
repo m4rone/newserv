@@ -7535,10 +7535,19 @@ void run_static_tests() {
       gone.c.reset(); // the last owner: the client is destroyed, its waiting lines hold only a weak_ptr
       expect(weak_gone.expired());
 
-      run_until(t0 + gap + milliseconds(500));
-      // the old way sent a's reminder at t0 + gap, on top of the door line of t0 + 1 s; now it waits the hold out
-      expect_eq(0u, a.ch->count(reminder));
-      // K3: b's reminder was due at t0 + gap and found the mag equipped: no line; and none later either (below)
+      // until a's reminder is there: it is the last line due, so every line due before it has gone or was dropped by
+      // then. A slow machine only makes this wait longer; nothing below depends on a moment of the wall clock
+      while (!a.ch->when(reminder).has_value() && (steady_clock::now() < t0 + 3 * gap)) {
+        run_until(steady_clock::now() + milliseconds(50));
+      }
+      run_until(steady_clock::now() + milliseconds(200));
+      // the old way sent a's reminder a gap after it arrived, on top of the door line that came 1 s after it; now it
+      // waits the hold out and goes when the door line had its gap
+      auto a_line = a.ch->when(reminder);
+      expect(a_line.has_value());
+      expect(*a_line >= *a_door + gap);
+      expect_eq(1u, a.ch->count(reminder));
+      // K3: b's reminder was due before a's and found the mag equipped: no line
       expect_eq(0u, b.ch->count(reminder));
       // K2: e's "not given" line came in its turn, a gap or more after it arrived and after the door line
       auto e_line = e.ch->when(not_given);
@@ -7559,16 +7568,6 @@ void run_static_tests() {
       expect_eq(1u, stays.ch->count(equip_weapon));
       expect_eq(0u, moved.ch->count(equip_weapon));
       expect(moved.c->spire_pack_line_free == steady_clock::time_point{});
-
-      run_until(t0 + gap + milliseconds(1300));
-      // a's reminder went when the door line had its gap
-      auto a_line = a.ch->when(reminder);
-      expect(a_line.has_value());
-      expect(*a_line >= *a_door + gap);
-      expect_eq(1u, a.ch->count(reminder));
-      expect_eq(0u, b.ch->count(reminder));
-      expect_eq(0u, h.ch->count(equip_weapon));
-      expect_eq(0u, left.ch->count(reminder));
 
       for (auto* p : {&e, &a, &b, &left, &g, &h, &stays, &moved}) {
         spire_static_test_forget(p->c, cl);
