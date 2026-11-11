@@ -8406,6 +8406,84 @@ void run_static_tests() {
       expect(!spire_map_has_boss_teleporter(empty, Version::GC_V3, 2));
     });
 
+    k3_case("4-M2: a verified run again opens 'Z' for that player alone; every other path keeps it off", [&]() {
+      K3TempCwd temp_cwd("runmag");
+      K3World w;
+      auto l = w.game(921, Episode::EP1);
+      auto a = w.player();
+      auto b = w.player();
+      w.join(a, l, k3_inventory({0x00, 0x02}), 0); // the run copy of run 1 with its run mag
+      w.join(b, l, k3_inventory({0x00, 0x02}), 1);
+      // what the 'Z' handler decides for this client, every other condition of a run mag ASK met
+      auto z = [&](K3Player& p) {
+        SpireRunMagState st;
+        st.gc_v3 = st.spire_game = st.has_overlay = st.run_in_progress = st.enabled = st.has_table = true;
+        spire_run_mag_game_marks(p.c, l, st);
+        return std::string(spire_run_mag_refusal_name(spire_run_mag_refusal(st)));
+      };
+      // the 'I' as spire_run_again runs it: the mark, the push's 61s, the run copy made anew (no mag: the server strips
+      // it), and the 61 after the push equal to that copy
+      auto run_again = [&](K3Player& p, const PlayerInventory& copy) {
+        spire_run_again_note_started(p.c, l);
+        spire_run_mag_note_in_game_61(p.c);
+        auto overlay = p.c->character_file(false, true);
+        overlay->inventory = copy;
+        spire_run_mag_note_in_game_61(p.c);
+        return spire_run_again_note_verified(p.c, l, copy, overlay->disp);
+      };
+      expect_eq(std::string("NONE"), z(a)); // run 1
+      expect_eq(std::string("NONE"), z(b));
+
+      // the fix: player 1's verified 'I' gives its new run a run mag again
+      bool opened = run_again(a, k3_inventory({0x00}));
+      expect_eq(std::string("NONE"), z(a));
+      expect(opened);
+      // the protection stays: the partner without its own 'I' (in the base with the real character, or still holding
+      // run 1's copy and mag) keeps amendment 4's refusal
+      expect_eq(std::string("RUN_AGAIN"), z(b));
+      // an 'I' whose run copy holds a mag, or whose overlay is not the copy the push verified, opens nothing
+      expect(!run_again(b, k3_inventory({0x00, 0x02})));
+      expect_eq(std::string("RUN_AGAIN"), z(b));
+      spire_run_again_note_started(b.c, l);
+      b.c->character_file(false, true)->inventory = k3_inventory({0x00, 0x00});
+      expect(!spire_run_again_note_verified(b.c, l, k3_inventory({0x00}), b.c->character_file(false, true)->disp));
+      expect_eq(std::string("RUN_AGAIN"), z(b));
+      // an 'I' that was never verified (the push failed): its mark and its 61s hold
+      spire_run_again_note_started(b.c, l);
+      spire_run_mag_note_in_game_61(b.c);
+      expect_eq(std::string("RUN_AGAIN"), z(b));
+      // the partner's own verified 'I' opens 'Z' for it too
+      expect(run_again(b, k3_inventory({0x00})));
+      expect_eq(std::string("NONE"), z(b));
+      // after that, an in-game 61 (the real mag may be in the overlay again) closes it as amendment 3 says
+      spire_run_mag_note_in_game_61(b.c);
+      expect_eq(std::string("REFRESHED_BY_61"), z(b));
+      // no 'I' in the game: nothing to open
+      auto l2 = w.game(921, Episode::EP1);
+      auto c = w.player();
+      w.join(c, l2, k3_inventory({0x00}), 0);
+      expect(!spire_run_again_note_verified(c.c, l2, k3_inventory({0x00}), c.c->character_file(false, true)->disp));
+      w.leave(c, l2);
+
+      // run 2 ends (player 1's 'B' and 'F'); the first 'I' after that end takes back every verification of the game:
+      // player 2's is of the copy of the run that ended
+      k3_reg(a, l, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 8) | 1);
+      auto end = k3_quest_end(1, false, false, 0, 10);
+      k3_reg(a, l, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_SCORE) << 24) | end.score);
+      k3_reg(a, l, SPIRE_BRIDGE_REQUEST_REGISTER, end.finish);
+      expect(run_again(a, k3_inventory({0x00})));
+      expect_eq(std::string("NONE"), z(a));
+      expect_eq(std::string("RUN_AGAIN"), z(b));
+
+      // the quest load forgets the game's mark and the verifications
+      spire_checkpoint_run_started(a.c);
+      spire_checkpoint_run_started(b.c);
+      expect_eq(std::string("NONE"), z(a));
+      expect_eq(std::string("NONE"), z(b));
+      w.leave(a, l);
+      w.leave(b, l);
+    });
+
     expect_eq(0u, k3_failed);
   }
 

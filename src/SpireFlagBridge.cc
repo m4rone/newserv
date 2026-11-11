@@ -1337,7 +1337,8 @@ static std::vector<SpireMagBytes> spire_run_mag_inventory_mags(const PlayerInven
 // Amendment 3: an in-game 61 refreshes the overlay with the client's save buffer, which after a push is the real
 // character with the real mag; from then on in that game 'Z' is refused and 'V' no longer updates the ledger.
 // Amendment 4: an 'I' (run again) in a game leaves the earlier run copy live; 'Z' is refused in that game until the
-// next quest load. Both are forgotten at the quest load (spire_checkpoint_run_started), when the overlay is made anew.
+// next quest load (kwaliteit-3 4-M2: or, for one client, until its own 'I' is verified, spire_run_again_note_verified).
+// Both are forgotten at the quest load (spire_checkpoint_run_started), when the overlay is made anew.
 struct SpireOverlayRefreshed {
   std::weak_ptr<const Client> client;
   uint32_t lobby_id = 0;
@@ -1361,6 +1362,44 @@ void spire_run_mag_note_in_game_61(std::shared_ptr<const Client> c) {
 static bool spire_run_mag_overlay_refreshed(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
   auto it = spire_overlay_refreshed.find(c.get());
   return (it != spire_overlay_refreshed.end()) && (it->second.client.lock() == c) && (it->second.lobby_id == l->lobby_id);
+}
+
+// kwaliteit-3 4-M2: a client whose own 'I' ended with the run copy the server made in its memory and in the overlay, with
+// no mag in it (the 61 after the push showed exactly that copy): its 'Z' is open again in that game. Every other client
+// of a game with an 'I' keeps amendment 4's refusal until the next quest load or its own verified 'I'.
+static std::unordered_map<const Client*, SpireOverlayRefreshed> spire_run_again_verified;
+
+static bool spire_run_again_verified_has(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  auto it = spire_run_again_verified.find(c.get());
+  return (it != spire_run_again_verified.end()) && (it->second.client.lock() == c) && (it->second.lobby_id == l->lobby_id);
+}
+
+void spire_run_mag_game_marks(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, SpireRunMagState& st) {
+  st.run_again = spire_run_again_games.count(l->lobby_id) && !spire_run_again_verified_has(c, l);
+  st.refreshed_by_61 = spire_run_mag_overlay_refreshed(c, l);
+}
+
+bool spire_run_again_note_verified(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l,
+    const PlayerInventory& want_inventory, const PlayerDispDataV4& want_disp) {
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+  const char* why = !spire_run_again_games.count(l->lobby_id) ? "no 'I' in this game"
+      : !overlay                                                ? "no run copy"
+      : !spire_guard_same_state(overlay->inventory, overlay->disp, want_inventory, want_disp) ? "the run copy is not the one the server made"
+      : !spire_run_mag_inventory_mags(overlay->inventory).empty() ? "the run copy holds a mag"
+                                                                  : nullptr;
+  if (why) {
+    c->log.info_f("Spire run mag: 'Z' stays off in game {:X} after the run again: {}", l->lobby_id, why);
+    return false;
+  }
+  if (spire_run_again_verified.size() > 256) {
+    std::erase_if(spire_run_again_verified, [](const auto& e) { return e.second.client.expired(); });
+  }
+  spire_run_again_verified[c.get()] = SpireOverlayRefreshed{c, l->lobby_id};
+  // the overlay is the server's own run copy now (the 61s of the 'I' showed the real character before it was made)
+  spire_overlay_refreshed.erase(c.get());
+  c->log.info_f("Spire run mag: the run again put the server's run copy without a mag in memory; 'Z' is on again for this client in game {:X}",
+      l->lobby_id);
+  return true;
 }
 
 // A run end in the game (spire_run_mark_ended, the first one): delete the savestates of the game's run at every true
@@ -2753,6 +2792,7 @@ void spire_checkpoint_run_started(std::shared_ptr<const Client> c) {
   spire_overlay_refreshed.erase(c.get()); // F6: the quest load makes the overlay anew
   if (auto l = c->lobby.lock()) {
     spire_run_again_games.erase(l->lobby_id); // F6
+    spire_run_again_verified.erase(c.get()); // kwaliteit-3 4-M2
     spire_run_forget_end(l->lobby_id, "quest start", c->log);
     if (spire_game_runs.erase(l->lobby_id)) {
       c->log.info_f("Spire savestate: the run of this game forgotten at the quest start");
@@ -3818,8 +3858,7 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
       st.run_in_progress = snapshot.run_in_progress;
     }
     st.base_returned = spire_base_returned_has(c, l->lobby_id);
-    st.run_again = spire_run_again_games.count(l->lobby_id);
-    st.refreshed_by_61 = spire_run_mag_overlay_refreshed(c, l);
+    spire_run_mag_game_marks(c, l, st); // run_again (amendment 4, kwaliteit-3 4-M2) and refreshed_by_61
     st.enabled = true; // a missing or broken file is NO_TABLE
     try {
       table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
@@ -6128,12 +6167,24 @@ static asio::awaitable<SpireRunAgainRefusal> spire_run_again_push(std::shared_pt
     }
     c->log.info_f("Spire run again: run copy verified for serial {:010}: 61 shows Lv{}, {} items", serial_number,
         after->disp.stats.level + 1, after->inventory.num_items);
+    spire_run_again_note_verified(c, l, want_inventory, want_disp); // kwaliteit-3 4-M2: no co_await since the 61
     co_return R::NONE;
 
   } catch (const std::exception& e) {
     c->log.warning_f("Spire run again: failed for serial {:010}: {}; marker RunInProgress", serial_number, e.what());
     co_return on_error;
   }
+}
+
+// F6 (amendment 4): no 'Z' in this game until the next quest load, except for a client whose own 'I' is verified
+// (kwaliteit-3 4-M2). This client's own earlier verification goes, and at the first 'I' after the run end every one of
+// the game (a partner's from an earlier run again holds the copy of the run that ended)
+void spire_run_again_note_started(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  if (spire_run_ends.count(l->lobby_id)) {
+    std::erase_if(spire_run_again_verified, [&](const auto& e) { return e.second.lobby_id == l->lobby_id; });
+  }
+  spire_run_again_verified.erase(c.get());
+  spire_run_again_games.emplace(l->lobby_id);
 }
 
 // v49: the run again ('I', SpireFlagBridge.hh). Always answers the client (r41, then 'DONE'). Never throws.
@@ -6180,7 +6231,7 @@ static asio::awaitable<void> spire_run_again(
     } else {
       c->log.info_f("Spire run again: making the run copy for serial {:010} in q{} on floor {:02X}", serial_number,
           quest_number, c->floor);
-      spire_run_again_games.emplace(l->lobby_id); // F6 (amendment 4): no 'Z' in this game until the next quest load
+      spire_run_again_note_started(c, l); // F6 (amendment 4); kwaliteit-3 4-M2
       refusal = co_await spire_run_again_push(c, l, serial_number, quest_number, filename, snapshot);
     }
   }
@@ -7734,6 +7785,7 @@ void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const L
   spire_game_runs.erase(l->lobby_id);
   spire_run_ends.erase(l->lobby_id);
   spire_run_again_games.erase(l->lobby_id);
+  std::erase_if(spire_run_again_verified, [&](const auto& e) { return e.second.lobby_id == l->lobby_id; });
   spire_base_game_run_quests.erase(l->lobby_id);
   spire_run_timers.erase(l.get());
   spire_replay_states.erase(l.get());
@@ -7743,6 +7795,7 @@ void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const L
   spire_lobby_texts.erase(key);
   spire_client_runs.erase(key);
   spire_overlay_refreshed.erase(key);
+  spire_run_again_verified.erase(key);
   spire_base_returned.erase(key);
   spire_draw_inputs.erase(key);
   spire_overview_entries.erase(key);

@@ -1072,6 +1072,14 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
 void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// kwaliteit-3 4-M2: the 'Z' marks of a run again. An 'I' marks its game (amendment 4: 'Z' refused until the next quest
+// load); note_verified, called when the 61 after the push equals the run copy the server made, opens 'Z' again for that
+// client alone if its overlay is that copy and holds no mag (returns whether it did). game_marks fills st.run_again and
+// st.refreshed_by_61 for a 'Z' as the handler does. Exported for StaticTests.
+void spire_run_again_note_started(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l);
+bool spire_run_again_note_verified(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l,
+    const PlayerInventory& want_inventory, const PlayerDispDataV4& want_disp);
+void spire_run_mag_game_marks(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, SpireRunMagState& st);
 // For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
 void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
