@@ -15,6 +15,7 @@
 #include "PSOEncryption.hh"
 #include "Text.hh"
 #include "QuestScript.hh"
+#include "ReceiveCommands.hh"
 #include "ReceiveSubcommands.hh"
 #include "RareItemSet.hh"
 #include "ClientFunctionIndex.hh"
@@ -7930,6 +7931,535 @@ void run_static_tests() {
     });
 
     expect_eq(0u, k2_failed);
+  }
+
+  phosg::log_info_f("-- Spire guard, played end to end: after a run on the run copy the client holds the real character again, field by field (intern-1 b1)");
+  {
+    // Every case plays the guard's own functions in the order of a run, against a GC client that answers the server's
+    // commands through the server's own command handlers (on_command). What is compared is what that client holds.
+    constexpr uint32_t QUEST = 987655;
+    constexpr uint32_t SERIAL = 4321;
+    constexpr size_t MAG_SLOT = 3;
+    using GCCharacter = PSOGCCharacterFile::Character;
+    // every case runs, a failed one is logged, and the section fails at its end if any did
+    size_t e2e_failed = 0;
+    auto e2e_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   GUARD E2E ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        e2e_failed++;
+        phosg::log_error_f("   GUARD E2E ({}) FAILED: {}", name, e.what());
+      }
+    };
+
+    // read before a case changes the working directory
+    auto level_table = std::make_shared<JSONLevelTable>(
+        phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+    auto functions = std::make_shared<ClientFunctionIndex>("system/client-functions", true);
+    auto get_fn = functions->get("GetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
+    auto set_fn = functions->get("SetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
+    expect(get_fn && set_fn && (get_fn->code != set_fn->code));
+
+    // The guard reads and writes by relative paths (system/spire-bridge): a case runs in a temp directory, so no file of
+    // the server is touched
+    struct TempCwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-guard-e2e-{}", getpid());
+      TempCwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~TempCwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    };
+
+    // A GC client as the guard sees it: one character in memory (what a 30 shows and what SetExtendedPlayerInfo
+    // overwrites), the 61 made from it, and the memory card, written at a 97 with flag 1
+    struct FakeGC : Channel {
+      GCCharacter memory;
+      std::vector<GCCharacter> card_writes;
+      std::vector<std::string> inbox; // what the server sent and the client has not handled yet
+      size_t pushes = 0;
+      bool open = true;
+      FakeGC()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return this->open;
+      }
+      virtual void disconnect() {
+        this->open = false;
+      }
+      virtual void send_raw(std::string&& data) {
+        this->inbox.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client is read through on_command");
+        co_return;
+      }
+      // the 61 or 98 of the character in memory: the inventory as a GC client sends it (a mag's data2 byteswapped)
+      std::string as_61() const {
+        C_CharacterData_V3_61_98 cmd;
+        cmd.inventory = this->memory.inventory;
+        cmd.inventory.encode_for_client(Version::GC_V3, nullptr);
+        Language language = this->memory.inventory.language;
+        cmd.disp = this->memory.disp.to_v4(language, language).to_v123<false>(language, language);
+        return std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+      }
+    };
+
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    struct World {
+      std::shared_ptr<ServerState> s;
+      std::shared_ptr<GameServer> server;
+    };
+    auto make_world = [&]() {
+      World w;
+      auto s = std::make_shared<TestState>();
+      s->data = std::make_shared<DataIndex>();
+      s->io_context = std::make_shared<asio::io_context>(1);
+      s->data->spire_bridge_quest_numbers.emplace(QUEST); // no SpireGuardQuests key: the guard follows this list
+      s->data->level_table_v3 = level_table;
+      s->data->client_functions = functions;
+      w.s = s;
+      w.server = std::make_shared<GameServer>(s);
+      return w;
+    };
+    // a Battle game with a guarded replace_char quest loaded, registered as create_game_generic registers a game
+    auto new_game = [&](World& w) {
+      auto rules = std::make_shared<BattleRules>();
+      rules->replace_char = true;
+      rules->char_level = 0;
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      vq->meta.battle_rules = rules;
+      auto l = std::make_shared<Lobby>(w.s, 0x7B01, true);
+      l->episode = Episode::EP1;
+      l->mode = GameMode::BATTLE;
+      l->quest = std::make_shared<Quest>(vq);
+      w.s->id_to_lobby.emplace(l->lobby_id, l);
+      return l;
+    };
+
+    struct Session {
+      std::shared_ptr<FakeGC> ch;
+      std::shared_ptr<Client> c;
+    };
+    // a connection of the console whose client holds this character; it runs client functions and was patched before
+    auto connect = [&](World& w, const GCCharacter& memory) {
+      Session p;
+      p.ch = std::make_shared<FakeGC>();
+      p.ch->memory = memory;
+      p.c = std::make_shared<Client>(w.server, p.ch, ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->account->is_temporary = true; // never saved to system/licenses
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = SERIAL;
+      p.c->login = login;
+      p.c->specific_version = SPECIFIC_VERSION_GC_V3_EU;
+      p.c->set_flag(Client::Flag::HAS_SEND_FUNCTION_CALL);
+      p.c->set_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE);
+      p.c->set_flag(Client::Flag::SEND_FUNCTION_CALL_NO_CACHE_PATCH);
+      p.c->clear_flag(Client::Flag::ENCRYPTED_SEND_FUNCTION_CALL);
+      return p;
+    };
+
+    // The client's side. Its answers go in through on_command, as GameServer hands a received command over.
+    std::exception_ptr answer_failed;
+    auto answer = [&](World& w, Session& p, uint8_t command, std::string data) {
+      auto msg = std::make_unique<Channel::Message>(Channel::Message{.command = command, .flag = 0, .data = std::move(data)});
+      asio::co_spawn(*w.s->io_context, on_command(p.c, std::move(msg)), [&answer_failed](std::exception_ptr e) {
+        if (e && !answer_failed) {
+          answer_failed = e;
+        }
+      });
+    };
+    auto client_handles = [&](World& w, Session& p, const std::string& raw) {
+      const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+      if (header.command == 0x95) {
+        answer(w, p, 0x61, p.ch->as_61());
+      } else if (header.command == 0xB2) {
+        // the code follows the 4-byte header and S_ExecuteCode_B2; SetExtendedPlayerInfo carries the character behind it
+        std::string code = raw.substr(sizeof(header) + sizeof(S_ExecuteCode_B2));
+        if ((code.size() >= set_fn->code.size() + sizeof(GCCharacter)) && code.starts_with(set_fn->code)) {
+          memcpy(static_cast<void*>(&p.ch->memory), code.data() + set_fn->code.size(), sizeof(GCCharacter));
+          p.ch->pushes++;
+        } else if (code.starts_with(get_fn->code)) {
+          answer(w, p, 0x30, std::string(reinterpret_cast<const char*>(&p.ch->memory), sizeof(GCCharacter)));
+        } else {
+          throw std::logic_error("the server sent a function call this test client does not know");
+        }
+        C_ExecuteCodeResult_B3 result{};
+        answer(w, p, 0xB3, std::string(reinterpret_cast<const char*>(&result), sizeof(result)));
+      } else if ((header.command == 0x97) && (header.flag == 0x01)) {
+        p.ch->card_writes.emplace_back(p.ch->memory); // the client saves what it holds
+      }
+    };
+    // runs the server until `finished`, letting the client answer what it was sent; it never waits for the clock
+    auto drive = [&](World& w, Session& p, const std::function<bool()>& finished) {
+      for (;;) {
+        w.s->io_context->restart();
+        size_t ran = w.s->io_context->poll();
+        if (answer_failed) {
+          auto e = answer_failed;
+          answer_failed = nullptr;
+          std::rethrow_exception(e);
+        }
+        auto inbox = std::move(p.ch->inbox);
+        p.ch->inbox.clear();
+        for (const auto& raw : inbox) {
+          client_handles(w, p, raw);
+        }
+        if (inbox.empty() && finished()) {
+          return;
+        }
+        if (inbox.empty() && !ran) {
+          throw std::runtime_error("the server waits for something this client does not send");
+        }
+      }
+    };
+    auto run_bool = [&](World& w, Session& p, asio::awaitable<bool> what) {
+      std::optional<bool> result;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e, bool r) {
+        failed = e;
+        result = r;
+      });
+      drive(w, p, [&]() { return result.has_value(); });
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+      return *result;
+    };
+    auto run_void = [&](World& w, Session& p, asio::awaitable<void> what) {
+      bool done = false;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e) {
+        failed = e;
+        done = true;
+      });
+      drive(w, p, [&]() { return done; });
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+    };
+    auto client_sends = [&](World& w, Session& p, uint8_t command, std::string data) {
+      run_void(w, p, on_command(p.c, std::make_unique<Channel::Message>(Channel::Message{.command = command, .flag = 0, .data = std::move(data)})));
+    };
+
+    // The real character: six items (weapon, frame, barrier and mag equipped), material counters, a level, EXP and
+    // meseta, a bank with three items and its own meseta, and three fields of the rest of the save file
+    auto real_character = [&]() {
+      GCCharacter ch;
+      ch.inventory.language = Language::ENGLISH;
+      ch.inventory.hp_from_materials = 6;
+      ch.inventory.tp_from_materials = 4;
+      auto item = [&](size_t z, std::initializer_list<uint8_t> data1, uint32_t flags, std::initializer_list<uint8_t> data2 = {}) {
+        auto& it = ch.inventory.items[z];
+        size_t x = 0;
+        for (uint8_t b : data1) {
+          it.data.data1[x++] = b;
+        }
+        x = 0;
+        for (uint8_t b : data2) {
+          it.data.data2[x++] = b;
+        }
+        it.data.id = 0x00010000 + z;
+        it.flags = flags;
+      };
+      item(0, {0x00, 0x01, 0x05, 0x09}, 0x0000000C); // a weapon with a grind, equipped
+      item(1, {0x01, 0x01, 0x02}, 0x0000000C); // a frame, equipped
+      item(2, {0x01, 0x02, 0x03}, 0x0000000C); // a barrier, equipped
+      // the mag, equipped: level 100, DEF 50.00, POW 100.00, DEX 22.00, MIND 20.00, synchro 120, IQ 200, PBs, colour
+      item(MAG_SLOT, {0x02, 0x05, 0x64, 0x00, 0x88, 0x13, 0x10, 0x27, 0x98, 0x08, 0xD0, 0x07}, 0x0000000C, {0x78, 0xC8, 0x05, 0x0A});
+      item(4, {0x03, 0x00, 0x00, 0x00, 0x00, 0x0A}, 0x00000000); // ten Monomates
+      item(5, {0x00, 0x09, 0x04, 0x00, 0x00, 0x00, 0x01, 0x1E, 0x03, 0x28}, 0x00000004); // a rare weapon with attributes, not equipped
+      ch.inventory.num_items = 6;
+      PlayerDispDataV4 disp;
+      disp.stats.char_stats.atp = 611;
+      disp.stats.char_stats.mst = 322;
+      disp.stats.char_stats.evp = 433;
+      disp.stats.char_stats.hp = 544;
+      disp.stats.char_stats.dfp = 255;
+      disp.stats.char_stats.ata = 166;
+      disp.stats.char_stats.lck = 77;
+      disp.stats.level = 51;
+      disp.stats.exp = 1234567;
+      disp.stats.meseta = 54321;
+      disp.visual.name.encode("Eindtest", Language::ENGLISH);
+      disp.visual.sh.char_class = 1;
+      disp.visual.sh.section_id = 3;
+      ch.disp = disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH);
+      ch.bank.num_items = 3;
+      ch.bank.meseta = 777000;
+      for (size_t z = 0; z < 3; z++) {
+        ch.bank.items[z].data.data1[0] = (z == 2) ? 0x03 : 0x00;
+        ch.bank.items[z].data.data1[1] = 0x02 + z;
+        ch.bank.items[z].data.data1[5] = (z == 2) ? 0x05 : 0x00;
+        ch.bank.items[z].data.id = 0x00020000 + z;
+        ch.bank.items[z].amount = (z == 2) ? 5 : 1;
+        ch.bank.items[z].present = 1;
+      }
+      ch.guild_card.guild_card_number = SERIAL;
+      ch.play_time_seconds = 360000;
+      ch.death_count = 7;
+      ch.save_count = 42;
+      return ch;
+    };
+
+    // Field by field: what the client holds against the character it logged in with before the run
+    auto expect_real = [&](const GCCharacter& now, const GCCharacter& real, const std::string& when) {
+      auto same = [&](const std::string& field, bool ok) {
+        if (!ok) {
+          throw std::runtime_error(std::format("{}: {} is not the real character's", when, field));
+        }
+      };
+      same("the item count", now.inventory.num_items == real.inventory.num_items);
+      same("the material counters", (now.inventory.hp_from_materials == real.inventory.hp_from_materials) &&
+              (now.inventory.tp_from_materials == real.inventory.tp_from_materials));
+      for (size_t z = 0; z < real.inventory.items.size(); z++) {
+        const auto& a = now.inventory.items[z];
+        const auto& b = real.inventory.items[z];
+        std::string what = (z == MAG_SLOT) ? std::string("the mag (inventory item 3)") : std::format("inventory item {}", z);
+        same(what + ", its data and ID", !memcmp(&a.data, &b.data, sizeof(a.data)));
+        same(what + ", its equipped flags", a.flags == b.flags);
+        same(what + ", the rest of its slot", !memcmp(&a, &b, sizeof(a)));
+      }
+      same("the level", now.disp.stats.level == real.disp.stats.level);
+      same("the EXP", now.disp.stats.exp == real.disp.stats.exp);
+      same("the meseta", now.disp.stats.meseta == real.disp.stats.meseta);
+      same("the stats", !memcmp(&now.disp.stats, &real.disp.stats, sizeof(now.disp.stats)));
+      same("the name", !memcmp(&now.disp.visual.name, &real.disp.visual.name, sizeof(now.disp.visual.name)));
+      same("the bank's item count", now.bank.num_items == real.bank.num_items);
+      same("the bank's meseta", now.bank.meseta == real.bank.meseta);
+      for (size_t z = 0; z < real.bank.items.size(); z++) {
+        same(std::format("bank item {}", z), !memcmp(&now.bank.items[z], &real.bank.items[z], sizeof(now.bank.items[z])));
+      }
+      same("the play time, death count or save count", (now.play_time_seconds == real.play_time_seconds) &&
+              (now.death_count == real.death_count) && (now.save_count == real.save_count));
+    };
+    // the server's own character data (never the overlay) against a copy taken before the run
+    auto server_holds = [&](const Session& p, const PSOBBCharacterFile& before) {
+      auto now = p.c->character_file(false, false);
+      return now && !memcmp(&now->inventory, &before.inventory, sizeof(now->inventory)) &&
+          !memcmp(&now->disp.stats, &before.disp.stats, sizeof(now->disp.stats)) &&
+          spire_guard_same_state(now->inventory, now->disp, before.inventory, before.disp);
+    };
+    // the guard's snapshot file of the character the server has for this client
+    auto snapshot_on_disk = [&](const Session& p) {
+      auto ch = p.c->character_file(false, false);
+      expect(ch != nullptr);
+      std::string filename = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, SERIAL, spire_guard_character_id(ch->disp));
+      expect(std::filesystem::is_regular_file(filename));
+      return spire_guard_load(filename);
+    };
+    auto snapshot_is = [&](const SpireGuardSnapshot& snap, const PSOBBCharacterFile& before) {
+      return snap.has_character && !memcmp(&snap.inventory, &before.inventory, sizeof(snap.inventory)) &&
+          !memcmp(&snap.disp.stats, &before.disp.stats, sizeof(snap.disp.stats));
+    };
+
+    // The opening every case shares: the login 61 of the real character, the game, the guarded quest load (the snapshot
+    // and the run copy, spire_create_battle_overlay), and a run that wears the run copy down on the client
+    struct Started {
+      Session p;
+      std::shared_ptr<Lobby> l;
+      std::shared_ptr<PSOBBCharacterFile> server_real; // the server's character data before the run
+      GCCharacter run_copy; // what the client holds at the end of the run
+    };
+    auto start_run = [&](World& w, const GCCharacter& real) {
+      Started r;
+      r.p = connect(w, real);
+      auto& p = r.p;
+      client_sends(w, p, 0x61, p.ch->as_61());
+      // no marker: the login may save, and nothing is pushed
+      expect(run_bool(w, p, spire_guard_restore_if_needed(p.c)));
+      expect_eq(0u, p.ch->pushes);
+      r.server_real = std::make_shared<PSOBBCharacterFile>(*p.c->character_file(false, false));
+      expect_eq(51u, r.server_real->disp.stats.level.load());
+      expect_eq(6u, static_cast<uint32_t>(r.server_real->inventory.num_items));
+      expect_eq(54321u, r.server_real->disp.stats.meseta.load());
+      expect(spire_guard_game_join_allowed(p.c, false));
+
+      r.l = new_game(w);
+      r.l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = r.l;
+      // the quest load: the snapshot goes to disk, then the run copy is made
+      expect(spire_create_battle_overlay(p.c, r.l));
+      expect(p.c->has_overlay());
+      expect(server_holds(p, *r.server_real)); // the real character is untouched by the run copy
+      auto overlay = p.c->character_file(false, true);
+      expect_eq(0u, overlay->disp.stats.level.load()); // Lv1, the quest's char_level
+      expect_eq(300u, overlay->disp.stats.meseta.load());
+      auto snap = snapshot_on_disk(p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect_eq(QUEST, snap.quest_number);
+      expect(snapshot_is(snap, *r.server_real));
+
+      // The run: the client plays the run copy (the overlay's stats), its real items are gone, it holds a run weapon and
+      // a fed run mag, spent its meseta and gained levels. The server's overlay follows.
+      PlayerInventoryBE worn;
+      worn.language = Language::ENGLISH;
+      worn.num_items = 2;
+      worn.items[0].data.data1[0] = 0x00;
+      worn.items[0].data.data1[1] = 0x02;
+      worn.items[0].data.id = 0x00810000;
+      worn.items[0].flags = 0x0000000C;
+      const uint8_t run_mag[12] = {0x02, 0x01, 0x1E, 0x00, 0xDC, 0x05, 0xB8, 0x0B, 0x00, 0x00, 0x00, 0x00};
+      for (size_t z = 0; z < 12; z++) {
+        worn.items[1].data.data1[z] = run_mag[z];
+      }
+      worn.items[1].data.data2[0] = 0x64;
+      worn.items[1].data.data2[1] = 0x32;
+      worn.items[1].data.id = 0x00810001;
+      worn.items[1].flags = 0x0000000C;
+      overlay->inventory = worn;
+      overlay->disp.stats.level = overlay->disp.stats.level + 9;
+      overlay->disp.stats.exp = overlay->disp.stats.exp + 54321;
+      overlay->disp.stats.meseta = 0;
+      p.ch->memory.inventory = worn;
+      p.ch->memory.disp.stats = overlay->disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH).stats;
+      r.run_copy = p.ch->memory;
+      expect(server_holds(p, *r.server_real));
+      return r;
+    };
+    auto no_marker = [](const SpireGuardSnapshot& snap) {
+      return !snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save;
+    };
+    e2e_case("start, run copy, game exit: the 98, the restore before the lobby join, the next login", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      // the 98 of the game exit carries the run copy: the server's character data is the run copy from here on, the
+      // marker turns into a pending restore (spire_guard_end_run) and the snapshot keeps the real character
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->lobby.lock() && !p.c->has_overlay());
+      expect_eq(9u, p.c->character_file(false, false)->disp.stats.level.load());
+      expect_eq(2u, static_cast<uint32_t>(p.c->character_file(false, false)->inventory.num_items));
+      auto snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect(!spire_guard_game_join_allowed(p.c, false)); // no game while the restore is open
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+
+      // the 84: the restore before the lobby join (on_84 calls exactly this, and drops the client on false)
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit restore");
+      expect_eq(1u, p.ch->pushes);
+      // the one 97 came after the push: the card got the real character, never the run copy
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after the game exit restore");
+      expect(server_holds(p, *r.server_real));
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && !snap.restore_pending && snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect(spire_guard_game_join_allowed(p.c, false));
+
+      // the next login shows the card's character: equal to the snapshot, so the marker closes and nothing is pushed
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the game exit");
+      expect(no_marker(snapshot_on_disk(p2)));
+      expect(server_holds(p2, *r.server_real));
+    });
+    e2e_case("the connection drops mid-run: no 98, the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      // the disconnect (on_disconnect) restores nothing and leaves the marker RunInProgress with the real character
+      r.p.ch->open = false;
+      run_void(w, r.p, on_disconnect(r.p.c));
+      expect(!r.p.c->lobby.lock());
+      auto snap = snapshot_on_disk(r.p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect_eq(0u, r.p.ch->pushes);
+      r.p.c.reset();
+
+      // the next login: a new connection whose 61 is the run copy the client kept
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect_eq(9u, p2.c->character_file(false, false)->disp.stats.level.load());
+      expect(!spire_guard_game_join_allowed(p2.c, false)); // a run that never got its 98 counts too
+      // RunInProgress turns into RestorePending and the restore runs before any 97 (enable_save_if_needed sends the 97
+      // only after this returns true)
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login that follows a dropped connection");
+      expect_eq(1u, p2.ch->pushes);
+      expect_eq(0u, p2.ch->card_writes.size());
+      expect(server_holds(p2, *r.server_real));
+      snap = snapshot_on_disk(p2);
+      expect(no_marker(snap));
+      expect(snapshot_is(snap, *r.server_real));
+      expect(spire_guard_game_join_allowed(p2.c, false));
+    });
+    e2e_case("game exit, but the card kept the run copy: the next login pushes the real character again", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit restore");
+      auto snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && !snap.restore_pending && snap.awaiting_save);
+      // the console goes off before its card is written: the next login's 61 is the run copy again, under AwaitingSave
+      p.ch->open = false;
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login whose card still held the run copy");
+      expect_eq(1u, p2.ch->pushes);
+      expect(server_holds(p2, *r.server_real));
+      snap = snapshot_on_disk(p2);
+      expect(no_marker(snap));
+      expect(snapshot_is(snap, *r.server_real));
+    });
+
+    e2e_case("game exit, the client is gone before the restore: refused, the marker stays, the next login restores", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      client_sends(w, p, 0x98, p.ch->as_61());
+      // no answer can come: the restore is refused (on_84 then drops the client), nothing was pushed or saved
+      p.ch->open = false;
+      expect(!run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      auto snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(!spire_guard_game_join_allowed(p2.c, false));
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login that follows a refused game exit restore");
+      expect_eq(1u, p2.ch->pushes);
+      expect(server_holds(p2, *r.server_real));
+      expect(no_marker(snapshot_on_disk(p2)));
+    });
+
+    expect_eq(0u, e2e_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");
