@@ -518,6 +518,10 @@ std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std
   return spire_run_mag_evolve_text(sega_name, shell, st.mag_c14_seen);
 }
 
+std::string spire_run_mag_reminder_text_take(const SpireKitMagTexts& st, bool shell) {
+  return st.mag_c14_seen ? "" : spire_run_mag_reminder_text(shell);
+}
+
 bool spire_boss_burst_text_due(uint8_t room_k, const std::set<uint8_t>& boss_rooms, std::set<uint8_t>& sent_rooms) {
   if ((room_k < SPIRE_BOSS_BURST_FROM_K) || !boss_rooms.count(room_k)) {
     return false;

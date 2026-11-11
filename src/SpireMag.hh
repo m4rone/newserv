@@ -317,6 +317,10 @@ void spire_run_mag_c14_take(SpireKitMagTexts& st, bool equip_sent);
 // The evolution text SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1: without the hint only when that RESULT's
 // 'C' 14 came and newserv equips the mag.
 std::string spire_run_mag_evolve_text_take(const SpireKitMagTexts& st, const std::string& sega_name, bool shell);
+// kwaliteit-2 276: the reminder of the run's first mag, SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY after its RESULT 1 as the
+// evolution text: "" when that RESULT's 'C' 14 came and newserv equips the mag (nothing left to equip; when the game
+// refuses the equip, spire_equip_missing_text says so), otherwise spire_run_mag_reminder_text.
+std::string spire_run_mag_reminder_text_take(const SpireKitMagTexts& st, bool shell);
 
 // Route B bundle 2 S: the boss burst text. The quest (F7, make_spire.py boss_burst) casts Shifta, and Deband unless
 // the boss modifier is Furious or Elite, on each player at the door of every boss room from k8 on (not the Dragon at

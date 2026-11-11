@@ -7017,6 +7017,26 @@ void run_static_tests() {
       expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
     });
 
+    k2_case("276: the first mag's reminder is not sent when newserv equips that mag ('C' 14)", [&]() {
+      // the RESULT 1 of the run's first mag clears the mark; its 'C' 14 follows in the same quest frame
+      SpireKitMagTexts equipped;
+      spire_run_mag_c14_take(equipped, true); // r143 = 1 and the mag in the copy: SpireEquipItem went out
+      expect(spire_run_mag_reminder_text_take(equipped, false).empty());
+      expect(spire_run_mag_reminder_text_take(equipped, true).empty());
+      // 'C' 14 with r143 = 0, or no such mag in the copy: nothing equips it, so the reminder stays
+      SpireKitMagTexts by_hand;
+      spire_run_mag_c14_take(by_hand, false);
+      expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text_take(by_hand, false));
+      expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_SHELL_TEXT), spire_run_mag_reminder_text_take(by_hand, true));
+      // an older quest sends no 'C' 14: the reminder of before
+      SpireKitMagTexts old_quest;
+      expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text_take(old_quest, false));
+      // the 'C' 13 of the kit weapon is no 'C' 14
+      SpireKitMagTexts kit_only;
+      spire_kit_c13_take(kit_only, 10);
+      expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text_take(kit_only, false));
+    });
+
     expect_eq(0u, k2_failed);
   }
 

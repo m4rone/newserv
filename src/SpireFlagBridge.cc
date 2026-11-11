@@ -3412,6 +3412,26 @@ static asio::awaitable<void> spire_run_mag_evolve_text_later(
       text);
 }
 
+// kwaliteit-2 276: the reminder of the run's first mag waits for that RESULT's 'C' 14 as the evolution text does; when
+// newserv equips the mag for it there is nothing to remind of. Otherwise it takes its turn (kwaliteit-2 145).
+static asio::awaitable<void> spire_run_mag_reminder_later(
+    std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, bool shell) {
+  co_await async_sleep(SPIRE_RUN_MAG_EVOLVE_TEXT_DELAY);
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  std::string text = spire_run_mag_reminder_text_take(spire_client_run_for(c, l, true)->b9_texts, shell);
+  if (text.empty()) {
+    c->log.info_f("Spire run mag: first mag: its 'C' 14 came and newserv equips it; no reminder");
+    co_return;
+  }
+  auto delay = spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now());
+  spire_send_ticker_later(c, l, text, delay);
+  c->log.info_f("Spire run mag: first mag (no 'C' 14 equip); reminder in {} ms: \"{}\"", delay.count(), text);
+}
+
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t sub = (value >> 16) & 0xFF;
@@ -3470,13 +3490,14 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           }
         } catch (const std::exception&) {
         }
+        // critic B-1: the 'C' 14 follows this RESULT 1 in the same quest frame; the text waits for it
+        spire_client_run_for(c, l, true)->b9_texts.mag_c14_seen = false;
         if (before < 0) {
-          // kwaliteit-2 145: the run's first mag: its reminder waits its turn as the NO_MAG one does
-          spire_send_ticker_later(c, l, spire_run_mag_reminder_text(offered_shell),
-              spire_run_mag_reminder_delay(c->spire_pack_line_free, std::chrono::steady_clock::now()));
+          // kwaliteit-2 145/276: the run's first mag: its reminder waits its turn as the NO_MAG one does, and is
+          // left out when newserv equips the mag
+          asio::co_spawn(*c->require_server_state()->io_context,
+              spire_run_mag_reminder_later(c, l, offered_shell), asio::detached);
         } else {
-          // critic B-1: the 'C' 14 follows this RESULT 1 in the same quest frame; the text waits for it
-          spire_client_run_for(c, l, true)->b9_texts.mag_c14_seen = false;
           asio::co_spawn(*c->require_server_state()->io_context,
               spire_run_mag_evolve_text_later(c, l, name, offered_shell), asio::detached);
         }
