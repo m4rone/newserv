@@ -1691,6 +1691,29 @@ void run_static_tests() {
     expect(spire_finish_boss_store_room(true, 1) == 15);
     expect(spire_finish_boss_store_room(false, 1) == 0);
     expect(spire_finish_boss_store_room(true, 2) == 0); // Olga Flow: as before
+    // audit 1 A1: per run; Run I stores k15 (its room quests too), Run II nothing as before, Run III nothing (Epsilon in
+    // k32 is no boss: the caller would store k32 as a boss room)
+    expect(spire_finish_boss_store_room(true, 1, 921) == 15);
+    expect(spire_finish_boss_store_room(true, 1, 955) == 15);
+    expect(spire_finish_boss_store_room(false, 1, 921) == 0);
+    expect(spire_finish_boss_store_room(true, 2, 922) == 0);
+    for (uint32_t q : {913u, 914u, 916u, 917u, 918u, 1917u, 3918u}) {
+      expect(spire_finish_boss_store_room(true, 2, q) == 0);
+      expect(spire_meta_quest_final_room(q, 2) == 32);
+    }
+    // audit 1 A1: '$spire status' names every room up to the top of the Tower (k32)
+    expect_eq(std::string("No rooms cleared yet"), spire_checkpoint_status_text(0, 0));
+    expect_eq(std::string("Rooms cleared: 1 31 32 - last: room 32"),
+        spire_checkpoint_status_text(0x00000001u | (1u << 30) | (1u << 31), 32));
+    expect_eq(std::string("Rooms cleared: 32 - last: room 32"), spire_checkpoint_status_text(1u << 31, 32));
+    {
+      std::string all = "Rooms cleared:";
+      for (uint32_t k = 1; k <= 32; k++) {
+        all += " " + std::to_string(k);
+      }
+      expect_eq(all + " - last: room 30", spire_checkpoint_status_text(0xFFFFFFFFu, 30));
+    }
+    expect_eq(std::string("Rooms cleared: 1 2 15 - last: room 15"), spire_checkpoint_status_text(0x4003u, 15)); // Run I
     for (bool flag_first : {true, false}) {
       uint32_t cp_rooms = 0x3FFF; // k1-k14 stored in this run
       std::set<uint8_t> checkpoint_new;
@@ -7263,6 +7286,17 @@ void run_static_tests() {
         expect(spire_gift_last_clear(1, k) == (k == 15));
         expect(spire_gift_last_clear(2, k) == (k == 30));
         expect(!spire_gift_last_clear(0, k) && !spire_gift_last_clear(3, k) && !spire_gift_last_clear(4, k));
+      }
+      // audit 1 A1: the last room of the quest's run: k32 for Run III and its room quests, Run I and II as before
+      for (uint32_t k = 0; k <= 0x100; k++) {
+        for (uint32_t q : {913u, 914u, 916u, 917u, 918u, 1917u, 3918u}) {
+          expect(spire_gift_last_clear(2, k, q) == (k == 32));
+        }
+        expect(spire_gift_last_clear(2, k, 922) == (k == 30));
+        expect(spire_gift_last_clear(2, k, 986) == (k == 30));
+        expect(spire_gift_last_clear(2, k, 1971) == (k == 30)); // a room quest of Run II
+        expect(spire_gift_last_clear(1, k, 921) == (k == 15));
+        expect(spire_gift_last_clear(1, k, 955) == (k == 15));
       }
     });
 

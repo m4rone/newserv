@@ -634,7 +634,8 @@ uint8_t spire_checkpoint_room_k(const std::map<uint8_t, std::map<std::pair<uint8
 bool spire_checkpoint_room_first(uint32_t rooms, uint8_t k);
 // kwaliteit-1 r2 (critic B-6): the room a finishing 'F' stores in the checkpoint itself before it records the boss: k15
 // for a won run of Episode 1 (Dark Falz), so the Run II text does not depend on the server-side Dark Falz flag; else 0
-uint8_t spire_finish_boss_store_room(bool won, uint8_t episode);
+// audit 1 A1: quest_number gives the run (spire_meta_quest_final_room); 0 = by the episode only. Run II and Run III: 0
+uint8_t spire_finish_boss_store_room(bool won, uint8_t episode, uint32_t quest_number = 0);
 // The room index k an arrival on this floor in a game of this episode stores (SpireCheckpointArrivals), or 0.
 uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor);
@@ -708,6 +709,9 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
 // '$spire status' / '$spire continue': returns the text for the player. Throws std::runtime_error with a short message
 // on bad input.
 std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::string& args);
+// The '$spire status' line of a checkpoint: every room k 1-32 in rooms_mask (bit k - 1) and the last room. Pure, for
+// the offline test (audit 1 A1: k32 is the top of the Tower).
+std::string spire_checkpoint_status_text(uint32_t rooms_mask, uint32_t last_room);
 
 // The rooms this client's character has cleared (bit k-1 = room k), from its checkpoint file; 0 if none or unknown.
 uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
@@ -1004,8 +1008,9 @@ asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std:
 // retries only the exam rare and extra, so that gift is never made: the line then says so instead of "it waits".
 // The server knows the writer's room from its last 'V' (the room start; room_k 0 = none seen) and a quest's last room
 // as its episode's final boss room (the run and every room quest play on to it: spire_meta_final_boss_room). A quest
-// that ends earlier (a lab variant) keeps "it waits".
-bool spire_gift_last_clear(uint8_t episode, uint32_t room_k);
+// that ends earlier (a lab variant) keeps "it waits". Audit 1 A1: the last room of the quest's run
+// (spire_meta_quest_final_room: k32 for Run III, q913-q918); quest_number 0 = by the episode only.
+bool spire_gift_last_clear(uint8_t episode, uint32_t room_k, uint32_t quest_number = 0);
 // kwaliteit-1: 'C' 15 and 'C' 16 (a reward that waited is now in the pack) arrive in the same frame as another line
 // (the exam's 'C' 10 after ex_retry) or as each other (two extras that fit in one ex_retry round, two gifts in one
 // gw_retry), and a B0 line that follows at once pushes the one before aside (pc 2026-10-25, see

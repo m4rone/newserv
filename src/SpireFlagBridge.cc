@@ -2472,8 +2472,8 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
   }
 }
 
-bool spire_gift_last_clear(uint8_t episode, uint32_t room_k) {
-  return room_k && (room_k == spire_meta_final_boss_room(episode));
+bool spire_gift_last_clear(uint8_t episode, uint32_t room_k, uint32_t quest_number) {
+  return room_k && (room_k == spire_meta_quest_final_room(quest_number, episode)); // audit 1 A1: k32 for Run III
 }
 
 bool spire_bridge_is_pack_line(uint32_t value) {
@@ -3027,11 +3027,12 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   // B-AF-1 (critic S1): the last boss of the episode has no room after it; a won run of a real run is its kill
   // kwaliteit-1 r2 (critic B-6): the won 'F' of Episode 1 stores k15 for this client itself first (idempotent: a known
   // room stays as it is), so "Spire Run II" and its unlock never depend on the Dark Falz flag having stored it before
-  if (uint8_t store_k = spire_finish_boss_store_room(is_won, static_cast<uint8_t>(l->episode))) {
+  if (uint8_t store_k = spire_finish_boss_store_room(is_won, static_cast<uint8_t>(l->episode), quest_number)) {
     std::array<std::shared_ptr<Client>, 1> just_c{c};
     spire_checkpoint_store(l, just_c, store_k, true);
   }
-  if (uint8_t final_k = is_won ? spire_meta_final_boss_room(static_cast<uint8_t>(l->episode)) : 0) {
+  // audit 1 A1: the last room of the run, not of the episode (k32 for Run III; Run I and II as before)
+  if (uint8_t final_k = is_won ? spire_meta_quest_final_room(quest_number, static_cast<uint8_t>(l->episode)) : 0) {
     spire_checkpoint_record_boss(l, c, serial_number, final_k);
   }
   uint32_t seconds = value & 0xFFFF;
@@ -3254,7 +3255,9 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
     }
     if (refusal == SpireShopRefusal::NONE) {
       auto rec = spire_records_load(records_filename);
-      uint8_t open_rung[2] = {spire_meta_open_rung(meta, 1), spire_meta_open_rung(meta, 2)};
+      // audit 1 A1: the open rung of all three runs, so a rung Run III lacks is still sold (SpireMeta.hh)
+      std::array<uint8_t, 3> open_rung = {
+          spire_meta_open_rung(meta, 1), spire_meta_open_rung(meta, 2), spire_meta_open_rung(meta, 3)};
       uint8_t char_class = character->disp.visual.sh.char_class;
       // route B F3: the archetype's second kit already owned (its Normal flag) makes kit_tier a double buy: refused
       // with ALREADY_OPEN at BUY, and listed with price 0
@@ -3283,6 +3286,7 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
           if (refusal == SpireShopRefusal::NONE) {
             open_rung[0] = spire_meta_open_rung(meta, 1);
             open_rung[1] = spire_meta_open_rung(meta, 2);
+            open_rung[2] = spire_meta_open_rung(meta, 3);
             detail = std::format(" {} {} -> {} for {} splinter(s)", SPIRE_SHOP_ITEM_NAMES[index], level_before,
                 level_before + 1, price);
           }
@@ -3331,8 +3335,8 @@ static void spire_shop_handle(std::shared_ptr<Client> c, uint32_t serial_number,
       spire_send_register(c, SPIRE_SHOP_BALANCE_REGISTER, rec.splinters);
       spire_send_register(c, SPIRE_SHOP_STRENGTH_REGISTER, strength);
       spire_send_register(c, SPIRE_SHOP_HEAT_REGISTER, heat);
-      detail += std::format("; balance {}, P {}, {} ({}), level/next price:{}, rungs open {}/{}", rec.splinters,
-          strength, heat_str, name_for_char_class(char_class), levels_str, open_rung[0], open_rung[1]);
+      detail += std::format("; balance {}, P {}, {} ({}), level/next price:{}, rungs open {}/{}/{}", rec.splinters,
+          strength, heat_str, name_for_char_class(char_class), levels_str, open_rung[0], open_rung[1], open_rung[2]);
     }
   } catch (const std::exception& e) {
     refusal = SpireShopRefusal::FILE_ERROR;
@@ -3849,7 +3853,8 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
   if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 12) && !((value >> 23) & 1)) {
     // kwaliteit-2 258: a relic gift that does not fit after the quest's last room has no room start to wait for
     const auto* gift_cr = spire_client_run_for(c, l, false);
-    text_ctx.last_clear = gift_cr && spire_gift_last_clear(static_cast<uint8_t>(l->episode), gift_cr->v_room);
+    text_ctx.last_clear =
+        gift_cr && spire_gift_last_clear(static_cast<uint8_t>(l->episode), gift_cr->v_room, quest_number);
   }
   return text_ctx;
 }
@@ -6969,8 +6974,12 @@ bool spire_checkpoint_room_first(uint32_t rooms, uint8_t k) {
   return (k >= 1) && (k <= 32) && !((rooms >> (k - 1)) & 1);
 }
 
-uint8_t spire_finish_boss_store_room(bool won, uint8_t episode) {
-  return (won && (episode == 1)) ? spire_meta_final_boss_room(episode) : 0;
+uint8_t spire_finish_boss_store_room(bool won, uint8_t episode, uint32_t quest_number) {
+  // audit 1 A1: the last room of the run, and only Run I's: the caller stores it as a boss room (PerBoss, boss count).
+  // Run II stores nothing here, as before; neither does Run III, since Epsilon in k32 is no boss (EnemyType.cc, no
+  // BOSS flag) and its room clear stores k32 as a room
+  uint8_t final_k = spire_meta_quest_final_room(quest_number, episode);
+  return (won && (final_k == spire_meta_run_final_room(1))) ? final_k : 0;
 }
 
 uint8_t spire_checkpoint_arrival_k(
@@ -7353,6 +7362,17 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
   }
 }
 
+std::string spire_checkpoint_status_text(uint32_t rooms_mask, uint32_t last_room) {
+  std::string rooms;
+  for (size_t k = 1; k <= 32; k++) { // audit 1 A1: up to the top of the Tower (k32), the mask's 32 bits
+    if ((rooms_mask >> (k - 1)) & 1) {
+      rooms += (rooms.empty() ? "" : " ") + std::to_string(k);
+    }
+  }
+  return rooms_mask ? std::format("Rooms cleared: {} - last: room {}", rooms, last_room)
+                    : std::string("No rooms cleared yet");
+}
+
 // v35: one line each, so the answer is no window when the command is typed during a run
 std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::string& args) {
   std::string arg = args;
@@ -7363,14 +7383,7 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
   }
   auto cp = spire_checkpoint_load(filename);
   if (arg.empty() || (arg == "status")) {
-    std::string rooms;
-    for (size_t k = 1; k <= 31; k++) {
-      if ((cp.rooms >> (k - 1)) & 1) {
-        rooms += (rooms.empty() ? "" : " ") + std::to_string(k);
-      }
-    }
-    return cp.rooms ? std::format("Rooms cleared: {} - last: room {}", rooms, cp.last_room)
-                    : std::string("No rooms cleared yet");
+    return spire_checkpoint_status_text(cp.rooms, cp.last_room);
   }
   if (arg == "continue") {
     // v44: a savestate names the exact room quest and what the run had at its start; B-REGIE-18-6: one line per
