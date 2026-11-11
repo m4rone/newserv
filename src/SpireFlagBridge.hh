@@ -1364,6 +1364,8 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
 // replace_char and an owned start_level bonus a copy with the rule block's ba_set_char_level raised by the bonus
 // (spire_start_level_patch_bin), which the client applies at ba_start. Remembers the bonus for the client's overlay.
 // Never throws; on any doubt the quest's own .bin (and no bonus for the overlay).
+// B-REGIE-20-5: a client that is not the game's leader gets at least the leader's level for this quest load minus
+// SPIRE_LEVEL_FLOOR_GAP (SpireMeta.hh spire_level_floor_char_level), also on a resume; its overlay gets the same level.
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
 

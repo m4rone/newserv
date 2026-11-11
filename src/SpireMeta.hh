@@ -344,6 +344,20 @@ uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus);
 // F8 71). Returns how many there are and replaces the level with new_char_level only if there is exactly one.
 size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_char_level, uint32_t new_char_level);
 
+// B-REGIE-20-5 (kwaliteit-3 measurement 128): the level floor of the trailing player. The GC client computes EXP itself
+// and the server cannot give any, so the second player of a co-op run hardly grows along. At every quest load (run
+// start, room quest, resume) a client that is not the game's leader gets at least the leader's level for that quest
+// load minus SPIRE_LEVEL_FLOOR_GAP in the quest .bin it is sent, and never less than its own; the leader and a solo
+// player keep their own. Levels are 0-based, as ba_set_char_level; the floor is at most SPIRE_START_LEVEL_LEVEL_CAP.
+// The floor is not a start_level bonus: the run's bonus (P, heat, the run mag's start floors) stays the bought one.
+constexpr uint32_t SPIRE_LEVEL_FLOOR_GAP = 2;
+// A client's own level for a quest load, before the floor: the saved level of a resume (SpireSavestate::level), else
+// the quest's level plus its start_level bonus; at most SPIRE_START_LEVEL_LEVEL_CAP.
+uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level);
+// The level the client's quest .bin carries: own_level for the leader (a solo player is its own leader), else the
+// higher of own_level and leader_level - SPIRE_LEVEL_FLOOR_GAP (0 if that is below Lv1).
+uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level, bool is_leader);
+
 // v53 (B-BASIS-54): the heat steps server-side. A Spire quest built with the heat steps carries the override rows of H 0
 // in a layout that is the same for every step H 0..HeatMax, and a sidecar SPIRE_HEAT_PATCH_DIR/q<N>.json (pso-roguelike
 // quests/spire make_spire.py heat_patch_sidecar) that lists every byte range that differs over H: its offset in the

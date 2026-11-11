@@ -4652,6 +4652,30 @@ static std::optional<uint32_t> spire_resume_level_for_client(
   }
 }
 
+// B-REGIE-20-5: the trailing player's level floor (SpireMeta.hh spire_level_floor_char_level) for the quest .bin of a
+// client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
+// The leader is the game's (l->leader_id, as spire_heat_for_leader), at the level its own .bin gets. Never throws.
+static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    std::optional<uint32_t> resume_level, uint32_t bonus) {
+  const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
+  if (!leader || !l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
+      !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
+      (c->version() != Version::GC_V3)) {
+    return std::nullopt;
+  }
+  std::optional<uint32_t> unused;
+  uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
+  uint32_t leader_level = (leader == c) ? own : spire_quest_load_char_level(rules->char_level,
+      spire_start_level_bonus_for_client(leader, l), spire_resume_level_for_client(leader, l, &unused));
+  uint32_t level = spire_level_floor_char_level(own, leader_level, leader == c);
+  if (level > own) {
+    c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
+        SPIRE_LEVEL_FLOOR_GAP);
+  }
+  return (level > own) ? std::optional<uint32_t>(level) : std::nullopt;
+}
+
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
   spire_start_level_sent.erase(c.get());
@@ -4661,6 +4685,7 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     uint32_t quest_number = l->quest->meta.quest_number;
     uint32_t base = l->quest->meta.battle_rules->char_level;
     uint32_t level = std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+    level = spire_level_floor_for_client(c, l, resume_level, 0).value_or(level); // B-REGIE-20-5
     try {
       std::string bin = prs_decompress(*bin_contents);
       size_t count = spire_start_level_patch_bin(bin, base, level);
@@ -4680,13 +4705,14 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     }
   }
   uint32_t bonus = spire_start_level_bonus_for_client(c, l);
-  if (!bonus || !bin_contents) {
+  auto floor_level = bin_contents ? spire_level_floor_for_client(c, l, std::nullopt, bonus) : std::nullopt; // B-REGIE-20-5
+  if ((!bonus && !floor_level) || !bin_contents) {
     return bin_contents;
   }
   uint32_t quest_number = l->quest->meta.quest_number;
   try {
     uint32_t base = l->quest->meta.battle_rules->char_level;
-    uint32_t level = spire_start_level_char_level(base, bonus);
+    uint32_t level = floor_level.value_or(spire_start_level_char_level(base, bonus));
     std::string bin = prs_decompress(*bin_contents);
     size_t count = spire_start_level_patch_bin(bin, base, level);
     if (count != 1) {
@@ -4695,9 +4721,11 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
       return bin_contents;
     }
     auto ret = std::make_shared<const std::string>(prs_compress(bin));
-    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
+    // B-REGIE-20-5: a floored level reaches the overlay as an absolute level; the run's bonus stays the bought one
+    spire_start_level_sent[c.get()] = floor_level ? SpireStartLevelSent{l->lobby_id, quest_number, 0, level, bonus}
+        : SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
     c->log.info_f("Spire start level: q{} sent with the rule block's level Lv{} -> Lv{} (start_level +{})",
-        quest_number, base + 1, level + 1, level - base);
+        quest_number, base + 1, level + 1, floor_level ? bonus : (level - base));
     return ret;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire start level: q{} .bin not changed: {}; quest and overlay keep the quest's level",
