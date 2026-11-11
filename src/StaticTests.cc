@@ -8756,8 +8756,8 @@ void run_static_tests() {
       d = kb_load(live.path);
       expect(d.spire && d.has_exit && !d.has_interim);
 
-      // The next game's backup file cannot take the mark (here: it is unreadable). It leaves the *.json list, so no
-      // $restore ever reads an interim state of a guarded run that does not say Spire
+      // The next game's backup file cannot take the mark (here: it is unreadable). Its name takes it instead: no
+      // $restore ever reads an interim state of a guarded run that does not say Spire, and the backup stays listed
       kb_join(w, live);
       std::string second = live.path;
       std::string dir = std::filesystem::path(second).parent_path().string();
@@ -8765,9 +8765,59 @@ void run_static_tests() {
       phosg::save_file(second, "{\"SerialNumber\": 5200, \"Inter");
       inventory_backup_note_guarded(live.p.c);
       expect(!std::filesystem::exists(second));
-      expect(std::filesystem::exists(second + INVENTORY_BACKUP_SET_ASIDE_SUFFIX));
-      expect_eq(1u, inventory_backup_list(dir).size());
+      expect(std::filesystem::exists(second.substr(0, second.size() - 5) + INVENTORY_BACKUP_UNMARKED_SUFFIX));
+      expect_eq(2u, inventory_backup_list(dir).size());
       expect(live.p.c->inventory_backup_current.empty());
+    });
+
+    k3_case("backup M1: a backup set aside for its missing Spire mark stays the newest game and is refused; $restore does not work from the game before it", [&]() {
+      K3TempCwd temp_cwd("backup-m1");
+      K3World w;
+      KbLive live;
+      // Game 1: a normal game that ends with a dropped connection after he dropped the Handgun. Its Exit is
+      // restorable and nobody restored it
+      kb_join(w, live);
+      std::string first = live.path;
+      std::string dir = std::filesystem::path(first).parent_path().string();
+      std::string character_id = kb_load(first).character_id;
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      inventory_backup_note_removed(live.p.c, ItemData(KB_HANDGUN, 0));
+      inventory_backup_on_game_end(live.p.c, live.l, false);
+      expect(kb_load(first).has_exit);
+      auto decide = [&](const PlayerInventory& card) {
+        return inventory_restore_decide(dir, "", kb_next_boot, true, false, false, live.p.serial_number, character_id,
+            card, 500, InventoryRemovals());
+      };
+      auto d = decide(kb_penalty_card);
+      expect_eq(KbR::NONE, d.refusal);
+      expect_eq(first, d.path);
+      expect_eq(1u, d.plan.items.size()); // the Monomates
+      // Game 2: a guarded Spire run whose backup cannot take the Spire mark, readable or not
+      for (bool readable : {false, true}) {
+        kb_join(w, live);
+        std::string second = live.path;
+        if (readable) {
+          std::filesystem::create_directory(second + ".tmp"); // the write of the mark fails, the file stays whole
+        } else {
+          phosg::save_file(second, "{\"SerialNumber\": 5200, \"Inter");
+        }
+        inventory_backup_note_guarded(live.p.c);
+        std::string aside = second.substr(0, second.size() - 5) + INVENTORY_BACKUP_UNMARKED_SUFFIX;
+        expect(std::filesystem::exists(aside) && !std::filesystem::exists(second));
+        auto names = inventory_backup_list(dir);
+        expect_eq(std::filesystem::path(aside).filename().string(), names.back()); // listed, and the newest
+        // Game 3: $restore. a5fa1dc: the set-aside file is out of the list, game 1 is "the previous game" and its
+        // Exit is compared with what he has now
+        d = decide(kb_penalty_card);
+        expect_eq(KbR::SPIRE_BACKUP, d.refusal);
+        expect_eq(aside, d.path);
+        expect(d.plan.empty());
+        // the login check leaves it to the guard, and it is not a game he played on in
+        expect(d.backup->spire);
+        expect(inventory_loss_verdict(*d.backup, false, 2, 500, false) == InventoryLossVerdict::NONE);
+        expect(!inventory_backup_played_on(d.backup.get()));
+        std::filesystem::remove(aside);
+      }
     });
 
     // ---- kwaliteit-3 critic B1: provenance. Two real clients in one real game, each with its own backup. The steps

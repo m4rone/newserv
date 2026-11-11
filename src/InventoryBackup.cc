@@ -195,6 +195,9 @@ InventoryBackupSetAside inventory_backup_set_aside_kind(const std::string& name)
   if (name.ends_with(INVENTORY_BACKUP_LOST_SUFFIX)) {
     return InventoryBackupSetAside::LOST;
   }
+  if (name.ends_with(INVENTORY_BACKUP_UNMARKED_SUFFIX)) {
+    return InventoryBackupSetAside::UNMARKED;
+  }
   return InventoryBackupSetAside::NONE;
 }
 
@@ -622,6 +625,9 @@ InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game,
   if (backup->set_aside == InventoryBackupSetAside::LOST) {
     return R::NOT_UPDATED; // before anything its content says: the content is what could not be written
   }
+  if (backup->set_aside == InventoryBackupSetAside::UNMARKED) {
+    return R::SPIRE_BACKUP; // its name is the Spire mark, also if its content cannot be read
+  }
   if ((backup->serial_number != serial_number) || (backup->character_id != character_id)) {
     return R::OTHER_CHARACTER;
   }
@@ -683,6 +689,9 @@ InventoryBackupListing inventory_backup_read_all(const std::string& dir, const s
     }
     if (b) {
       b->set_aside = set_aside;
+      // The name carries the Spire mark its content could not take: $restore refuses it as a Spire backup, the login
+      // check leaves it to the guard, and it never counts as a game he played on in (critic M1)
+      b->spire = b->spire || (set_aside == InventoryBackupSetAside::UNMARKED);
     }
     ret.flags.emplace_back(b ? backup_pick_flags(*b) : InventoryBackupPickFlags());
     ret.backups.emplace_back(std::move(b));
@@ -1046,12 +1055,6 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   }
 }
 
-bool inventory_backup_set_aside(const std::string& path) {
-  std::error_code ec;
-  std::filesystem::rename(path, path + INVENTORY_BACKUP_SET_ASIDE_SUFFIX, ec);
-  return !ec;
-}
-
 void inventory_backup_flush_interim(std::shared_ptr<Client> c) {
   if (c->inventory_backup_current.empty()) {
     return;
@@ -1192,12 +1195,14 @@ void inventory_backup_note_guarded(std::shared_ptr<Client> c) {
   // interim state without the mark would let $restore give the same items a second time
   inventory_backup_flush_interim(c);
   if (!c->inventory_backup_interim.written || !c->inventory_backup_interim.guard_covered) {
-    // Not written. Take the backup out of $restore's reach instead (it stays on disk under another name)
+    // Not written. Give the backup a name that says it instead: it stays in the list as this game, refused as a Spire
+    // backup, so $restore never works from an older game in its place (critic M1)
     std::string path = c->inventory_backup_current;
-    bool set_aside = inventory_backup_set_aside(path);
+    std::string aside = inventory_backup_set_aside_as(path, INVENTORY_BACKUP_UNMARKED_SUFFIX);
+    bool set_aside = !aside.empty();
     c->log.error_f("Inventory backup: the Spire mark could not be written into {}; {}", path,
-        set_aside ? "set aside as " + path + INVENTORY_BACKUP_SET_ASIDE_SUFFIX + ", $restore will not use it"
-                  : "and it could not be set aside either");
+        set_aside ? "set aside as " + aside + ", $restore refuses it as a Spire backup"
+                  : "and it could not be set aside either (the mark is retried with every interim write)");
     if (set_aside) {
       open_backups.erase(path);
       c->inventory_backup_current.clear();

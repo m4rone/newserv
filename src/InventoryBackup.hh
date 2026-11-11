@@ -105,8 +105,6 @@ constexpr const char* INVENTORY_BACKUP_DIRECTORY = "system/inventory-backups";
 constexpr size_t INVENTORY_BACKUP_KEEP = 20;
 // How long a change that only adds to the inventory may wait for its interim write (what a hard stop can cost at most)
 constexpr uint64_t INVENTORY_BACKUP_INTERIM_USECS = 2000000;
-// A backup whose Spire mark could not be written is renamed to <name>.json + this: inventory_backup_list skips it
-constexpr const char* INVENTORY_BACKUP_SET_ASIDE_SUFFIX = ".unmarked";
 // What $restore says first when it works from the interim state of a game that ended in a hard server stop
 constexpr const char* INVENTORY_RESTORE_INTERIM_TEXT = "Stand van de laatste tussenstand\nvoor de harde serverstop.";
 constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten opzichte van\nde laatste tussenstand.";
@@ -116,12 +114,17 @@ constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten 
 // <time><suffix>. The name still ends in .json, so the backup stays in inventory_backup_list at its place in time:
 // $restore sees it as that game and refuses it, and never silently works from an older game instead.
 // LOST (critic B3): something left the inventory and the interim state could not be written after it, so what is on
-// disk still holds it
+// disk still holds it.
+// UNMARKED (critic M1): the Spire guard took its snapshot in this game and the Spire mark could not be written into
+// the backup. The name is the mark now: the backup reads as a Spire backup (the guard restores that game), also if
+// its content cannot be read
 enum class InventoryBackupSetAside {
   NONE = 0,
   LOST,
+  UNMARKED,
 };
 constexpr const char* INVENTORY_BACKUP_LOST_SUFFIX = ".lost.json";
+constexpr const char* INVENTORY_BACKUP_UNMARKED_SUFFIX = ".unmarked.json";
 // The kind a backup's file name says
 InventoryBackupSetAside inventory_backup_set_aside_kind(const std::string& name);
 // Renames the backup at path (<...>.json) to <...><suffix>; returns the new path, or "" if the rename failed
@@ -405,8 +408,6 @@ void inventory_backup_note_removed(std::shared_ptr<Client> c, const ItemData& it
 void inventory_backup_note_meseta_removed(std::shared_ptr<Client> c, uint64_t meseta);
 // Writes the interim state of c's current game now if it changed. Never throws (a failure is logged)
 void inventory_backup_flush_interim(std::shared_ptr<Client> c);
-// Renames the backup at path out of the *.json list (INVENTORY_BACKUP_SET_ASIDE_SUFFIX); returns whether that worked
-bool inventory_backup_set_aside(const std::string& path);
 // After every command of c (on_command): writes the interim state if something left the inventory in that command
 void inventory_backup_after_command(std::shared_ptr<Client> c);
 // Provenance hooks (see the top of this file). After every subcommand of c: reconciles c's provenance with its
