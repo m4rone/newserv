@@ -1,6 +1,6 @@
 # K7b (newserv): de momentopname volgt alleen wat tussen spelers verhuist
 
-Tak spike/veilig-k7b, start 771d844. Fix-commit 4f08618 (gelezen met git rev-parse).
+Tak spike/veilig-k7b, start 771d844. Fix-commits 4f08618 en e7f9f1a (gelezen met git rev-parse).
 
 ## Regel
 - Val (6x2A, 6x5D): de momentopname van A blijft zoals hij is. Het vloeritem krijgt een tegoed: wat A's
@@ -25,7 +25,7 @@ hieronder omgerekend naar het definitieve bestand):
 - (h) 2365 `expect_eq(1u, count(after_login(snap, card), sword))` rood voor alle drie kaarten (oude stand,
   run-kopie, stand na de val): A had het zwaard niet meer.
 - (i) 2379 `expect_eq(0u, step.taken + step.given)` rood (771d844 haalde het weg en gaf het terug); de
-  telling erna (2381) was op 771d844 al 1: A die zelf opraapt verloor bij 771d844 niets.
+  telling erna (2382) was op 771d844 al 1: A die zelf opraapt verloor bij 771d844 niets.
 - (j) 2394 `expect_eq(1000u, after_login(snap, card).second.stats.meseta.load())` rood voor alle drie kaarten.
 - 2403 `expect(spire_guard_same_state(... a_real ...)) // the drop alone moves nothing` brak de rode run af.
 Letterlijk: `RED .../src/StaticTests.cc:2367 1u != count(after_login(snap, card), sword)` (3x),
@@ -41,17 +41,43 @@ Laat hij in de basis iets vallen dat niemand opraapt, of raapt hij het zelf weer
 dan heeft hij het na de volgende login weer. Raapt zijn partner het op, dan staat het na wegvallen van
 een van beiden bij precies één van hen.
 
-## Rest-risico (genoteerd, niet gebouwd)
-A laat iets vallen, valt weg en krijgt het bij zijn herstel terug, terwijl het spel van B nog loopt en het
-item nog op de vloer ligt. Raapt B het daarna op, dan haalt de opraap het uit A's momentopname zolang die
-gevolgd wordt (A's volgende login duwt het dan weg); is A's momentopname dan al gesloten (98 in een
-normaal spel), dan heeft B het en A ook. Dichten vraagt het vloeritem weghalen bij A's vertrek: een
-keuze buiten deze opdracht.
+## Vertrekregel (vervolg, fix-commit e7f9f1a, B-AF-53: geen dubbel gaat voor niets kwijt)
+Het open geval van de eerste ronde (A laat vallen, valt weg, krijgt het bij zijn herstel terug, B raapt het
+daarna nog op: dubbel) is dicht. Geen commando naar de client.
+- Vertrekt A uit de game (98, lobbywissel of verbinding weg; `Lobby::remove_client` roept
+  `spire_guard_note_floor_leave` aan) terwijl er nog een andere speler in zit, dan verliest A's momentopname
+  nu zijn open vloeritems (hoogstens het tegoed). Het tegoed blijft op het vloeritem (status LEFT, bedrag =
+  wat A verloor): een latere opraap geeft het een andere raper, nooit A.
+- Is A de laatste speler, dan eindigt de game met zijn vloeritems en houdt A ze in zijn momentopname.
+- Afgerekend (SETTLED, na een 98 die het item al niet meer had) verandert niet. Bij een 98 komt het
+  vertrek vóór het volgen van de 98 (`on_61_98`): het vertrek neemt het, het volgen verandert daarna niets.
+- Bestanden: src/SpireFlagBridge.cc/.hh, src/Lobby.cc (één aanroep), src/StaticTests.cc.
+
+Rood op 95c434c (stub: vertrek verandert niets, geen LEFT-status; regelnummers van het definitieve bestand):
+- (k) 2492 `expect_eq(1u, left)`, 2495 `expect_eq(1u, step.given)`, 2498
+  `expect_eq(1u, count(a_after, sword) + count(b_memory, sword))` rood voor alle drie kaarten (A en B samen 2).
+- (l) groen op beide (A alleen: hij krijgt het terug; was (h)).
+- (m) 2525 `expect_eq(0u, count(after_login(a, card), sword))` rood voor alle drie kaarten.
+- (n) 2537 `expect_eq(0u, ... a ... + ... b ...)` rood voor 6 kaartparen; Meseta 2545/2546 rood.
+- 98 met B erbij: 2557/2558 rood, alleen in de stub (95c434c zelf rekende dat af via de 98).
+Letterlijk: `RED src/StaticTests.cc:2500 1u != count(a_after, sword) + count(b_memory, sword)` (3x),
+`RED src/StaticTests.cc:2527 0u != count(after_login(a, card), sword)` (3x),
+`RED src/StaticTests.cc:2539 0u != count(after_login(a, card), sword) + count(after_login(b, b_card), sword)` (6x)
+(stub-regelnummers, +2). Groen erna: alles, ook (h), (i), (j) en de K7-tests.
+
+Bewust smal verlies onder B-AF-53: (m) en (n). Laat A iets vallen en vertrekt hij terwijl B er is, en
+raapt niemand het op voordat de game eindigt, dan is het weg: A's momentopname verloor het bij zijn vertrek
+en B kreeg het nooit, dus na beider herstel heeft geen van beiden het, nooit dubbel.
+
+## Wat de speler merkt (vervolg)
+Laat hij iets vallen en verlaat hij het spel terwijl zijn partner er nog is, dan is het voor de partner: raapt
+die het op, dan heeft de partner het; raapt niemand het op, dan is het weg. Is hij alleen, dan krijgt hij het
+bij wegvallen terug.
 
 ## Build en checks
 - `build/newserv help | head -1`: zie het eindrapport (binary van de rapportcommit, de HEAD).
 - `build/newserv run-static-tests`: exit 0, `-- All static tests passed`, 13x "GUARD E2E", 0x "FAILED"
-  (op de fix-commit).
+  (op e7f9f1a).
 - `git diff --quiet ee0fa66 HEAD -- src/SpireDrops.cc src/SpireDrops.hh`: exit 0 (gelijk).
 
 ## Dekking
