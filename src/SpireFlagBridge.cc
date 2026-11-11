@@ -1735,6 +1735,22 @@ static void spire_run_timer_stop(const Lobby* l) {
   spire_run_timers.erase(l);
 }
 
+// B-AF-55 (veilig-1): the run timer's end r252 is kept for the game next to its room clears (SpireReplayState), so a
+// client that missed it during its own floor load gets it again (spire_replay_values); the end mark follows
+static void spire_replay_note_run_end(std::shared_ptr<const Lobby> l, uint32_t value);
+static void spire_replay_forget_run_end(std::shared_ptr<const Lobby> l);
+
+void spire_run_timer_record_end(std::shared_ptr<const Lobby> l, uint32_t value, uint32_t cause) {
+  spire_replay_note_run_end(l, value);
+  spire_run_mark_ended(l, (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "run timer: time up" : "run timer: player left",
+      cause == SPIRE_BRIDGE_TIMER_PLAYER_LEFT);
+}
+
+void spire_run_timer_forget_end(std::shared_ptr<const Lobby> l, const phosg::PrefixedLogger& log) {
+  spire_run_forget_end(l->lobby_id, "run timer start", log);
+  spire_replay_forget_run_end(l); // a kept r252 of an earlier run never reaches this one
+}
+
 static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, const Lobby* key, uint64_t generation) {
   for (;;) {
     co_await async_sleep(SPIRE_BRIDGE_TIMER_TICK);
@@ -1787,8 +1803,7 @@ static asio::awaitable<void> spire_run_timer_tick(std::weak_ptr<Lobby> weak_l, c
     l->log.info_f("Spire bridge: run timer end ({}) at {} s with {} of {} client(s); sent r{}={:08X}",
         (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "time up" : "player left", elapsed, clients, t.clients_at_start,
         SPIRE_BRIDGE_TIMER_REGISTER, cmd.value.as_int.load());
-    spire_run_mark_ended(l, (cause == SPIRE_BRIDGE_TIMER_TIME_UP) ? "run timer: time up" : "run timer: player left",
-        cause == SPIRE_BRIDGE_TIMER_PLAYER_LEFT);
+    spire_run_timer_record_end(l, cmd.value.as_int, cause);
     spire_run_timers.erase(it);
     co_return;
   }
@@ -1818,7 +1833,7 @@ static void spire_run_timer_start(
     c->log.info_f("Spire savestate: run timer of the resumed run starts {} s back", std::min(run->elapsed, t.limit_s));
   }
   spire_run_timers[l.get()] = t;
-  spire_run_forget_end(l->lobby_id, "run timer start", c->log);
+  spire_run_timer_forget_end(l, c->log);
   c->log.info_f("Spire bridge: run timer for serial {:010} in q{}: limit {} s, warning {} s before, {} client(s)",
       serial_number, quest_number, t.limit_s, t.warn_before_s, t.clients_at_start);
   auto s = c->require_server_state();
@@ -7491,12 +7506,13 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c) {
   }
 }
 
-// Per game: register -> client id -> latest value, and floor -> latest r251. The weak_ptr tells a reused Lobby
-// address from the game that wrote the state.
+// Per game: register -> client id -> latest value, floor -> latest r251, and the run timer's end r252 (B-AF-55). The
+// weak_ptr tells a reused Lobby address from the game that wrote the state.
 struct SpireReplayState {
   std::weak_ptr<const Lobby> game;
   std::map<uint8_t, std::map<uint8_t, uint32_t>> registers;
   std::map<uint8_t, uint32_t> room_cleared;
+  std::optional<uint32_t> run_end;
 };
 static std::unordered_map<const Lobby*, SpireReplayState> spire_replay_states;
 
@@ -7513,7 +7529,7 @@ static SpireReplayState* spire_replay_state_for(std::shared_ptr<const Lobby> l, 
     if (spire_replay_states.size() > 256) {
       std::erase_if(spire_replay_states, [](const auto& e) { return e.second.game.expired(); });
     }
-    it = spire_replay_states.emplace(l.get(), SpireReplayState{.game = l, .registers = {}, .room_cleared = {}}).first;
+    it = spire_replay_states.emplace(l.get(), SpireReplayState{.game = l, .registers = {}, .room_cleared = {}, .run_end = std::nullopt}).first;
   }
   return &it->second;
 }
@@ -7578,6 +7594,44 @@ static void spire_replay_note_room_cleared(std::shared_ptr<const Lobby> l, uint8
   spire_replay_state_for(l, true)->room_cleared[floor] = value;
 }
 
+static void spire_replay_note_run_end(std::shared_ptr<const Lobby> l, uint32_t value) {
+  spire_replay_state_for(l, true)->run_end = value;
+}
+
+static void spire_replay_forget_run_end(std::shared_ptr<const Lobby> l) {
+  if (auto* st = spire_replay_state_for(l, false)) {
+    st->run_end.reset();
+  }
+}
+
+std::vector<std::pair<uint8_t, uint32_t>> spire_replay_values(
+    std::shared_ptr<const Lobby> l, uint8_t client_id, uint32_t floor) {
+  std::vector<std::pair<uint8_t, uint32_t>> ret;
+  auto* st = spire_replay_state_for(l, false);
+  if (!st) {
+    return ret;
+  }
+  for (const auto& [reg, by_client] : st->registers) {
+    // A register only one other client writes: its value. Written by this client itself: nothing (it has its own).
+    for (const auto& [writer_id, value] : by_client) {
+      if (writer_id != client_id) {
+        ret.emplace_back(reg, value);
+      }
+    }
+  }
+  auto rc = st->room_cleared.find(floor);
+  if (rc != st->room_cleared.end()) {
+    ret.emplace_back(SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, rc->second);
+  }
+  // B-AF-55: the run timer's end, last, and only while the game's run is still the ended one (a 'B', 'S' or quest
+  // start forgets the end mark). A second r252 in the ended run changes nothing on the client: its end and t_timer
+  // stop at phase 9 (make_spire.py, label end and t_timer)
+  if (st->run_end && spire_run_end_for(l)) {
+    ret.emplace_back(SPIRE_BRIDGE_TIMER_REGISTER, *st->run_end);
+  }
+  return ret;
+}
+
 static asio::awaitable<void> spire_replay_send(
     std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l, uint32_t floor, size_t attempt) {
   co_await async_sleep(attempt ? SPIRE_REPLAY_SECOND_DELAY : SPIRE_REPLAY_DELAY);
@@ -7586,12 +7640,8 @@ static asio::awaitable<void> spire_replay_send(
   if (!c || !l || (c->lobby.lock() != l) || (c->floor != floor)) {
     co_return; // left the game, or another floor load is under way (that one replays again)
   }
-  auto* st = spire_replay_state_for(l, false);
-  if (!st) {
-    co_return;
-  }
   size_t sent = 0;
-  auto send_reg = [&](uint8_t reg, uint32_t value) {
+  for (const auto& [reg, value] : spire_replay_values(l, c->lobby_client_id, floor)) {
     G_SyncQuestRegister_6x77 cmd;
     cmd.header = {0x77, 0x03, 0x0000};
     cmd.register_number = reg;
@@ -7599,18 +7649,6 @@ static asio::awaitable<void> spire_replay_send(
     send_command_t(c, 0x60, 0x00, cmd);
     c->log.info_f("Spire replay: r{} = {:08X} after the load of floor {:02X}", reg, value, floor);
     sent++;
-  };
-  for (const auto& [reg, by_client] : st->registers) {
-    // A register only one other client writes: its value. Written by this client itself: nothing (it has its own).
-    for (const auto& [client_id, value] : by_client) {
-      if (client_id != c->lobby_client_id) {
-        send_reg(reg, value);
-      }
-    }
-  }
-  auto rc = st->room_cleared.find(floor);
-  if (rc != st->room_cleared.end()) {
-    send_reg(SPIRE_BRIDGE_ROOM_CLEARED_REGISTER, rc->second);
   }
   if (sent) {
     l->log.info_f("Spire replay: {} register(s) to client {} after its load of floor {:02X} (send {})", sent,

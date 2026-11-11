@@ -631,8 +631,9 @@ void spire_bridge_check_dark_falz_flag(
 // - Replay after a floor load: for the registers in SpireReplayRegisters the server keeps, per game, the latest value
 //   each client synced (6x77). When a client finishes a floor load (6x1F / 6x21, and 6F) it gets, after
 //   SPIRE_REPLAY_DELAY (and once more SPIRE_REPLAY_SECOND_DELAY later), the latest value of every such register written by another client, and the last room-cleared
-//   r251 of that floor. A 6x77 that reached it during its own load (respawn, go_floor) is so delivered again; a value
-//   it already had is unchanged by the replay. Nothing is sent if the client changed floor again in the meantime.
+//   r251 of that floor, and (B-AF-55) the run timer's end r252 while the game's run is the ended one. A 6x77 that
+//   reached it during its own load (respawn, go_floor) is so delivered again; a value it already had is unchanged by
+//   the replay. Nothing is sent if the client changed floor again in the meantime.
 // - '$spire status' shows the rooms this character cleared; '$spire continue' names the room to continue at (the one
 //   after the last room cleared) and the lives it had at that clear (from its 'L' codes), so after a disconnect the
 //   player picks that room's quest, which its AvailableIf has unlocked. The kit follows from the class.
@@ -654,6 +655,15 @@ uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor);
 constexpr auto SPIRE_REPLAY_DELAY = std::chrono::milliseconds(1500);
 constexpr auto SPIRE_REPLAY_SECOND_DELAY = std::chrono::milliseconds(3500); // after the first send
+// What a replay sends the client with this lobby client id after its load of this floor, in order: the kept registers
+// of the other writers, the floor's r251, and last the run timer's end r252, only while the run is still marked ended
+// (B-AF-55). Exported for StaticTests.
+std::vector<std::pair<uint8_t, uint32_t>> spire_replay_values(
+    std::shared_ptr<const Lobby> l, uint8_t client_id, uint32_t floor);
+// B-AF-55: the run timer's end as spire_run_timer_tick records it (r252 kept for the replay, the run marked ended), and
+// its start as spire_run_timer_start forgets both (no kept r252 reaches a new run). Exported for StaticTests.
+void spire_run_timer_record_end(std::shared_ptr<const Lobby> l, uint32_t value, uint32_t cause);
+void spire_run_timer_forget_end(std::shared_ptr<const Lobby> l, const phosg::PrefixedLogger& log);
 
 // v26 follow the leader (SpireFollowLeader, regie 2026-10-24 Marck's choice A): a room starts as soon as the leader is
 // in it, the partner never waits for the other. When the leader client loads a floor (6x1F / 6x21 / 6F) other than

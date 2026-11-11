@@ -8691,5 +8691,60 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire veilig-1 (B-AF-55): the run timer's end r252 comes again after a floor load, never in a new run");
+  {
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->io_context = std::make_shared<asio::io_context>(1);
+    auto l = std::make_shared<Lobby>(s, 0x7C01, true);
+    std::shared_ptr<const Lobby> cl = l;
+    // the r252 a replay sends this client after its load of this floor (nullopt: none), and that it comes last
+    auto replayed_end = [&](uint8_t client_id, uint32_t floor) -> std::optional<uint32_t> {
+      auto values = spire_replay_values(cl, client_id, floor);
+      for (size_t z = 0; z < values.size(); z++) {
+        if (values[z].first == SPIRE_BRIDGE_TIMER_REGISTER) {
+          expect_eq(values.size() - 1, z);
+          return values[z].second;
+        }
+      }
+      return std::nullopt;
+    };
+    auto end_code = [](uint32_t cause, uint32_t seconds) {
+      return (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) | (cause << 16) | seconds;
+    };
+    // no end yet: nothing to replay
+    expect(spire_replay_values(cl, 0, 0x02).empty());
+    expect(!replayed_end(1, 0x02));
+    // time up at 240 s: every client gets it again after its floor load, on any floor (the one that missed it too)
+    uint32_t time_up = end_code(SPIRE_BRIDGE_TIMER_TIME_UP, 240);
+    spire_run_timer_record_end(cl, time_up, SPIRE_BRIDGE_TIMER_TIME_UP);
+    for (uint8_t client_id : {0, 1}) {
+      for (uint32_t floor : {0x00u, 0x02u, 0x0Bu}) {
+        auto end = replayed_end(client_id, floor);
+        expect(end.has_value());
+        expect_eq(time_up, *end);
+      }
+    }
+    // a second floor load in the ended run: the same value again (a state, not an event)
+    expect_eq(time_up, *replayed_end(1, 0x03));
+    // a new run in the game: the timer's 'S' forgets the kept end, so neither client gets the old r252
+    spire_run_timer_forget_end(cl, l->log);
+    for (uint8_t client_id : {0, 1}) {
+      for (uint32_t floor : {0x00u, 0x02u, 0x0Bu}) {
+        expect(!replayed_end(client_id, floor));
+      }
+    }
+    // that new run's own end (the second player left at 30 s): its value, not the old one
+    uint32_t left = end_code(SPIRE_BRIDGE_TIMER_PLAYER_LEFT, 30);
+    spire_run_timer_record_end(cl, left, SPIRE_BRIDGE_TIMER_PLAYER_LEFT);
+    expect_eq(left, *replayed_end(0, 0x05));
+    expect_eq(left, *replayed_end(1, 0x05));
+    spire_run_timer_forget_end(cl, l->log);
+    expect(!replayed_end(0, 0x05));
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }
