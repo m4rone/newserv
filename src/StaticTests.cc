@@ -2347,18 +2347,215 @@ void run_static_tests() {
       }
     }
 
-    // (c) A drops the sword, nobody picks it up, and A's Wii drops: A's restore does not give it back (the partner can
-    // still pick it up from the floor; giving it back would double it then)
+    // K7b: the snapshot follows only what moves between players. The steps as the server takes them: the drop puts a
+    // credit on the floor item and leaves the dropper's snapshot; a pickup by another player moves it.
+    auto drop_step = [&](SpireGuardSnapshot& dropper, const ItemData& item) {
+      return spire_guard_floor_drop_credit(dropper, item, limits);
+    };
+    using CreditState = SpireGuardFloorCreditState;
+    auto pickup_step = [&](SpireGuardSnapshot* dropper, SpireGuardSnapshot* picker, bool self, CreditState state,
+                           const ItemData& item, uint32_t credit) {
+      return spire_guard_floor_pickup_step(dropper, picker, self, state, item, credit, limits);
+    };
+    auto leave_step = [&](SpireGuardSnapshot& dropper, const ItemData& item, uint32_t credit, bool others_remain) {
+      return spire_guard_floor_leave_step(dropper, item, credit, others_remain, limits);
+    };
+
+    // (h) A drops the sword, nobody picks it up, and A's Wii drops without a 98: after A's restore A has the sword
     {
       auto snap = awaiting(a_real);
-      expect_eq(1u, spire_guard_snapshot_take_drop(snap, sword, limits));
+      expect_eq(1u, drop_step(snap, sword));
       for (const auto& card : {a_real, run_copy, a_memory}) {
-        expect_eq(0u, count(after_login(snap, card), sword));
+        expect_eq(1u, count(after_login(snap, card), sword));
       }
-      // a later pickup by B gives it once; a floor item without a credit (a box, an enemy) is never added
+      // a floor item without a credit (a box, an enemy) is never added
       auto b = awaiting(b_real);
-      expect_eq(0u, spire_guard_snapshot_give_pickup(b, sword, 0, limits));
+      expect_eq(0u, pickup_step(&snap, &b, false, CreditState::OPEN, sword, 0).given);
       expect(spire_guard_same_state(b.inventory, b.disp, b_real.first, b_real.second));
+    }
+
+    // (i) A drops the sword, picks it up himself, and his Wii drops: the sword once, with A
+    {
+      auto snap = awaiting(a_real);
+      uint32_t c = drop_step(snap, sword);
+      expect_eq(1u, c);
+      auto step = pickup_step(&snap, &snap, true, CreditState::OPEN, sword, c);
+      expect_eq(0u, step.taken + step.given);
+      expect(spire_guard_same_state(snap.inventory, snap.disp, a_real.first, a_real.second));
+      for (const auto& card : {a_real, run_copy, pick_into(a_memory, sword)}) {
+        expect_eq(1u, count(after_login(snap, card), sword));
+      }
+    }
+
+    // (j) the meseta variant of (h): A drops 300 meseta, nobody picks it up, A's Wii drops: A has his 1000 again
+    {
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 300;
+      auto snap = awaiting(a_real);
+      expect_eq(300u, drop_step(snap, meseta));
+      for (const auto& card : {a_real, run_copy, drop_from(a_real, meseta)}) {
+        expect_eq(1000u, after_login(snap, card).second.stats.meseta.load());
+      }
+    }
+
+    // the K7 cases through the K7b steps: A drops, B picks up, then A's or B's Wii drops: the sword exists once
+    {
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      uint32_t c = drop_step(a, sword);
+      expect(spire_guard_same_state(a.inventory, a.disp, a_real.first, a_real.second)); // the drop alone moves nothing
+      auto step = pickup_step(&a, &b, false, CreditState::OPEN, sword, c);
+      expect_eq(1u, step.taken);
+      expect_eq(1u, step.given);
+      expect(spire_guard_same_state(a.inventory, a.disp, a_memory.first, a_memory.second));
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(0u, count(after_login(a, card), sword)); // A drops out: not doubled
+      }
+      for (const auto& card : {b_real, run_copy, b_memory}) {
+        expect_eq(1u, count(after_login(b, card), sword)); // B drops out: not gone
+      }
+      // B does not follow (another kind of game, protected): A still loses it, B is not given it
+      auto a2 = awaiting(a_real);
+      auto step2 = pickup_step(&a2, nullptr, false, CreditState::OPEN, sword, drop_step(a2, sword));
+      expect_eq(1u, step2.taken);
+      expect_eq(0u, step2.given);
+      expect_eq(0u, count(as_character(a2), sword));
+    }
+
+    // settled: A drops, leaves with a 98 (his snapshot follows his character without the sword), then B picks it up.
+    // B gains it without a take: A's other item of the same kind stays (no take by kind from what A really has).
+    {
+      auto a_two = a_real;
+      a_two.first.items[a_two.first.num_items] = a_two.first.items[3];
+      a_two.first.items[a_two.first.num_items].data.data1[3] = 0x05; // a second sword of the same kind, another grind
+      a_two.first.items[a_two.first.num_items].data.id = 0x00010010;
+      a_two.first.num_items++;
+      auto a = awaiting(a_two);
+      uint32_t c = drop_step(a, sword);
+      auto a_two_memory = drop_from(a_two, sword);
+      expect(spire_guard_base_game_follow(a, a_two_memory.first, a_two_memory.second));
+      auto b = awaiting(b_real);
+      auto step = pickup_step(&a, &b, false, CreditState::SETTLED, sword, c);
+      expect_eq(0u, step.taken);
+      expect_eq(1u, step.given);
+      expect(spire_guard_same_state(a.inventory, a.disp, a_two_memory.first, a_two_memory.second));
+      expect_eq(1u, count(as_character(b), sword));
+      // A after his 98 takes it back himself: his snapshot gets it again
+      auto a3 = awaiting(a_two);
+      uint32_t c3 = drop_step(a3, sword);
+      expect(spire_guard_base_game_follow(a3, a_two_memory.first, a_two_memory.second));
+      expect_eq(1u, pickup_step(&a3, &a3, true, CreditState::SETTLED, sword, c3).given);
+      expect_eq(1u, count(as_character(a3), sword));
+    }
+
+    // meseta through the steps: B gains at most what A's snapshot lost, the minimum of the drop and what A held
+    {
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 1500; // more than A's snapshot holds (1000)
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      uint32_t c = drop_step(a, meseta);
+      expect_eq(1000u, c);
+      expect_eq(1000u, a.disp.stats.meseta.load());
+      auto step = pickup_step(&a, &b, false, CreditState::OPEN, meseta, c);
+      expect_eq(1000u, step.taken);
+      expect_eq(1000u, step.given);
+      expect_eq(0u, a.disp.stats.meseta.load());
+      expect_eq(1500u, b.disp.stats.meseta.load());
+      // a partial stack through the steps: 3 of 8 Monomates, B gets 3, A keeps 5
+      auto a4 = awaiting(a_real);
+      auto& stack = a4.inventory.items[a4.inventory.num_items++];
+      stack.state = 1;
+      stack.data.data1[0] = 0x03;
+      stack.data.data1[5] = 8;
+      ItemData three = stack.data;
+      three.data1[5] = 3;
+      uint32_t c4 = drop_step(a4, three);
+      expect_eq(3u, c4);
+      expect_eq(8u, static_cast<uint32_t>(a4.inventory.items[a4.inventory.num_items - 1].data.data1[5]));
+      auto b4 = awaiting(b_real);
+      auto step4 = pickup_step(&a4, &b4, false, CreditState::OPEN, three, c4);
+      expect_eq(3u, step4.taken);
+      expect_eq(3u, step4.given);
+      expect_eq(5u, static_cast<uint32_t>(a4.inventory.items[a4.inventory.num_items - 1].data.data1[5]));
+    }
+
+    // K7b leaving (B-AF-53, no double before nothing lost): the dropper leaves the game with his item still on the floor
+    // (k) A drops, A's Wii drops while B stays, A logs in and is restored, then B picks it up: the sword exists once, with B
+    {
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      uint32_t c = drop_step(a, sword);
+      uint32_t left = leave_step(a, sword, c, true);
+      expect_eq(1u, left);
+      auto step = pickup_step(&a, &b, false, CreditState::LEFT, sword, left);
+      expect_eq(0u, step.taken);
+      expect_eq(1u, step.given);
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        auto a_after = after_login(a, card);
+        expect_eq(1u, count(a_after, sword) + count(b_memory, sword)); // B still in the game: his memory holds it
+        for (const auto& b_card : {b_real, run_copy, b_memory}) {
+          expect_eq(1u, count(a_after, sword) + count(after_login(b, b_card), sword)); // B's Wii drops too
+        }
+      }
+      // A, back in that game, picks it up himself: never given to him again (his restore had his card of before)
+      auto a2 = awaiting(a_real);
+      uint32_t left2 = leave_step(a2, sword, drop_step(a2, sword), true);
+      expect_eq(0u, pickup_step(&a2, &a2, true, CreditState::LEFT, sword, left2).given);
+    }
+
+    // (l) A drops while he is alone, and his Wii drops: the game ends with him, his restore gives the sword back
+    {
+      auto a = awaiting(a_real);
+      uint32_t c = drop_step(a, sword);
+      expect_eq(0u, leave_step(a, sword, c, false));
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(1u, count(after_login(a, card), sword));
+      }
+    }
+
+    // (m) A drops, A's Wii drops while B stays, nobody picks it up and the game ends: A does not have it (the narrow
+    // loss B-AF-53 accepts: never doubled)
+    {
+      auto a = awaiting(a_real);
+      leave_step(a, sword, drop_step(a, sword), true);
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(0u, count(after_login(a, card), sword));
+      }
+    }
+
+    // (n) as (m), and B leaves too without picking it up (the game ends): after both restores the sword is gone, with
+    // neither of them (never doubled); B's leave changes nothing for A's credit
+    {
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      leave_step(a, sword, drop_step(a, sword), true);
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        for (const auto& b_card : {b_real, run_copy}) {
+          expect_eq(0u, count(after_login(a, card), sword) + count(after_login(b, b_card), sword));
+        }
+      }
+      // meseta the same way: A's 300 on the floor are gone from his snapshot, B never had them
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 300;
+      auto am = awaiting(a_real);
+      expect_eq(300u, leave_step(am, meseta, drop_step(am, meseta), true));
+      expect_eq(700u, after_login(am, a_real).second.stats.meseta.load());
+    }
+
+    // the 98 of A with B present: the leave comes before the 98 is followed (on_61_98), so the leave takes it; the
+    // follow of his real character (without the sword) then changes nothing more, and B's pickup gives it to B
+    {
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      uint32_t left = leave_step(a, sword, drop_step(a, sword), true);
+      expect(spire_guard_base_game_follow(a, a_memory.first, a_memory.second));
+      expect(spire_guard_same_state(a.inventory, a.disp, a_memory.first, a_memory.second));
+      expect_eq(1u, pickup_step(&a, &b, false, CreditState::LEFT, sword, left).given);
+      expect_eq(1u, count(as_character(b), sword) + count(as_character(a), sword));
     }
 
     // meseta: the same rule, and at most what the dropper's snapshot held (meseta earned in the base without a 98 is

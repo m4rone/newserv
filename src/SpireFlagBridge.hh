@@ -948,15 +948,22 @@ std::string spire_guard_verified_scope(uint32_t bank_items, uint32_t bank_meseta
 // Never throws.
 void spire_guard_after_98(std::shared_ptr<Client> c);
 
-// K7 (critic, B-REGIE-21-5): items and meseta handed over through the floor. The snapshot follows a 98 only, so a
-// player whose Wii drops after a floor hand-over, without a 98, used to get the snapshot of before back at the next
+// K7 (critic, B-REGIE-21-5) and K7b: items and meseta handed over through the floor. The snapshot follows a 98 only,
+// so a player whose Wii drops after a floor hand-over, without a 98, used to get the snapshot of before back at the next
 // login: the dropper still had the item (doubled with the partner who picked it up), the picker lost it. Now, in the
 // games whose 98 the snapshot follows (a Normal or Solo game under AwaitingSave alone, the base game included), the
-// snapshot also follows each floor drop (6x2A, 6x5D) and each pickup (6x59, 6x5A) the server itself handles. The rule
-// is conservation, never more: the dropper's snapshot loses what was dropped (as far as it holds it, meseta at most
-// what it holds); that amount is a credit on the floor item, and only a pickup of that floor item by a player whose
-// snapshot follows gives it back, at most the credit. A floor item without a credit (from a box or an enemy, from a
-// player whose snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
+// snapshot follows what moves between players through the floor, and only that (K7b). A followed drop (6x2A, 6x5D)
+// leaves the dropper's snapshot as it is and puts a credit on the floor item: what his snapshot would lose (as far as it
+// holds it, meseta at most what it holds). Only a pickup (6x59, 6x5A) by ANOTHER player moves it: the dropper's snapshot
+// loses it (at most the credit) and the picker's, if it follows, gains at most what the dropper's lost. A pickup by the
+// dropper himself changes nothing; nobody picking it up changes nothing (his restore gives it back). If the dropper's
+// 98 follows his real character after the drop, the credit is settled (his snapshot no longer holds the item) and a
+// following picker gains it without a take. Leaving (K7b, B-AF-53: no double before nothing lost): when the dropper leaves the
+// game (98, a lobby change or a dropped connection) while another player stays, his snapshot loses his open floor items
+// now (at most the credit), since another can still pick them up after his restore; a later pickup gives them to
+// another picker only, never to him. Is he the last player, the game ends with its floor items and his snapshot keeps
+// them. The narrow loss this accepts: he leaves with another present and nobody picks the item up. A floor item without a credit (from a box or an enemy, from a player whose
+// snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
 // What the server cannot see (shop, tekker) changes no snapshot: the 98 still does. Neither does a 6x29 on its own (a
 // sale, a bank deposit, a fed mag); the trade window is followed at its execution since Veilig-2 (below).
 bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo);
@@ -969,6 +976,33 @@ uint32_t spire_guard_snapshot_take_drop(
 // capped at 999999). Returns the amount added; 0 (snapshot unchanged) if credit is 0 or the item does not fit.
 uint32_t spire_guard_snapshot_give_pickup(
     SpireGuardSnapshot& snapshot, const ItemData& picked, uint32_t credit, const ItemData::StackLimits& limits);
+// K7b: the drop step: the credit the dropped item gets (what spire_guard_snapshot_take_drop would remove from the
+// dropper's snapshot); the snapshot itself stays as it is.
+uint32_t spire_guard_floor_drop_credit(
+    const SpireGuardSnapshot& dropper, const ItemData& dropped, const ItemData::StackLimits& limits);
+// K7b: the state of a floor credit. OPEN: the dropper's snapshot still holds it. SETTLED: the dropper's 98 made his
+// snapshot follow his real character, which no longer holds it. LEFT: his snapshot lost it when he left the game while
+// another player stayed.
+enum class SpireGuardFloorCreditState { OPEN, SETTLED, LEFT };
+// K7b: the pickup step on the snapshots. dropper: the dropper's snapshot (nullptr if not loaded); picker: the picker's
+// followed snapshot (nullptr if it does not follow). SETTLED: give at most the credit. Else a pickup by the dropper
+// changes nothing; by another player LEFT gives at most the credit, and OPEN takes at most the credit from the
+// dropper's snapshot (if it follows; taken) and gives the picker at most that (given).
+struct SpireGuardFloorPickup {
+  uint32_t taken = 0;
+  uint32_t given = 0;
+};
+SpireGuardFloorPickup spire_guard_floor_pickup_step(SpireGuardSnapshot* dropper, SpireGuardSnapshot* picker,
+    bool picker_is_dropper, SpireGuardFloorCreditState state, const ItemData& item, uint32_t credit,
+    const ItemData::StackLimits& limits);
+// K7b: the leave step for one OPEN credit of the leaving dropper: with another player staying, his snapshot loses at
+// most the credit (if it follows); the last player out keeps it. Returns the amount taken (the credit from then on).
+uint32_t spire_guard_floor_leave_step(SpireGuardSnapshot& dropper, const ItemData& item, uint32_t credit,
+    bool others_remain, const ItemData::StackLimits& limits);
+// K7b: called from Lobby::remove_client for a game, before c is removed. Never throws.
+void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain);
+// K7b: after the 98 of c made its snapshot follow its real character: the credits of what c dropped are settled.
+void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c);
 // Called from 6x2A and 6x5D after the server put the dropped item on the floor. Never throws.
 void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id);
 // Called from the pickup after the server moved the floor item into c's inventory. Never throws.
