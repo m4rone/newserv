@@ -3,11 +3,14 @@
 Worktree `/home/m4rck/code/worktrees/newserv/balans-1`, tak `spike/balans`, gebouwd op 9e40c01.
 Codecommits: e91dba414ea3ed5c85927beba929d21d5c865ef5 (`feat: level floor for the trailing player at quest load`),
 e3394dd04c0493eea675951ba9ca14ff8500c796 (`fix: the level floor follows the quest leader in slot 0, not the game
-leader`) en 00897e4c68e63e1e6f3cd8de92d112df663750d1 (`fix: the heat follows the quest leader in slot 0, as the level
-floor does`). Overal waar hieronder "leider" staat is dat sinds de tweede commit de questleider: de speler op de plek
-uit `SpireFollowLeader` (anders plek 0), niet de spelleider (`l->leader_id`). Zie "Vervolg: de questleider is de maat"
-en "Hitte volgt de questleider". De uitvoer onder "Tests" is van de eerste commit; de uitvoer van de eindstand staat
-onder "Hitte volgt de questleider".
+leader`), 00897e4c68e63e1e6f3cd8de92d112df663750d1 (`fix: the heat follows the quest leader in slot 0, as the level
+floor does`) en 557fdee682eeeb7409558a479d7b6fc91a47dcc2 (`fix: floor and heat fall back to the same leader when the
+leader slot is empty`). Overal waar hieronder "leider" staat is dat sinds de tweede commit de questleider: de speler
+op de plek uit `SpireFollowLeader` (anders plek 0), niet de spelleider (`l->leader_id`); zit er niemand op die plek,
+dan de spelleider, voor vloer en hitte gelijk. Zie "Vervolg: de questleider is de maat", "Hitte volgt de questleider"
+en "Lege leidersplek: vloer en hitte gelijk". De uitvoer onder "Tests" is van de eerste commit; de uitvoer van de
+eindstand staat onder "Lege leidersplek". Regelnummers in de secties per vervolg zijn die van de commit van dat
+vervolg; de regellijst hieronder en "Gezien" zijn bijgewerkt naar 557fdee.
 
 ## Wat er nu gebeurt
 
@@ -37,36 +40,36 @@ boven de vloer zit, de leider zelf en een solo-speler krijgen precies wat ze voo
 
 ## Geraakte regels in SpireFlagBridge (voor het samenvoegen)
 
-Regelnummers van vóór de wijziging (9e40c01) en van erna (00897e4, alle drie de commits samen).
+Regelnummers van vóór de wijziging (9e40c01) en van erna (557fdee, alle vier de commits samen).
 `git diff 9e40c01 --stat -- src/SpireFlagBridge.cc src/SpireFlagBridge.hh` geeft:
 
 ```
- src/SpireFlagBridge.cc | 51 ++++++++++++++++++++++++++++++++++++++++++++------
+ src/SpireFlagBridge.cc | 55 ++++++++++++++++++++++++++++++++++++++++++++------
  src/SpireFlagBridge.hh |  5 ++++-
- 2 files changed, 49 insertions(+), 7 deletions(-)
+ 2 files changed, 53 insertions(+), 7 deletions(-)
 ```
 
-Samen 49 regels erbij en 7 weg (de vloer 38 erbij en 4 weg, de hitte 11 erbij en 3 weg); dat is boven de
+Samen 53 regels erbij en 7 weg (de vloer 42 erbij en 4 weg, de hitte 11 erbij en 3 weg); dat is boven de
 oorspronkelijke richtwaarde van 25. Reden: de geldigheidscontrole en het level van de leider hebben de bestandslokale
 functies `spire_start_level_bonus_for_client` en `spire_resume_level_for_client` nodig, dus de lijm kan niet in
 SpireMeta staan.
 
 `src/SpireFlagBridge.cc`:
-- na oud 4654 (nieuw 4655-4682): nieuwe statische functie `spire_level_floor_for_client`, 28 regels, pure toevoeging
-  tussen `spire_resume_level_for_client` en `spire_start_level_quest_bin`. De leider komt uit nieuw 4667-4670
-  (`spire_follow_leader`, anders plek 0).
-- na oud 4663 (nieuw 4692), hervat-tak: één regel erbij,
+- na oud 4654 (nieuw 4655-4686): nieuwe statische functie `spire_level_floor_for_client`, 32 regels, pure toevoeging
+  tussen `spire_resume_level_for_client` en `spire_start_level_quest_bin`. De leider komt uit nieuw 4668-4674
+  (`spire_follow_leader`, anders plek 0; zit daar niemand, dan `l->leader_id`).
+- na oud 4663 (nieuw 4696), hervat-tak: één regel erbij,
   `level = spire_level_floor_for_client(c, l, resume_level, 0).value_or(level);`
-- oud 4683 (nieuw 4712-4713): `if (!bonus || !bin_contents)` werd `auto floor_level = ...` plus
+- oud 4683 (nieuw 4716-4717): `if (!bonus || !bin_contents)` werd `auto floor_level = ...` plus
   `if ((!bonus && !floor_level) || !bin_contents)`.
-- oud 4689 (nieuw 4719): `uint32_t level = floor_level.value_or(spire_start_level_char_level(base, bonus));`
-- oud 4698 (nieuw 4728-4730): de `spire_start_level_sent`-toewijzing; bij een vloer
+- oud 4689 (nieuw 4723): `uint32_t level = floor_level.value_or(spire_start_level_char_level(base, bonus));`
+- oud 4698 (nieuw 4732-4734): de `spire_start_level_sent`-toewijzing; bij een vloer
   `SpireStartLevelSent{lobby_id, quest_number, 0, level, bonus}`, anders ongewijzigd.
-- oud 4700 (nieuw 4732): laatste argument van de logregel, `floor_level ? bonus : (level - base)`.
-- oud 4715 (nieuw 4747), hitte: eerste commentaarregel boven `spire_heat_for_leader`, "game leader's" werd
+- oud 4700 (nieuw 4736): laatste argument van de logregel, `floor_level ? bonus : (level - base)`.
+- oud 4715 (nieuw 4751), hitte: eerste commentaarregel boven `spire_heat_for_leader`, "game leader's" werd
   "quest leader's".
-- na oud 4717 (nieuw 4750-4751), hitte: twee commentaarregels erbij (wie de leider is, en de terugval).
-- oud 4720 (nieuw 4754-4759), hitte: de regel `auto leader = (l->leader_id < ...) ? l->clients[l->leader_id] : nullptr;`
+- na oud 4717 (nieuw 4754-4755), hitte: twee commentaarregels erbij (wie de leider is, en de terugval).
+- oud 4720 (nieuw 4758-4763), hitte: de regel `auto leader = (l->leader_id < ...) ? l->clients[l->leader_id] : nullptr;`
   werd zes regels: de plek uit `spire_follow_leader` (anders 0), de terugval op `l->leader_id` als daar niemand zit,
   en de client op die plek.
 
@@ -158,9 +161,9 @@ is gelezen en in het padblok zichtbaar in de logregel, maar er is geen aparte he
 
 1. **Wie de leider is (herzien in de vervolgopdracht):** de questleider, de speler op de plek uit `SpireFollowLeader`
    (anders plek 0), precies zoals `spire_resume_level_for_client` en de quest hem nemen. De eerste commit nam de
-   spelleider (`l->leader_id`); die keuze is vervangen. Sinds de derde commit neemt de heat dezelfde leider. Eén
-   verschil blijft: zit er niemand op de plek van de questleider, dan valt de heat terug op de spelleider en geeft de
-   vloer geen vloer (zie "Hitte volgt de questleider").
+   spelleider (`l->leader_id`); die keuze is vervangen. Sinds de derde commit neemt de heat dezelfde leider, en
+   sinds de vierde vallen beide op de spelleider terug als er niemand op de plek van de questleider zit (zie "Lege
+   leidersplek: vloer en hitte gelijk"). Vloer en heat hebben dus altijd dezelfde speler als maat.
 2. **Hoe de vloer bij de runkopie komt:** via het bestaande veld `resume_level` van `SpireStartLevelSent` (een
    absoluut level), met de gekochte bonus als bonus van de run. Daardoor hoefde `spire_create_battle_overlay` niet te
    veranderen en lekt de vloer niet in bonus, heat of mag. Prijs: voor een speler met een vloer zeggen twee bestaande
@@ -242,14 +245,12 @@ De oude code nam altijd de spelleider. De nieuwe neemt de plek uit `SpireFollowL
 niemand, dan valt hij terug op de spelleider (`l->leader_id`). Een lege plek wordt dus nooit als leider genomen. Staat
 er ook op `l->leader_id` niemand, dan meldt hij zoals voorheen "no GC leader" en speelt de game stap 0.
 
-Verschil met de vloer: bij een lege leidersplek geeft de vloer geen vloer (zo opgeleverd in het vorige vervolg), de
-hitte neemt de spelleider. Voor de vloer is "geen leider, geen vloer" een veilige uitkomst; de hitte moet altijd een
-stap kiezen. Wil de regie dat ook de vloer dan op de spelleider terugvalt, dan is dat één regel in
-`spire_level_floor_for_client`.
+Verschil met de vloer op het moment van deze commit (00897e4): bij een lege leidersplek gaf de vloer geen vloer en nam
+de hitte de spelleider. Dat verschil is in de volgende commit weggenomen; zie "Lege leidersplek: vloer en hitte gelijk".
 
-Geen gedeelde hulpfunctie: vloer en hitte hebben nu elk hun eigen regels voor de leider (de hitte met terugval, de
-vloer zonder). Een helper van ongeveer acht regels had er zes vervangen door twee en het totaal laten groeien; de
-voorwaarde in de opdracht was dat het niet groeit.
+Geen gedeelde hulpfunctie: op het moment van deze commit hadden vloer en hitte elk hun eigen regels voor de leider (de
+hitte met terugval, de vloer zonder). Een helper van ongeveer acht regels had er zes vervangen door twee en het totaal
+laten groeien; de voorwaarde in de opdracht was dat het niet groeit.
 
 ### Test
 
@@ -291,6 +292,45 @@ I 779764 2026-11-11 14:51:55 - -- All static tests passed
 Dekking van dit deel: welke speler de hitte van een game bepaalt bij het laden van de quest. Niet: de basisstroom
 (zie "Gezien"), niet wat de client toont, niet de Wii.
 
+## Lege leidersplek: vloer en hitte gelijk
+
+Tot en met ab22370 gaf de vloer geen vloer als er niemand op de plek van de questleider zat, terwijl de hitte op de
+spelleider terugviel. Nu neemt `spire_level_floor_for_client` dezelfde terugval als de hitte: leidersplek leeg, dan de
+spelleider (`l->leader_id`); staat ook daar niemand, dan geen vloer. Vloer en hitte hebben daarmee in elke opstelling
+dezelfde speler als maat.
+
+Test eerst: in het blok voor twee clients (`src/StaticTests.cc:7682`) een spel met plek 0 leeg, de client met +14 op
+plek 1 als spelleider en de client zonder aankopen op plek 2. Rood tegen ab22370, exitcode 1, letterlijk:
+
+```
+E 810940 2026-11-11 14:56:19 - run-static-tests: failure at /home/m4rck/code/worktrees/newserv/balans-1/src/StaticTests.cc:7824: bin_at(12) != sent_to(fresh)
+```
+
+Regel 7824 is de client op plek 2, die de vloer van de spelleider op plek 1 hoort te krijgen; de oude code gaf hem de
+ongewijzigde bin (Lv1).
+
+De fix: drie regels in `spire_level_floor_for_client` (`src/SpireFlagBridge.cc:4670-4672`, dezelfde drie als in
+`spire_heat_for_leader` op `:4760-4762`) plus één commentaarregel erboven en een aangepast regelcommentaar.
+
+Het blok dekt nu voor de lege leidersplek: de spelleider met +14 op plek 1 houdt Lv15 en de client op plek 2 krijgt
+Lv13; is de client zonder aankopen spelleider, dan houden beide hun eigen level; wijst `l->leader_id` ook naar een lege
+plek, dan komt er geen vloer; alleen in het spel op plek 1 (hij is dan zelf de spelleider): de eigen bin.
+
+Groen met de fix, de staart van de hele run (14078 regels, 10 waarschuwingsregels van bestaande tests, geen foutregel)
+met de exitcode als eigen regel:
+
+```
+I 822960 2026-11-11 14:58:28 - [C-B] Spire savestate: the run's start_level bonus +0 (saved)
+I 822960 2026-11-11 14:58:28 - [C-B] Deleted
+I 822960 2026-11-11 14:58:28 - [C-A] Deleted
+I 822960 2026-11-11 14:58:28 - [Game:7A03] Deleted
+I 822960 2026-11-11 14:58:28 - -- All static tests passed
+0
+```
+
+Dekking van dit deel: welke speler de maat van de vloer is als de plek van de questleider leeg is. Niet: of die
+opstelling bij een echte questlading voorkomt, niet de basisstroom, niet de Wii.
+
 ## Wat niet gemeten is
 
 - Hervatten op het echte pad: de hervat-tak is één regel en gebruikt dezelfde functies, maar het padblok laadt geen
@@ -309,30 +349,32 @@ level op de Wii werkelijk toepast voor een tweede speler (alleen de Wii beslist 
 
 - toekomstbestendigheid · "opnieuw spelen" binnen dezelfde quest (`spire_create_battle_overlay` met `run_again`) bouwt
   de runkopie uit het gekochte startlevel van nu, zonder vloer; de achterblijver valt daar terug op zijn eigen level.
-  Het is geen questlading en staat niet in de drie momenten · `src/SpireFlagBridge.cc:4862-4863` · een aanroep in de
+  Het is geen questlading en staat niet in de drie momenten · `src/SpireFlagBridge.cc:4866-4867` · een aanroep in de
   overlay-functie van het andere spoor.
-- codekwaliteit · de twee misleidende logregels uit keuze 2 · `src/SpireFlagBridge.cc:4878` en `:4900` · een eigen
+- codekwaliteit · de twee misleidende logregels uit keuze 2 · `src/SpireFlagBridge.cc:4882` en `:4904` · een eigen
   veld of een eigen logtekst bij het samenvoegen.
 - codekwaliteit · de voorwaarde "bewaakte Spire-quest met runkopie voor een GC-client" staat nu drie keer uitgeschreven
-  (bonus, hervatlevel, vloer) · `src/SpireFlagBridge.cc:4587`, `:4621`, `:4662` · één gedeelde hulpfunctie.
+  (bonus, hervatlevel, vloer) · `src/SpireFlagBridge.cc:4587`, `:4621`, `:4663` · één gedeelde hulpfunctie.
 - datakwaliteit, bestond al · het startantwoord en de heat van de leider vergelijken de bonus in levels met het aantal
   gekochte treden (`run_bonus < spire_shop_level(upgrades, 0)`); sinds de bonus per trede meer dan 1 is kloppen die
   eenheden niet. Het heeft nu geen effect omdat startlevels 0 aan de sterkte bijdragen · `src/SpireFlagBridge.cc:3303`
-  en `:4775` · uitzoeken en één regel per plek.
-- codekwaliteit · de regels die de questleider bepalen staan nu op vier plekken (`:2159`, `:4637`, `:4667`, `:4754`) ·
-  `src/SpireFlagBridge.cc` · één gedeelde hulpfunctie, in het bestand van het andere spoor.
-- datakwaliteit, basisstroom, niet aangeraakt · `spire_base_leader_serial` (`src/SpireFlagBridge.cc:5641-5642`) neemt
-  de spelleider en legt zijn serienummer vast als degene die na de run het volgende spel maakt (`:5671`, gebruikt op
-  `:5799`). In het lobby-en-terug-geval is dat B: B maakt het basisspel ("the previous leader creates the next game,
-  so he leads it again", `:5797`). Komt de maker daar op plek 0 (niet nagelezen), dan is B vanaf dan questleider én
+  en `:4779` · uitzoeken en één regel per plek.
+- codekwaliteit · de regels die de questleider bepalen staan nu op vier plekken (`:2159`, `:4637`, `:4668`, `:4758`);
+  vloer en hitte hebben sinds 557fdee dezelfde zes regels met terugval, de andere twee hebben geen terugval ·
+  `src/SpireFlagBridge.cc` · één gedeelde hulpfunctie; voor vloer en hitte samen scheelt die een paar regels, voor
+  alle vier raakt hij het bestand van het andere spoor.
+- datakwaliteit, basisstroom, niet aangeraakt · `spire_base_leader_serial` (`src/SpireFlagBridge.cc:5645-5646`) neemt
+  de spelleider en legt zijn serienummer vast als degene die na de run het volgende spel maakt (`:5675`, gebruikt op
+  `:5803`). In het lobby-en-terug-geval is dat B: B maakt het basisspel ("the previous leader creates the next game,
+  so he leads it again", `:5801`). Komt de maker daar op plek 0 (niet nagelezen), dan is B vanaf dan questleider én
   spelleider en de maat van vloer en hitte in de volgende run, terwijl A de run leidde · omzetten naar de questleider
   is één regel plus een test.
-- gebruiksvriendelijkheid, basisstroom, niet aangeraakt · `spire_base_new_run` (`src/SpireFlagBridge.cc:5849-5856`)
-  laat alleen de spelleider een nieuwe run starten (`c->lobby_client_id != l->leader_id`, `:5852`). Is in een basisspel
+- gebruiksvriendelijkheid, basisstroom, niet aangeraakt · `spire_base_new_run` (`src/SpireFlagBridge.cc:5853-5860`)
+  laat alleen de spelleider een nieuwe run starten (`c->lobby_client_id != l->leader_id`, `:5856`). Is in een basisspel
   de spelleider een ander dan de speler op plek 0, dan krijgt de speler op plek 0 "Only the party leader can start a
   new run." terwijl de quest hem als leider behandelt · dezelfde omzetting.
 - datakwaliteit, niet aangeraakt · "opnieuw spelen" geeft de drops de spelleider mee
-  (`spire_drops_quest_loaded(l, leader ? leader : c)`, `src/SpireFlagBridge.cc:5952-5953`); in het lobby-en-terug-geval
+  (`spire_drops_quest_loaded(l, leader ? leader : c)`, `src/SpireFlagBridge.cc:5956-5957`); in het lobby-en-terug-geval
   is dat B en niet de questleider A. Wat de drops met die leider doen is niet uitgezocht · uitzoeken en zo nodig één
   regel.
 - werkwijze · de commit-hook meldt dat voor deze worktree geen integratietak en uitrol zijn vastgelegd; er is niets
