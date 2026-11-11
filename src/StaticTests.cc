@@ -2432,25 +2432,25 @@ void run_static_tests() {
       expect_eq(0u, spire_guard_snapshot_take_drop(empty, sword, limits));
     }
 
-    // Veilig-2: the trade window and a sale. On V3 a trade is each side's D0 list, each side's own 6x29 of what it gives
-    // (before its D2), and the execution when both D2s are in; a sale is a 6x29 alone. Counted over both players, a
-    // traded item exists once after the logins, never twice; a sold item never comes back.
-    phosg::log_info_f("-- Spire guard: a trade through the trade window or a sale, then a Wii drops without a 98 (Veilig-2)");
+    // Veilig-2: the trade window, a sale, a bank deposit, a fed mag. On V3 a trade is each side's D0 list, each side's
+    // own 6x29 of what it gives (before its D2), and the execution when both D2s are in; the others are a 6x29 alone.
+    // Only what moves between players moves the snapshot: a traded item exists once after the logins, never twice.
+    phosg::log_info_f("-- Spire guard: a trade through the trade window, a sale, a deposit or a feed, then a Wii drops without a 98 (Veilig-2)");
     {
       ItemData shield = b_real.first.items[1].data; // what B gives back (game item ID 0x00010001 in B's inventory)
       auto b_after_trade = pick_into(drop_from(b_real, shield), sword);
       auto a_after_trade = pick_into(a_memory, shield);
-      // the trade as the server follows it: A's and B's 6x29 take from their snapshots, the execution gives each the
-      // other's entries with at most that entry's credit
+      // the trade as the server follows it: the 6x29s of both sides change nothing, the execution takes each side's D0
+      // list and gives each the other's entries with at most that entry's credit
       auto a_snap = awaiting(a_real);
       auto b_snap = awaiting(b_real);
       SpireGuardTradeSide a_side, b_side;
       a_side.items = {sword};
       b_side.items = {shield};
-      expect_eq(1u, spire_guard_delete_apply(&a_snap, &a_side, std::nullopt, sword.id, sword, limits));
-      expect_eq(1u, spire_guard_delete_apply(&b_snap, &b_side, std::nullopt, shield.id, shield, limits));
-      expect_eq(0u, spire_guard_trade_take_rest(&a_snap, a_side, limits));
-      expect_eq(0u, spire_guard_trade_take_rest(&b_snap, b_side, limits));
+      spire_guard_delete_apply(&a_snap, &a_side, std::nullopt, sword.id, sword, limits);
+      spire_guard_delete_apply(&b_snap, &b_side, std::nullopt, shield.id, shield, limits);
+      spire_guard_trade_take_rest(&a_snap, a_side, limits);
+      spire_guard_trade_take_rest(&b_snap, b_side, limits);
       expect_eq(1u, spire_guard_trade_give(&b_snap, a_side, limits));
       expect_eq(1u, spire_guard_trade_give(&a_snap, b_side, limits));
       expect(spire_guard_same_inventory(a_snap.inventory, a_snap.disp.stats.meseta.load(), a_after_trade.first, 1000));
@@ -2474,16 +2474,58 @@ void run_static_tests() {
         }
       }
     }
-    // (c) A sells the sword (a 6x29 alone) and A's Wii drops: the sword does not come back, the sale's meseta not either
+    // (c) A sells the sword (a 6x29 alone) and A's Wii drops: the sword comes back as before Veilig-2 (the card was not
+    // written either; nobody else has it), the sale's meseta does not
     {
       auto snap = awaiting(a_real);
-      expect_eq(1u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, sword.id, sword, limits));
-      expect_eq(1000u, snap.disp.stats.meseta.load());
-      for (const auto& card : {a_real, run_copy, a_memory}) {
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, sword.id, sword, limits));
+      auto sold = a_memory;
+      sold.second.stats.meseta = 1000 + 750; // what the shop paid, if the card was written after all
+      for (const auto& card : {a_real, run_copy, sold}) {
         auto a_after = after_login(snap, card);
-        expect_eq(0u, count(a_after, sword));
-        expect(a_after.second.stats.meseta.load() <= 1000u);
+        expect_eq(1u, count(a_after, sword));
+        expect_eq(1000u, a_after.second.stats.meseta.load());
       }
+    }
+    // (e) A deposits the sword and 300 meseta in the bank (6x29s alone) and A's Wii drops: both come back
+    {
+      auto snap = awaiting(a_real);
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 300;
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, sword.id, sword, limits));
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, 0xFFFFFFFF, meseta, limits));
+      auto deposited = drop_from(drop_from(a_real, sword), meseta);
+      for (const auto& card : {a_real, run_copy, deposited}) {
+        auto a_after = after_login(snap, card);
+        expect_eq(1u, count(a_after, sword));
+        expect_eq(1000u, a_after.second.stats.meseta.load());
+      }
+    }
+    // (f) a trade cancelled (D4) after A's own 6x29, and A's Wii drops: A keeps his sword, nobody gains it
+    {
+      auto snap = awaiting(a_real);
+      SpireGuardTradeSide a_side;
+      a_side.items = {sword};
+      expect_eq(0u, spire_guard_delete_apply(&snap, &a_side, std::nullopt, sword.id, sword, limits));
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(1u, count(after_login(snap, card), sword));
+      }
+    }
+    // (g) A feeds a Monomate to his mag (6x28, then a 6x29 of the fed item) and A's Wii drops: the Monomate comes back
+    {
+      auto snap = awaiting(a_real);
+      auto& stack = snap.inventory.items[snap.inventory.num_items++];
+      stack.state = 1;
+      stack.data.data1[0] = 0x03;
+      stack.data.data1[5] = 4;
+      stack.data.id = 0x00010010;
+      ItemData one = stack.data;
+      one.data1[5] = 1;
+      auto before = snap;
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, one.id, one, limits));
+      expect(spire_guard_same_state(snap.inventory, snap.disp, before.inventory, before.disp));
+      expect_eq(4u, static_cast<uint32_t>(snap.inventory.items[snap.inventory.num_items - 1].data.data1[5]));
     }
     // meseta through the trade window: the partner gains at most what the giver's snapshot held (the minimum)
     {
@@ -2495,7 +2537,7 @@ void run_static_tests() {
       auto b = awaiting(b_real);
       SpireGuardTradeSide a_side, b_side;
       a_side.items = {meseta};
-      expect_eq(1000u, spire_guard_delete_apply(&a, &a_side, std::nullopt, 0xFFFFFFFF, meseta, limits));
+      spire_guard_delete_apply(&a, &a_side, std::nullopt, 0xFFFFFFFF, meseta, limits);
       spire_guard_trade_take_rest(&a, a_side, limits);
       spire_guard_trade_take_rest(&b, b_side, limits);
       expect_eq(1u, spire_guard_trade_give(&b, a_side, limits));
@@ -2503,12 +2545,11 @@ void run_static_tests() {
       expect_eq(1500u, b.disp.stats.meseta.load()); // 500 + 1000, never 500 + 1500
       expect_eq(1500u, after_login(a, a_real).second.stats.meseta.load() + after_login(b, b_real).second.stats.meseta.load());
     }
-    // an entry without a 6x29 before the execution (meseta, or a BB server-side trade) is taken there; its late 6x29 is
-    // skipped once and never takes a second item of the same kind
+    // the execution takes exactly the D0 entry: a second sword of the same kind stays, also after a late 6x29
     {
       auto a = awaiting(a_real);
       auto b = awaiting(b_real);
-      ItemData twin = sword; // A also holds a second sword of the same kind
+      ItemData twin = sword;
       twin.data1[3] = 0x05;
       a.inventory.items[a.inventory.num_items].state = 1;
       a.inventory.items[a.inventory.num_items++].data = twin;
@@ -2523,7 +2564,8 @@ void run_static_tests() {
       expect_eq(1u, count(as_character(b), sword));
     }
     // a traded item the giver's snapshot does not hold (bought in the base): no credit, the partner gains nothing; a
-    // stack: the partner gains at most what the giver's snapshot lost
+    // stack: the partner gains at most what the giver's snapshot lost; a taker whose snapshot does not follow gains
+    // nothing while the giver still loses it (the only place where stricter is allowed)
     {
       ItemData bought;
       bought.data1[0] = 0x01;
@@ -2541,49 +2583,24 @@ void run_static_tests() {
       auto b = awaiting(b_real);
       SpireGuardTradeSide a_side, b_side;
       a_side.items = {bought, five};
-      expect_eq(0u, spire_guard_delete_apply(&a, &a_side, std::nullopt, bought.id, bought, limits));
-      expect_eq(2u, spire_guard_delete_apply(&a, &a_side, std::nullopt, five.id, five, limits));
-      spire_guard_trade_take_rest(&a, a_side, limits);
+      expect_eq(2u, spire_guard_trade_take_rest(&a, a_side, limits));
       spire_guard_trade_take_rest(&b, b_side, limits);
       expect_eq(1u, spire_guard_trade_give(&b, a_side, limits));
       expect_eq(5u, b.inventory.num_items);
       expect_eq(2u, static_cast<uint32_t>(b.inventory.items[4].data.data1[5]));
       expect_eq(0u, count(as_character(b), bought));
-      // a giver or taker whose snapshot does not follow: nothing taken, nothing gained
+      auto a2 = awaiting(a_real);
       SpireGuardTradeSide c_side;
       c_side.items = {sword};
-      expect_eq(0u, spire_guard_delete_apply(nullptr, &c_side, std::nullopt, sword.id, sword, limits));
-      expect_eq(0u, spire_guard_trade_take_rest(nullptr, c_side, limits));
+      expect_eq(1u, spire_guard_trade_take_rest(&a2, c_side, limits));
+      expect_eq(0u, spire_guard_trade_give(nullptr, c_side, limits));
+      expect_eq(0u, count(as_character(a2), sword));
+      SpireGuardTradeSide d_side;
+      d_side.items = {sword};
+      expect_eq(0u, spire_guard_trade_take_rest(nullptr, d_side, limits)); // a giver that does not follow
       auto b2 = awaiting(b_real);
-      expect_eq(0u, spire_guard_trade_give(&b2, c_side, limits));
+      expect_eq(0u, spire_guard_trade_give(&b2, d_side, limits));
       expect(spire_guard_same_state(b2.inventory, b2.disp, b_real.first, b_real.second));
-    }
-    // the 6x29 after a 6x5D is that partial drop's: K7 took it at the 6x5D, the 6x29 takes nothing more; any other
-    // 6x29 is followed
-    {
-      auto a = awaiting(a_real);
-      auto& stack = a.inventory.items[a.inventory.num_items++];
-      stack.state = 1;
-      stack.data.data1[0] = 0x03;
-      stack.data.data1[5] = 8;
-      ItemData three = stack.data;
-      three.data1[5] = 3;
-      expect_eq(3u, spire_guard_snapshot_take_drop(a, three, limits)); // the 6x5D (K7)
-      expect(spire_guard_delete_is_partial_drop(three, three));
-      expect_eq(0u, spire_guard_delete_apply(&a, nullptr, three, three.id, three, limits));
-      expect_eq(5u, static_cast<uint32_t>(a.inventory.items[a.inventory.num_items - 1].data.data1[5]));
-      ItemData two = three;
-      two.data1[5] = 2;
-      expect(!spire_guard_delete_is_partial_drop(three, two));
-      expect(!spire_guard_delete_is_partial_drop(std::nullopt, three));
-      expect_eq(2u, spire_guard_delete_apply(&a, nullptr, three, two.id, two, limits)); // not the 6x5D's: followed
-      ItemData m1, m2;
-      m1.data1[0] = m2.data1[0] = 0x04;
-      m1.data2d = 300;
-      m2.data2d = 300;
-      expect(spire_guard_delete_is_partial_drop(m1, m2));
-      m2.data2d = 301;
-      expect(!spire_guard_delete_is_partial_drop(m1, m2));
     }
   }
 

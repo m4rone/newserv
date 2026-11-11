@@ -5388,7 +5388,6 @@ static asio::awaitable<void> on_D4_V3_BB(std::shared_ptr<Client> c, Channel::Mes
   }
   uint8_t other_client_id = c->pending_item_trade->other_client_id;
   c->pending_item_trade.reset();
-  spire_guard_note_trade_cancelled(c); // Veilig-2: nothing gained, what was taken stays taken
   send_command(c, 0xD4, 0x00);
 
   // Cancel the other side of the trade too, if it's open
@@ -5401,7 +5400,6 @@ static asio::awaitable<void> on_D4_V3_BB(std::shared_ptr<Client> c, Channel::Mes
     co_return;
   }
   target_c->pending_item_trade.reset();
-  spire_guard_note_trade_cancelled(target_c);
   send_command(target_c, 0xD4, 0x00);
 }
 

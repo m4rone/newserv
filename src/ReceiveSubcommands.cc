@@ -2131,7 +2131,6 @@ static void on_drop_partial_stack_t(std::shared_ptr<Client> c, SubcommandMessage
   l->on_item_id_generated_externally(item.id);
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
   spire_guard_note_floor_drop(c, l, cmd.floor, item.id); // K7: a partial stack or meseta (the 6x29 follows)
-  spire_guard_note_partial_drop(c, item); // Veilig-2: that 6x29 is this drop's, K7 took it here
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -4630,7 +4629,7 @@ static void on_destroy_inventory_item(std::shared_ptr<Client> c, SubcommandMessa
   auto [item, _] = p->remove_item(cmd.item_id, cmd.amount, *s->data->item_stack_limits(c->version()));
   // V3 sends this after a sale, a trade, a partial stack drop (also meseta) and a mag feed: not missing for $restore
   inventory_backup_note_removed(c, item);
-  spire_guard_note_delete(c, l, cmd.item_id, item); // Veilig-2: the snapshot follows a sale, a trade, a fed mag
+  spire_guard_note_delete(c, l, cmd.item_id, item); // Veilig-2: a 6x29 alone never changes the snapshot
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto name = s->data->describe_item(c->version(), item);
