@@ -7633,6 +7633,15 @@ void run_static_tests() {
       std::vector<std::string> inbox; // what the server sent and the client has not handled yet
       size_t pushes = 0;
       bool open = true;
+      // The live player, for a case that plays it apart from `memory` (the save buffer, which a push writes): at a floor
+      // change the client copies the live player's items and stats back over the save buffer
+      std::optional<GCCharacter> live;
+      void floor_change() {
+        if (this->live) {
+          this->memory.inventory = this->live->inventory;
+          this->memory.disp = this->live->disp;
+        }
+      }
       FakeGC()
           : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
                 phosg::TerminalFormat::END, false, false) {}
@@ -8756,6 +8765,83 @@ void run_static_tests() {
     });
     e2e_case("two players in one game, the leader drops: the follower leads on, gets the server's run end and leaves; each gets its own real character", [&]() {
       two_players(true);
+    });
+
+    // The proof on Pioneer 2 that fails (spire_base_return_prove). The push of an 'O' reaches the save buffer only; on
+    // the Wii the client copied its live player, still the run copy, back over it at the warp (live 2026-10-26).
+    e2e_case("the proof on Pioneer 2 fails, the client fell back on the run copy at the warp: no 'I', the server's 6x73, the game exit restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      Seat seat;
+      seat.p = p;
+      std::vector<Seat*> alone{&seat};
+      ServerWrote seen;
+      r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS); // as set_lobby_quest leaves a game with a quest loaded
+      p.c->floor = 1; // a field floor
+      spire_checkpoint_run_started(p.c);
+      p.ch->live = r.run_copy; // the player that walks around is the run copy, whatever the save buffer holds
+
+      // the run ends, 'O' pushes the real character into the save buffer and answers OK
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      expect_real(p.ch->memory, real, "in the save buffer at the 'O' OK");
+      expect_eq(1u, p.ch->pushes);
+
+      // the warp: the floor change puts the live player's items and stats back, so the proof's 61 shows the run copy
+      p.c->floor = 0;
+      p.ch->floor_change();
+      auto holds_run_copy = [&]() {
+        return !memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)) &&
+            !memcmp(&p.ch->memory.disp, &r.run_copy.disp, sizeof(r.run_copy.disp));
+      };
+      must(holds_run_copy(), "the client of this case did not fall back on the run copy");
+      drive_seats(w, alone, [&]() { return seat.exits_asked > 0; }, "the server's 6x73 after the failed proof");
+      must(seat.seen.asked_61 >= 1, "the 6x73 came without a 61 asked on Pioneer 2");
+      expect_eq(1u, seat.exits_asked);
+      // nothing else was done to the client: no second push, no card write, it still holds the run copy
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      must(holds_run_copy(), "the failed proof changed what the client holds");
+      // the run copy that the 61 carried never became the real character: not on the server, not in the snapshot
+      must(server_holds(p, *r.server_real), "the server's real character changed at the failed proof");
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after the failed proof is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after the failed proof is not the real character");
+      // no 'I': a run again would take the run copy as the real character
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NOT_RETURNED),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to 'I' after the failed proof"));
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "the refused 'I' changed the snapshot");
+      must(server_holds(p, *r.server_real), "the refused 'I' changed the server's real character");
+      expect_eq(1u, p.ch->pushes);
+
+      // the client obeys the 6x73: its 98 carries the run copy, and the snapshot does not follow it (that is only for a
+      // proven return); the restore before the lobby join pushes the real character, and the card gets that one
+      client_sends(w, p, 0x98, p.ch->as_61());
+      p.ch->live.reset(); // no player walks around outside a game
+      must(!p.c->lobby.lock() && !p.c->has_overlay(), "the 98 left the client in the game or with its run copy");
+      snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the 98 is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot followed the 98 of a return to base that was never proven");
+      must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore after the failed proof was refused");
+      expect_real(p.ch->memory, real, "after the game exit that follows the failed proof");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after the game exit that follows the failed proof");
+      must(server_holds(p, *r.server_real), "the server's character data after the game exit is not the real character");
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the failed proof was refused");
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the failed proof");
+      must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the failed proof");
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
     });
 
     expect_eq(0u, e2e_failed);
