@@ -8550,9 +8550,25 @@ void run_static_tests() {
           expect(spire_lobby_text_at(z) >= spire_lobby_text_at(z - 1) + gap);
         }
         auto settle = spire_base_game_settle(n);
-        phosg::log_info_f("   K3 10-M3: {} text(s): last at {} ms, base game at {} ms", n, spire_lobby_text_at(n - 1).count(),
-            settle.count());
-        expect(settle >= spire_lobby_text_at(n - 1) + gap);
+        size_t in_lobby = spire_lobby_texts_in_lobby(n);
+        phosg::log_info_f("   K3 10-M3: {} text(s), {} in the lobby: last there at {} ms, base game at {} ms", n, in_lobby,
+            spire_lobby_text_at(in_lobby - 1).count(), settle.count());
+        expect((in_lobby >= 1) && (in_lobby <= n));
+        expect(settle >= spire_lobby_text_at(in_lobby - 1) + gap); // the last lobby text stands a gap
+      }
+      // the records, the k4 and the k8 unlock text (the first eight rooms): all three in the lobby
+      expect_eq(size_t(3), spire_lobby_texts_in_lobby(3));
+      expect_eq(int64_t(15000), spire_base_game_settle(3).count());
+      // r2: a run through every episode holds more; the base game never comes later than SPIRE_BASE_GAME_SETTLE_MAX,
+      // which stays 4 s or more below the 20 s a follower waits for the leader's base game
+      const auto follower_wait = SPIRE_BASE_GAME_LEADER_WAIT_POLLS * milliseconds(500);
+      expect(SPIRE_BASE_GAME_SETTLE_MAX + seconds(4) <= follower_wait);
+      for (size_t n : {6u, 8u}) {
+        auto settle = spire_base_game_settle(n);
+        phosg::log_info_f("   K3 10-M3 r2: {} text(s): base game at {} ms (bound {} ms), {} in the lobby", n,
+            settle.count(), duration_cast<milliseconds>(SPIRE_BASE_GAME_SETTLE_MAX).count(), spire_lobby_texts_in_lobby(n));
+        expect(settle <= SPIRE_BASE_GAME_SETTLE_MAX);
+        expect(spire_lobby_text_at(spire_lobby_texts_in_lobby(n) - 1) + gap <= settle);
       }
       expect_eq(duration_cast<milliseconds>(SPIRE_LOBBY_TEXT_DELAY).count(), spire_lobby_text_at(0).count());
       expect_eq(duration_cast<milliseconds>(SPIRE_BASE_GAME_LOBBY_SETTLE).count(), spire_base_game_settle(0).count());

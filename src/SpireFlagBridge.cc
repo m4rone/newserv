@@ -448,6 +448,8 @@ static void spire_ticker_text_in_turn(std::shared_ptr<Client> c, std::shared_ptr
   spire_ticker_line_in_turn(c, l, delay, [text](std::shared_ptr<Client>, std::shared_ptr<const Lobby>) { return text; });
 }
 
+static bool spire_base_game_marked(std::shared_ptr<Client> c); // kwaliteit-3 10-M3 r2
+
 // Texts held for the lobby, per client. The weak_ptr tells a reused Client address from the client that earned them.
 struct SpireLobbyTexts {
   std::weak_ptr<Client> client;
@@ -469,7 +471,42 @@ static void spire_defer_to_lobby(std::shared_ptr<Client> c, const std::string& t
   c->log.info_f("Spire bridge: text held for the lobby ({} waiting): \"{}\"", e.texts.size(), spire_ticker_line(text));
 }
 
-static asio::awaitable<void> spire_lobby_texts_send(std::weak_ptr<Client> weak_c) {
+// kwaliteit-3 10-M3 r2: the texts that do not fit in the lobby before the base game (spire_lobby_texts_in_lobby) go
+// there once its quest runs and the client loads nothing, in the client's ticker order: the first SPIRE_LOBBY_TEXT_DELAY
+// after that, each next one a gap later. The client is not in that game within 3 x SPIRE_BASE_GAME_WAIT (the base
+// game's own limit) or is gone: they wait for the next lobby join again. Each text is sent or held again, never both.
+static asio::awaitable<void> spire_lobby_texts_in_base_game(std::weak_ptr<Client> weak_c, std::vector<std::string> texts) {
+  constexpr auto poll = std::chrono::milliseconds(500);
+  for (auto waited = std::chrono::milliseconds(0); waited < 3 * SPIRE_BASE_GAME_WAIT; waited += poll) {
+    co_await async_sleep(poll);
+    auto c = weak_c.lock();
+    if (!c || !c->channel->connected()) {
+      co_return;
+    }
+    auto l = c->lobby.lock();
+    if (!l || !l->is_game() || !l->quest || c->check_flag(Client::Flag::LOADING) ||
+        c->check_flag(Client::Flag::LOADING_QUEST)) {
+      continue;
+    }
+    auto now = std::chrono::steady_clock::now();
+    for (size_t z = 0; z < texts.size(); z++) {
+      auto delay = z ? spire_ticker_turn_delay(c->spire_pack_line_free, now)
+                     : spire_ticker_turn_from(c->spire_pack_line_free, now, SPIRE_LOBBY_TEXT_DELAY);
+      spire_ticker_text_in_turn(c, l, delay, texts[z]);
+      c->log.info_f("Spire bridge: held text {} of {} in the base game in {} ms", z + 1, texts.size(), delay.count());
+    }
+    co_return;
+  }
+  auto c = weak_c.lock();
+  if (c) {
+    for (const auto& text : texts) {
+      spire_defer_to_lobby(c, text);
+    }
+    c->log.info_f("Spire bridge: not in the base game; {} held text(s) wait for the next lobby", texts.size());
+  }
+}
+
+static asio::awaitable<void> spire_lobby_texts_send(std::weak_ptr<Client> weak_c, bool base_game_next) {
   co_await async_sleep(SPIRE_LOBBY_TEXT_DELAY);
   auto c = weak_c.lock();
   if (!c) {
@@ -486,7 +523,15 @@ static asio::awaitable<void> spire_lobby_texts_send(std::weak_ptr<Client> weak_c
   auto texts = std::move(it->second.texts);
   spire_lobby_texts.erase(it);
   // kwaliteit-3 10-M3: one by one, a gap apart (spire_lobby_text_at), so none pushes the one before aside; the base
-  // game waits until the last one has stood (spire_base_game_settle)
+  // game waits until the last one in the lobby has stood (spire_base_game_settle). r2: before a base game only as
+  // many as fit before SPIRE_BASE_GAME_SETTLE_MAX; the rest go in the base game (spire_lobby_texts_in_base_game)
+  size_t in_lobby = base_game_next ? spire_lobby_texts_in_lobby(texts.size()) : texts.size();
+  if (in_lobby < texts.size()) {
+    std::vector<std::string> rest(texts.begin() + in_lobby, texts.end());
+    texts.resize(in_lobby);
+    asio::co_spawn(*c->require_server_state()->io_context, spire_lobby_texts_in_base_game(c, std::move(rest)),
+        asio::detached);
+  }
   for (size_t z = 0; z < texts.size(); z++) {
     if (z) {
       c = nullptr; // neither the client nor its lobby is held while it waits
@@ -520,7 +565,9 @@ void spire_deliver_lobby_texts(std::shared_ptr<Client> c) {
     if ((it == spire_lobby_texts.end()) || (it->second.client.lock() != c) || it->second.texts.empty()) {
       return;
     }
-    asio::co_spawn(*c->require_server_state()->io_context, spire_lobby_texts_send(c), asio::detached);
+    // r2: whether this lobby join goes on to the base game (spire_base_game_after_lobby_join, just after this)
+    asio::co_spawn(*c->require_server_state()->io_context, spire_lobby_texts_send(c, spire_base_game_marked(c)),
+        asio::detached);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire bridge: failed to schedule the held texts: {}", e.what());
   }
@@ -2706,9 +2753,20 @@ std::chrono::milliseconds spire_lobby_text_at(size_t index) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(SPIRE_LOBBY_TEXT_DELAY + index * SPIRE_PACK_LINE_GAP);
 }
 
+size_t spire_lobby_texts_in_lobby(size_t held_texts) {
+  size_t n = 0;
+  while ((n < held_texts) && (spire_lobby_text_at(n) + SPIRE_PACK_LINE_GAP <= SPIRE_BASE_GAME_SETTLE_MAX)) {
+    n++;
+  }
+  return std::max<size_t>(n, held_texts ? 1 : 0);
+}
+
 std::chrono::milliseconds spire_base_game_settle(size_t held_texts) {
   std::chrono::milliseconds settle = SPIRE_BASE_GAME_LOBBY_SETTLE;
-  return held_texts ? std::max(settle, spire_lobby_text_at(held_texts - 1) + SPIRE_PACK_LINE_GAP) : settle;
+  size_t in_lobby = spire_lobby_texts_in_lobby(held_texts);
+  return in_lobby ? std::min<std::chrono::milliseconds>(SPIRE_BASE_GAME_SETTLE_MAX,
+                        std::max(settle, spire_lobby_text_at(in_lobby - 1) + SPIRE_PACK_LINE_GAP))
+                  : settle;
 }
 
 std::string spire_bridge_message_text(uint32_t value) {
@@ -5827,6 +5885,11 @@ struct SpireBaseGameGroup {
   std::weak_ptr<Lobby> game;
 };
 static std::unordered_map<uint32_t, SpireBaseGameMark> spire_base_game_marks;
+
+static bool spire_base_game_marked(std::shared_ptr<Client> c) {
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  return serial_number && spire_base_game_marks.count(serial_number);
+}
 static std::unordered_map<uint32_t, SpireBaseGameGroup> spire_base_game_groups;
 
 bool spire_base_game_request(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, const char* why) {

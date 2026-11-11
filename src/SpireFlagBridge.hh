@@ -1236,9 +1236,16 @@ std::chrono::milliseconds spire_lobby_text_at(size_t index);
 // The clients of one run share one base game (the first one in creates it, the quest starts when all are in or after
 // SPIRE_BASE_GAME_WAIT). A client that left meanwhile, or a base game that is gone or already started, is left alone.
 constexpr auto SPIRE_BASE_GAME_LOBBY_SETTLE = std::chrono::seconds(4);
-// kwaliteit-3 10-M3: how long a client with held_texts waiting stays in the lobby before the base game: the last of them
-// stands SPIRE_PACK_LINE_GAP (spire_lobby_text_at), and never shorter than SPIRE_BASE_GAME_LOBBY_SETTLE
+// kwaliteit-3 10-M3: how long a client with held_texts waiting stays in the lobby before the base game: the last text
+// that goes in the lobby (spire_lobby_texts_in_lobby) stands SPIRE_PACK_LINE_GAP (spire_lobby_text_at); never shorter
+// than SPIRE_BASE_GAME_LOBBY_SETTLE and never longer than SPIRE_BASE_GAME_SETTLE_MAX
 std::chrono::milliseconds spire_base_game_settle(size_t held_texts);
+// kwaliteit-3 10-M3 r2: a client that was not the leader waits SPIRE_BASE_GAME_LEADER_WAIT_POLLS x 500 ms = 20 s (after
+// its own settle) for the leader's base game; the leader's settle stays 4 s below that, whatever it holds
+constexpr auto SPIRE_BASE_GAME_SETTLE_MAX = std::chrono::seconds(16);
+// kwaliteit-3 10-M3 r2: how many of held_texts go in the lobby: those that stand a gap before SPIRE_BASE_GAME_SETTLE_MAX.
+// The rest go in the base game once its quest runs, in order, in the client's ticker order (spire_lobby_texts_send).
+size_t spire_lobby_texts_in_lobby(size_t held_texts);
 constexpr auto SPIRE_BASE_GAME_WAIT = std::chrono::seconds(40);
 // v60: a client that was not the leader waits this many 500 ms polls for the leader's game before it makes one
 constexpr size_t SPIRE_BASE_GAME_LEADER_WAIT_POLLS = 40;
