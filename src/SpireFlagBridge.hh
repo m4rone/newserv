@@ -499,6 +499,16 @@ std::string spire_savestate_store_rung(
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
+// kwaliteit-3 plek 2: whether a client is the only one in its game and does not stand on the leader's slot
+// (SpireFollowLeader's LeaderClient, else 0; occupied_slots: bit z = lobby client slot z is taken). The quest gives such
+// a client the follower's part, which starts no run (make_spire.py 83d3f9c: ui_ready sends Ready and waits for the
+// leader's clock, and with run.min_players 2 nobody starts alone), so a resume answer would hand out the saved items
+// for a run that never begins, and a run end after it would delete the savestate. For such a client with a savestate
+// that fits the quest the 'J' start answer stays fresh, as before; new: the player reads once what to do
+// (SPIRE_SAVESTATE_ALONE_TEXT) and no 'V' of that client in that game replaces the savestate. With two clients in the
+// game, or the one client on the leader's slot, nothing changes.
+bool spire_alone_off_leader_slot(uint8_t leader_slot, uint32_t occupied_slots, uint8_t client_slot);
+constexpr const char* SPIRE_SAVESTATE_ALONE_TEXT = "Your saved run stays saved. Leave this game and make a new one to go on.";
 // The ack of an item request: index + 1 (| SPIRE_RESUME_ITEM_GLASS for the Glass item), 0 = no item sent (the run
 // ended, this client was not answered with a resume, or no such item).
 uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index);

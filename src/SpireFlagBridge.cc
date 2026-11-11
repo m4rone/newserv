@@ -722,6 +722,10 @@ bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id
   return !run_ended && game_resumed && game_run_id && own_matches && (own_run_id == game_run_id);
 }
 
+bool spire_alone_off_leader_slot(uint8_t leader_slot, uint32_t occupied_slots, uint8_t client_slot) {
+  return (client_slot < 32) && (client_slot != leader_slot) && (occupied_slots == (1u << client_slot));
+}
+
 std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_number) {
   phosg::JSON values_json = phosg::JSON::list();
   for (uint32_t v : ss.values) {
@@ -1103,6 +1107,7 @@ struct SpireClientRun {
   SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
   uint32_t v_room = 0; // kwaliteit-2 258: the room of its last 'V' (the room it is in), 0 = none came
+  bool savestate_kept = false; // kwaliteit-3 plek 2: alone off the leader's slot; its fitting savestate is not replaced
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
@@ -1961,6 +1966,12 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
         "runs): the resume still owes items ({} of {} asked); the savestate it resumed from stays", serial_number,
         quest_number, room_k, cr->resume_items_asked, cr->savestate.items.size());
   }
+  if (plan.store && cr->savestate_kept) {
+    // kwaliteit-3 plek 2 (spire_alone_off_leader_slot): the savestate this client could not resume here stays
+    plan.store = false;
+    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} room {} not stored: the client came alone off the "
+        "leader's slot with a savestate that fits this quest; that savestate stays", serial_number, quest_number, room_k);
+  }
   // F6: the ledger follows the feed mirror (the overlay), unless an in-game 61 refreshed it; only its run mag comes back
   auto* led = spire_run_mag_ledger_for(c, run->run_id, false);
   if (plan.follow_ledger && spire_run_mag_savestate_follow(
@@ -2233,6 +2244,21 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh on {} (own savestate {}, game run {:08X}{})",
         serial_number, quest_number, k, variant, spire_meta_difficulty_name(rung), spire_savestate_describe(own),
         run->run_id, run->resumed ? " resumed" : "");
+    // kwaliteit-3 plek 2 (spire_alone_off_leader_slot): no leader in the game to run the quest, so no resume; the
+    // savestate that fits stays, and the player reads what to do, once
+    uint32_t occupied_slots = 0;
+    for (size_t z = 0; (z < l->clients.size()) && (z < 32); z++) {
+      occupied_slots |= l->clients[z] ? (1u << z) : 0;
+    }
+    const auto& follow_leader = c->require_server_state()->data->spire_follow_leader;
+    if (!end && !cr->savestate_kept && spire_savestate_matches(own, episode, k, variant, rung) &&
+        spire_alone_off_leader_slot(follow_leader ? follow_leader->first : 0, occupied_slots, c->lobby_client_id)) {
+      cr->savestate_kept = true;
+      spire_send_ticker(c, SPIRE_SAVESTATE_ALONE_TEXT);
+      c->log.info_f("Spire savestate: serial {:010} is alone in this game on slot {}, not the leader's slot {}; {} is "
+          "not resumed and stays saved; sent \"{}\"", serial_number, c->lobby_client_id,
+          follow_leader ? follow_leader->first : 0, spire_savestate_describe(own), SPIRE_SAVESTATE_ALONE_TEXT);
+    }
     // critic spel-af-3 r2 S-1 (B-REGIE-18-6): a run of this room parked on another difficulty stays saved; say where
     for (uint8_t other = 0; !end && (other < SPIRE_SAVESTATE_RUNGS); other++) {
       if (other == rung) {
