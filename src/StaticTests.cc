@@ -8903,7 +8903,7 @@ void run_static_tests() {
       expect(no_marker(snapshot_on_disk(p2)));
       expect(server_holds(p2, *r.server_real));
     });
-    e2e_case("the connection drops mid-run: no 98, the next login restores the real character", [&]() {
+    e2e_case("the connection drops mid-run: no 98, the next login restores the real character; after a card write that did not arrive, the login after that restores it again", [&]() {
       TempCwd temp_cwd;
       auto w = make_world();
       const GCCharacter real = real_character();
@@ -8939,13 +8939,19 @@ void run_static_tests() {
       expect(spire_guard_game_join_allowed(p2.c, false));
       restored_at_login(p2, *r.server_real);
 
-      // 8-B2: the console goes off before the card write of that 97 landed, so the card still holds the run copy. The login after that
-      // finds the marker open and pushes the real character again (with the marker closed it restored nothing)
+      // A card write that did not arrive: the login 97 wrote the real character (card_writes[0]), but the console goes
+      // off before that write reached the card, so the card still holds the run copy. That stand does not arise by
+      // itself in this test client (it always writes at the 97), so the card is set up here. 8-B2: the login after
+      // that finds the marker open and pushes the real character again (with the marker closed it restored nothing)
       p2.ch->open = false;
-      auto p3 = connect(w, r.run_copy);
+      const GCCharacter card_write_not_arrived = r.run_copy;
+      if (!memcmp(&card_write_not_arrived, &p2.ch->card_writes[0], sizeof(GCCharacter))) {
+        throw std::runtime_error("the card whose write did not arrive is the card the login 97 wrote");
+      }
+      auto p3 = connect(w, card_write_not_arrived);
       client_sends(w, p3, 0x61, p3.ch->as_61());
       expect(run_bool(w, p3, spire_guard_restore_if_needed(p3.c)));
-      expect_real(p3.ch->memory, real, "after the second login, the card still held the run copy");
+      expect_real(p3.ch->memory, real, "after the second login, the card write had not arrived and the card still held the run copy");
       expect_eq(1u, p3.ch->pushes);
       expect(awaiting_only(snapshot_on_disk(p3)));
       // this time the card is written. The next login's 61 equals the snapshot: the marker closes, nothing is pushed
