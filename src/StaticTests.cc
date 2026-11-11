@@ -9322,7 +9322,7 @@ void run_static_tests() {
     // Gap B2 (output/systeem-8-itemveiligheid-critic.md B2): a login restore closes the marker before the 97, so a
     // connection that drops in between leaves the run copy on the card with no marker for it. The invariant: whatever
     // the card holds after that, the next login gives the real character back. Red on code that still has gap B2.
-    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = false;
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = true; // on spike/veilig: 8-B2 closes it (B-REGIE-21-8)
     if (SPIRE_E2E_KNOWN_GAP_B2) {
       e2e_case("the login restore, then the connection drops before the 97: the card kept the run copy, the next login restores the real character (known gap B2)", [&]() {
         TempCwd temp_cwd;
