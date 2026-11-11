@@ -2013,6 +2013,82 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire guard: a restore at login leaves the marker open until the card is written (8-B2)");
+  {
+    auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t exp, uint32_t meseta) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[0] = kind;
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      return ret;
+    };
+    auto real = make(20, 0x00, 51, 370758, 1000);
+    auto run_copy = make(7, 0x01, 11, 4200, 300);
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-guard-b2-{}", getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    std::string filename = (dir / "0000000042.snapshot.json").string();
+    // a run that ended hard: the next login finds RunInProgress, makes it RestorePending and pushes the snapshot
+    SpireGuardSnapshot stored;
+    stored.restore_pending = true;
+    stored.has_character = true;
+    stored.quest_number = 921;
+    stored.inventory = real.first;
+    stored.disp = real.second;
+    stored.has_overlay = true;
+    stored.overlay_level = 11;
+    spire_guard_save(filename, 42, stored);
+    // the push at login is verified: the file must still hold an open marker, since the 97 has not gone out yet
+    {
+      auto snap = spire_guard_load(filename);
+      spire_guard_restore_verified_apply(snap, spire_guard_restore_awaits_save("login"));
+      spire_guard_save(filename, 42, snap);
+    }
+    // the client drops before it wrote its card. Next login, the card still holds the run copy: the marker is open and
+    // the 61 differs from the snapshot, so the real character is pushed again
+    {
+      auto snap = spire_guard_load(filename);
+      expect(!snap.restore_pending && snap.awaiting_save && !snap.run_in_progress);
+      expect(spire_guard_marker_open(false, snap.run_in_progress, snap.restore_pending, snap.awaiting_save));
+      expect(!spire_guard_awaiting_save_login_apply(snap, run_copy.first, run_copy.second));
+      expect(snap.restore_pending && !snap.awaiting_save);
+      expect(spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second)); // what the push sends
+      // that second push is verified too, and again the marker stays open for the login after it
+      spire_guard_restore_verified_apply(snap, spire_guard_restore_awaits_save("login"));
+      expect(!snap.restore_pending && snap.awaiting_save);
+      spire_guard_save(filename, 42, snap);
+    }
+    // this time the client wrote its card. Next login, the 61 equals the snapshot: the marker closes without a push
+    {
+      auto snap = spire_guard_load(filename);
+      expect(snap.awaiting_save);
+      expect(spire_guard_awaiting_save_login_apply(snap, real.first, real.second));
+      expect(!snap.restore_pending && !snap.awaiting_save && !snap.run_in_progress && !snap.has_overlay);
+      expect(!spire_guard_marker_open(false, snap.run_in_progress, snap.restore_pending, snap.awaiting_save));
+      expect(spire_guard_same_state(snap.inventory, snap.disp, real.first, real.second));
+    }
+    // only the push at the game exit and at login await the save; a push in a game changes no marker
+    expect(spire_guard_restore_awaits_save("game exit"));
+    expect(spire_guard_restore_awaits_save("login"));
+    expect(!spire_guard_restore_awaits_save("game"));
+    expect(!spire_guard_restore_awaits_save("base game"));
+    // the marker step itself: at the game exit as before (v10), and without AwaitingSave no fingerprint stays
+    {
+      SpireGuardSnapshot snap = stored;
+      spire_guard_restore_verified_apply(snap, true);
+      expect(!snap.restore_pending && snap.awaiting_save && snap.has_overlay);
+      snap = stored;
+      spire_guard_restore_verified_apply(snap, false);
+      expect(!snap.restore_pending && !snap.awaiting_save && !snap.has_overlay);
+    }
+    std::filesystem::remove_all(dir);
+  }
+
   phosg::log_info_f("-- Spire guard: the restore check finds a different item count or material counter (v32, v38, v39)");
   {
     PlayerInventory real;

@@ -4500,6 +4500,17 @@ bool spire_guard_follow_real_progress(
   return true;
 }
 
+// 8-B2: see SpireFlagBridge.hh
+bool spire_guard_restore_awaits_save(const char* where) {
+  return !strcmp(where, "game exit") || !strcmp(where, "login");
+}
+
+void spire_guard_restore_verified_apply(SpireGuardSnapshot& snapshot, bool awaits_save) {
+  snapshot.restore_pending = false;
+  snapshot.awaiting_save = awaits_save;
+  snapshot.has_overlay = awaits_save && snapshot.has_overlay;
+}
+
 // v49: the snapshot step of the run again ('I', SpireFlagBridge.hh)
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
@@ -5164,8 +5175,9 @@ struct SpireGuardWatchdog {
 
 // Verifies the 61 that the client sent right after the push: level and EXP must equal the snapshot, and (v32) the
 // items and meseta too. Clears RestorePending and returns true if verified. In the lobby (v10) the marker is not cleared
-// but becomes AwaitingSave: the card may still hold the overlay until the client saves. v48: keep_marker (the push in a
-// game, the return to base) checks the same and changes no marker and no file.
+// but becomes AwaitingSave: the card may still hold the overlay until the client saves. 8-B2: the same at login
+// (after_game is spire_guard_restore_awaits_save, true for both). v48: keep_marker (the push in a game, the return to
+// base) checks the same and changes no marker and no file.
 static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t serial_number, const std::string& filename,
     SpireGuardSnapshot& snapshot, std::shared_ptr<const PSOBBCharacterFile> character, bool after_game,
     bool keep_marker = false) {
@@ -5204,9 +5216,7 @@ static bool spire_guard_verify_restore(std::shared_ptr<Client> c, uint32_t seria
         serial_number, level + 1, exp, items_str);
     return true;
   }
-  snapshot.restore_pending = false;
-  snapshot.awaiting_save = after_game;
-  snapshot.has_overlay = after_game && snapshot.has_overlay;
+  spire_guard_restore_verified_apply(snapshot, after_game);
   spire_guard_save(filename, serial_number, snapshot);
   c->log.info_f("Spire guard: restore verified for serial {:010}: 61 shows Lv{} EXP {}; {}; {}",
       serial_number, level + 1, exp, items_str,
@@ -5282,8 +5292,9 @@ static asio::awaitable<std::shared_ptr<PSOBBCharacterFile>> spire_guard_push_cha
 
 // The restore itself, shared by the login path and the lobby path: fetch the full character (30), put the snapshot's
 // inventory and disp in, send it with SetExtendedPlayerInfo, and verify the 61 requested right after. Returns true
-// only if the restore was verified (RestorePending is then cleared). where is "login" or "game exit" (for the log); v48:
-// "game" is the return to base: no drop, no push while a client of the game loads, the marker unchanged.
+// only if the restore was verified (RestorePending is then cleared; 8-B2: at login and at the game exit AwaitingSave
+// takes its place). where is "login" or "game exit" (for the log and the marker step); v48: "game" is the return to
+// base: no drop, no push while a client of the game loads, the marker unchanged.
 static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, uint32_t serial_number,
     const std::string& filename, SpireGuardSnapshot snapshot, const char* where) {
   bool base_game = !strcmp(where, "base game"); // v59: the base game's push, like "game" but on any floor
@@ -5351,7 +5362,7 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     if (!pushed) {
       co_return false;
     }
-    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after, !strcmp(where, "game exit"), in_game)) {
+    if (!spire_guard_verify_restore(c, serial_number, filename, snapshot, after, spire_guard_restore_awaits_save(where), in_game)) {
       co_return false;
     }
     co_return true;
@@ -6322,7 +6333,8 @@ asio::awaitable<bool> spire_guard_restore_if_needed(std::shared_ptr<Client> c) {
         serial_number);
     co_return false;
   }
-  c->log.info_f("Spire guard: restored {} for serial {:010} at login; 97 follows", spire_guard_describe(snapshot), serial_number);
+  c->log.info_f("Spire guard: restored {} for serial {:010} at login; 97 follows; marker stays until the next login confirms it (8-B2)",
+      spire_guard_describe(snapshot), serial_number);
   co_return true;
 }
 

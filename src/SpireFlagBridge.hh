@@ -791,6 +791,10 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   restore pushes it. After a failed 'O' or after an 'I' the snapshot stays (the run start's or the 'I's).
 // - v52: the start_level upgrade (SpireMeta.hh): a guarded Spire quest .bin goes to each client with the rule block's
 //   level raised by its owned start_level, and its overlay (quest load and 'I') is built at that level.
+// - 8-B2 (system critic round 1): a verified restore at login no longer clears the marker either. It becomes
+//   AwaitingSave, as at the game exit (v10): the 97 goes out only after the restore, so a client that drops before it
+//   wrote its card still holds the run copy, and with the marker gone the next login restored nothing. The next login
+//   whose 61 equals the snapshot closes the marker without a push (spire_guard_restore_awaits_save).
 
 // Called from on_quest_loaded for each client, before its battle overlay is created. Does nothing unless the client is
 // GC V3 with a GC license, the lobby is a Battle game whose quest is listed in SpireBridgeQuests and uses replace_char.
@@ -841,7 +845,8 @@ struct SpireGuardSnapshot {
   bool run_in_progress = false;
   // Cleared only when the 61 requested right after the restore push shows the snapshot's state (v8, v32, v38)
   bool restore_pending = false;
-  // v10: set instead of clearing restore_pending when the lobby restore is verified. The real character is then only in
+  // v10: set instead of clearing restore_pending when the lobby restore is verified (8-B2: and when the restore at
+  // login is). The real character is then only in
   // the client's memory until the client saves it, so the card may still hold the run copy. v39: cleared only at a
   // login whose 61 equals the snapshot (spire_guard_same_state); any other login turns it back into restore_pending.
   // While it is set, the snapshot follows the real character's 98 from a Normal or Solo game (real progress); v40: that
@@ -888,6 +893,15 @@ bool spire_guard_awaiting_save_login_apply(
 // character.
 bool spire_guard_follow_real_progress(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
+// 8-B2 (system critic round 1): whether a verified restore push leaves the marker open as AwaitingSave. True for the
+// restore at the game exit (v10) and, since 8-B2, for the restore at login: there too the real character is only in the
+// client's memory until the 97 that follows has been written to the card, and a client that drops in between still has
+// the run copy on its card. The next login whose 61 equals the snapshot closes the marker without a push; any other
+// login pushes again. False for the pushes in a game ("game", "base game"): those change no marker at all.
+bool spire_guard_restore_awaits_save(const char* where);
+// The marker step of a verified restore push outside a game: RestorePending goes, AwaitingSave is awaits_save, and the
+// overlay fingerprint (log only) stays only with AwaitingSave.
+void spire_guard_restore_verified_apply(SpireGuardSnapshot& snapshot, bool awaits_save);
 // Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
 // spire_guard_follow_real_progress if spire_guard_end_run saw the client leave a Normal or Solo game under
 // AwaitingSave, and (v51) spire_guard_base_exit_follow if it saw the client leave a Spire game after a verified 'O'.
