@@ -9919,13 +9919,17 @@ void run_static_tests() {
       data.tekker_adjustment_set = tekker_set;
     };
 
-    // One of the two drops out mid-run, the other plays on, gets the server's run end and leaves through the 98
-    auto two_players = [&](bool leader_drops) {
+    // One of the two drops out mid-run, the other plays on, gets the server's run end and leaves through the 98.
+    // same_serial: one console with two characters on its card (critic intern-1 point 6), so the two snapshot files
+    // differ by character alone; a guard that names them by serial alone gives both players one file.
+    auto two_players = [&](bool leader_drops, bool same_serial) {
       TempCwd temp_cwd;
       auto w = make_world();
       give_item_tables(w);
-      const GCCharacter real[2] = {real_character(), second_character()};
-      const uint32_t serial[2] = {SERIAL, SERIAL_2};
+      const uint32_t serial[2] = {SERIAL, same_serial ? SERIAL : SERIAL_2};
+      GCCharacter second = second_character();
+      second.guild_card.guild_card_number = serial[1];
+      const GCCharacter real[2] = {real_character(), second};
       Seat seat[2];
       std::vector<Seat*> both{&seat[0], &seat[1]};
       std::shared_ptr<PSOBBCharacterFile> server_real[2];
@@ -9941,6 +9945,10 @@ void run_static_tests() {
         file[z] = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial[z], spire_guard_character_id(server_real[z]->disp));
       }
       must(file[0] != file[1], "the two players share a snapshot file name");
+      if (same_serial) {
+        const std::string console = std::format("{}/{:010}.", SPIRE_BRIDGE_DIRECTORY, SERIAL);
+        must(file[0].starts_with(console) && file[1].starts_with(console), "the two characters of this case are not on one console");
+      }
       must(!server_holds(seat[0].p, *server_real[1]) && !server_holds(seat[1].p, *server_real[0]), "the two characters of this case are not different");
 
       // both in one game, the first as its leader; the quest start as ReceiveCommands.cc plays it for every client of the
@@ -10079,10 +10087,121 @@ void run_static_tests() {
       expect_eq(2u, snapshot_files());
     };
     e2e_case("two players in one game: each its own snapshot and run copy; the follower drops, the leader plays on and leaves; each gets its own real character", [&]() {
-      two_players(false);
+      two_players(false, false);
     });
     e2e_case("two players in one game, the leader drops: the follower leads on, gets the server's run end and leaves; each gets its own real character", [&]() {
-      two_players(true);
+      two_players(true, false);
+    });
+    e2e_case("one console, two characters in one game: each its own snapshot and run copy; the follower drops, the leader plays on and leaves; each gets its own real character", [&]() {
+      two_players(false, true);
+    });
+    e2e_case("one console, two characters in one game, the leader drops: the follower leads on and leaves; each gets its own real character", [&]() {
+      two_players(true, true);
+    });
+
+    // One console, two characters after each other (critic intern-1 point 6): A drops mid-run, B logs in on the same
+    // serial and plays a run to its game exit, then A logs in again. Each gets exactly its own real character back, and
+    // neither's snapshot file moves while the other plays.
+    e2e_case("one console, two characters after each other: A drops mid-run, B plays a run on the same serial, A logs in again; each gets its own real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real_a = real_character();
+      GCCharacter real_b = second_character();
+      real_b.guild_card.guild_card_number = SERIAL;
+      auto file_of = [&](const PSOBBCharacterFile& ch) {
+        return std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, SERIAL, spire_guard_character_id(ch.disp));
+      };
+
+      // A's run, and A drops out of it: its marker stays RunInProgress with its real character
+      auto r = start_run(w, real_a);
+      const std::string file_a = file_of(*r.server_real);
+      r.p.ch->open = false;
+      run_void(w, r.p, on_disconnect(r.p.c));
+      must(!r.p.c->lobby.lock(), "A is still in its game after the disconnect");
+      auto snap = spire_guard_load(file_a);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "A's marker after the drop is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "A's snapshot after the drop is not A's real character");
+      r.p.c.reset();
+      w.s->id_to_lobby.erase(r.l->lobby_id); // A's game is gone; a running server never reuses its ID
+      const std::string a_bytes = phosg::load_file(file_a);
+      auto a_untouched = [&](const char* when) {
+        if (phosg::load_file(file_a) != a_bytes) {
+          throw std::runtime_error(std::format("{}: A's snapshot file changed while B played on the same serial", when));
+        }
+      };
+
+      // B logs in on the same serial: A's open marker is not B's, so nothing is pushed and B may join a game
+      auto pb = connect(w, real_b);
+      client_sends(w, pb, 0x61, pb.ch->as_61());
+      must(run_bool(w, pb, spire_guard_restore_if_needed(pb.c)), "B's login was refused while A's run is open on the same serial");
+      expect_eq(0u, pb.ch->pushes);
+      const auto server_real_b = std::make_shared<PSOBBCharacterFile>(*pb.c->character_file(false, false));
+      must(!server_holds(pb, *r.server_real), "B's login gave the server A's character");
+      const std::string file_b = file_of(*server_real_b);
+      must(file_b != file_a, "A and B share a snapshot file name");
+      must(spire_guard_game_join_allowed(pb.c, false), "A's open marker refused B's game join");
+      a_untouched("after B's login");
+
+      // B's run: its own snapshot and its own run copy
+      auto lb = new_game(w);
+      lb->clients[0] = pb.c;
+      pb.c->lobby_client_id = 0;
+      pb.c->lobby = lb;
+      spire_checkpoint_run_started(pb.c);
+      must(spire_create_battle_overlay(pb.c, lb), "B's quest load was refused");
+      expect_eq(2u, snapshot_files());
+      snap = spire_guard_load(file_b);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "B's marker at its run start is not RunInProgress alone");
+      must(snapshot_is(snap, *server_real_b), "B's snapshot is not B's real character");
+      must(!snapshot_is(snap, *r.server_real), "B's snapshot holds A's character");
+      must(server_holds(pb, *server_real_b), "B's run copy changed B's real character on the server");
+      a_untouched("after B's quest load");
+      wear_down(pb, 0x04, 0x00A10000, 3, 777, 45);
+
+      // B leaves through the 98 and gets its own real character, its card too
+      client_sends(w, pb, 0x98, pb.ch->as_61());
+      must(!pb.c->lobby.lock() && !pb.c->has_overlay(), "the 98 left B in its game or with its run copy");
+      snap = spire_guard_load(file_b);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "B's marker after the 98 is not RestorePending alone");
+      must(run_bool(w, pb, spire_guard_restore_at_game_exit(pb.c)), "B's game exit restore was refused");
+      expect_real(pb.ch->memory, real_b, "after B's game exit");
+      expect_eq(1u, pb.ch->pushes);
+      expect_eq(1u, pb.ch->card_writes.size());
+      expect_real(pb.ch->card_writes[0], real_b, "on B's memory card after its game exit");
+      must(server_holds(pb, *server_real_b), "the server's character data of B is not B's real character after its game exit");
+      a_untouched("after B's game exit");
+      pb.ch->open = false;
+      const std::string b_bytes = phosg::load_file(file_b);
+
+      // A logs in again with the run copy its card kept: its own real character comes back, on its card too
+      auto pa = connect(w, r.run_copy);
+      client_sends(w, pa, 0x61, pa.ch->as_61());
+      must(!spire_guard_game_join_allowed(pa.c, false), "A's game join was allowed before its login restore");
+      login_to_lobby(w, pa);
+      expect_real(pa.ch->memory, real_a, "after A's login that follows B's run");
+      expect_eq(1u, pa.ch->pushes);
+      expect_eq(1u, pa.ch->card_writes.size());
+      expect_real(pa.ch->card_writes[0], real_a, "on A's memory card after the login 97 that follows B's run");
+      must(server_holds(pa, *r.server_real), "the server's character data of A is not A's real character after its login");
+      restored_at_login(pa, *r.server_real);
+      if (phosg::load_file(file_b) != b_bytes) {
+        throw std::runtime_error("A's login restore changed B's snapshot file");
+      }
+      pa.ch->open = false;
+
+      // B's next login shows its card, its own real character: nothing is pushed, its marker closes
+      auto pb2 = connect(w, pb.ch->card_writes[0]);
+      client_sends(w, pb2, 0x61, pb2.ch->as_61());
+      must(run_bool(w, pb2, spire_guard_restore_if_needed(pb2.c)), "B's next login was refused");
+      expect_eq(0u, pb2.ch->pushes);
+      expect_real(pb2.ch->memory, real_b, "after B's next login");
+      must(no_marker(spire_guard_load(file_b)), "B's marker is still open after its next login");
+      must(server_holds(pb2, *server_real_b), "the server's character data at B's next login is not B's real character");
+      pb2.ch->open = false;
+
+      // and A's next login, from the card its login 97 wrote: its real character, its marker closed
+      next_login_is_real(w, pa.ch->card_writes[0], real_a, *r.server_real, "after A's next login on the shared serial");
+      expect_eq(2u, snapshot_files());
     });
 
     // The proof on Pioneer 2 that fails (spire_base_return_prove). The push of an 'O' reaches the save buffer only; on
