@@ -8026,6 +8026,38 @@ void run_static_tests() {
       expect(no_marker(snapshot_on_disk(p2)));
       expect(server_holds(p2, *r.server_real));
     });
+    e2e_case("the connection drops mid-run: no 98, the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      // the disconnect (on_disconnect) restores nothing and leaves the marker RunInProgress with the real character
+      r.p.ch->open = false;
+      run_void(w, r.p, on_disconnect(r.p.c));
+      expect(!r.p.c->lobby.lock());
+      auto snap = snapshot_on_disk(r.p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect_eq(0u, r.p.ch->pushes);
+      r.p.c.reset();
+
+      // the next login: a new connection whose 61 is the run copy the client kept
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect_eq(9u, p2.c->character_file(false, false)->disp.stats.level.load());
+      expect(!spire_guard_game_join_allowed(p2.c, false)); // a run that never got its 98 counts too
+      // RunInProgress turns into RestorePending and the restore runs before any 97 (enable_save_if_needed sends the 97
+      // only after this returns true)
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_real(p2.ch->memory, real, "after the login that follows a dropped connection");
+      expect_eq(1u, p2.ch->pushes);
+      expect_eq(0u, p2.ch->card_writes.size());
+      expect(server_holds(p2, *r.server_real));
+      snap = snapshot_on_disk(p2);
+      expect(no_marker(snap));
+      expect(snapshot_is(snap, *r.server_real));
+      expect(spire_guard_game_join_allowed(p2.c, false));
+    });
 
     expect_eq(0u, e2e_failed);
   }
