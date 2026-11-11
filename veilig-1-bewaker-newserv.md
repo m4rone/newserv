@@ -8,9 +8,10 @@ Tak `spike/veilig`, gestart op 9e40c01 (de versie op de pc). Worktree `/home/m4r
 |---|---|---|---|
 | 8-B2 herstel bij login sluit de marker te vroeg | klopt | gebouwd, test rood en groen | 6068558 |
 | 8-B1 beloning uit de basis wordt teruggedraaid | klopt | gebouwd, test rood en groen | 89e0e17 |
-| 7-M2 losse kamer overschrijft geparkeerde run | klopt | in bouw | nog niet |
+| 7-M2 losse kamer overschrijft geparkeerde run | klopt | gebouwd, test rood en groen | 27dee5b |
 
-Eindstand (sha, eerste regel van `newserv help`, slotregel van de statische tests) staat onderaan zodra 7-M2 af is.
+Alle drie de punten zijn af. De code staat op 27dee5b; de laatste commit op de tak is die van dit rapport, en van die
+commit is de binary gebouwd. Blockers: geen.
 
 ## Dekking
 
@@ -141,4 +142,112 @@ Groen (met de fix): `I 809503 2026-11-11 14:56:09 - -- All static tests passed`,
 
 ## 7-M2: een losse kamer overschrijft de geparkeerde run
 
-In bouw; deze sectie wordt aangevuld.
+**Nameting: klopt.** Keten op 9e40c01:
+
+- `SpireFlagBridge.cc:2163-2170` de kamerquest van kamer 3 naast een run die op kamer 9 geparkeerd staat: het
+  bewaarpunt van de leider past niet, de game krijgt een nieuw run-id.
+- `:2198-2217` de speler begint vers. De melding "je run staat geparkeerd" kijkt alleen naar andere moeilijkheden
+  (`:2207` slaat de eigen moeilijkheid over).
+- `:2984-2985` met `:865-870`: een kamerquest die niet op de eerste kamer begint en niet hervat is, is een oefenrun.
+- `:1904-1914` en `:1941-1963`: de 'V' kijkt niet naar oefenrun of naar wat er geparkeerd staat en schrijft met
+  `spire_savestate_store_rung` naar het bestand van de moeilijkheid (`:1957-1961` in de telling van de fixlijst).
+- Niet nagemeten: dat de quest de 'V' al bij de eerste kamer van een kamerquest stuurt (questkant; de server schrijft
+  bij elke 'V' die hij krijgt).
+
+**Hoe de server een oefenrun herkent en hoe hervatten het bestand kiest.** De 'B' van de client draagt de startkamer
+en de eerste kamer van de run; ongelijk en niet hervat is een oefenrun, en een hervatte run neemt de vlag over uit
+zijn bewaarpunt (`spire_run_is_practice`). Er is één bestand per karakter per moeilijkheid
+(`<serial>.<karakter>.savestate.<normal|hard|vhard|ultimate>.json`), en het oude ene bestand telt voor de
+moeilijkheid die erin staat zolang die geen eigen bestand heeft. Hervatten laadt het bestand van de moeilijkheid van
+de quest en hervat alleen als kamer, variant, episode en run-id passen.
+
+**Gekozen vorm.** Een oefenrun schrijft niet als er op die moeilijkheid een echte run geparkeerd staat. Niet een eigen
+bestand: de bestandsnaam wordt op zes plekken gelezen (hervatten, het einde van de run, de melding bij de game-join,
+`$spire continue`, het mag-grootboek, het niveau bij hervatten); een tweede bestand per moeilijkheid raakt ze alle zes
+en opent zelf nieuwe wegen naar een verkeerd gekozen bewaarpunt. Niet schrijven raakt er één. Geen bestaand bestand
+wordt anders gelezen of geschreven: oude en nieuwe bestanden laden zoals voorheen.
+
+De regel is strenger dan het voorstel van de critic: een oefenrun vervangt nooit het bewaarpunt van een echte run,
+ook niet als het run-id gelijk is (de critic zonderde alleen een ander run-id uit). Gelijk run-id met een oefenrun
+komt alleen voor bij de volger die vers begint in een hervatte game (7-M1) en bij een te laat hervat-antwoord (7-K1);
+in beide is het echte bewaarpunt houden de veilige kant. Een geparkeerd bestand dat niet te lezen is laat een oefenrun
+ook staan: het kan een echte run zijn. Een echte run schrijft zoals voorheen, ook over een onleesbaar bestand.
+
+**Wat het hervatten van de losse kamer zelf nog kan.**
+
+- Staat er op die moeilijkheid niets, of een eerdere oefenrun: de losse kamer wordt bewaard en is te hervatten, precies
+  zoals voorheen.
+- Staat er een echte run geparkeerd: de losse kamer wordt niet bewaard. Na een verbroken verbinding begint hij
+  opnieuw vanaf zijn kamerquest. De speler krijgt één keer per oefenrun de regel
+  "Practice is not saved: your run at room 9 stays parked." De server logt elke overgeslagen 'V'.
+- Een andere moeilijkheid heeft zijn eigen bestand: daar verandert niets.
+
+**Wat de speler meemaakt.** Vóór: je parkeert een echte run op kamer 9, oefent kamer 3 los, en bij de eerste stap in
+die kamer is je run van kamer 9 weg, zonder melding. Na: je run van kamer 9 blijft staan en hervat ongeschonden; je
+leest één regel dat de oefenkamer niet bewaard wordt.
+
+**Test** (in "resume only into the same room, variant and run", blok "7-M2"), met echte bestanden in een eigen
+tijdelijke map: echte run geparkeerd op kamer 9; losse kamer 3, drie kamerstarts, niet bewaard, het bestand blijft
+byte voor byte gelijk; het einde van de oefenrun wist alleen bestanden van zijn eigen run-id; de echte run laadt en
+hervat. Verder: de beslissing zelf (ook bij gelijk run-id), een andere moeilijkheid, een echte run die een echte of
+een oefenrun vervangt zoals voorheen, het oude ene bestand, niets geparkeerd, en een onleesbaar bestand.
+
+Rood (test erin, gedrag van 9e40c01):
+
+```
+E 828208 2026-11-11 14:59:06 - run-static-tests: failure at /home/m4rck/code/worktrees/newserv/veilig-1/src/StaticTests.cc:6084: std::string() != spire_savestate_store_v(stem, 0, practice, 42, &replaced, &kept)
+exit=1
+```
+
+Groen (met de fix): `I 840011 2026-11-11 15:00:06 - -- All static tests passed`, exit 0, 10 W, 0 E.
+
+## Beslissingen (voor de orchestrator, die deze ronde decisions.md schrijft)
+
+1. 8-B1 volgt bij "level en EXP niet lager", niet bij "exact gelijk". Dekking: het voorstel van de critic in de
+   fixlijst, en `quests/payout/build.sh:4`/`:14` (q925 is Sega's q101 met ongewijzigde kaart, dus EXP in de basis is
+   echte voortgang). Klasse 2, eigen writeSet.
+2. 8-B1: het twijfelgeval-ontwerp is niet gebouwd; de reden staat in de sectie 8-B1. Wil de regie het toch (een stand
+   "onbeslist" waarin de login niet duwt), dan is dat nieuw ontwerp: een nieuwe markerstand, een weigering voor runs
+   in die stand en een beheerderscommando om hem te sluiten.
+3. 7-M2: "niet schrijven" in plaats van "eigen bestand", en strenger dan de critic (ook bij gelijk run-id en bij een
+   onleesbaar bestand). Dekking: de opdracht ("schrijft nooit over een bewaarpunt van een echte run heen").
+4. 7-M2 stuurt één nieuwe regel naar de client, één keer per oefenrun. Dat is nieuw zichtbaar gedrag; de tekst staat
+   in `spire_savestate_practice_kept_text`.
+5. De nieuwe stukken dragen de naam van het bezwaar (8-B1, 8-B2, 7-M2) en geen volgend versienummer, zodat de tak van
+   veilig-1b een eigen nummer kan kiezen zonder botsing.
+
+## Gezien, niet gebouwd
+
+- security/datakwaliteit · de bank zit niet in de momentopname: een bankstorting of -opname in de basis gevolgd door een
+  Wii die zijn kaart niet schrijft, geeft bij de volgende login inventaris uit de momentopname en bank van de kaart, dus
+  één item dubbel of weg; vóór 8-B1 gebeurde dat in spiegelbeeld op de gewone route · `SpireFlagBridge.cc`
+  `spire_guard_run_restore` (bank uit de verse 30) · vraagt een bank in het bestand, of meten of de bankbalie in q925 werkt.
+- datakwaliteit · vóór 8-B1 kwamen items die je in de basis aan je partner gaf bij de volgende login terug (dubbel);
+  8-B1 sluit dat mee, het is niet apart getest op de client · `spire_guard_base_game_follow` · niets.
+- datakwaliteit · 8-M1 (spelen buiten deze server wordt teruggedraaid) geldt door 8-B2 nu ook na een herstel bij de
+  login · `spire_guard_restore_awaits_save` · de fix van 8-M1 (marker sluiten zodra de kaart geschreven is, eerst meten op de Wii).
+- datakwaliteit · 7-K1: een te laat hervat-antwoord maakt een oefenrun met het run-id van de echte run; 7-M2 houdt het
+  bestand bij elke 'V', maar het einde van die oefenrun wist het nog steeds op run-id · `spire_savestate_on_run_end` · klein.
+- datakwaliteit · een nieuwe echte run op dezelfde moeilijkheid vervangt de geparkeerde echte run nog steeds zonder
+  waarschuwing (zo ontworpen, B-REGIE-18-6, en vastgezet in de test); dat is de andere helft van het bezwaar van systeem 1 ·
+  `spire_savestate_may_replace` · een keuze over wat de speler dan te zien krijgt.
+- datakwaliteit · 7-M3 (episode 1 en 2 delen één bewaarpunt per moeilijkheid) en 7-M1 (volger één kamer achter) zijn
+  niet geraakt; bij 7-M1 houdt de volger door 7-M2 nu wel zijn echte bewaarpunt in plaats van een oefenpunt · `:695-698`, `:2175` · eigen punten.
+- werkwijze · de commit-hook meldt dat voor deze newserv-repo geen integratietak en uitrol zijn vastgelegd (waarschuwing,
+  niets geweigerd); er is niets gepusht of samengevoegd · `.claude/omgeving.json` of `CLAUDE.md § Git flow` · één regel van de regie.
+
+## Afwijkingen van de opdracht
+
+- "Na elke commit die je meet: `unlink src/Revision.cc` en `make`": bij de drie codecommits is de boom gemeten vlak
+  vóór de commit (gebouwd en getest, daarna ongewijzigd gecommit), niet opnieuw erna. Alleen de laatste commit is
+  volgens het voorschrift gebouwd en gemeten.
+- Het eind-sha en de meting op de eindbinary kunnen niet in dit bestand staan (het bestand is zelf de laatste commit);
+  ze staan in de overdracht aan de orchestrator. De laatste commit wijzigt alleen dit rapport; de code is die van 27dee5b.
+
+## Wat er gewijzigd is
+
+- `src/SpireFlagBridge.cc`, `src/SpireFlagBridge.hh`: de drie fixes. Geen regel in de functies van het vangnet
+  (regels 6591-6801 op 9e40c01); de laatste gewijzigde plek ligt rond regel 6325 van 9e40c01.
+- `src/StaticTests.cc`: drie testblokken, bij de bestaande bewaker- en bewaarpunttests; het commentaar boven de
+  assertie van regel 240 (de assertie zelf is gelijk).
+- Niet geraakt: `src/InventoryBackup.*`, `src/SpireDrops.*`, `tests/`.
