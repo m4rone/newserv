@@ -2531,6 +2531,155 @@ void run_static_tests() {
     expect(!spire_event_without_living_enemy({boss}));                  // never a living boss
   }
 
+  phosg::log_info_f("-- Spire bridge: the never-hit net waits for a floor without a fight (veilig-1, 2-M2)");
+  {
+    using A = SpireNetAction;
+    using std::chrono::seconds;
+    // Was: 30 s after the defeat that left the wave held only by never-hit enemies, they were counted. Now a look
+    // counts only when nothing was fought on the floor for SPIRE_UNHIT_QUIET_SECONDS with a client on it.
+    expect_eq(A::WAIT, spire_unhit_net_look(true, seconds(30), true).action);
+    // The pc journal (2026-10-25 10:22:22 and 20:54:14, 2026-10-26 19:56:10; read by another track): the net counted
+    // enemies whose real defeat came 63, 52 and 48 s after the defeat that started its wait. No look inside such a gap
+    // counts, and the real defeat starts the clock again.
+    for (int64_t gap : {63, 52, 48}) {
+      for (int64_t quiet = 0; quiet <= gap; quiet++) {
+        expect(spire_unhit_net_look(true, seconds(quiet), true).action != A::COUNT);
+      }
+    }
+    expect_eq(A::WAIT, spire_unhit_net_look(true, SPIRE_UNHIT_QUIET_SECONDS - seconds(1), true).action);
+    expect_eq(seconds(1), spire_unhit_net_look(true, SPIRE_UNHIT_QUIET_SECONDS - seconds(1), true).wait);
+    expect_eq(A::COUNT, spire_unhit_net_look(true, SPIRE_UNHIT_QUIET_SECONDS, true).action);
+    // nobody on the floor: never counted, whatever the clock says
+    expect_eq(A::WAIT, spire_unhit_net_look(true, seconds(600), false).action);
+    expect(!spire_unhit_net_look(true, seconds(600), false).notice);
+    // one of them was hit meanwhile: the watch stops
+    expect_eq(A::STOP, spire_unhit_net_look(false, seconds(600), true).action);
+    // the first look is the notice's moment, the next the count's
+    expect_eq(SPIRE_STUCK_NOTICE_SECONDS, spire_unhit_net_look(true, seconds(0), true).wait);
+    expect(!spire_unhit_net_look(true, SPIRE_STUCK_NOTICE_SECONDS - seconds(1), true).notice);
+    auto at_notice = spire_unhit_net_look(true, SPIRE_STUCK_NOTICE_SECONDS, true);
+    expect(at_notice.notice);
+    expect_eq(A::WAIT, at_notice.action);
+    expect_eq(SPIRE_UNHIT_QUIET_SECONDS - SPIRE_STUCK_NOTICE_SECONDS, at_notice.wait);
+    expect(SPIRE_STUCK_NOTICE_SECONDS < SPIRE_UNHIT_QUIET_SECONDS);
+    std::string notice = SPIRE_STUCK_NOTICE_TEXT;
+    expect(!notice.empty() && (notice.size() <= SPIRE_BRIDGE_TEXT_MAX) && (notice == spire_ticker_line(notice)));
+
+    // The fight clock, per game and floor: a sign of a fight 5 s before the count (a 6x0A on an enemy of another wave
+    // or of the elite, a player hit by an enemy) starts the clock again
+    const uint32_t game = 0xFFFFFF01;
+    auto t0 = std::chrono::steady_clock::time_point(seconds(100000));
+    spire_fight_note(game, 5, t0);
+    expect_eq(SPIRE_UNHIT_QUIET_SECONDS, spire_fight_quiet(game, 5, t0 + SPIRE_UNHIT_QUIET_SECONDS));
+    spire_fight_note(game, 5, t0 + SPIRE_UNHIT_QUIET_SECONDS - seconds(5));
+    auto quiet = spire_fight_quiet(game, 5, t0 + SPIRE_UNHIT_QUIET_SECONDS);
+    expect_eq(seconds(5), quiet);
+    expect_eq(A::WAIT, spire_unhit_net_look(true, quiet, true).action);
+    quiet = spire_fight_quiet(game, 5, t0 + SPIRE_UNHIT_QUIET_SECONDS * 2 - seconds(5));
+    expect_eq(A::COUNT, spire_unhit_net_look(true, quiet, true).action);
+    // a floor without a clock gets one at the look: a lost clock makes the net later, never sooner
+    expect_eq(seconds(0), spire_fight_quiet(game, 6, t0 + seconds(500)));
+    expect_eq(seconds(10), spire_fight_quiet(game, 6, t0 + seconds(510)));
+    expect_eq(seconds(0), spire_fight_quiet(game + 1, 5, t0 + seconds(500))); // another game: its own clock
+    expect_eq(seconds(0), spire_fight_quiet(game, 5, t0 - seconds(1)));       // never negative
+  }
+
+  phosg::log_info_f("-- Spire bridge: a hit on a child is a hit on its parent for the nets (veilig-1, 2-M2)");
+  {
+    // q921 k7 (Caves 3, room 50, wave 3): Guil Sharks and a Pan Arms. The players fight the Pan Arms as Hidoom and
+    // Migium, its children; the server books those hits on the children. The net saw the Pan Arms itself as never hit
+    // and counted it while it was being fought (pc journal 2026-10-26 19:56:10, real defeat 18 s later).
+    using ESE = MapFile::EnemySetEntry;
+    auto make_set = [](uint16_t base_type, uint16_t wave_number) {
+      ESE e;
+      e.base_type = base_type;
+      e.floor = 0x05;
+      e.room = 50;
+      e.wave_number = wave_number;
+      return e;
+    };
+    // Pan Arms (+ Hidoom, Migium), two sharks, and in wave 4 a Chaos Sorcerer (+ two Bees) next to a Dimenian
+    std::vector<ESE> sets{make_set(0x0065, 3), make_set(0x0063, 3), make_set(0x0063, 3), make_set(0x00A1, 4), make_set(0x00A6, 4)};
+    auto dat = std::make_shared<std::string>();
+    MapFile::SectionHeader h;
+    h.le_type = static_cast<uint32_t>(MapFile::SectionHeader::Type::ENEMY_SETS);
+    h.data_size = sets.size() * sizeof(ESE);
+    h.section_size = sizeof(h) + h.data_size;
+    h.floor = 0x05;
+    dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+    dat->append(reinterpret_cast<const char*>(sets.data()), h.data_size);
+    MapFile::SectionHeader end_h;
+    end_h.le_type = 0;
+    end_h.section_size = 0;
+    end_h.floor = 0;
+    end_h.data_size = 0;
+    dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+    std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+    map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+    auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+    auto map_state = std::make_shared<MapState>(
+        0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+    auto ene = [&](uint16_t index) { return map_state->enemy_state_for_index(Version::GC_V3, index); };
+    expect_eq(EnemyType::PAN_ARMS, ene(0)->super_ene->type);
+    expect_eq(EnemyType::HIDOOM, ene(1)->super_ene->type);
+    expect_eq(EnemyType::MIGIUM, ene(2)->super_ene->type);
+    expect_eq(EnemyType::CHAOS_SORCERER, ene(5)->super_ene->type);
+    expect_eq(EnemyType::BEE_L, ene(7)->super_ene->type);
+    auto wave = [&](uint16_t wave_number) { return spire_wave_enemies(map_state, Version::GC_V3, 0x05, 50, wave_number); };
+
+    // one entry per parent: Pan Arms and two sharks
+    expect_eq(3u, wave(3).size());
+    ene(3)->set_flags |= 8;
+    ene(4)->set_flags |= 8;
+    // both sharks defeated, nobody touched the Pan Arms or its parts: the net's case
+    expect(spire_wave_held_only_by_unhit(wave(3)));
+    // a hit claim on Hidoom (6x46/6x47/6x49), nothing on the Pan Arms itself: the Pan Arms is being fought
+    ene(1)->set_last_hit_by_client_id(0);
+    expect_eq(0, ene(0)->server_flags & MapState::EnemyState::Flag::ALL_HITS_MASK);
+    expect_eq(0, ene(0)->total_damage);
+    expect(!spire_wave_held_only_by_unhit(wave(3)));
+    expect_eq(SpireNetAction::STOP, spire_unhit_net_look(spire_wave_held_only_by_unhit(wave(3)), std::chrono::seconds(600), true).action);
+    // damage on Migium alone (6x0A) counts the same
+    ene(1)->reset();
+    expect(spire_wave_held_only_by_unhit(wave(3)));
+    ene(2)->total_damage = 40;
+    expect(!spire_wave_held_only_by_unhit(wave(3)));
+
+    // the second net: an event whose only living enemy is a Chaos Sorcerer hit through a Bee has a living enemy
+    ene(8)->set_flags |= 8;
+    expect_eq(2u, wave(4).size());
+    expect(spire_event_without_living_enemy(wave(4)));
+    ene(7)->game_flags = 0x00000200;
+    expect(!spire_event_without_living_enemy(wave(4)));
+    // a child's hit reaches its own parent only: without Migium's damage the Pan Arms wave is held again
+    ene(2)->reset();
+    expect(spire_wave_held_only_by_unhit(wave(3)));
+  }
+
+  phosg::log_info_f("-- Spire bridge: behind a wave a net counted the room goes on (veilig-1, 2-M1)");
+  {
+    using E = SpireRoomEvent;
+    using V = std::vector<size_t>;
+    // fields: event id, started, finished, the events its post-wave actions trigger
+    // k2 (Forest 1 B, room 10): 111 -> 112 -> 113. An enemy of wave 2 sits in a warp; the net counted it, so 112 is
+    // finished on the server only. The clients never send the 6x67 of 113: it is counted too and the room clears.
+    expect(V{2} == spire_unstarted_chain({E{111, false, true, {112}}, E{112, false, true, {113}}, E{113, false, false, {}}}));
+    // the elite room (room 7): 114 -> 115 -> 116 -> 117 (the chained elite); counted in 115: 116 and 117 go with it
+    expect((V{2, 3}) == spire_unstarted_chain({E{114, false, true, {115}}, E{115, false, true, {116}},
+                           E{116, false, false, {117}}, E{117, false, false, {}}}));
+    // the next wave started (the clients did send its 6x67): nothing is skipped
+    expect(spire_unstarted_chain({E{111, false, true, {112}}, E{112, true, false, {113}}, E{113, false, false, {}}}).empty());
+    // a never-started event no finished event points at (the elite wave on the normal path) is not in the chain
+    expect(spire_unstarted_chain({E{111, false, true, {112}}, E{112, false, true, {}}, E{119, false, false, {}}}).empty());
+    // the last wave counted: nothing behind it
+    expect(spire_unstarted_chain({E{101, false, true, {102}}, E{102, false, true, {}}}).empty());
+    expect(spire_unstarted_chain({}).empty());
+    // the triggers of a post-wave action stream, as make_map writes it: 0C <event id> ..., 01 stop
+    const uint8_t stream[] = {0x0C, 0x71, 0x00, 0x00, 0x00, 0x0C, 0x75, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x77, 0x00, 0x00, 0x00};
+    expect((std::vector<uint32_t>{113, 117}) == spire_room_actions_triggers(stream, sizeof(stream)));
+    expect(spire_room_actions_triggers(stream, 0).empty());
+  }
+
   phosg::log_info_f("-- Spire bridge: run over sends the client back to the lobby, never twice (v35)");
   {
     using X = SpireRunOverExit;

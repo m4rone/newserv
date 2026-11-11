@@ -1112,12 +1112,23 @@ bool spire_drop_is_forbidden(const ItemData& item);
 bool spire_drop_filter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, ItemData& item);
 // v36 (regie, pc 2026-10-25 09:26: q921 room 10 wave 2 stayed open, E-02C sat in a warp and was never hit): safety net
 // for an enemy nobody can reach. In a quest listed in SpireBridgeQuests (GC V3), when a defeat leaves a wave held only by
-// enemies that were never hit (no hit claim, no damage, no 6x0A update; never a boss), the server waits
-// SPIRE_UNHIT_ENEMY_SECONDS. If no other enemy of the wave died and none of them was hit meanwhile, it counts them as
-// defeated (set flag 8 on the server's map state only), logs "E-xxx never hit 30 s after the rest of wave n of room
-// r; counted as defeated", and runs the normal wave check again (events finished, then the room clear). Enemies
-// that were hit are never touched. Not after the run ended.
+// enemies that were never hit (no hit claim, no damage, no 6x0A update, on the enemy or on one of its children; never
+// a boss), the server watches the wave. veilig-1 (system critic 2-M2; pc journal 2026-10-25 10:22:22 and 20:54:14,
+// 2026-10-26 19:56:10: the net counted enemies whose real defeats came 18 to 47 s later): "never hit for 30 s" also
+// fits an enemy the players have not reached yet or are fighting through its children (a Pan Arms: the hits land on
+// Hidoom and Migium). So the wave is counted only when nothing was fought on its floor for SPIRE_UNHIT_QUIET_SECONDS
+// (spire_bridge_note_fight: no hit claim, 6x0A, 6xE4, 6x9C or 6x76 on any enemy, no player hit by an enemy, none
+// died) while a client stands on that floor, and its enemies are still never hit. Then it counts them as defeated (set
+// flag 8 on the server's map state only), logs "E-xxx never hit and no fight on floor ff for n s under wave w of room
+// r; counted as defeated", and runs the normal wave check again (events finished, then the room clear). Enemies that
+// were hit are never touched. Not after the run ended. SPIRE_UNHIT_ENEMY_SECONDS stays the interval of the second
+// net's looks.
 constexpr auto SPIRE_UNHIT_ENEMY_SECONDS = std::chrono::seconds(30);
+constexpr auto SPIRE_UNHIT_QUIET_SECONDS = std::chrono::seconds(120);
+// veilig-1 (2-M1): once the floor was quiet this long under a wave or event a net watches, every client on the floor
+// reads SPIRE_STUCK_NOTICE_TEXT, once per room of a run, so nobody waits in silence for the net.
+constexpr auto SPIRE_STUCK_NOTICE_SECONDS = std::chrono::seconds(45);
+constexpr const char* SPIRE_STUCK_NOTICE_TEXT = "Enemy out of reach? Wait: the room opens by itself.";
 struct SpireWaveEnemy {
   bool defeated = false;
   bool ever_hit = false;
@@ -1126,6 +1137,30 @@ struct SpireWaveEnemy {
 // The decision, free of state for the static tests: at least one enemy defeated, at least one not, and every one not
 // defeated never hit and no boss.
 bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
+// veilig-1: the enemies of a wave as the nets see them, one entry per parent (a child counts through its parent, as
+// in the wave check). A hit on a child (hit claim, damage or 6x0A flags on the child's own state) is a hit on its
+// parent: the server books a hit on the enemy that was struck, never on its parent.
+std::vector<SpireWaveEnemy> spire_wave_enemies(
+    std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number);
+// veilig-1: the fight clock, per game and floor (a run fights one room at a time, and a player's hit names no room).
+// spire_fight_note sets it to now; spire_fight_quiet is the time since then, and a floor without a clock gets one at
+// now (0 s: a lost clock makes a net later, never sooner).
+void spire_fight_note(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now);
+std::chrono::seconds spire_fight_quiet(uint32_t lobby_id, uint8_t floor, std::chrono::steady_clock::time_point now);
+// Called by the subcommand handlers for every sign of a fight on floor (see above); a no-op outside a game with a
+// quest.
+void spire_bridge_note_fight(std::shared_ptr<const Lobby> l, uint8_t floor);
+// veilig-1: what a net does at a look, free of state for the static tests. STOP: the wave is no longer held only by
+// enemies never hit. WAIT: look again after `wait` (the floor was not quiet long enough; a look without a client on
+// the floor starts the clock again, so quiet is 0 there). COUNT: count them as defeated. notice: the floor was quiet
+// for SPIRE_STUCK_NOTICE_SECONDS, the players should read SPIRE_STUCK_NOTICE_TEXT.
+enum class SpireNetAction { STOP, WAIT, COUNT };
+struct SpireNetLook {
+  SpireNetAction action = SpireNetAction::STOP;
+  std::chrono::seconds wait{0};
+  bool notice = false;
+};
+SpireNetLook spire_unhit_net_look(bool held_only_by_unhit, std::chrono::seconds quiet, bool player_on_floor);
 // v42 (regie, pc 2026-10-25 12:32: q921 room 7 = k2 elite, "wave 3 done, room not clear: W-009 (event 117) is
 // running"; its only enemy, the elite Hildebear E-04D, never showed: no hit, no kill, no flag from either client while
 // the event had started at 12:29:48). Second net, for a started wave event without a living enemy: when the room
@@ -1137,7 +1172,26 @@ bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
 // watch per room; it stops at the room clear, at the run end, or when every started event has a living enemy again.
 // v43 (pc 2026-10-25 20:43): the watch also starts when the room is held only by a trigger_event of an event that has
 // not started yet (the check ran before the clients' 6x67); it then needs one look more.
+// veilig-1 (2-M2): this net too counts only at a look where the floor was quiet for SPIRE_UNHIT_QUIET_SECONDS with a
+// client on it (spire_unhit_net_look), so an elite nobody hit yet is not counted while the room is being fought.
 bool spire_event_without_living_enemy(const std::vector<SpireWaveEnemy>& enemies);
+// veilig-1 (2-M1): a net that counts a wave finishes it on the server only. The clients still see its enemy alive, so
+// they never run the wave's trigger_event (0C) and never send the 6x67 of the next wave: the room stayed open for
+// good (the watch looked once and gave up). The wave events of one room as the watch sees them: started (0004 or
+// 0002), finished (0008, or counted by a net at this look) and the events its post-wave actions trigger.
+// spire_unstarted_chain returns the indexes of the events that never started and that only a finished event's
+// trigger still points at, followed through the chain (the wave after the next, a chained elite wave). After a net
+// counted a wave of the room, the watch counts those as finished too at a look that would let a net count (floor
+// quiet, a client on it): the waves behind the unreachable enemy are skipped and the room clears.
+struct SpireRoomEvent {
+  uint32_t event_id = 0;
+  bool started = false;
+  bool finished = false;
+  std::vector<uint32_t> triggers;
+};
+std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
+// The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
+std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,
