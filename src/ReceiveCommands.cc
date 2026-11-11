@@ -82,6 +82,9 @@ asio::awaitable<void> on_disconnect(std::shared_ptr<Client> c) {
     if (server) {
       server->get_state()->remove_client_from_lobby(c);
     }
+  } else {
+    // Inventory backup: a backup still open for a client that is in no lobby never gets its end; it is set aside
+    inventory_backup_on_game_end(c, nullptr, false);
   }
 
   if (c->login) {

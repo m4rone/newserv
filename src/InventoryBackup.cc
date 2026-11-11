@@ -975,6 +975,35 @@ static bool backup_session_alive(const std::string& path) {
   return c && (c->inventory_backup_current == path);
 }
 
+// The backup at path is given up by this living process without an end in it: set it aside as LOST, so no later
+// process reads its game as a hard stop (critic M2). Returns the line to log; error is set if the rename failed
+static std::string abandon_backup(const std::string& path, const char* why, bool& error) {
+  error = false;
+  std::error_code ec;
+  if (path.empty() || !std::filesystem::exists(path, ec)) {
+    return "";
+  }
+  std::string aside = inventory_backup_set_aside_as(path, INVENTORY_BACKUP_LOST_SUFFIX);
+  if (!aside.empty()) {
+    return std::format("Inventory backup: {} in {}; set aside as {}, $restore will refuse it", why, path, aside);
+  }
+  error = true;
+  return std::format("Inventory backup: {} in {} and the backup could not be set aside either: after a restart it reads as a hard server stop",
+      why, path);
+}
+
+static void abandon_backup(std::shared_ptr<Client> c, const std::string& path, const char* why) {
+  bool error = false;
+  std::string line = abandon_backup(path, why, error);
+  if (!line.empty()) {
+    if (error) {
+      c->log.error_f("{}", line);
+    } else {
+      c->log.warning_f("{}", line);
+    }
+  }
+}
+
 // Every INVENTORY_BACKUP_INTERIM_USECS while c is in the game of the backup at path: writes the interim state if the
 // inventory changed (what came in since the last write; what went out was written at once)
 static asio::awaitable<void> interim_ticker(std::weak_ptr<Client> weak_c, std::string path) {
@@ -989,6 +1018,8 @@ static asio::awaitable<void> interim_ticker(std::weak_ptr<Client> weak_c, std::s
 }
 
 void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  // A backup that is still open here never got its end (no 98 and no disconnect reached it): critic M2
+  abandon_backup(c, c->inventory_backup_current, "the next join came before the end of the game");
   open_backups.erase(c->inventory_backup_current);
   c->inventory_backup_current.clear();
   c->inventory_backup_removals = InventoryRemovals();
@@ -1042,9 +1073,10 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
 }
 
 void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, bool normal) {
-  if (c->inventory_backup_current.empty() || !l || !l->is_game()) {
+  if (c->inventory_backup_current.empty()) {
     return;
   }
+  bool in_game = l && l->is_game();
   std::string path = c->inventory_backup_current;
   c->inventory_backup_current.clear();
   open_backups.erase(path);
@@ -1052,7 +1084,11 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
   c->inventory_backup_guarded = false;
   c->inventory_backup_interim = InventoryInterimState();
   c->inventory_backup_interim_urgent = false;
-  try {
+  // The end is recorded for a client in its game, and for a 98 wherever the server has it (a 98 is the end of the only
+  // game this backup can belong to). Anything else, and an end that cannot be read or written, leaves a backup this
+  // living process gives up without an end: set aside (critic M2)
+  bool recorded = false;
+  if (in_game || normal) try {
     auto b = inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
     auto p = normal ? nullptr : c->character_file(false, false);
     InventoryOwnership own;
@@ -1063,11 +1099,17 @@ void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lob
     }
     inventory_backup_record_end(b, normal, guarded, p ? &p->inventory : nullptr, p ? p->disp.stats.meseta.load() : 0,
         p ? &own : nullptr);
-    inventory_backup_write_file(path, b);
-    c->log.info_f("Inventory backup: game ended {} ({}{})", normal ? "normally (98)" : "without a 98 (exit state saved)",
-        path, b.spire ? ", Spire run" : "");
+    if (b.left_normally || b.has_exit) {
+      inventory_backup_write_file(path, b);
+      recorded = true;
+      c->log.info_f("Inventory backup: game ended {} ({}{})", normal ? "normally (98)" : "without a 98 (exit state saved)",
+          path, b.spire ? ", Spire run" : "");
+    }
   } catch (const std::exception& e) {
     c->log.warning_f("Inventory backup: cannot record the end of the game in {}: {}", path, e.what());
+  }
+  if (!recorded) {
+    abandon_backup(c, path, "the end of the game could not be recorded");
   }
 }
 
@@ -1296,16 +1338,34 @@ void inventory_backup_on_login(std::shared_ptr<Client> c) {
 
 size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s) {
   size_t count = 0;
-  if (!s->game_server) {
-    return 0;
-  }
-  for (const auto& c : s->game_server->all_clients()) {
-    auto l = c->lobby.lock();
-    if (c->inventory_backup_current.empty() || !l || !l->is_game()) {
-      continue;
+  if (s->game_server) {
+    for (const auto& c : s->game_server->all_clients()) {
+      auto l = c->lobby.lock();
+      if (c->inventory_backup_current.empty() || !l || !l->is_game()) {
+        continue;
+      }
+      inventory_backup_on_game_end(c, l, false);
+      count++;
     }
-    inventory_backup_on_game_end(c, l, false);
-    count++;
+  }
+  // Every backup that is still open now belongs to no client in a game: its end never came in this process, and after
+  // this stop its interim state would read as a hard stop (critic M2)
+  std::vector<std::pair<std::string, std::weak_ptr<Client>>> left(open_backups.begin(), open_backups.end());
+  open_backups.clear();
+  for (const auto& [path, weak_c] : left) {
+    bool error = false;
+    std::string line = abandon_backup(path, "the server stops and the end of the game never came", error);
+    if (!line.empty()) {
+      if (error) {
+        phosg::log_error_f("{}", line);
+      } else {
+        phosg::log_warning_f("{}", line);
+      }
+    }
+    auto c = weak_c.lock();
+    if (c && (c->inventory_backup_current == path)) {
+      c->inventory_backup_current.clear();
+    }
   }
   return count;
 }

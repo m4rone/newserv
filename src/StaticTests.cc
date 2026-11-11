@@ -9376,6 +9376,74 @@ void run_static_tests() {
       expect_eq(200u, d.plan.meseta);
     });
 
+    k3_case("backup M2: a game whose end got lost inside a living server process is set aside; only a process that died leaves a hard stop", [&]() {
+      K3TempCwd temp_cwd("backup-m2");
+      K3World w;
+      KbLive live;
+      auto lost_name = [](const std::string& path) {
+        return path.substr(0, path.size() - 5) + INVENTORY_BACKUP_LOST_SUFFIX;
+      };
+      // what a later server process makes of the backup that was at path
+      auto later = [&](const std::string& path) {
+        std::string dir = std::filesystem::path(path).parent_path().string();
+        auto listing = inventory_backup_read_all(dir, "");
+        for (size_t z = 0; z < listing.names.size(); z++) {
+          if ((dir + "/" + listing.names[z] == path) || (dir + "/" + listing.names[z] == lost_name(path))) {
+            expect(listing.backups[z] != nullptr);
+            bool is_end = inventory_backup_interim_is_end(*listing.backups[z], kb_next_boot);
+            return inventory_restore_refusal(true, false, false, live.p.serial_number, kb_load(dir + "/" + listing.names[z]).character_id,
+                listing.backups[z].get(), is_end);
+          }
+        }
+        throw std::runtime_error("backup M2: the backup is not listed");
+      };
+      // A real hard stop: the process dies with the game open. The file is as the last write left it
+      kb_join(w, live);
+      std::string first = live.path;
+      live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
+      inventory_backup_note_removed(live.p.c, ItemData(KB_HANDGUN, 0));
+      expect_eq(KbR::NONE, later(first));
+      // 1. The same client joins a next game and no end ever came for this one (no 98, no disconnect). a5fa1dc: the
+      // file stays as it is and the next server process reads it as a hard stop
+      kb_join(w, live);
+      std::string second = live.path;
+      expect(!std::filesystem::exists(first) && std::filesystem::exists(lost_name(first)));
+      expect_eq(KbR::NOT_UPDATED, later(first));
+      // 2. The end cannot be written (the temp file's name is taken); here a 98, so his card is saved in full
+      std::filesystem::create_directory(second + ".tmp");
+      inventory_backup_on_game_end(live.p.c, live.l, true);
+      expect(!std::filesystem::exists(second) && std::filesystem::exists(lost_name(second)));
+      expect(kb_load(lost_name(second)).has_interim); // an interim state of this process and no end
+      expect_eq(KbR::NOT_UPDATED, later(second));
+      // 3. The client is in no game any more and its backup is still open (no end reached it); then he disconnects
+      kb_join(w, live);
+      std::string third = live.path;
+      live.p.c->lobby.reset();
+      inventory_backup_on_game_end(live.p.c, nullptr, false);
+      expect(std::filesystem::exists(lost_name(third)));
+      expect_eq(KbR::NOT_UPDATED, later(third));
+      // but a 98 that reaches the server without the lobby is the end of that game: recorded as before
+      kb_join(w, live);
+      std::string fourth = live.path;
+      inventory_backup_on_game_end(live.p.c, nullptr, true);
+      expect(kb_load(fourth).left_normally && !kb_load(fourth).has_interim);
+      expect_eq(KbR::LEFT_NORMALLY, later(fourth));
+      // 4. The server stops (SIGTERM) while a backup is open for a client that is in no game
+      kb_join(w, live);
+      std::string fifth = live.path;
+      live.p.c->lobby.reset();
+      expect_eq(0u, inventory_backup_on_server_stop(w.s));
+      expect(std::filesystem::exists(lost_name(fifth)));
+      expect(live.p.c->inventory_backup_current.empty());
+      expect_eq(KbR::NOT_UPDATED, later(fifth));
+      // and a disconnect in the game still writes the Exit, as before
+      kb_join(w, live);
+      std::string sixth = live.path;
+      inventory_backup_on_game_end(live.p.c, live.l, false);
+      expect(kb_load(sixth).has_exit);
+      expect_eq(KbR::NONE, later(sixth));
+    });
+
     k3_case("backup B3: an interim write that fails after a removal sets the backup aside: it stays listed and $restore refuses it", [&]() {
       K3TempCwd temp_cwd("backup-b3");
       K3World w;

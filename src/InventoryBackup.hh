@@ -75,6 +75,12 @@ class ServerState;
 //   state: $restore uses it like an Exit and says so; the next login treats it like an Exit. A backup without Interim
 //   (written by an older server, or lost before its first write) is refused as before (UNKNOWN_END). Interim of the
 //   running process is never used: that game is still open or lost its end inside this process, as before.
+// - Only a server process that died with the game open leaves a backup without an end (critic M2). Whenever a living
+//   process gives a backup up without writing its end, it sets it aside as LOST instead: the end could not be read or
+//   written, the client's next join came while the backup was still open, the client left without ever being in the
+//   game's lobby again, or the server stops (SIGTERM) while the backup belongs to no client in a game. So a later
+//   process never reads a game that in truth ended (perhaps with a 98, card saved) as a hard stop. If that rename
+//   fails as well it is an error line; that backup then does read as a hard stop after a restart.
 // - A write that fails (full disk, I/O error) after something left the inventory leaves an interim state on disk that
 //   still holds it; and it stays that way for as long as the disk refuses, whatever he uses, sells or gives away
 //   (critic B3). The backup is then set aside as LOST at once (a rename, see InventoryBackupSetAside) and this game
@@ -118,7 +124,7 @@ constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten 
 // <time><suffix>. The name still ends in .json, so the backup stays in inventory_backup_list at its place in time:
 // $restore sees it as that game and refuses it, and never silently works from an older game instead.
 // LOST (critic B3): something left the inventory and the interim state could not be written after it, so what is on
-// disk still holds it.
+// disk still holds it. Also (critic M2): the game ended inside a living server process and its end is not in the file.
 // UNMARKED (critic M1): the Spire guard took its snapshot in this game and the Spire mark could not be written into
 // the backup. The name is the mark now: the backup reads as a Spire backup (the guard restores that game), also if
 // its content cannot be read
@@ -400,13 +406,16 @@ std::string inventory_loss_text(InventoryLossVerdict v, size_t missing_items, ui
 
 // Server hooks
 void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);
-// normal: the client sent 98; otherwise it dropped out of the game (disconnect)
+// normal: the client sent 98; otherwise it dropped out of the game (disconnect). l: the lobby it is in, may be null.
+// A backup that is open and gets no end here (no game lobby and no 98, or the end cannot be read or written) is set
+// aside as LOST
 void inventory_backup_on_game_end(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, bool normal);
 // The Spire guard stored its snapshot for c in its current game (spire_guard_begin_run)
 void inventory_backup_note_guarded(std::shared_ptr<Client> c);
 // After the 61 of a login: the hard-end check above (logs, Loss mark, lobby text). Never throws
 void inventory_backup_on_login(std::shared_ptr<Client> c);
-// SIGTERM/SIGINT: writes Exit for every client still in a game; returns how many
+// SIGTERM/SIGINT: writes Exit for every client still in a game and returns how many; every other backup that is
+// still open is set aside as LOST
 size_t inventory_backup_on_server_stop(std::shared_ptr<ServerState> s);
 // Both also write the interim state at once if the inventory already shows the removal, and mark the client so
 // inventory_backup_after_command writes it if the removal follows later in the same command
