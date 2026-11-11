@@ -8,6 +8,7 @@
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Client.hh"
@@ -35,6 +36,8 @@ struct Lobby : public std::enable_shared_from_this<Lobby> {
     // specifies whether a rare item notification should be sent to all players when the item is picked up. This has no
     // effect for non-rare items.
     uint16_t flags;
+    // Inventory backup: where the server knows this item came from (InventoryBackup.hh, Provenance)
+    InventoryFloorOrigin backup_origin;
 
     bool visible_to_client(uint8_t client_id) const;
   };
@@ -269,6 +272,9 @@ struct Lobby : public std::enable_shared_from_this<Lobby> {
   void add_item(uint8_t floor, std::shared_ptr<FloorItem>);
   void evict_items_from_floor(uint8_t floor);
   std::shared_ptr<FloorItem> remove_item(uint8_t floor, uint32_t item_id, uint8_t requesting_client_id);
+  // Inventory backup: the enemies and boxes (their map state) for which the server already vouched for one floor item
+  // the leader announced (inventory_backup_note_leader_drop)
+  std::unordered_set<const void*> inventory_backup_drop_sources;
 
   uint32_t generate_item_id(uint8_t client_id);
   void on_item_id_generated_externally(uint32_t item_id);

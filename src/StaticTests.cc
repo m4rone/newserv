@@ -8222,17 +8222,39 @@ void run_static_tests() {
     struct KbGame {
       std::string path;
       InventoryInterimState state;
+      InventoryProvenance prov; // what the server keeps per client while the game runs
     };
     // what inventory_backup_on_game_join does: the join backup with its first interim state, in one write
     auto kb_open = [&](const std::string& dir, InventoryBackup b, uint64_t boot_id) {
       KbGame g;
-      inventory_backup_record_interim(b, b.inventory, b.disp.stats.meseta, false, b.time_usecs, boot_id, 1);
+      inventory_backup_record_interim(b, b.inventory, b.disp.stats.meseta, false, b.time_usecs, boot_id, 1,
+          InventoryOwnership());
       g.path = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
       g.state.written = true;
       g.state.inventory = b.inventory;
       g.state.meseta = b.disp.stats.meseta;
       g.state.count = 1;
+      inventory_provenance_begin(g.prov, b.inventory, b.disp.stats.meseta);
       return g;
+    };
+    // The player of g picked up floor items the server vouches for (an enemy's, a box's, a $restore drop) and his
+    // inventory is now inv with meseta: what inventory_backup_note_picked_up does, then the bundle write
+    auto kb_found = [&](KbGame& g, const PlayerInventory& inv, uint32_t meseta, const std::vector<uint64_t>& codes,
+                        uint32_t found_meseta, uint64_t when, uint64_t boot_id) {
+      for (uint64_t code : codes) {
+        for (size_t z = 0; z < inv.num_items; z++) {
+          if (!memcmp(&inv.items[z].data.data1[0], &ItemData(code, 0).data1[0], 3)) {
+            inventory_provenance_credit(g.prov, inv, inv.items[z].data, inventory_provenance_units(ItemData(code, 0)));
+          }
+        }
+      }
+      if (found_meseta) {
+        ItemData m;
+        m.data1[0] = 0x04;
+        inventory_provenance_credit(g.prov, inv, m, found_meseta);
+      }
+      inventory_provenance_reconcile(g.prov, inv, meseta);
+      return inventory_backup_write_interim(g.path, g.state, inv, meseta, false, when, boot_id, &g.prov);
     };
     auto kb_load = [](const std::string& path) {
       return inventory_backup_from_json(phosg::JSON::parse(phosg::load_file(path)));
@@ -8251,7 +8273,7 @@ void run_static_tests() {
       r.refusal = inventory_restore_refusal(true, false, false, 42, r.backup.character_id, &r.backup, interim_is_end);
       auto from = inventory_backup_restore_source(r.backup, boot_id);
       r.kind = from.kind;
-      r.plan = inventory_restore_missing(*from.inventory, from.meseta, card, card_meseta, InventoryRemovals());
+      r.plan = inventory_restore_missing(from.inventory, from.meseta, card, card_meseta, InventoryRemovals());
       return r;
     };
 
@@ -8282,10 +8304,11 @@ void run_static_tests() {
       expect(kb_restore(g.path, kb_new_boot, after_drop, 500).plan.empty());
       expect(kb_restore(g.path, kb_new_boot, kb_join_inv, 500).plan.empty());
 
-      // The other way round: the server puts an item into the inventory (a trade it executes, an item it creates) and
-      // that state is on disk. After the stop the item is in card plus plan exactly once, whatever the card kept
+      // The other way round: an item the server vouches for comes into the inventory (an enemy's drop he picked up)
+      // and that state is on disk. After the stop the item is in card plus plan exactly once, whatever the card kept
       auto after_gift = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_FOUND}, 2);
-      expect(inventory_backup_write_interim(g.path, g.state, after_gift, 500, false, kb_time + 2000000, kb_old_boot));
+      inventory_provenance_reconcile(g.prov, after_drop, 500);
+      expect(kb_found(g, after_gift, 500, {KB_FOUND}, 0, kb_time + 2000000, kb_old_boot));
       for (const auto& card : {Card{kb_penalty_card, 0}, Card{after_gift, 500}}) {
         auto gift = kb_restore(g.path, kb_new_boot, card.inventory, card.meseta);
         expect_eq(KbR::NONE, gift.refusal);
@@ -8305,7 +8328,7 @@ void run_static_tests() {
       auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
       auto after_pickup = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
       expect(inventory_backup_interim_changed(g.state, after_pickup, 500, false));
-      expect(inventory_backup_write_interim(g.path, g.state, after_pickup, 500, false, kb_time + 2000000, kb_old_boot));
+      expect(kb_found(g, after_pickup, 500, {KB_FOUND}, 0, kb_time + 2000000, kb_old_boot)); // an enemy's drop
       expect(!inventory_backup_interim_changed(g.state, after_pickup, 500, false));
       expect(!inventory_backup_write_interim(g.path, g.state, after_pickup, 500, false, kb_time + 4000000, kb_old_boot));
       auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
@@ -8436,30 +8459,55 @@ void run_static_tests() {
       auto a = kb_open(tmp.root + "/42.a", kb_backup(), kb_old_boot);
       InventoryBackup other = kb_backup();
       other.serial_number = 43;
-      other.inventory = kb_inv({KB_SABER}, 1);
+      other.inventory = kb_inv({KB_FRAME}, 1);
+      other.inventory.items[0].data.id = 0x00210000; // the second player's own id range
       other.disp.stats.meseta = 0;
       auto b = kb_open(tmp.root + "/43.b", other, kb_old_boot);
-      // both restore after a stop at this moment, with cards that kept only what was equipped
-      auto handguns = [&]() {
+      // Both restore after a stop at this moment. A's card holds what was equipped when he joined (the Saber and the
+      // Frame; measured on the Wii, critic B1), B's card what B had equipped. How often the item then exists: on A's
+      // card, plus what $restore gives A, plus what it gives B
+      auto count = [&](uint64_t code) {
         auto ra = kb_restore(a.path, kb_new_boot, kb_penalty_card, 0);
         auto rb_backup = kb_load(b.path);
         auto from = inventory_backup_restore_source(rb_backup, kb_new_boot);
-        auto rb_plan = inventory_restore_missing(*from.inventory, from.meseta, other.inventory, 0, InventoryRemovals());
+        auto rb_plan = inventory_restore_missing(from.inventory, from.meseta, other.inventory, 0, InventoryRemovals());
         expect(inventory_backup_interim_is_end(rb_backup, kb_new_boot));
-        return kb_plan_n(ra.plan, KB_HANDGUN) + kb_plan_n(rb_plan, KB_HANDGUN);
+        return kb_n(kb_penalty_card, code) + kb_plan_n(ra.plan, code) + kb_plan_n(rb_plan, code);
       };
-      expect_eq(1u, handguns()); // A has it
-      auto a_after = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3}, 2);
-      expect(inventory_backup_write_interim(a.path, a.state, a_after, 500, false, kb_time + 1000000, kb_old_boot));
-      expect_eq(0u, handguns()); // it lies on the floor: A dropped it himself, nobody gets it back
-      auto b_after = kb_inv({KB_SABER, KB_HANDGUN}, 1);
+      // The critic's sequence: A drops the Saber he had equipped at the join, B picks it up
+      expect_eq(1u, count(KB_SABER));
+      auto a_after = kb_inv({KB_FRAME, KB_MONOMATE_3, KB_HANDGUN}, 1);
+      for (size_t z = 0; z < 3; z++) {
+        a_after.items[z].data.id = 0x00010001 + z;
+      }
+      inventory_provenance_reconcile(a.prov, a_after, 500);
+      expect(inventory_backup_write_interim(a.path, a.state, a_after, 500, false, kb_time + 1000000, kb_old_boot, &a.prov));
+      expect_eq(1u, count(KB_SABER)); // on the floor; A's card still holds it
+      auto b_after = other.inventory;
+      b_after.items[1] = kb_join_inv.items[0]; // the Saber, with the id it had in A's inventory
+      b_after.items[1].flags = 0;
+      b_after.num_items = 2;
+      inventory_provenance_reconcile(b.prov, b_after, 0); // nobody vouched for it: a player dropped it
       expect(inventory_backup_interim_changed(b.state, b_after, 0, false));
-      expect_eq(0u, handguns()); // B picked it up, his bundle is not written yet: lost with the last bundle, never twice
-      expect(inventory_backup_write_interim(b.path, b.state, b_after, 0, false, kb_time + 3000000, kb_old_boot));
-      expect_eq(1u, handguns()); // B has it
+      expect_eq(1u, count(KB_SABER)); // B picked it up, his bundle is not written yet
+      expect(inventory_backup_write_interim(b.path, b.state, b_after, 0, false, kb_time + 3000000, kb_old_boot, &b.prov));
+      expect_eq(1u, kb_n(kb_load(b.path).interim_inventory, KB_SABER)); // B's interim state holds it
+      expect_eq(1u, count(KB_SABER)); // and $restore does not give it to B: once, on A's card (a5fa1dc: twice)
+      // the same for an item A's card does not hold (the Handgun was not equipped): nobody gets it back, never twice
+      expect_eq(1u, count(KB_HANDGUN));
+      auto a_last = kb_inv({KB_FRAME, KB_MONOMATE_3}, 1);
+      a_last.items[0].data.id = 0x00010001;
+      a_last.items[1].data.id = 0x00010002;
+      inventory_provenance_reconcile(a.prov, a_last, 500);
+      expect(inventory_backup_write_interim(a.path, a.state, a_last, 500, false, kb_time + 4000000, kb_old_boot, &a.prov));
+      b_after.items[2] = kb_join_inv.items[3];
+      b_after.num_items = 3;
+      inventory_provenance_reconcile(b.prov, b_after, 0);
+      expect(inventory_backup_write_interim(b.path, b.state, b_after, 0, false, kb_time + 5000000, kb_old_boot, &b.prov));
+      expect_eq(0u, count(KB_HANDGUN));
       // the two games write two files: neither write touched the other
-      expect_eq(2u, kb_load(a.path).interim_count);
-      expect_eq(2u, kb_load(b.path).interim_count);
+      expect_eq(3u, kb_load(a.path).interim_count);
+      expect_eq(3u, kb_load(b.path).interim_count);
     });
 
     k3_case("backup 8: a player who left the game before the hard stop is treated as before; a Loss mark survives interim writes", [&]() {
@@ -8525,7 +8573,7 @@ void run_static_tests() {
       // game 1 stops hard with the found item in its interim state
       auto g1 = kb_open(dir, kb_backup(), kb_old_boot);
       auto with_found = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
-      expect(inventory_backup_write_interim(g1.path, g1.state, with_found, 500, false, kb_time + 2000000, kb_old_boot));
+      expect(kb_found(g1, with_found, 500, {KB_FOUND}, 0, kb_time + 2000000, kb_old_boot)); // an enemy's drop
       // game 2 (the next server process): the card kept the equipped items; $restore marks the backup, writes the mark
       // and only then drops
       InventoryBackup second = kb_backup();
@@ -8544,9 +8592,10 @@ void run_static_tests() {
       auto r2 = kb_restore(g2.path, kb_third_boot, kb_penalty_card, 0);
       expect_eq(KbR::NONE, r2.refusal);
       expect(r2.plan.empty()); // game 2's interim state never held them
-      // Or he picked them up and the bundle was written: game 2's interim state holds them, once
+      // Or he picked them up and the bundle was written: game 2's interim state holds them, once. They are the
+      // server's own $restore drops, so they are proven his
       auto picked_up = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
-      expect(inventory_backup_write_interim(g2.path, g2.state, picked_up, 500, false, kb_time + 603000000, kb_new_boot));
+      expect(kb_found(g2, picked_up, 500, {KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 500, kb_time + 603000000, kb_new_boot));
       r2 = kb_restore(g2.path, kb_third_boot, kb_penalty_card, 0);
       expect_eq(KbR::NONE, r2.refusal);
       expect_eq(KbKind::INTERIM, r2.kind);
@@ -8654,9 +8703,18 @@ void run_static_tests() {
       K3World w;
       KbLive live;
       kb_join(w, live);
-      // 6x59 (a pick-up): nothing notes it, and the end of the command does not write it
+      // 6x59 (a pick-up of an enemy's item and of 250 Meseta the server made itself): the provenance notes it, and the
+      // end of the command does not write it
       live.ch->inventory = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_HANDGUN, KB_FOUND}, 2);
+      InventoryFloorOrigin from_world;
+      from_world.world = true;
+      inventory_backup_note_picked_up(live.p.c, live.ch->inventory.items[4].data, from_world);
       live.ch->disp.stats.meseta = 750;
+      ItemData meseta_item;
+      meseta_item.data1[0] = 0x04;
+      meseta_item.data2d = 250;
+      inventory_backup_note_picked_up(live.p.c, meseta_item, from_world);
+      inventory_backup_after_subcommand(live.p.c);
       inventory_backup_after_command(live.p.c);
       auto d = kb_load(live.path);
       expect_eq(1u, d.interim_count);
@@ -8710,6 +8768,423 @@ void run_static_tests() {
       expect(std::filesystem::exists(second + INVENTORY_BACKUP_SET_ASIDE_SUFFIX));
       expect_eq(1u, inventory_backup_list(dir).size());
       expect(live.p.c->inventory_backup_current.empty());
+    });
+
+    // ---- kwaliteit-3 critic B1: provenance. Two real clients in one real game, each with its own backup. The steps
+    // are the ones the server's handlers take (on_player_drop_item, on_pick_up_item_generic, on_destroy_inventory_item,
+    // on_create_inventory_item, on_buy_shop_item), with the same hooks in the same order; "the bundle" is the timer's
+    // write. After the hard stop each player's $restore runs in a later server process
+    const uint64_t KB_X1 = 0x0002000000000000, KB_X2 = 0x0003000000000000, KB_X3 = 0x0004000000000000;
+    auto kb_items = [](const std::vector<std::pair<uint64_t, uint32_t>>& items, size_t equipped) {
+      PlayerInventory i;
+      i.language = Language::ENGLISH;
+      i.num_items = items.size();
+      for (size_t z = 0; z < items.size(); z++) {
+        i.items[z].state = (z < equipped) ? 2 : 1;
+        i.items[z].flags = (z < equipped) ? 0x00000008 : 0;
+        i.items[z].data = ItemData(items[z].first, 0);
+        i.items[z].data.id = items[z].second;
+      }
+      return i;
+    };
+    const auto kb_a_inv = kb_items({{KB_SABER, 0x00010000}, {KB_FRAME, 0x00010001}, {KB_MONOMATE_3, 0x00010002}, {KB_HANDGUN, 0x00010003}}, 2);
+    const auto kb_b_inv = kb_items({{KB_FRAME, 0x00210000}}, 1);
+    struct KbTwo {
+      K3World w;
+      std::shared_ptr<Lobby> l;
+      KbLive a, b;
+    };
+    auto kb_two = [&](KbTwo& g, uint32_t a_meseta, uint32_t b_meseta) {
+      g.l = std::make_shared<Lobby>(g.w.s, g.w.next_lobby_id++, true);
+      for (size_t floor = 0; floor < 2; floor++) {
+        g.l->floor_item_managers.emplace_back(g.l->lobby_id, floor);
+      }
+      size_t slot = 0;
+      for (auto* who : {&g.a, &g.b}) {
+        who->p = g.w.player();
+        who->ch = who->p.c->character_file(false, false);
+        who->ch->disp.visual.name.encode("TestK3", Language::ENGLISH);
+        who->ch->disp.stats.meseta = slot ? b_meseta : a_meseta;
+        who->ch->inventory = slot ? kb_b_inv : kb_a_inv;
+        who->l = g.l;
+        who->p.c->lobby_client_id = slot;
+        g.l->clients[slot] = who->p.c;
+        who->p.c->lobby = g.l;
+        inventory_backup_on_game_join(who->p.c, g.l); // the 6F of each
+        who->path = who->p.c->inventory_backup_current;
+        expect(!who->path.empty());
+        slot++;
+      }
+    };
+    auto kb_take = [](PlayerInventory& inv, uint32_t id) {
+      for (size_t z = 0; z < inv.num_items; z++) {
+        if (inv.items[z].data.id == id) {
+          ItemData item = inv.items[z].data;
+          for (size_t y = z + 1; y < inv.num_items; y++) {
+            inv.items[y - 1] = inv.items[y];
+          }
+          inv.num_items--;
+          inv.items[inv.num_items] = PlayerInventoryItem();
+          return item;
+        }
+      }
+      throw std::runtime_error("kb_take: no such item");
+    };
+    auto kb_put = [](PlayerInventory& inv, const ItemData& item) {
+      auto& slot = inv.items[inv.num_items++];
+      slot = PlayerInventoryItem();
+      slot.state = 1;
+      slot.data = item;
+    };
+    auto kb_floor = [](KbTwo& g, uint64_t code, uint32_t id, uint32_t meseta = 0) {
+      ItemData item(code, 0);
+      if (meseta) {
+        item.data1[0] = 0x04;
+        item.data2d = meseta;
+      }
+      item.id = id;
+      g.l->add_item(1, item, VectorXZF(), nullptr, nullptr, 0x00F);
+      return item;
+    };
+    auto kb_done = [](KbLive& who) { // the end of the subcommand and of the command it came in
+      inventory_backup_after_subcommand(who.p.c);
+      inventory_backup_after_command(who.p.c);
+    };
+    auto kb_drop = [&](KbTwo& g, KbLive& who, uint32_t id) { // 6x2A
+      ItemData item = kb_take(who.ch->inventory, id);
+      g.l->add_item(1, item, VectorXZF(), nullptr, nullptr, 0x00F);
+      inventory_backup_note_dropped(who.p.c, g.l, 1, item);
+      inventory_backup_note_removed(who.p.c, item);
+      kb_done(who);
+    };
+    // 6x59/6x5A; stack_id: the tool stack the picked-up units join (what PSOBBCharacterFile::add_item does)
+    auto kb_pick_up = [&](KbTwo& g, KbLive& who, uint32_t id, uint32_t stack_id = 0) {
+      auto fi = g.l->remove_item(1, id, who.p.c->lobby_client_id);
+      if (fi->data.data1[0] == 0x04) {
+        who.ch->disp.stats.meseta += fi->data.data2d;
+      } else if (stack_id) {
+        for (size_t z = 0; z < who.ch->inventory.num_items; z++) {
+          if (who.ch->inventory.items[z].data.id == stack_id) {
+            who.ch->inventory.items[z].data.data1[5] += fi->data.data1[5];
+          }
+        }
+      } else {
+        kb_put(who.ch->inventory, fi->data);
+      }
+      inventory_backup_note_picked_up(who.p.c, fi->data, fi->backup_origin);
+      kb_done(who);
+    };
+    auto kb_destroy = [&](KbLive& who, uint32_t id) { // 6x29: a sale, a bank deposit, the giving side of a trade
+      ItemData item = kb_take(who.ch->inventory, id);
+      inventory_backup_note_removed(who.p.c, item);
+      kb_done(who);
+    };
+    // 6x2B: the client says an item appeared in its inventory (the receiving side of a trade, the bank, the tekker,
+    // a quest). The server adds it and nothing vouches for it
+    auto kb_create = [&](KbLive& who, const ItemData& item) {
+      kb_put(who.ch->inventory, item);
+      kb_done(who);
+    };
+    auto kb_bundle = [](KbLive& who) {
+      inventory_backup_flush_interim(who.p.c);
+    };
+    struct KbBoth {
+      InventoryRestorePlan a, b;
+    };
+    // The hard stop is now: what $restore gives each of them in a later server process, for cards that hold this
+    auto kb_stop = [&](KbTwo& g, const PlayerInventory& a_card, uint32_t a_card_meseta, const PlayerInventory& b_card,
+                       uint32_t b_card_meseta) {
+      KbBoth ret;
+      auto ra = kb_restore(g.a.path, kb_next_boot, a_card, a_card_meseta);
+      auto rb = kb_restore(g.b.path, kb_next_boot, b_card, b_card_meseta);
+      expect(inventory_backup_interim_is_end(ra.backup, kb_next_boot));
+      expect(inventory_backup_interim_is_end(rb.backup, kb_next_boot));
+      expect_eq(KbKind::INTERIM, ra.kind);
+      expect_eq(KbKind::INTERIM, rb.kind);
+      ret.a = ra.plan;
+      ret.b = rb.plan;
+      return ret;
+    };
+    // how often an item of this type exists after a hard stop now: on the two cards, plus what $restore gives each
+    auto kb_total = [&](KbTwo& g, uint64_t code, const PlayerInventory& a_card) {
+      auto both = kb_stop(g, a_card, 0, kb_b_inv, 0);
+      return kb_n(a_card, code) + kb_n(kb_b_inv, code) + kb_plan_n(both.a, code) + kb_plan_n(both.b, code);
+    };
+
+    k3_case("backup B1 1: A drops what he had equipped at the join, B picks it up, hard stop: the item exists once (the critic's sequence, through the hooks)", [&]() {
+      K3TempCwd temp_cwd("backup-b1-drop");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      // A's card holds what he had equipped when he joined: the Saber and the Frame (measured on the Wii, critic B1)
+      expect_eq(1u, kb_total(g, KB_SABER, kb_penalty_card));
+      kb_drop(g, g.a, 0x00010000);
+      expect_eq(0u, kb_n(kb_load(g.a.path).interim_inventory, KB_SABER)); // on disk at once
+      expect_eq(1u, kb_total(g, KB_SABER, kb_penalty_card));
+      kb_pick_up(g, g.b, 0x00010000);
+      expect_eq(1u, kb_total(g, KB_SABER, kb_penalty_card)); // B's bundle is not written yet
+      kb_bundle(g.b);
+      expect_eq(1u, kb_n(kb_load(g.b.path).interim_inventory, KB_SABER)); // B's interim state holds it
+      expect_eq(1u, kb_total(g, KB_SABER, kb_penalty_card)); // once: on A's card. $restore does not give it to B
+      // also if A's card kept everything he joined with
+      expect_eq(1u, kb_total(g, KB_SABER, kb_a_inv));
+
+      // An item A's card does not hold (the Handgun was not equipped). He drops it and picks it up himself: his own
+      // drop, the server moved it both ways, it is still proven his
+      expect_eq(1u, kb_total(g, KB_HANDGUN, kb_penalty_card));
+      kb_drop(g, g.a, 0x00010003);
+      expect_eq(0u, kb_total(g, KB_HANDGUN, kb_penalty_card)); // on the floor it is nobody's
+      kb_pick_up(g, g.a, 0x00010003);
+      kb_bundle(g.a);
+      expect_eq(1u, kb_total(g, KB_HANDGUN, kb_penalty_card));
+      // He drops it, B picks it up: not B's after a hard stop (and not A's: lost, never twice)
+      kb_drop(g, g.a, 0x00010003);
+      kb_pick_up(g, g.b, 0x00010003);
+      kb_bundle(g.b);
+      expect_eq(0u, kb_total(g, KB_HANDGUN, kb_penalty_card));
+      expect_eq(1u, kb_total(g, KB_HANDGUN, kb_a_inv)); // a card that kept the join state: once, there
+      // B drops it and A picks it up again: it went through another player, so it is not proven A's any more, though
+      // its id is the one it had in A's join inventory
+      kb_drop(g, g.b, 0x00010003);
+      kb_pick_up(g, g.a, 0x00010003);
+      kb_bundle(g.a);
+      auto d = kb_load(g.a.path);
+      expect_eq(1u, kb_n(d.interim_inventory, KB_HANDGUN));
+      expect_eq(1u, d.interim_own.units.size());
+      expect_eq(0x00010003u, d.interim_own.units[0].first);
+      expect_eq(0u, d.interim_own.units[0].second);
+      expect_eq(0u, kb_total(g, KB_HANDGUN, kb_penalty_card));
+      expect_eq(1u, kb_total(g, KB_HANDGUN, kb_a_inv));
+    });
+
+    k3_case("backup B1 2: a trade on the GameCube with the hard stop between every two commands: the traded item exists at most once", [&]() {
+      size_t variant = 0;
+      for (bool on_card : {true, false}) {
+        for (bool create_first : {false, true}) {
+          K3TempCwd temp_cwd(std::format("backup-b1-trade{}", variant++).c_str());
+          KbTwo g;
+          kb_two(g, 500, 0);
+          // what A trades away: the Saber (equipped at the join, so on his card) or the Handgun (not on his card)
+          uint32_t id = on_card ? 0x00010000 : 0x00010003;
+          uint64_t code = on_card ? KB_SABER : KB_HANDGUN;
+          auto check = [&]() {
+            size_t n = kb_total(g, code, kb_penalty_card);
+            expect(n <= 1);
+            if (on_card) {
+              expect_eq(1u, n);
+            }
+            expect(kb_total(g, code, kb_a_inv) == 1); // a card that kept the whole join state
+            return n;
+          };
+          ItemData traded = kb_a_inv.items[on_card ? 0 : 3].data;
+          // D2: the server notes what A gives; on the GameCube the inventories change only with the clients' own
+          // commands that follow, A's 6x29 and B's 6x2B, in either order
+          inventory_backup_note_removed(g.a.p.c, traded);
+          kb_done(g.a);
+          expect_eq(1u, check());
+          ItemData received = traded;
+          received.id = 0x00210001; // B's client names it
+          for (size_t step = 0; step < 2; step++) {
+            if ((step == 0) == create_first) {
+              kb_create(g.b, received);
+              check();
+              kb_bundle(g.b);
+              expect_eq(1u, kb_n(kb_load(g.b.path).interim_inventory, code));
+            } else {
+              kb_destroy(g.a, id);
+              expect_eq(0u, kb_n(kb_load(g.a.path).interim_inventory, code));
+            }
+            check();
+          }
+          kb_bundle(g.a);
+          kb_bundle(g.b);
+          // After the trade: on A's card if it was equipped at the join, else nowhere. Never at B through $restore
+          expect_eq(on_card ? 1u : 0u, check());
+          expect_eq(0u, kb_plan_n(kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).b, code));
+        }
+      }
+    });
+
+    k3_case("backup B1 3: the bank: what the client says it took out (6x2B) is never given back; what it put in (6x29) is gone", [&]() {
+      K3TempCwd temp_cwd("backup-b1-bank");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      // He takes an item out of the bank. The card's bank is outside what the server sees and may still hold it
+      ItemData from_bank(KB_FOUND, 0);
+      from_bank.id = 0x00010004;
+      kb_create(g.a, from_bank);
+      kb_bundle(g.a);
+      expect_eq(1u, kb_n(kb_load(g.a.path).interim_inventory, KB_FOUND));
+      auto both = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0);
+      expect_eq(0u, kb_plan_n(both.a, KB_FOUND));
+      expect_eq(1u, kb_plan_n(both.a, KB_HANDGUN)); // what he had at the join is still his
+      // He puts the Handgun into the bank: it left the inventory, at once
+      kb_destroy(g.a, 0x00010003);
+      both = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0);
+      expect_eq(0u, kb_plan_n(both.a, KB_HANDGUN));
+      expect_eq(0u, kb_plan_n(both.a, KB_FOUND));
+    });
+
+    k3_case("backup B1 4: Meseta handed over is never given back to the receiver; Meseta of an enemy is", [&]() {
+      K3TempCwd temp_cwd("backup-b1-meseta");
+      KbTwo g;
+      kb_two(g, 500, 100);
+      // A drops 300 Meseta: 6x5D (the client's own floor item, nobody vouches for it), then 6x29 for the amount
+      ItemData dropped = kb_floor(g, 0, 0x00010010, 300);
+      g.a.ch->disp.stats.meseta = 200;
+      inventory_backup_note_removed(g.a.p.c, dropped);
+      kb_done(g.a);
+      expect_eq(200u, kb_load(g.a.path).interim_meseta);
+      kb_pick_up(g, g.b, 0x00010010);
+      kb_bundle(g.b);
+      expect_eq(400u, kb_load(g.b.path).interim_meseta); // B's interim state holds it
+      auto both = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0); // cards without any Meseta (measured on the Wii)
+      expect_eq(200u, both.a.meseta);
+      expect_eq(100u, both.b.meseta); // what B joined with, not what A gave
+      both = kb_stop(g, kb_penalty_card, 500, kb_b_inv, 100); // cards that kept the join state
+      expect_eq(0u, both.a.meseta);
+      expect_eq(0u, both.b.meseta);
+      // 50 Meseta the server made itself for an enemy: proven
+      kb_floor(g, 0, 0xCC000001, 50);
+      inventory_backup_note_floor_world(g.l, 1, 0xCC000001);
+      kb_pick_up(g, g.b, 0xCC000001);
+      kb_bundle(g.b);
+      expect_eq(450u, kb_load(g.b.path).interim_meseta);
+      expect_eq(150u, kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).b.meseta);
+      // B spends 120 in the shop: what leaves is counted as his own first
+      g.b.ch->disp.stats.meseta = 330;
+      inventory_backup_note_meseta_removed(g.b.p.c, 120);
+      kb_done(g.b);
+      expect_eq(30u, kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).b.meseta);
+    });
+
+    k3_case("backup B1 5: the good path: an item of an enemy or box the server vouches for is given back after a hard stop; everything else that came in is not", [&]() {
+      K3TempCwd temp_cwd("backup-b1-world");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      // an item the server made itself (server drop modes)
+      kb_floor(g, KB_FOUND, 0xCC000000);
+      inventory_backup_note_floor_world(g.l, 1, 0xCC000000);
+      kb_pick_up(g, g.a, 0xCC000000);
+      expect_eq(0u, kb_plan_n(kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).a, KB_FOUND)); // the bundle is not written yet
+      kb_bundle(g.a);
+      expect_eq(1u, kb_plan_n(kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).a, KB_FOUND));
+      // an item the leader announced (6x5F, client drop mode) for a box whose drop request the server had marked
+      int box1 = 0, box2 = 0;
+      kb_floor(g, KB_X1, 0x00010020);
+      inventory_backup_note_leader_drop(g.l, 1, 0x00010020, &box1, true);
+      kb_pick_up(g, g.b, 0x00010020);
+      // a second item for the same box, and one for a box nobody asked a drop for: the leader's word alone
+      kb_floor(g, KB_X2, 0x00010021);
+      inventory_backup_note_leader_drop(g.l, 1, 0x00010021, &box1, true);
+      kb_pick_up(g, g.b, 0x00010021);
+      kb_floor(g, KB_X3, 0x00010022);
+      inventory_backup_note_leader_drop(g.l, 1, 0x00010022, &box2, false);
+      kb_pick_up(g, g.b, 0x00010022);
+      kb_bundle(g.b);
+      auto both = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0);
+      expect_eq(1u, kb_plan_n(both.b, KB_X1));
+      expect_eq(0u, kb_plan_n(both.b, KB_X2));
+      expect_eq(0u, kb_plan_n(both.b, KB_X3));
+      expect_eq(3u, kb_load(g.b.path).interim_inventory.num_items - 1u); // all three are in B's interim state
+      // a shop purchase (6x5E): the item is not proven (the Meseta that paid for it may be another player's), and
+      // the Meseta that left is gone
+      ItemData bought(KB_X2, 0);
+      bought.id = 0x00010005;
+      kb_put(g.a.ch->inventory, bought);
+      g.a.ch->disp.stats.meseta = 400;
+      inventory_backup_note_meseta_removed(g.a.p.c, 100);
+      kb_done(g.a);
+      both = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0);
+      expect_eq(0u, kb_plan_n(both.a, KB_X2));
+      expect_eq(400u, both.a.meseta);
+      // tools: two Monomates of an enemy join his stack of three, then two a player dropped
+      ItemData two(KB_MONOMATE_2, 0);
+      two.id = 0xCC000002;
+      g.l->add_item(1, two, VectorXZF(), nullptr, nullptr, 0x00F);
+      inventory_backup_note_floor_world(g.l, 1, 0xCC000002);
+      kb_pick_up(g, g.a, 0xCC000002, 0x00010002);
+      two.id = 0x00210009;
+      g.l->add_item(1, two, VectorXZF(), nullptr, nullptr, 0x00F);
+      kb_pick_up(g, g.a, 0x00210009, 0x00010002);
+      kb_bundle(g.a);
+      auto d = kb_load(g.a.path);
+      expect_eq(7u, d.interim_inventory.items[2].data.data1[5]);
+      auto mates = [&]() {
+        auto plan = kb_stop(g, kb_penalty_card, 0, kb_b_inv, 0).a;
+        for (const auto& item : plan.items) {
+          if (item.data1[0] == 0x03) {
+            return static_cast<uint32_t>(item.data1[5]);
+          }
+        }
+        return 0u;
+      };
+      expect_eq(5u, mates());
+      // he uses one (6x27 notes first, the use follows, the end of the command writes): what leaves a stack is
+      // counted as his own first
+      ItemData used(0x0300000000010000, 0);
+      used.id = 0x00010002;
+      inventory_backup_note_removed(g.a.p.c, used);
+      g.a.ch->inventory.items[2].data.data1[5] = 6;
+      kb_done(g.a);
+      expect_eq(6u, kb_load(g.a.path).interim_inventory.items[2].data.data1[5]);
+      expect_eq(4u, mates());
+    });
+
+    k3_case("backup B1 6: the rules on disk: Own names what differs from the default rule; an interim state without Own is no end state", [&]() {
+      KbTempDir tmp("own");
+      auto g = kb_open(tmp.root + "/42.test", kb_backup(), kb_old_boot);
+      // the join interim state: nothing differs from the default rule, Own is there and empty
+      std::string raw = phosg::load_file(g.path);
+      expect(raw.find("\"Own\": []") != std::string::npos);
+      expect(raw.find("\"OwnMeseta\"") == std::string::npos);
+      auto d = kb_load(g.path);
+      expect(d.interim_own.present && d.interim_own.units.empty() && !d.interim_own.has_meseta);
+      // the default rule: the same id with the same type, up to the units of the join; Meseta up to the join's
+      uint32_t own_meseta = 0;
+      auto end = kb_inv({KB_SABER, KB_FRAME, KB_MONOMATE_3, KB_FOUND, KB_X1}, 2); // FOUND has the Handgun's id
+      end.items[2].data.data1[5] = 9;
+      auto own = inventory_backup_own_state(kb_join_inv, 500, end, 800, InventoryOwnership(), own_meseta);
+      expect_eq(3u, own.num_items);
+      expect_eq(1u, kb_n(own, KB_SABER) + 0u);
+      expect_eq(0u, kb_n(own, KB_FOUND) + kb_n(own, KB_X1));
+      expect_eq(3u, own.items[2].data.data1[5]);
+      expect_eq(500u, own_meseta);
+      // Own overrides it per id, both ways, and round-trips through the file
+      InventoryOwnership named;
+      named.present = true;
+      named.units = {{0x00010002, 1}, {0x00010004, 1}};
+      named.has_meseta = true;
+      named.meseta = 650;
+      d.interim_inventory = end;
+      d.interim_meseta = 800;
+      d.interim_own = named;
+      inventory_backup_write_file(g.path, d);
+      d = kb_load(g.path);
+      expect(d.interim_own.present && d.interim_own.has_meseta);
+      expect_eq(650u, d.interim_own.meseta);
+      expect_eq(2u, d.interim_own.units.size());
+      auto from = inventory_backup_restore_source(d, kb_new_boot);
+      expect_eq(KbKind::INTERIM, from.kind);
+      expect_eq(650u, from.meseta);
+      expect_eq(1u, from.inventory.items[2].data.data1[5]);
+      expect_eq(1u, kb_n(from.inventory, KB_X1));
+      expect_eq(0u, kb_n(from.inventory, KB_FOUND));
+      // An interim state without Own (what a5fa1dc wrote, before provenance): not an end state, refused as a hard stop
+      // was before interim states existed
+      std::string legacy = phosg::load_file(g.path);
+      size_t at = legacy.find("\"Own\": [");
+      expect(at != std::string::npos);
+      auto json = phosg::JSON::parse(legacy);
+      auto legacy_backup = inventory_backup_from_json(json);
+      legacy_backup.interim_own = InventoryOwnership();
+      std::string legacy_text = inventory_backup_to_json(legacy_backup).serialize(phosg::JSON::SerializeOption::FORMAT);
+      expect(legacy_text.find("\"Own\"") == std::string::npos);
+      expect(legacy_text.find("\"Interim\"") != std::string::npos);
+      phosg::save_file(g.path, legacy_text);
+      auto r = kb_restore(g.path, kb_new_boot, kb_penalty_card, 0);
+      expect(r.backup.has_interim && !r.backup.interim_own.present);
+      expect_eq(KbR::UNKNOWN_END, r.refusal);
+      expect_eq(KbKind::JOIN, r.kind);
     });
 
     expect_eq(0u, k3_failed);

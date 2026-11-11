@@ -38,6 +38,36 @@ static phosg::JSON items_json(const PlayerInventory& inventory) {
   return ret;
 }
 
+// Own and OwnMeseta of an end state (InventoryBackup.hh, Provenance), added to its dict
+static void own_to_json(phosg::JSON& json, const InventoryOwnership& own, bool always) {
+  if (always || !own.units.empty()) {
+    auto list = phosg::JSON::list();
+    for (const auto& [id, units] : own.units) {
+      list.emplace_back(phosg::JSON::dict({{"ID", id}, {"Units", units}}));
+    }
+    json.emplace("Own", std::move(list));
+  }
+  if (own.has_meseta) {
+    json.emplace("OwnMeseta", own.meseta);
+  }
+}
+
+static InventoryOwnership own_from_json(const phosg::JSON& json) {
+  InventoryOwnership own;
+  if (json.contains("Own")) {
+    own.present = true;
+    for (const auto& z : json.at("Own").as_list()) {
+      own.units.emplace_back(z->get_int("ID"), z->get_int("Units"));
+    }
+  }
+  if (json.contains("OwnMeseta")) {
+    own.present = true;
+    own.has_meseta = true;
+    own.meseta = json.get_int("OwnMeseta");
+  }
+  return own;
+}
+
 phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
   Language language = b.inventory.language;
   auto json = phosg::JSON::dict({
@@ -78,7 +108,7 @@ phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
   }
   // Added last and only when present: a backup without an interim state serializes byte for byte as it did before
   if (b.has_interim) {
-    json.emplace("Interim", phosg::JSON::dict({
+    auto interim = phosg::JSON::dict({
         {"Time", b.interim_time_usecs},
         {"TimeText", phosg::format_time(b.interim_time_usecs)},
         {"Boot", b.interim_boot},
@@ -86,7 +116,11 @@ phosg::JSON inventory_backup_to_json(const InventoryBackup& b) {
         {"Meseta", b.interim_meseta},
         {"Items", items_json(b.interim_inventory)},
         {"Inventory", spire_guard_hex_encode(&b.interim_inventory, sizeof(b.interim_inventory))},
-    }));
+    });
+    if (b.interim_own.present) {
+      own_to_json(interim, b.interim_own, true);
+    }
+    json.emplace("Interim", std::move(interim));
   }
   return json;
 }
@@ -124,6 +158,7 @@ InventoryBackup inventory_backup_from_json(const phosg::JSON& json) {
     b.interim_count = interim.get_int("Count", 0);
     b.interim_meseta = interim.get_int("Meseta");
     spire_guard_hex_decode(interim.get_string("Inventory"), &b.interim_inventory, sizeof(b.interim_inventory));
+    b.interim_own = own_from_json(interim);
   }
   return b;
 }
@@ -360,6 +395,201 @@ InventoryRestorePlan inventory_restore_missing(const PlayerInventory& source, ui
   return plan;
 }
 
+// Provenance (InventoryBackup.hh)
+
+namespace {
+// item id -> units, for the items of an inventory
+std::unordered_map<uint32_t, uint32_t> units_by_id(const PlayerInventory& inventory) {
+  std::unordered_map<uint32_t, uint32_t> ret;
+  for (size_t z = 0; z < std::min<size_t>(inventory.num_items, inventory.items.size()); z++) {
+    const auto& item = inventory.items[z].data;
+    if (!item.empty()) {
+      ret[item.id.load()] += entry_count(item);
+    }
+  }
+  return ret;
+}
+
+// Whether an item of an end state can be the join item that had the same id: the same type (data1[0-2], a mag
+// data1[0-1]). An id alone is not enough for a file written without provenance
+bool same_kind(const ItemData& a, const ItemData& b) {
+  size_t len = (a.data1[0] == 0x02) ? 2 : 3;
+  return !memcmp(&a.data1[0], &b.data1[0], len);
+}
+} // namespace
+
+uint32_t inventory_provenance_units(const ItemData& item) {
+  return (item.data1[0] == 0x04) ? item.data2d.load() : entry_count(item);
+}
+
+void inventory_provenance_begin(InventoryProvenance& prov, const PlayerInventory& inventory, uint32_t meseta) {
+  prov = InventoryProvenance();
+  prov.seen = units_by_id(inventory);
+  prov.seen_meseta = meseta;
+}
+
+void inventory_provenance_credit(InventoryProvenance& prov, const PlayerInventory& inventory, const ItemData& item,
+    uint32_t units) {
+  if (item.data1[0] == 0x04) {
+    prov.credit_meseta += units;
+    return;
+  }
+  // The slot the units landed in: the item's own id, or for a tool that joined a stack, that stack
+  const ItemData* landed = nullptr;
+  for (size_t z = 0; z < std::min<size_t>(inventory.num_items, inventory.items.size()); z++) {
+    const auto& slot = inventory.items[z].data;
+    if (slot.id == item.id) {
+      landed = &slot;
+      break;
+    }
+    if (!landed && is_tool(item) && !memcmp(&slot.data1[0], &item.data1[0], 3)) {
+      landed = &slot;
+    }
+  }
+  if (landed) {
+    prov.credit[landed->id.load()] += units;
+  }
+}
+
+void inventory_provenance_reconcile(InventoryProvenance& prov, const PlayerInventory& inventory, uint32_t meseta) {
+  auto now = units_by_id(inventory);
+  for (const auto& [id, units] : now) {
+    auto seen_it = prov.seen.find(id);
+    uint32_t before = (seen_it == prov.seen.end()) ? 0 : seen_it->second;
+    if (units > before) {
+      uint32_t gain = units - before;
+      auto credit_it = prov.credit.find(id);
+      uint32_t proven = std::min(gain, (credit_it == prov.credit.end()) ? 0 : credit_it->second);
+      if (gain > proven) {
+        prov.foreign[id] += gain - proven;
+      }
+    }
+  }
+  // What left a slot is counted as its proven units first: the foreign units stay, up to what the slot still holds
+  for (auto it = prov.foreign.begin(); it != prov.foreign.end();) {
+    auto now_it = now.find(it->first);
+    if (now_it == now.end()) {
+      it = prov.foreign.erase(it);
+    } else {
+      it->second = std::min(it->second, now_it->second);
+      ++it;
+    }
+  }
+  if (meseta > prov.seen_meseta) {
+    uint32_t gain = meseta - prov.seen_meseta;
+    prov.foreign_meseta += gain - std::min(gain, prov.credit_meseta);
+  }
+  prov.foreign_meseta = std::min(prov.foreign_meseta, meseta);
+  prov.seen = std::move(now);
+  prov.seen_meseta = meseta;
+  prov.credit.clear();
+  prov.credit_meseta = 0;
+}
+
+uint32_t inventory_provenance_own_units(const InventoryProvenance& prov, const ItemData& item) {
+  auto seen_it = prov.seen.find(item.id.load());
+  if ((item.data1[0] == 0x04) || (seen_it == prov.seen.end())) {
+    return 0;
+  }
+  auto foreign_it = prov.foreign.find(item.id.load());
+  uint32_t foreign = (foreign_it == prov.foreign.end()) ? 0 : foreign_it->second;
+  return std::min<uint32_t>(seen_it->second - std::min(seen_it->second, foreign), entry_count(item));
+}
+
+namespace {
+struct JoinSlot {
+  uint32_t units = 0;
+  const ItemData* item = nullptr;
+};
+std::unordered_map<uint32_t, JoinSlot> join_slots(const PlayerInventory& join) {
+  std::unordered_map<uint32_t, JoinSlot> ret;
+  for (size_t z = 0; z < std::min<size_t>(join.num_items, join.items.size()); z++) {
+    const auto& item = join.items[z].data;
+    if (!item.empty()) {
+      auto& slot = ret[item.id.load()];
+      slot.units += entry_count(item);
+      if (!slot.item) {
+        slot.item = &item;
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
+
+InventoryOwnership inventory_provenance_ownership(const InventoryProvenance& prov, const PlayerInventory& join,
+    uint32_t join_meseta, const PlayerInventory& end, uint32_t end_meseta) {
+  InventoryOwnership own;
+  own.present = true;
+  auto in_join = join_slots(join);
+  auto held = units_by_id(end);
+  for (size_t z = 0; z < std::min<size_t>(end.num_items, end.items.size()); z++) {
+    const auto& item = end.items[z].data;
+    auto held_it = held.find(item.id.load());
+    if (item.empty() || (held_it == held.end())) {
+      continue;
+    }
+    uint32_t units = held_it->second;
+    held.erase(held_it); // an id is handled once, at its first slot
+    auto foreign_it = prov.foreign.find(item.id.load());
+    uint32_t proven = units - std::min(units, (foreign_it == prov.foreign.end()) ? 0 : foreign_it->second);
+    auto join_it = in_join.find(item.id.load());
+    uint32_t by_default = ((join_it != in_join.end()) && same_kind(*join_it->second.item, item))
+        ? std::min(join_it->second.units, units)
+        : 0;
+    if (proven != by_default) {
+      own.units.emplace_back(item.id.load(), proven);
+    }
+  }
+  std::sort(own.units.begin(), own.units.end());
+  uint32_t proven_meseta = end_meseta - std::min(end_meseta, prov.foreign_meseta);
+  if (proven_meseta != std::min(join_meseta, end_meseta)) {
+    own.has_meseta = true;
+    own.meseta = proven_meseta;
+  }
+  return own;
+}
+
+PlayerInventory inventory_backup_own_state(const PlayerInventory& join, uint32_t join_meseta, const PlayerInventory& end,
+    uint32_t end_meseta, const InventoryOwnership& own, uint32_t& own_meseta) {
+  // Per item id the units that may still be handed out: what own names, else what the join inventory held under that id
+  struct Budget {
+    uint32_t units = 0;
+    const ItemData* join_item = nullptr; // null: named by own (no type check needed, the server followed the id)
+  };
+  std::unordered_map<uint32_t, Budget> budget;
+  for (const auto& [id, slot] : join_slots(join)) {
+    budget[id] = Budget{slot.units, slot.item};
+  }
+  for (const auto& [id, units] : own.units) {
+    budget[id] = Budget{units, nullptr};
+  }
+  PlayerInventory ret = end;
+  ret.num_items = 0;
+  for (size_t z = 0; z < ret.items.size(); z++) {
+    ret.items[z] = PlayerInventoryItem();
+  }
+  for (size_t z = 0; z < std::min<size_t>(end.num_items, end.items.size()); z++) {
+    const auto& item = end.items[z].data;
+    auto it = budget.find(item.id.load());
+    if (item.empty() || (it == budget.end()) || (it->second.join_item && !same_kind(*it->second.join_item, item))) {
+      continue;
+    }
+    uint32_t take = std::min(entry_count(item), it->second.units);
+    if (!take) {
+      continue;
+    }
+    it->second.units -= take;
+    auto& slot = ret.items[ret.num_items++];
+    slot = end.items[z];
+    if (is_tool(item) && item.data1[5]) {
+      slot.data.data1[5] = take;
+    }
+  }
+  own_meseta = std::min(end_meseta, own.has_meseta ? own.meseta : join_meseta);
+  return ret;
+}
+
 InventoryRestoreRefusal inventory_restore_refusal(bool in_game, bool spire_game, bool,
     uint32_t serial_number, const std::string& character_id, const InventoryBackup* backup, bool interim_is_end) {
   using R = InventoryRestoreRefusal;
@@ -442,6 +672,7 @@ void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_cov
     b.interim_time_usecs = 0;
     b.interim_boot = 0;
     b.interim_count = 0;
+    b.interim_own = InventoryOwnership();
   }
 }
 
@@ -451,22 +682,29 @@ uint64_t inventory_backup_boot_id() {
 }
 
 bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id) {
-  return b.has_interim && !b.has_exit && !b.left_normally && (b.interim_boot != boot_id);
+  // An interim state that does not say what of it is proven the player's own (written before provenance existed) is
+  // never an end state: it would give back what another player's card still holds (critic B1)
+  return b.has_interim && b.interim_own.present && !b.has_exit && !b.left_normally && (b.interim_boot != boot_id);
 }
 
 InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id) {
   using K = InventoryBackupSource::Kind;
   if (b.has_exit) {
-    return InventoryBackupSource{K::EXIT, &b.exit_inventory, b.exit_meseta};
+    return InventoryBackupSource{K::EXIT, b.exit_inventory, b.exit_meseta};
   }
   if (inventory_backup_interim_is_end(b, boot_id)) {
-    return InventoryBackupSource{K::INTERIM, &b.interim_inventory, b.interim_meseta};
+    // Not the interim state itself: only what of it is proven the player's own (critic B1)
+    InventoryBackupSource from;
+    from.kind = K::INTERIM;
+    from.inventory = inventory_backup_own_state(b.inventory, b.disp.stats.meseta, b.interim_inventory, b.interim_meseta,
+        b.interim_own, from.meseta);
+    return from;
   }
-  return InventoryBackupSource{K::JOIN, &b.inventory, b.disp.stats.meseta.load()};
+  return InventoryBackupSource{K::JOIN, b.inventory, b.disp.stats.meseta.load()};
 }
 
 void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
-    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count) {
+    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count, const InventoryOwnership& own) {
   b.spire = b.spire || guard_covered;
   b.has_interim = true;
   b.interim_inventory = inventory;
@@ -474,6 +712,8 @@ void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& 
   b.interim_time_usecs = now_usecs;
   b.interim_boot = boot_id;
   b.interim_count = count;
+  b.interim_own = own;
+  b.interim_own.present = true;
 }
 
 bool inventory_backup_interim_changed(const InventoryInterimState& state, const PlayerInventory& inventory,
@@ -483,7 +723,8 @@ bool inventory_backup_interim_changed(const InventoryInterimState& state, const 
 }
 
 bool inventory_backup_write_interim(const std::string& path, InventoryInterimState& state,
-    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id) {
+    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id,
+    const InventoryProvenance* prov) {
   if (!inventory_backup_interim_changed(state, inventory, meseta, guard_covered)) {
     return false;
   }
@@ -492,7 +733,9 @@ bool inventory_backup_write_interim(const std::string& path, InventoryInterimSta
   if (b.has_exit || b.left_normally) {
     return false; // the game has its end; an interim state never goes on top of it
   }
-  inventory_backup_record_interim(b, inventory, meseta, guard_covered, now_usecs, boot_id, state.count + 1);
+  inventory_backup_record_interim(b, inventory, meseta, guard_covered, now_usecs, boot_id, state.count + 1,
+      prov ? inventory_provenance_ownership(*prov, b.inventory, b.disp.stats.meseta, inventory, meseta)
+           : InventoryOwnership());
   inventory_backup_write_file(path, b);
   state.written = true;
   state.inventory = inventory;
@@ -606,6 +849,7 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
   c->inventory_backup_removals = InventoryRemovals();
   c->inventory_backup_interim = InventoryInterimState();
   c->inventory_backup_interim_urgent = false;
+  c->inventory_backup_provenance = InventoryProvenance();
   if (!l || !l->is_game()) {
     return;
   }
@@ -627,8 +871,9 @@ void inventory_backup_on_game_join(std::shared_ptr<Client> c, std::shared_ptr<Lo
     b.inventory = p->inventory;
     b.disp = p->disp;
     // The first interim state is the join itself, in the same write (B-REGIE-20-4)
+    inventory_provenance_begin(c->inventory_backup_provenance, p->inventory, p->disp.stats.meseta);
     inventory_backup_record_interim(b, p->inventory, p->disp.stats.meseta, false, b.time_usecs,
-        inventory_backup_boot_id(), 1);
+        inventory_backup_boot_id(), 1, InventoryOwnership());
     std::string dir = inventory_backup_character_directory(INVENTORY_BACKUP_DIRECTORY, serial, p->disp);
     c->inventory_backup_current = inventory_backup_save(dir, b, INVENTORY_BACKUP_KEEP);
     open_backups[c->inventory_backup_current] = c;
@@ -691,8 +936,9 @@ void inventory_backup_flush_interim(std::shared_ptr<Client> c) {
       return;
     }
     uint64_t start = phosg::now();
+    inventory_provenance_reconcile(c->inventory_backup_provenance, p->inventory, p->disp.stats.meseta);
     if (!inventory_backup_write_interim(c->inventory_backup_current, state, p->inventory, p->disp.stats.meseta,
-            c->inventory_backup_guarded, start, inventory_backup_boot_id())) {
+            c->inventory_backup_guarded, start, inventory_backup_boot_id(), &c->inventory_backup_provenance)) {
       return;
     }
     uint64_t usecs = phosg::now() - start;
@@ -715,6 +961,78 @@ void inventory_backup_after_command(std::shared_ptr<Client> c) {
   if (c->inventory_backup_interim_urgent) {
     c->inventory_backup_interim_urgent = false;
     inventory_backup_flush_interim(c);
+  }
+}
+
+void inventory_backup_after_subcommand(std::shared_ptr<Client> c) {
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  try {
+    auto p = c->character_file(false, false);
+    if (p) {
+      inventory_provenance_reconcile(c->inventory_backup_provenance, p->inventory, p->disp.stats.meseta);
+    }
+  } catch (const std::exception&) {
+  }
+}
+
+static void set_floor_item_world(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id) {
+  try {
+    if (l && l->item_exists(floor, item_id)) {
+      l->find_item(floor, item_id)->backup_origin.world = true;
+    }
+  } catch (const std::exception&) {
+  }
+}
+
+void inventory_backup_note_floor_world(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id) {
+  set_floor_item_world(l, floor, item_id);
+}
+
+void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id, const void* entity,
+    bool request_seen) {
+  // One item per enemy or box, and only for one whose drop request the server itself marked: a second item for the
+  // same entity, or one for an entity nobody asked a drop for, is of unknown origin
+  if (l && entity && request_seen && l->inventory_backup_drop_sources.emplace(entity).second) {
+    set_floor_item_world(l, floor, item_id);
+  }
+}
+
+void inventory_backup_note_dropped(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, const ItemData& item) {
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  try {
+    if (l && l->item_exists(floor, item.id)) {
+      auto fi = l->find_item(floor, item.id);
+      fi->backup_origin.world = false;
+      fi->backup_origin.dropper = c;
+      fi->backup_origin.dropper_own = inventory_provenance_own_units(c->inventory_backup_provenance, item);
+    }
+  } catch (const std::exception&) {
+  }
+}
+
+void inventory_backup_note_picked_up(std::shared_ptr<Client> c, const ItemData& item, const InventoryFloorOrigin& origin) {
+  if (c->inventory_backup_current.empty()) {
+    return;
+  }
+  try {
+    auto p = c->character_file(false, false);
+    if (!p) {
+      return;
+    }
+    uint32_t units = inventory_provenance_units(item);
+    // Proven: an item the server vouches for, or the units of his own drop that were proven his when he dropped it.
+    // An item another player dropped, or one of unknown origin, gets no credit and is foreign after the reconcile
+    uint32_t proven = origin.world ? units : ((origin.dropper.lock() == c) ? std::min(units, origin.dropper_own) : 0);
+    auto& prov = c->inventory_backup_provenance;
+    if (proven) {
+      inventory_provenance_credit(prov, p->inventory, item, proven);
+    }
+    inventory_provenance_reconcile(prov, p->inventory, p->disp.stats.meseta);
+  } catch (const std::exception&) {
   }
 }
 
@@ -777,7 +1095,7 @@ void inventory_backup_on_login(std::shared_ptr<Client> c) {
     // After a hard server stop the interim state stands in for the Exit that was never written
     bool interim_is_end = inventory_backup_interim_is_end(b, inventory_backup_boot_id());
     auto from = inventory_backup_restore_source(b, inventory_backup_boot_id());
-    const auto& source = *from.inventory;
+    const auto& source = from.inventory;
     uint32_t source_meseta = from.meseta;
     auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta, InventoryRemovals());
     auto verdict = inventory_loss_verdict(b, backup_session_alive(path), plan.items.size(), plan.meseta, interim_is_end);
@@ -888,7 +1206,7 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
 
   auto from = inventory_backup_restore_source(*backup, inventory_backup_boot_id());
   bool from_interim = (from.kind == InventoryBackupSource::Kind::INTERIM);
-  const auto& source = *from.inventory;
+  const auto& source = from.inventory;
   uint32_t source_meseta = from.meseta;
   auto plan = inventory_restore_missing(source, source_meseta, p->inventory, p->disp.stats.meseta,
       c->inventory_backup_removals);
@@ -924,6 +1242,7 @@ std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bo
   auto drop = [&](ItemData item) {
     item.id = l->generate_item_id(0xFF);
     l->add_item(c->floor, item, c->pos, nullptr, nullptr, 0x1000 | (1 << c->lobby_client_id));
+    inventory_backup_note_floor_world(l, c->floor, item.id); // the server's own drop, visible to him alone
     send_drop_stacked_item_to_channel(s, c->channel, item, c->floor, c->pos);
     c->log.info_f("Restore: dropped {:08X} {} ({}) for {}", item.id.load(), item_code(item),
         s->data->describe_item(c->version(), item), name);

@@ -225,6 +225,8 @@ public:
   // command being handled (B-REGIE-20-4, see InventoryBackup.hh)
   InventoryInterimState inventory_backup_interim;
   bool inventory_backup_interim_urgent = false;
+  // Where the units in the real character's inventory came from, since the join of inventory_backup_current
+  InventoryProvenance inventory_backup_provenance;
   // The Spire guard took its snapshot for this client in its current game; the login hard-end text went out already
   bool inventory_backup_guarded = false;
   bool inventory_loss_told = false;

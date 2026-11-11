@@ -6,6 +6,8 @@
 #include <memory>
 #include <phosg/JSON.hh>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "ItemData.hh"
@@ -60,13 +62,34 @@ class ServerState;
 //   takes its snapshot (the Spire mark must be on disk before the run copy exists), and every
 //   INVENTORY_BACKUP_INTERIM_USECS for everything else that changed (pick-ups and other gains). Every write is the whole
 //   file: temp file, fsync, rename, fsync of the directory.
-// - An interim state is always a state the inventory really was in. What left the inventory is never in it any more
-//   (so a hard stop cannot give it back); what came in less than one interval before the stop may be missing from it.
+// - An interim state is always a state the inventory of that one player really was in. What left his inventory is
+//   never in it any more (so a hard stop cannot give it back to him); what came in less than one interval before the
+//   stop may be missing from it. Across players that is not enough: what one player gave away is in the other's
+//   interim state, and the giver's memory card may still hold it. Hence provenance, below.
 // - The end of the game (Exit or a 98) removes Interim again: a game that ended leaves the same file as before.
 // - After a hard stop (no Exit, no 98, and Boot is not the running server process) the interim state counts as the end
 //   state: $restore uses it like an Exit and says so; the next login treats it like an Exit. A backup without Interim
 //   (written by an older server, or lost before its first write) is refused as before (UNKNOWN_END). Interim of the
 //   running process is never used: that game is still open or lost its end inside this process, as before.
+//
+// Provenance (kwaliteit-3 critic B1, 2026-11-11: A drops an item he had at the join, B picks it up, hard stop; A's card
+// still holds it, B's interim state holds it too, and $restore gave it to B a second time):
+// - After a hard stop $restore does not work from the interim state itself but from the part of it that is proven the
+//   player's own (inventory_backup_own_state): what he had at the join and never lost, and what came in during the
+//   game from a source the server itself vouches for. Everything else that came in is left out: from another player
+//   (a floor item a player dropped, a trade) or of unknown origin (6x2B: bank, tekker, quest; a shop purchase, paid
+//   with meseta whose origin is not proven; anything the server did not see arrive).
+// - What the server vouches for: a floor item it made itself for an enemy or box (server drop modes), a floor item the
+//   game's leader announced (6x5F) for an enemy or box whose drop request the server had seen and marked, once per
+//   enemy or box, a $restore drop, and a floor item this same player dropped himself (6x2A) and picks up again.
+// - The server keeps this per client while the game runs (InventoryProvenance): per item id how many units are not
+//   proven. It compares the inventory with the last one it saw after every subcommand; a gain nobody vouched for is
+//   not proven. Units that leave a stack are counted as the proven ones first.
+// - On disk the interim state carries Own: the item ids whose proven units differ from the default rule, with their
+//   proven units, and OwnMeseta. The default rule is what a reader without any provenance may assume: an item is the
+//   player's own if the join inventory holds the same id with the same type, up to the units it had there; meseta up
+//   to the join meseta. An interim state without Own (written before provenance existed) is not an end state:
+//   refused as before (UNKNOWN_END).
 
 constexpr const char* INVENTORY_BACKUP_DIRECTORY = "system/inventory-backups";
 constexpr size_t INVENTORY_BACKUP_KEEP = 20;
@@ -77,6 +100,15 @@ constexpr const char* INVENTORY_BACKUP_SET_ASIDE_SUFFIX = ".unmarked";
 // What $restore says first when it works from the interim state of a game that ended in a hard server stop
 constexpr const char* INVENTORY_RESTORE_INTERIM_TEXT = "Stand van de laatste tussenstand\nvoor de harde serverstop.";
 constexpr const char* INVENTORY_RESTORE_NOTHING_INTERIM_TEXT = "Niets kwijt ten opzichte van\nde laatste tussenstand.";
+
+// What of an end state (interim state or Exit) is proven the player's own, as differences from the default rule (see
+// Provenance above)
+struct InventoryOwnership {
+  bool present = false; // false: written without provenance
+  std::vector<std::pair<uint32_t, uint32_t>> units; // item id and its proven units, sorted by id
+  bool has_meseta = false;
+  uint32_t meseta = 0; // the proven meseta, if has_meseta
+};
 
 struct InventoryBackup {
   uint32_t serial_number = 0;
@@ -104,6 +136,7 @@ struct InventoryBackup {
   uint64_t interim_time_usecs = 0;
   uint64_t interim_boot = 0; // inventory_backup_boot_id of the server process that wrote it
   uint32_t interim_count = 0; // how many interim states this game wrote, this one included
+  InventoryOwnership interim_own; // what of the interim state is proven the player's own (see Provenance above)
 };
 
 phosg::JSON inventory_backup_to_json(const InventoryBackup& b);
@@ -191,11 +224,54 @@ void inventory_backup_record_end(InventoryBackup& b, bool normal, bool guard_cov
 // Interim state (see the top of this file)
 // This server process, as written into Interim.Boot: its start time in microseconds, never 0
 uint64_t inventory_backup_boot_id();
-// Whether the interim state of b stands in for the end of its game: the file has no end (no Exit, no 98) and the
-// process that wrote the interim state is not boot_id, so no end can come any more (a hard stop)
+// Whether the interim state of b stands in for the end of its game: the file has no end (no Exit, no 98), the
+// process that wrote the interim state is not boot_id, so no end can come any more (a hard stop), and the interim
+// state says what of it is proven the player's own
 bool inventory_backup_interim_is_end(const InventoryBackup& b, uint64_t boot_id);
-// The state $restore and the login check compare the character with: Exit, else the interim state after a hard stop,
-// else the join inventory (an import, or a game whose older connection is still open)
+
+// Provenance (see the top of this file). What the server knows, while a game runs, about where the units in one
+// client's inventory came from
+struct InventoryProvenance {
+  std::unordered_map<uint32_t, uint32_t> seen; // item id -> units at the last reconcile
+  std::unordered_map<uint32_t, uint32_t> foreign; // item id -> units of it that are not proven the player's own
+  std::unordered_map<uint32_t, uint32_t> credit; // item id -> proven units that came in since the last reconcile
+  uint32_t seen_meseta = 0;
+  uint32_t foreign_meseta = 0;
+  uint32_t credit_meseta = 0;
+};
+// The units of one inventory slot: the stack size of a tool stack, the amount of a meseta item, else 1
+uint32_t inventory_provenance_units(const ItemData& item);
+// The join: everything in the inventory is the player's own
+void inventory_provenance_begin(InventoryProvenance& prov, const PlayerInventory& inventory, uint32_t meseta);
+// The server vouches for units of item (meseta if it is a meseta item) that inventory holds now: under the item's own
+// id, or for a tool that joined a stack, under that stack's. Call inventory_provenance_reconcile right after
+void inventory_provenance_credit(InventoryProvenance& prov, const PlayerInventory& inventory, const ItemData& item,
+    uint32_t units);
+// Compares the inventory with the one of the last reconcile: every unit that came in without credit is foreign, and
+// foreign units never exceed what the slot still holds (units that leave are counted as the proven ones first)
+void inventory_provenance_reconcile(InventoryProvenance& prov, const PlayerInventory& inventory, uint32_t meseta);
+// How many of the units of item, as the last reconcile saw it in the inventory, are proven
+uint32_t inventory_provenance_own_units(const InventoryProvenance& prov, const ItemData& item);
+// prov (reconciled with end) as it goes to disk: only what differs from the default rule against join
+InventoryOwnership inventory_provenance_ownership(const InventoryProvenance& prov, const PlayerInventory& join,
+    uint32_t join_meseta, const PlayerInventory& end, uint32_t end_meseta);
+// The part of end that is proven the player's own: per item id the units own names, else the default rule (the join
+// inventory holds the same id with the same type: up to its units there). own_meseta: own's meseta, else
+// min(join_meseta, end_meseta); never more than end_meseta
+PlayerInventory inventory_backup_own_state(const PlayerInventory& join, uint32_t join_meseta, const PlayerInventory& end,
+    uint32_t end_meseta, const InventoryOwnership& own, uint32_t& own_meseta);
+
+// What the server itself knows about where a floor item came from; every Lobby::FloorItem carries one. The default is
+// "nothing": whoever picks that item up has an item of unknown origin
+struct InventoryFloorOrigin {
+  bool world = false; // the server vouches for it (see Provenance at the top of this file)
+  std::weak_ptr<Client> dropper; // the player whose own drop (6x2A) put it on the floor
+  uint32_t dropper_own = 0; // how many of its units were proven the dropper's own at that moment
+};
+
+// The state $restore and the login check compare the character with: Exit, else the proven part of the interim state
+// after a hard stop (inventory_backup_own_state), else the join inventory (an import, or a game whose older connection
+// is still open)
 struct InventoryBackupSource {
   enum class Kind {
     JOIN = 0,
@@ -203,14 +279,14 @@ struct InventoryBackupSource {
     INTERIM,
   };
   Kind kind = Kind::JOIN;
-  const PlayerInventory* inventory = nullptr;
+  PlayerInventory inventory;
   uint32_t meseta = 0;
 };
 InventoryBackupSource inventory_backup_restore_source(const InventoryBackup& b, uint64_t boot_id);
 // Puts inventory and meseta into b as its interim state and the guard mark into Spire (never back to false); count is
-// the number of this write within its game
+// the number of this write within its game. own: what of it is proven the player's own
 void inventory_backup_record_interim(InventoryBackup& b, const PlayerInventory& inventory, uint32_t meseta,
-    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count);
+    bool guard_covered, uint64_t now_usecs, uint64_t boot_id, uint32_t count, const InventoryOwnership& own);
 // What one open backup last put on disk as its interim state; the server keeps one per client, a static test one per
 // simulated game
 struct InventoryInterimState {
@@ -226,9 +302,11 @@ bool inventory_backup_interim_changed(const InventoryInterimState& state, const 
     uint32_t meseta, bool guard_covered);
 // Writes the interim state into the backup at path if it changed (inventory_backup_interim_changed) and returns
 // whether it wrote. It reads the file first, so the marks others wrote into it (Loss) stay, and never writes into a
-// backup that already has its end. Throws if the file cannot be read or written; state and the file are then as before
+// backup that already has its end. Throws if the file cannot be read or written; state and the file are then as before.
+// prov: the provenance of inventory, reconciled with it; null proves nothing beyond the default rule
 bool inventory_backup_write_interim(const std::string& path, InventoryInterimState& state,
-    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id);
+    const PlayerInventory& inventory, uint32_t meseta, bool guard_covered, uint64_t now_usecs, uint64_t boot_id,
+    const InventoryProvenance* prov = nullptr);
 
 // What the next login does with the backup $restore would use, given what is missing from it in the 61.
 // session_alive: an older connection of this character is still in that game (its Exit is still to come).
@@ -263,6 +341,21 @@ void inventory_backup_flush_interim(std::shared_ptr<Client> c);
 bool inventory_backup_set_aside(const std::string& path);
 // After every command of c (on_command): writes the interim state if something left the inventory in that command
 void inventory_backup_after_command(std::shared_ptr<Client> c);
+// Provenance hooks (see the top of this file). After every subcommand of c: reconciles c's provenance with its
+// inventory (no write)
+void inventory_backup_after_subcommand(std::shared_ptr<Client> c);
+// The floor item item_id on floor is one the server vouches for: it made it itself for an enemy or box, or $restore
+// dropped it
+void inventory_backup_note_floor_world(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id);
+// The game's leader announced the floor item item_id (6x5F) for the enemy or box entity. The server vouches for it
+// only if it had seen and marked the drop request for that entity (request_seen) and this is the first item for it
+void inventory_backup_note_leader_drop(std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id, const void* entity,
+    bool request_seen);
+// c dropped item out of its inventory onto floor (6x2A; the server moved it itself). Call before
+// inventory_backup_note_removed: it reads how many units of it were proven c's own
+void inventory_backup_note_dropped(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, const ItemData& item);
+// c picked up a floor item (item, with the origin the floor item carried) and its inventory holds it now
+void inventory_backup_note_picked_up(std::shared_ptr<Client> c, const ItemData& item, const InventoryFloorOrigin& origin);
 // $restore / $restore check: returns the lines to show the player
 std::vector<std::string> inventory_restore_command(std::shared_ptr<Client> c, bool check_only);
 
