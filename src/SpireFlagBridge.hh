@@ -791,6 +791,8 @@ uint32_t spire_checkpoint_mask_for_client(std::shared_ptr<const Client> c);
 //   restore pushes it. After a failed 'O' or after an 'I' the snapshot stays (the run start's or the 'I's).
 // - v52: the start_level upgrade (SpireMeta.hh): a guarded Spire quest .bin goes to each client with the rule block's
 //   level raised by its owned start_level, and its overlay (quest load and 'I') is built at that level.
+// - 8-B1 (system critic round 1): the snapshot follows the 98 of the base game (spire_guard_98_base_follows), so what
+//   the player collects there is no longer pushed away at the next login; AwaitingSave stays open as v59 wants.
 // - 8-B2 (system critic round 1): a verified restore at login no longer clears the marker either. It becomes
 //   AwaitingSave, as at the game exit (v10): the 97 goes out only after the restore, so a client that drops before it
 //   wrote its card still holds the run copy, and with the marker gone the next login restored nothing. The next login
@@ -850,7 +852,8 @@ struct SpireGuardSnapshot {
   // the client's memory until the client saves it, so the card may still hold the run copy. v39: cleared only at a
   // login whose 61 equals the snapshot (spire_guard_same_state); any other login turns it back into restore_pending.
   // While it is set, the snapshot follows the real character's 98 from a Normal or Solo game (real progress); v40: that
-  // 98 also clears it, since the client writes its card when it leaves the game.
+  // 98 also clears it, since the client writes its card when it leaves the game. 8-B1: the 98 of the base game moves
+  // the snapshot along too but leaves it set (spire_guard_base_game_follow).
   bool awaiting_save = false;
   // v12: what the client had in memory right before the lobby restore (from its 30): the run copy. v39: only for the
   // log; the login decision no longer uses it (it is not a complete record of the run copies a card can hold).
@@ -874,7 +877,8 @@ struct SpireGuardSnapshot {
 // character data may hold a run copy, so that data counts as the real character only if it equals the snapshot
 // (level, EXP, meseta, items and material counters). The snapshot itself only takes data the server knows is real:
 // the data at a run start without an open marker, and the 98 of a Normal or Solo game while only AwaitingSave is set
-// (the client has had the verified real character in memory since the lobby restore).
+// (the client has had the verified real character in memory since the lobby restore); 8-B1: the base game is such a
+// game, only its 98 leaves AwaitingSave open (v59).
 enum class SpireGuardRunStart {
   KEPT_OPEN_RUN, // RunInProgress or RestorePending: the stored snapshot stays, nothing changes
   KEPT_UNCONFIRMED, // AwaitingSave and the data differs from the snapshot: the stored snapshot stays, marker set
@@ -904,7 +908,8 @@ bool spire_guard_restore_awaits_save(const char* where);
 void spire_guard_restore_verified_apply(SpireGuardSnapshot& snapshot, bool awaits_save);
 // Called from the 98 handler after the client's data was taken into the server's character data (v39). Applies
 // spire_guard_follow_real_progress if spire_guard_end_run saw the client leave a Normal or Solo game under
-// AwaitingSave, and (v51) spire_guard_base_exit_follow if it saw the client leave a Spire game after a verified 'O'.
+// AwaitingSave, (v51) spire_guard_base_exit_follow if it saw the client leave a Spire game after a verified 'O', and
+// (8-B1) spire_guard_base_game_follow if it saw the client leave the base game under AwaitingSave.
 // Never throws.
 void spire_guard_after_98(std::shared_ptr<Client> c);
 
@@ -1160,6 +1165,25 @@ constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;
 // (lab 2026-10-26: the client wrote its card right after q925 loaded, with 8 of 23 items in the save buffer), so there
 // AwaitingSave stays open until a login 61 equals the snapshot (spire_guard_awaiting_save_login_apply).
 bool spire_guard_98_follows(bool awaiting_save, bool normal_or_solo, bool base_game);
+// 8-B1 (system critic round 1): the 98 of the base game under AwaitingSave alone. v59 shut the base game out of
+// spire_guard_98_follows because that step also closes AwaitingSave, and the card may still hold the run kit there (the
+// client writes its card at the game join from a card copy that holds the equipped items only, lab 2026-10-26). But
+// leaving the snapshot behind as well undid everything the player did in the base: the quartermaster's payout, a
+// forge, a bank visit, EXP from the base quest's forest. The next login 61 (the real character with the payout)
+// differed from the snapshot, so the snapshot of before the run was pushed over it, while the "paid" flags stayed set.
+// Now the two halves are apart. The snapshot follows this 98 on the same terms as the 98 of any normal game (the
+// client has held the verified real character since the restore at the game exit; lab 2026-10-26: the base game's 98
+// carried the live character, 23 and 20 items, while the card held 8 and 7): the snapshot's own character, level and
+// EXP not below it (v56: data below it is a run copy, and then the snapshot stays). AwaitingSave stays open, as v59
+// wants: a login 61 equal to the snapshot closes it, any other 61 gets the snapshot pushed, which now holds what the
+// base gave. True for a Normal or Solo game running SpireBaseQuest under AwaitingSave; never together with
+// spire_guard_98_follows.
+bool spire_guard_98_base_follows(bool awaiting_save, bool normal_or_solo, bool base_game);
+// The snapshot step of that 98. False (snapshot unchanged) if another marker is open, AwaitingSave is not set, the
+// snapshot has no character, the data is another character (name, class, section ID), or its level or EXP is below
+// the snapshot's. Otherwise the snapshot takes the inventory and disp; every marker and the overlay fingerprint stay.
+bool spire_guard_base_game_follow(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
 
 // v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose

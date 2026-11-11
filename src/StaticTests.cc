@@ -236,7 +236,9 @@ void run_static_tests() {
     expect_eq(0x4F020000u, SPIRE_BASE_NEW_RUN_VALUE);
     expect_ne(SPIRE_BASE_NEW_RUN_VALUE, SPIRE_BASE_RETURN_TAG);
     expect_eq(static_cast<uint32_t>(SPIRE_BRIDGE_BASE_RETURN), SPIRE_BASE_NEW_RUN_VALUE >> 24);
-    // v59: the marker stays open in the base game: its 98 never follows the real character nor closes AwaitingSave
+    // v59: the marker stays open in the base game: its 98 never closes AwaitingSave (spire_guard_98_follows is the
+    // step that follows AND closes). 8-B1: the snapshot does follow that 98, by spire_guard_98_base_follows, which
+    // leaves the marker open (tested with the guard's restore cases below)
     expect_eq(false, spire_guard_98_follows(true, true, true));
     expect_eq(true, spire_guard_98_follows(true, true, false));
     expect_eq(false, spire_guard_98_follows(false, true, false));
@@ -2087,6 +2089,147 @@ void run_static_tests() {
       expect(!snap.restore_pending && !snap.awaiting_save && !snap.has_overlay);
     }
     std::filesystem::remove_all(dir);
+  }
+
+  phosg::log_info_f("-- Spire guard: the base game's 98 moves the snapshot along and leaves the marker open (8-B1)");
+  {
+    auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t exp, uint32_t meseta) {
+      std::pair<PlayerInventory, PlayerDispDataV4> ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].data.data1[0] = kind;
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      ret.second.visual.sh.char_class = 2;
+      ret.second.visual.sh.section_id = 5;
+      return ret;
+    };
+    auto same = [](const SpireGuardSnapshot& snap, const std::pair<PlayerInventory, PlayerDispDataV4>& data) {
+      return spire_guard_same_state(snap.inventory, snap.disp, data.first, data.second);
+    };
+    auto real = make(20, 0x00, 51, 370758, 1000); // the real character, as the restore at the game exit left it
+    auto paid = real; // the same after the quartermaster: a Photon Drop stack of 8 and the meseta of an exchange
+    paid.first.num_items = 21;
+    paid.first.items[20].data.data1[0] = 0x03;
+    paid.first.items[20].data.data1[1] = 0x10;
+    paid.first.items[20].data.data1[5] = 8;
+    paid.second.stats.meseta = 26000;
+    auto run_copy = make(7, 0x01, 11, 4200, 300); // the run copy (run kit, the run's level)
+    auto card_form = make(8, 0x00, 51, 370758, 1000); // the card after a game join: the equipped items only (v61)
+    auto awaiting = [&]() {
+      SpireGuardSnapshot ret;
+      ret.awaiting_save = true;
+      ret.has_character = true;
+      ret.quest_number = 921;
+      ret.snapshot_time_usecs = 1;
+      ret.inventory = real.first;
+      ret.disp = real.second;
+      ret.has_overlay = true;
+      ret.overlay_level = 11;
+      return ret;
+    };
+
+    // case 1: the client holds the real character and collected its payout in the base. The snapshot takes the 98
+    // and the marker stays open (v59: the card may still hold the run copy)
+    auto followed = awaiting();
+    expect(spire_guard_base_game_follow(followed, paid.first, paid.second));
+    expect(followed.awaiting_save && !followed.restore_pending && !followed.run_in_progress && followed.has_overlay);
+    expect_eq(21u, followed.inventory.num_items);
+    expect(same(followed, paid));
+    {
+      // the 97 after the base wrote the card: the login 61 equals the snapshot, the marker closes, nothing is pushed
+      auto snap = followed;
+      expect(spire_guard_awaiting_save_login_apply(snap, paid.first, paid.second));
+      expect(!snap.restore_pending && !snap.awaiting_save && same(snap, paid));
+    }
+    for (const auto& card : {run_copy, card_form}) {
+      // the card still holds the run copy, or the equipped items only: pushed again, and the push carries the payout
+      auto snap = followed;
+      expect(!spire_guard_awaiting_save_login_apply(snap, card.first, card.second));
+      expect(snap.restore_pending && !snap.awaiting_save && same(snap, paid));
+    }
+    {
+      // "Start a new run" in the base: the server's data equals the snapshot, so the new run's snapshot has the payout
+      auto snap = followed;
+      expect_eq(SpireGuardRunStart::FRESH, spire_guard_run_start_apply(snap, paid.first, paid.second, 921, 5));
+      expect(snap.run_in_progress && same(snap, paid));
+    }
+    {
+      // what 9e40c01 did: the snapshot stayed behind, so the login with the paid character pushed the payout away
+      auto snap = awaiting();
+      expect(!spire_guard_awaiting_save_login_apply(snap, paid.first, paid.second));
+      expect(snap.restore_pending && same(snap, real));
+    }
+    {
+      // EXP and a level from the base quest's forest (Sega's q101) follow too, as in any normal game
+      auto forest = paid;
+      forest.second.stats.level = 52;
+      forest.second.stats.exp = 380000;
+      auto snap = awaiting();
+      expect(spire_guard_base_game_follow(snap, forest.first, forest.second));
+      expect(snap.awaiting_save && same(snap, forest));
+    }
+    {
+      // items may go in the base (sold, handed over, put in the bank): the snapshot follows that as well
+      auto fewer = make(18, 0x00, 51, 370758, 1400);
+      auto snap = awaiting();
+      expect(spire_guard_base_game_follow(snap, fewer.first, fewer.second));
+      expect(snap.awaiting_save && same(snap, fewer));
+    }
+
+    // case 2: the 98 is a run copy (below the snapshot's level or EXP, v56): the snapshot never becomes it, the marker
+    // stays open and the next login pushes the real character
+    {
+      auto snap = awaiting();
+      expect(!spire_guard_base_game_follow(snap, run_copy.first, run_copy.second));
+      expect(snap.awaiting_save && !snap.restore_pending && same(snap, real));
+      auto less_exp = paid;
+      less_exp.second.stats.exp = 370757;
+      expect(!spire_guard_base_game_follow(snap, less_exp.first, less_exp.second));
+      expect(snap.awaiting_save && same(snap, real));
+      expect(!spire_guard_awaiting_save_login_apply(snap, run_copy.first, run_copy.second));
+      expect(snap.restore_pending && same(snap, real));
+    }
+    {
+      // another character than the snapshot's (class or section ID): nothing follows
+      for (bool by_class : {true, false}) {
+        auto other = paid;
+        (by_class ? other.second.visual.sh.char_class : other.second.visual.sh.section_id) = 7;
+        auto snap = awaiting();
+        expect(!spire_guard_base_game_follow(snap, other.first, other.second));
+        expect(snap.awaiting_save && same(snap, real));
+        expect_eq(2u, static_cast<uint32_t>(snap.disp.visual.sh.char_class));
+      }
+    }
+    // any other marker state: nothing follows and nothing changes
+    for (auto [run, restore, awaits] : std::vector<std::tuple<bool, bool, bool>>{{true, false, false},
+             {false, true, false}, {false, false, false}, {true, false, true}, {false, true, true}, {true, true, true}}) {
+      auto snap = awaiting();
+      snap.run_in_progress = run;
+      snap.restore_pending = restore;
+      snap.awaiting_save = awaits;
+      expect(!spire_guard_base_game_follow(snap, paid.first, paid.second));
+      expect(same(snap, real));
+      expect((snap.run_in_progress == run) && (snap.restore_pending == restore) && (snap.awaiting_save == awaits));
+    }
+    {
+      SpireGuardSnapshot empty; // a marker without a stored character
+      empty.awaiting_save = true;
+      expect(!spire_guard_base_game_follow(empty, paid.first, paid.second));
+      expect(!empty.has_character && empty.awaiting_save);
+    }
+
+    // which 98 takes this step: AwaitingSave, a Normal or Solo game, the base quest; never the step that also closes
+    expect(spire_guard_98_base_follows(true, true, true));
+    expect(!spire_guard_98_base_follows(false, true, true));
+    expect(!spire_guard_98_base_follows(true, false, true)); // the base quest in a Battle or Challenge game
+    expect(!spire_guard_98_base_follows(true, true, false)); // any other normal game: spire_guard_98_follows
+    for (uint8_t z = 0; z < 8; z++) {
+      expect(!(spire_guard_98_follows(z & 1, z & 2, z & 4) && spire_guard_98_base_follows(z & 1, z & 2, z & 4)));
+    }
   }
 
   phosg::log_info_f("-- Spire guard: the restore check finds a different item count or material counter (v32, v38, v39)");

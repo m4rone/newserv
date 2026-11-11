@@ -4511,6 +4511,28 @@ void spire_guard_restore_verified_apply(SpireGuardSnapshot& snapshot, bool await
   snapshot.has_overlay = awaits_save && snapshot.has_overlay;
 }
 
+// 8-B1: see SpireFlagBridge.hh
+bool spire_guard_98_base_follows(bool awaiting_save, bool normal_or_solo, bool base_game) {
+  return awaiting_save && normal_or_solo && base_game;
+}
+
+bool spire_guard_base_game_follow(
+    SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp) {
+  if (!snapshot.awaiting_save || snapshot.run_in_progress || snapshot.restore_pending || !snapshot.has_character ||
+      !spire_guard_same_character(disp, snapshot.disp)) {
+    return false;
+  }
+  // v56, as spire_guard_follow_real_progress: a real character never loses level or EXP, so data below the snapshot's
+  // is a run copy and the snapshot stays (items may go: the player can sell them, hand them over or bank them)
+  if ((disp.stats.level < snapshot.disp.stats.level) || (disp.stats.exp < snapshot.disp.stats.exp)) {
+    return false;
+  }
+  snapshot.inventory = inventory;
+  snapshot.disp = disp;
+  // v59: AwaitingSave stays open, and with it the overlay fingerprint: the card may still hold the run copy
+  return true;
+}
+
 // v49: the snapshot step of the run again ('I', SpireFlagBridge.hh)
 bool spire_guard_run_again_retake(SpireGuardSnapshot& snapshot, bool base_returned, const PlayerInventory& inventory,
     const PlayerDispDataV4& disp, uint32_t quest_number, uint64_t now_usecs) {
@@ -5002,6 +5024,10 @@ static bool spire_guard_take_snapshot(std::shared_ptr<Client> c, uint32_t quest_
 static std::unordered_set<const Client*> spire_guard_follow_pending;
 // v61: the clients that left the base game under AwaitingSave (spire_guard_end_run); the next 84 sends them a 97
 static std::unordered_set<const Client*> spire_guard_base_game_left;
+// 8-B1: clients whose 98 from the base game under AwaitingSave is still to be taken into the snapshot
+// (spire_guard_base_game_follow). Keyed by the Client's address and never dereferenced; spire_guard_after_98 removes
+// the entry in the same 98 handler.
+static std::unordered_set<const Client*> spire_guard_base_follow_pending;
 
 // v51: clients whose 98 leaves a Spire game after a verified 'O' (spire_guard_base_exit_follow). Keyed by the Client's
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
@@ -5010,6 +5036,7 @@ static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
+  spire_guard_base_follow_pending.erase(c.get());
   spire_start_level_sent.erase(c.get()); // v52
   spire_start_level_run.erase(c.get());
   spire_heat_sent.erase(c.get()); // v55
@@ -5041,13 +5068,20 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
       // restore; the 98 of a Normal or Solo game is its real progress, which the snapshot follows (spire_guard_after_98)
       bool base_game = l && l->is_game() && l->quest &&
           (l->quest->meta.quest_number == c->require_server_state()->data->spire_base_quest_number);
-      if (spire_guard_98_follows(snapshot.awaiting_save,
-              l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO)), base_game)) {
+      bool normal_or_solo = l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO));
+      if (spire_guard_98_follows(snapshot.awaiting_save, normal_or_solo, base_game)) {
         spire_guard_follow_pending.emplace(c.get());
       } else if (snapshot.awaiting_save && base_game) {
         spire_guard_base_game_left.emplace(c.get());
-        c->log.info_f("Spire guard: 98 of the base game (q{}) for serial {:010}; AwaitingSave stays open until a login 61 equals the snapshot {} (v59)",
-            quest_number, serial_number, spire_guard_describe(snapshot));
+        // 8-B1: the snapshot follows what the base changed (spire_guard_after_98); the marker stays open (v59)
+        bool follows = spire_guard_98_base_follows(snapshot.awaiting_save, normal_or_solo, base_game);
+        if (follows) {
+          spire_guard_base_follow_pending.emplace(c.get());
+        }
+        c->log.info_f("Spire guard: 98 of the base game (q{}) for serial {:010}; AwaitingSave stays open until a login 61 equals the snapshot (v59); {} (8-B1), now {}",
+            quest_number, serial_number,
+            follows ? "the snapshot follows this 98" : "not a Normal or Solo game, the snapshot stays",
+            spire_guard_describe(snapshot));
       }
       return;
     }
@@ -5095,6 +5129,38 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
           snapshot.inventory.num_items, snapshot.disp.stats.meseta.load());
     } catch (const std::exception& e) {
       c->log.warning_f("Spire guard: failed to follow the real character after a return to base: {}", e.what());
+    }
+    return;
+  }
+  if (spire_guard_base_follow_pending.erase(c.get())) {
+    // 8-B1: the 98 of the base game under AwaitingSave; the real character with what the base changed
+    try {
+      uint32_t serial_number = spire_bridge_serial_for_client(c);
+      auto character = c->character_file(false, false);
+      if (!serial_number || !character || c->is_spire_protected()) {
+        return;
+      }
+      std::string filename = spire_guard_filename_for(c, serial_number);
+      if (filename.empty()) {
+        return;
+      }
+      auto snapshot = spire_guard_load(filename);
+      SpireGuardSnapshot before = snapshot;
+      if (!spire_guard_base_game_follow(snapshot, character->inventory, character->disp)) {
+        c->log.warning_f("Spire guard: 98 of the base game for serial {:010} shows Lv{} EXP {} ({} items, meseta {}): another character than the snapshot's, below its level or EXP (a run copy), or the marker changed; the snapshot {} ({} items) stays and AwaitingSave stays open, so the next login pushes it (8-B1)",
+            serial_number, character->disp.stats.level + 1, character->disp.stats.exp.load(),
+            character->inventory.num_items, character->disp.stats.meseta.load(), spire_guard_describe(before),
+            before.inventory.num_items);
+        return;
+      }
+      spire_guard_save(filename, serial_number, snapshot);
+      bool same = spire_guard_same_state(snapshot.inventory, snapshot.disp, before.inventory, before.disp);
+      c->log.info_f("Spire guard: 98 of the base game for serial {:010}: snapshot follows the real character{} ({}, {} items); AwaitingSave stays open (8-B1)",
+          serial_number, same ? ", equal to the one before" : std::format(", changed in the base (was {}, {} items)",
+              spire_guard_describe(before), before.inventory.num_items),
+          spire_guard_describe(snapshot), snapshot.inventory.num_items);
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire guard: failed to follow the real character after the base game: {}; the snapshot of before stays", e.what());
     }
     return;
   }
