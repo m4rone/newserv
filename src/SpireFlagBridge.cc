@@ -1074,6 +1074,7 @@ struct SpireClientRun {
   SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
   uint32_t v_room = 0; // kwaliteit-2 258: the room of its last 'V' (the room it is in), 0 = none came
+  bool practice_kept_told = false; // 7-M2: spire_savestate_practice_kept_text went to this client in this run
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
@@ -1183,6 +1184,45 @@ std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, co
   } catch (const std::exception&) {
   }
   return filename;
+}
+
+// 7-M2: see SpireFlagBridge.hh
+bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice) {
+  return !(practice && parked.exists && !parked.practice);
+}
+
+std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
+    uint32_t serial_number, bool* replaced_old, SpireSavestate* kept) {
+  if (replaced_old) {
+    *replaced_old = false;
+  }
+  if (kept) {
+    *kept = SpireSavestate();
+  }
+  if (ss.practice) {
+    // only a practice run looks first; a real run writes as before, also over a file that cannot be read
+    SpireSavestate parked;
+    bool readable = true;
+    try {
+      parked = spire_savestate_load_rung(stem, rung);
+    } catch (const std::exception&) {
+      readable = false;
+    }
+    if (!readable || !spire_savestate_may_replace(parked, true)) {
+      if (kept && readable) {
+        *kept = std::move(parked);
+      }
+      return "";
+    }
+  }
+  return spire_savestate_store_rung(stem, rung, spire_savestate_to_json(ss, serial_number), replaced_old);
+}
+
+std::string spire_savestate_practice_kept_text(const SpireSavestate& kept) {
+  if (kept.exists && (kept.values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
+    return std::format("Practice is not saved: your run at room {} stays parked.", kept.values[SPIRE_SS_K]);
+  }
+  return "Practice is not saved: a saved run is parked here.";
 }
 
 // The client's savestate on this rung (spire_savestate_load_rung), and its file in *filename ("" without one)
@@ -1958,13 +1998,27 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     ss.values = std::move(values);
     ss.time_usecs = phosg::now();
     // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
+    // 7-M2: a practice run never writes over a real run parked on its own rung (spire_savestate_store_v)
     bool replaced_old = false;
-    std::string filename = spire_savestate_store_rung(stem, spire_meta_ladder_quest_rung(quest_number),
-        spire_savestate_to_json(ss, serial_number), &replaced_old);
-    run->savestate_files.emplace(filename);
-    c->log.info_f("Spire savestate: stored {} in {}{}{}", spire_savestate_describe(ss), filename,
-        ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "",
-        replaced_old ? std::format("; {} of before removed (same difficulty)", spire_savestate_old_filename(stem)) : "");
+    SpireSavestate kept;
+    std::string filename = spire_savestate_store_v(
+        stem, spire_meta_ladder_quest_rung(quest_number), ss, serial_number, &replaced_old, &kept);
+    if (filename.empty()) {
+      c->log.info_f("Spire savestate: 'V' of practice run {:08X} for serial {:010} in q{} room {} not stored: {} on {} stays (7-M2); this practice run cannot be resumed",
+          ss.run_id, serial_number, quest_number, room_k,
+          kept.exists ? std::format("the real run parked ({})", spire_savestate_describe(kept))
+                      : std::string("a parked file that cannot be read"),
+          spire_meta_difficulty_name(spire_meta_ladder_quest_rung(quest_number)));
+      if (!cr->practice_kept_told) {
+        cr->practice_kept_told = true;
+        spire_send_ticker(c, spire_savestate_practice_kept_text(kept));
+      }
+    } else {
+      run->savestate_files.emplace(filename);
+      c->log.info_f("Spire savestate: stored {} in {}{}{}", spire_savestate_describe(ss), filename,
+          ss.run_mag ? std::format(" with the run mag ledger (step {})", ss.run_mag->issued_step) : "",
+          replaced_old ? std::format("; {} of before removed (same difficulty)", spire_savestate_old_filename(stem)) : "");
+    }
   }
   // B-AF-1 (critic spel-af-1 S1): a boss counts as beaten once this client's run starts the room after it; its wave
   // clear may come from a child's 6x76 (Darvant, Pig Ray, Olga's first form) before the boss is dead

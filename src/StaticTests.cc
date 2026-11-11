@@ -6047,6 +6047,139 @@ void run_static_tests() {
       std::filesystem::remove_all(dir);
     }
 
+    // 7-M2: a practice run (a room quest opened loose) never writes over a real run parked on the same difficulty
+    {
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-practice-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::string stem = (dir / "0000000042.abc").string();
+      SpireSavestate real = ss; // the real run, parked at room 9 on Normal
+      real.practice = false;
+      real.run_id = 0xD1;
+      real.episode = 0;
+      real.quest_number = 920;
+      real.start_room = 1;
+      real.values[SPIRE_SS_K] = 9;
+      real.values[SPIRE_SS_VARIANT] = 0;
+      expect_eq(0u, static_cast<uint32_t>(spire_meta_ladder_quest_rung(real.quest_number)));
+      std::string real_file = spire_savestate_store_v(stem, 0, real, 42);
+      expect_eq(spire_savestate_rung_filename(stem, 0), real_file);
+      std::string real_bytes = phosg::load_file(real_file);
+      // "Spire room 3" is opened loose: the parked run does not fit room 3, so the game's run is new, and a room quest
+      // that does not start at the first room is a practice run
+      expect(!spire_savestate_matches(real, 0, 3, 0, 0));
+      expect(spire_run_is_practice(3, 1, false, false));
+      SpireSavestate practice = real;
+      practice.practice = true;
+      practice.run_id = 0xD2;
+      practice.quest_number = 943;
+      practice.start_room = 3;
+      practice.values[SPIRE_SS_K] = 3;
+      expect_eq(0u, static_cast<uint32_t>(spire_meta_ladder_quest_rung(practice.quest_number)));
+      // its 'V' at the first room start, and at every room after it: not stored, the parked run stays byte for byte
+      for (uint32_t k : {3u, 4u, 5u}) {
+        practice.values[SPIRE_SS_K] = k;
+        bool replaced = true;
+        SpireSavestate kept;
+        expect_eq(std::string(), spire_savestate_store_v(stem, 0, practice, 42, &replaced, &kept));
+        expect(!replaced);
+        expect(kept.exists && !kept.practice);
+        expect_eq(0xD1u, kept.run_id);
+        expect_eq(real_bytes, phosg::load_file(real_file));
+        expect_eq(std::string("Practice is not saved: your run at room 9 stays parked."),
+            spire_savestate_practice_kept_text(kept));
+      }
+      // the practice run ends (dead, time up, Give up, won): the run end deletes only files of its own run id
+      expect(!spire_savestate_is_of_run(spire_savestate_load_rung(stem, 0), practice.run_id));
+      // the real run resumes untouched in its own room quest
+      {
+        std::string from;
+        auto back = spire_savestate_load_rung(stem, 0, &from);
+        expect_eq(real_file, from);
+        expect(back.exists && !back.practice);
+        expect(spire_savestate_matches(back, 0, 9, 0, 0));
+        expect(spire_resume_client(false, true, 0xD1, spire_savestate_matches(back, 0, 9, 0, 0), back.run_id));
+        expect_eq(real_bytes, phosg::load_file(from));
+      }
+      // the decision itself: a practice run never replaces a real run, also not one with its own run id (a client
+      // that started fresh in a resumed game); everything else replaces as before
+      expect(!spire_savestate_may_replace(real, true));
+      {
+        SpireSavestate same_run = real;
+        same_run.run_id = practice.run_id;
+        expect(!spire_savestate_may_replace(same_run, true));
+      }
+      expect(spire_savestate_may_replace(real, false)); // a new real start on the difficulty replaces the parked run
+      expect(spire_savestate_may_replace(practice, true)); // a parked practice run: its own resume, or the next practice
+      expect(spire_savestate_may_replace(practice, false));
+      expect(spire_savestate_may_replace(SpireSavestate(), true)); // nothing parked
+      // another difficulty is its own file: the practice run on Hard is stored, the Normal run is not touched
+      {
+        SpireSavestate hard_practice = practice;
+        hard_practice.quest_number = 1943;
+        expect_eq(1u, static_cast<uint32_t>(spire_meta_ladder_quest_rung(hard_practice.quest_number)));
+        std::string hard_file = spire_savestate_store_v(stem, 1, hard_practice, 42);
+        expect_eq(spire_savestate_rung_filename(stem, 1), hard_file);
+        expect_eq(real_bytes, phosg::load_file(real_file));
+        // and that parked practice run resumes and replaces its own savestate as before
+        SpireSavestate kept;
+        hard_practice.values[SPIRE_SS_K] = 4;
+        expect_eq(hard_file, spire_savestate_store_v(stem, 1, hard_practice, 42, nullptr, &kept));
+        expect(!kept.exists);
+        expect_eq(4u, spire_savestate_load_rung(stem, 1).values[SPIRE_SS_K]);
+        // a real run started on Hard replaces the parked practice run, as before
+        SpireSavestate hard_real = real;
+        hard_real.run_id = 0xD3;
+        hard_real.quest_number = 981;
+        expect_eq(hard_file, spire_savestate_store_v(stem, 1, hard_real, 42));
+        expect_eq(0xD3u, spire_savestate_load_rung(stem, 1).run_id);
+        std::filesystem::remove(hard_file);
+      }
+      // a real run on the same difficulty still replaces the parked real run (a new start), as before
+      {
+        SpireSavestate real2 = real;
+        real2.run_id = 0xD4;
+        expect_eq(real_file, spire_savestate_store_v(stem, 0, real2, 42));
+        expect_eq(0xD4u, spire_savestate_load_rung(stem, 0).run_id);
+        std::filesystem::remove(real_file);
+      }
+      // the file of before (one file for every difficulty) that holds a real Normal run: kept the same way, and it
+      // still loads; the practice run's 'V' neither writes the rung's file nor removes the file of before
+      {
+        std::string old_file = spire_savestate_old_filename(stem);
+        spire_bridge_write_durable(old_file, spire_savestate_to_json(real, 42));
+        std::string old_bytes = phosg::load_file(old_file);
+        SpireSavestate kept;
+        practice.values[SPIRE_SS_K] = 3;
+        expect_eq(std::string(), spire_savestate_store_v(stem, 0, practice, 42, nullptr, &kept));
+        expect_eq(0xD1u, kept.run_id);
+        expect_eq(old_bytes, phosg::load_file(old_file));
+        expect(!std::filesystem::exists(spire_savestate_rung_filename(stem, 0)));
+        expect_eq(0xD1u, spire_savestate_load_rung(stem, 0).run_id);
+        std::filesystem::remove(old_file);
+      }
+      // nothing parked: the practice run is stored and can be resumed, as before
+      {
+        expect_eq(real_file, spire_savestate_store_v(stem, 0, practice, 42));
+        auto back = spire_savestate_load_rung(stem, 0);
+        expect(back.practice && spire_savestate_matches(back, 0, 3, 0, 0));
+        expect(spire_run_is_practice(3, 1, true, back.practice));
+      }
+      // a parked file that cannot be read may hold a real run: a practice run leaves it, a real run writes as before
+      {
+        spire_bridge_write_durable(real_file, "{not json");
+        SpireSavestate kept;
+        expect_eq(std::string(), spire_savestate_store_v(stem, 0, practice, 42, nullptr, &kept));
+        expect(!kept.exists);
+        expect_eq(std::string("{not json"), phosg::load_file(real_file));
+        expect_eq(std::string("Practice is not saved: a saved run is parked here."),
+            spire_savestate_practice_kept_text(kept));
+        expect_eq(real_file, spire_savestate_store_v(stem, 0, real, 42));
+        expect_eq(0xD1u, spire_savestate_load_rung(stem, 0).run_id);
+      }
+      std::filesystem::remove_all(dir);
+    }
+
     // Two clients: the leader's savestate sets the game's run; the partner resumes only from the same run
     // arguments: run_ended, game_resumed, game_run_id, own_matches, own_run_id
     expect(spire_resume_client(false, true, 0xA1, true, 0xA1)); // leader, and a partner of the same run

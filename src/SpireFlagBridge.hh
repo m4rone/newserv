@@ -467,6 +467,20 @@ SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, 
 // Writes data as the rung's file (durable) and removes the file of before if it held this rung; returns the filename
 std::string spire_savestate_store_rung(
     const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old = nullptr);
+// 7-M2 (system critic round 1): whether a 'V' may replace the savestate parked on its rung. A practice run (a room
+// quest opened at a room that is not the run's first, spire_run_is_practice) never replaces the savestate of a real
+// run, whatever its run id: "Spire room 3" opened next to a real run parked at room 9 wrote its own savestate over that
+// run at its first room start, without a word. A practice run that was parked and resumed finds its own practice
+// savestate there and replaces it as before; a real run replaces whatever is parked on its rung, as before.
+bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice);
+// The store step of a 'V': writes ss as the rung's file (spire_savestate_store_rung) and returns the filename. Returns
+// "" and writes nothing when spire_savestate_may_replace refuses: the parked savestate (the rung's file, or the file
+// of before if it counts for the rung) stays byte for byte, and *kept gets it. A practice run also leaves a parked
+// file it cannot read (*kept then does not exist): that file may hold a real run. Throws only if the write fails.
+std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
+    uint32_t serial_number, bool* replaced_old = nullptr, SpireSavestate* kept = nullptr);
+// The line a practice run's player gets, once per run, when its 'V' is not stored for a parked real run
+std::string spire_savestate_practice_kept_text(const SpireSavestate& kept);
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
