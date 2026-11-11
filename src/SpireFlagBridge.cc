@@ -3103,11 +3103,11 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     }
     auto counted = spire_finish_seen(value, score, seen);
     if (!seen.known) {
-      c->log.info_f("Spire records: 'F' {:08X} of a run without a start room ('B'): exams {} and score {} as the quest sent them",
+      c->log.info_f("Spire records: 'F' {:08X} of a run without a start room ('B'): unlock step(s) {} and score {} as the quest sent them",
           value, counted.exams, score);
     } else if ((counted.finish_value != value) || (counted.score != score)) {
       c->log.info_f("Spire records: 'F' {:08X} of the run from room {} that reached room {} (episode {}): the quest sent {} "
-          "exam(s) and score {}; the server counts {} exam(s) and score {} ({} room(s) and {} exam(s) before or outside the "
+          "unlock step(s) and score {}; the server counts {} exam(s) and score {} ({} room(s) and {} exam(s) before or outside the "
           "run taken off)", value, seen.start_room, seen.reached_room, seen.episode, counted.quest_exams, score,
           counted.exams, counted.score, counted.rooms_removed, counted.exams_removed);
     }
