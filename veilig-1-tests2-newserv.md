@@ -37,3 +37,14 @@ Geen controle geschrapt of verzwakt: 3227 expect/must-regels tegen 3191 op 771d8
 Deze opdracht dekt: dat de tests van intern (B1, B2, de 97 bij de login, de duw die niet aankomt) op de servercode van
 de veiligheidsbundel draaien en groen zijn, zonder verzwakte controle. Niet gedekt: wat een echte Wii opslaat (alleen
 de Wii), en servercode na 771d844.
+
+## Vervolg (B-REGIE-21-10), commit 02df90e
+- Zaak "verbinding valt weg midden in de run": sinds e07c6b1 schrijft de login-97 de kaart, dus de kaart met de
+  run-kopie bij de tweede login ontstaat niet meer vanzelf. Nu expliciet: `card_write_not_arrived` (= de run-kopie,
+  een kaartschrijfactie die niet aankwam) wordt vóór de tweede login klaargezet, met een extra controle dat die kaart
+  echt verschilt van wat de login-97 schreef. Nieuwe naam: "the connection drops mid-run: no 98, the next login
+  restores the real character; after a card write that did not arrive, the login after that restores it again".
+  Geen controle weggehaald of losser gemaakt.
+- `build/newserv help | head -1`: `newserv-02df90e built 2026-11-11 21:14:35.000000 UTC`
+- `build/newserv run-static-tests`: exit 0, "-- All static tests passed"; 16 keer GUARD E2E, 0 keer FAILED; de
+  hernoemde zaak staat met die naam in de log.
