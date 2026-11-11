@@ -908,7 +908,7 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
 // B-REGIE-20-5: the level floor of the trailing player (SpireMeta.hh)
 uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level) {
   if (resume_level) {
-    return std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+    return std::min<uint32_t>(std::max(*resume_level, base_char_level), SPIRE_START_LEVEL_LEVEL_CAP);
   }
   return spire_start_level_char_level(base_char_level, bonus);
 }

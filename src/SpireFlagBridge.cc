@@ -4704,7 +4704,7 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
   if (auto resume_level = bin_contents ? spire_resume_level_for_client(c, l, &resume_start_bonus) : std::nullopt) {
     uint32_t quest_number = l->quest->meta.quest_number;
     uint32_t base = l->quest->meta.battle_rules->char_level;
-    uint32_t level = std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+    uint32_t level = spire_quest_load_char_level(base, 0, resume_level); // never below the quest's own level
     level = spire_level_floor_for_client(c, l, resume_level, 0).value_or(level); // B-REGIE-20-5
     try {
       std::string bin = prs_decompress(*bin_contents);

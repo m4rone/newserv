@@ -1530,7 +1530,12 @@ void run_static_tests() {
     expect_eq(14u, spire_quest_load_char_level(0, 14, std::nullopt));
     expect_eq(37u, spire_quest_load_char_level(27, 10, std::nullopt));
     expect_eq(22u, spire_quest_load_char_level(0, 14, 22)); // a resume: the saved level, the bonus is in it already
-    expect_eq(0u, spire_quest_load_char_level(27, 10, 0));
+    // a saved level below the quest's own start level (a room quest raised after the savestate): the quest's level
+    expect_eq(27u, spire_quest_load_char_level(27, 10, 0));
+    expect_eq(14u, spire_quest_load_char_level(14, 0, 9));
+    expect_eq(20u, spire_quest_load_char_level(14, 0, 20)); // above it: the saved level
+    expect_eq(14u, spire_quest_load_char_level(14, 0, 14));
+    expect_eq(17u, spire_quest_load_char_level(14, 3, std::nullopt)); // no saved level: as before
     expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(0, 0, 5000));
     expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(198, 5, std::nullopt));
     // the trailing player below the floor: the leader's level minus 2
@@ -7965,6 +7970,12 @@ void run_static_tests() {
     expect_eq(bin_at(28), sent_to(fresh));
     expect(spire_create_battle_overlay(fresh, cl));
     expect_eq(28u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    // the quest starts at Lv30 now, above fresh's saved Lv12 and its floor: fresh resumes at the quest's Lv30
+    rules->char_level = 29;
+    auto raised_bin = std::make_shared<const std::string>(prs_compress(bin_at(29)));
+    expect_eq(bin_at(29), prs_decompress(*spire_start_level_quest_bin(fresh, cl, raised_bin)));
+    expect_eq(bin_at(30), prs_decompress(*spire_start_level_quest_bin(strong, cl, raised_bin)));
+    rules->char_level = 0;
     s->data->spire_room_quests.clear();
 
     for (const auto& c : {strong, fresh, third}) {
