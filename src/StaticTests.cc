@@ -8215,6 +8215,15 @@ void run_static_tests() {
       std::vector<std::string> inbox; // what the server sent and the client has not handled yet
       size_t pushes = 0;
       bool open = true;
+      // The live player, for a case that plays it apart from `memory` (the save buffer, which a push writes): at a floor
+      // change the client copies the live player's items and stats back over the save buffer
+      std::optional<GCCharacter> live;
+      void floor_change() {
+        if (this->live) {
+          this->memory.inventory = this->live->inventory;
+          this->memory.disp = this->live->disp;
+        }
+      }
       FakeGC()
           : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
                 phosg::TerminalFormat::END, false, false) {}
@@ -8712,6 +8721,983 @@ void run_static_tests() {
       expect(server_holds(p2, *r.server_real));
       expect(awaiting_only(snapshot_on_disk(p2))); // 8-B2 (was no_marker): the login restore awaits the save too
     });
+
+    // The return to base ('O') and the run again ('I'). The quest's write to register 248 goes in through
+    // spire_bridge_handle_register, as on_sync_quest_register hands a 6x77 over. The registers the server writes back
+    // (r41 with the answer, r248 'DONE') are kept, and the 61 requests are counted.
+    struct ServerWrote {
+      std::vector<std::pair<uint16_t, uint32_t>> registers;
+      size_t asked_61 = 0;
+    };
+    auto must = [](bool ok, const char* what) {
+      if (!ok) {
+        throw std::runtime_error(what);
+      }
+    };
+    // as `drive`, but it waits for the clock: the proof on Pioneer 2 (spire_base_return_prove) sleeps before its 61
+    auto drive_clock = [&](World& w, Session& p, ServerWrote& seen, const std::function<bool()>& finished, const char* what) {
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      for (;;) {
+        w.s->io_context->restart();
+        size_t ran = w.s->io_context->poll();
+        if (answer_failed) {
+          auto e = answer_failed;
+          answer_failed = nullptr;
+          std::rethrow_exception(e);
+        }
+        auto inbox = std::move(p.ch->inbox);
+        p.ch->inbox.clear();
+        for (const auto& raw : inbox) {
+          const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+          if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (raw[sizeof(header)] == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+            seen.registers.emplace_back(reg.register_number.load(), reg.value.as_int.load());
+          } else if (header.command == 0x95) {
+            seen.asked_61++;
+          }
+          client_handles(w, p, raw);
+        }
+        if (!inbox.empty() || ran) {
+          continue;
+        }
+        if (finished()) {
+          return;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+          throw std::runtime_error(std::format("the server did not get to {} within 15 seconds", what));
+        }
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(50));
+      }
+    };
+    // the quest writes a request and waits for r41 with the request's tag, then r248 'DONE'; returns r41
+    auto quest_asks = [&](World& w, Started& r, ServerWrote& seen, uint32_t request, const char* what) -> uint32_t {
+      size_t from = seen.registers.size();
+      must(spire_bridge_handle_register(r.p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, request), "the bridge did not take the quest's request");
+      const std::pair<uint16_t, uint32_t> done_write(SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+      drive_clock(w, r.p, seen, [&]() {
+        return std::find(seen.registers.begin() + from, seen.registers.end(), done_write) != seen.registers.end(); }, what);
+      for (size_t z = from; z < seen.registers.size(); z++) {
+        if ((seen.registers[z].first == SPIRE_BASE_RETURN_ANSWER_REGISTER) && ((seen.registers[z].second >> 24) == (request >> 24))) {
+          return seen.registers[z].second;
+        }
+      }
+      throw std::runtime_error(std::format("the server wrote no r41 for {}", what));
+    };
+    // the quest's warp to Pioneer 2 after an 'O' OK, and the server's proof there: a 61 asked on floor 0
+    auto warp_to_base = [&](World& w, Started& r, ServerWrote& seen) {
+      r.p.c->floor = 0;
+      size_t asked = seen.asked_61;
+      drive_clock(w, r.p, seen, [&]() { return seen.asked_61 > asked; }, "the proof's 61 on Pioneer 2");
+    };
+    const uint32_t run_over_request = static_cast<uint32_t>(SPIRE_BRIDGE_MSG_RUN_OVER) << 24;
+
+    e2e_case("the run ends, 'O' brings the real character back, proven on Pioneer 2; what the base changed follows at the game exit", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+      // the quest start (ReceiveCommands.cc calls this for every client of the game): an earlier run end of this game is
+      // forgotten. The cases reuse one game ID, which a server never does while it runs.
+      spire_checkpoint_run_started(p.c);
+
+      // mid-run an 'O' is refused: nothing is pushed and the client keeps the run copy
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::RUN_NOT_OVER),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to a mid-run 'O'"));
+      expect_eq(0u, p.ch->pushes);
+      must(!memcmp(&p.ch->memory, &r.run_copy, sizeof(r.run_copy)), "a refused 'O' changed what the client holds");
+
+      // the run ends ('X'); the 'O' that follows pushes the snapshot's inventory and disp into the client and answers OK
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      // the run adds nothing to the real character: the client holds exactly the character it logged in with
+      expect_real(p.ch->memory, real, "at the 'O' OK, before the warp to Pioneer 2");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      expect(server_holds(p, *r.server_real));
+      // the marker is the safety net and stays as it was; the print of the run copy is stored for the re-take
+      auto snap = snapshot_on_disk(p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+      expect(snap.run_copy_print.exists);
+
+      warp_to_base(w, r, seen);
+      expect_real(p.ch->memory, real, "at the base, after the proof on Pioneer 2");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      snap = snapshot_on_disk(p);
+      expect(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save);
+      expect(snapshot_is(snap, *r.server_real));
+
+      // In the base the player spends 300 meseta on two Dimates: the real character's own change, on top of nothing else
+      GCCharacter at_base = real;
+      at_base.disp.stats.meseta = 54021;
+      at_base.inventory.items[6].data.data1[0] = 0x03;
+      at_base.inventory.items[6].data.data1[2] = 0x01;
+      at_base.inventory.items[6].data.data1[5] = 0x02;
+      at_base.inventory.items[6].data.id = 0x00010006;
+      at_base.inventory.num_items = 7;
+      p.ch->memory = at_base;
+
+      // The game exit from the base: after a proven 'O' the snapshot follows the 98 (spire_guard_after_98), so the
+      // restore before the lobby join pushes the real character as the base left it, and the card gets that one
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->lobby.lock() && !p.c->has_overlay());
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      must(static_cast<uint32_t>(snap.inventory.num_items) == 7, "the snapshot did not follow the item bought in the base");
+      must(snap.disp.stats.meseta.load() == 54021, "the snapshot did not follow the meseta spent in the base");
+      must(snap.disp.stats.level.load() == 51 && snap.disp.stats.exp.load() == 1234567, "the snapshot's level or EXP changed at the base exit");
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, at_base, "after the game exit that follows the base");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], at_base, "on the memory card after the game exit that follows the base");
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && !snap.restore_pending && snap.awaiting_save);
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, at_base, "after the login that follows the base");
+      expect(no_marker(snapshot_on_disk(p2)));
+    });
+
+    e2e_case("run again: 'I' at the base takes the second snapshot of the real character, the new run copy is fresh, run 2's game exit restores the real character", [&]() {
+      TempCwd temp_cwd;
+      const GCCharacter real = real_character();
+      // a fresh run copy of this character, as Client::create_battle_overlay makes it at a quest load, without the guard
+      std::shared_ptr<PSOBBCharacterFile> fresh;
+      {
+        auto w0 = make_world();
+        auto p0 = connect(w0, real);
+        client_sends(w0, p0, 0x61, p0.ch->as_61());
+        auto rules = std::make_shared<BattleRules>();
+        rules->replace_char = true;
+        rules->char_level = 0;
+        p0.c->create_battle_overlay(rules, level_table);
+        fresh = std::make_shared<PSOBBCharacterFile>(*p0.c->character_file(false, true));
+      }
+      // what the client holds (its inventory and stats) against the server's character data
+      auto client_holds = [&](const Session& p, const PSOBBCharacterFile& want) {
+        PlayerInventory held = p.ch->memory.inventory;
+        Language language = p.ch->memory.inventory.language;
+        return spire_guard_same_state(held, p.ch->memory.disp.to_v4(language, language), want.inventory, want.disp);
+      };
+
+      auto w = make_world();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+      // the quest start (ReceiveCommands.cc calls this for every client of the game): an earlier run end of this game is
+      // forgotten. The cases reuse one game ID, which a server never does while it runs.
+      spire_checkpoint_run_started(p.c);
+      // run 1 ends, the return to base is proven on Pioneer 2
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      warp_to_base(w, r, seen);
+      expect_real(p.ch->memory, real, "at the base, before the run again");
+      expect_eq(1u, p.ch->pushes);
+
+      // 'I' on Pioneer 2: the snapshot is taken again from a 61 asked now, the run copy is made and pushed
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to 'I' at the base"));
+      // the second snapshot is the real character, never run 1's run copy and never the new one
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after 'I' is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the second snapshot is not the real character");
+      must(server_holds(p, *r.server_real), "the server's character data after 'I' is not the real character");
+      // the new run copy is a fresh one (Lv1, the quest's start), and it is what the client holds
+      must(p.c->has_overlay(), "no run copy after 'I'");
+      auto overlay = p.c->character_file(false, true);
+      expect_eq(0u, overlay->disp.stats.level.load());
+      expect_eq(300u, overlay->disp.stats.meseta.load());
+      must(spire_guard_same_state(overlay->inventory, overlay->disp, fresh->inventory, fresh->disp), "the new run copy is not a fresh one");
+      must(client_holds(p, *overlay), "the client does not hold the new run copy after 'I'");
+      must(memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)) != 0, "the client still holds run 1's items");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      // the push replaced the inventory and the stats alone: the rest of what the client holds is the real character's
+      must(!memcmp(&p.ch->memory.bank, &real.bank, sizeof(real.bank)), "the bank is not the real character's during run 2");
+      must((p.ch->memory.play_time_seconds == real.play_time_seconds) && (p.ch->memory.death_count == real.death_count) &&
+              (p.ch->memory.save_count == real.save_count), "the play time, death count or save count changed at 'I'");
+
+      // Run 2 wears its copy down in its own way
+      PlayerInventoryBE worn;
+      worn.language = Language::ENGLISH;
+      worn.num_items = 1;
+      worn.items[0].data.data1[0] = 0x00;
+      worn.items[0].data.data1[1] = 0x03;
+      worn.items[0].data.id = 0x00820000;
+      worn.items[0].flags = 0x0000000C;
+      overlay->inventory = worn;
+      overlay->disp.stats.level = overlay->disp.stats.level + 4;
+      overlay->disp.stats.exp = overlay->disp.stats.exp + 4321;
+      overlay->disp.stats.meseta = 120;
+      p.ch->memory.inventory = worn;
+      p.ch->memory.disp.stats = overlay->disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH).stats;
+      // the 'O' OK was used up by the 'I': a second 'I', with the run copy in memory, is refused and takes nothing
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NOT_RETURNED),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to a second 'I'"));
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "a second 'I' changed the snapshot");
+      must(server_holds(p, *r.server_real), "a second 'I' changed the server's character data");
+      expect_eq(2u, p.ch->pushes);
+
+      // Run 2 ends at the game exit: the 98 carries run copy 2, the restore before the lobby join pushes the snapshot
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->lobby.lock() && !p.c->has_overlay());
+      snap = snapshot_on_disk(p);
+      expect(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save);
+      must(snapshot_is(snap, *r.server_real), "the snapshot after run 2's 98 is not the real character");
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit of the second run");
+      expect_eq(3u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after the game exit of the second run");
+      must(server_holds(p, *r.server_real), "the server's character data after run 2 is not the real character");
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the second run");
+      expect(no_marker(snapshot_on_disk(p2)));
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
+    });
+
+    // The opening up to the quest load, without it: the login 61 of the real character and the game with the quest
+    auto before_quest_load = [&](World& w, const GCCharacter& real) {
+      Started r;
+      r.p = connect(w, real);
+      client_sends(w, r.p, 0x61, r.p.ch->as_61());
+      expect(run_bool(w, r.p, spire_guard_restore_if_needed(r.p.c)));
+      r.server_real = std::make_shared<PSOBBCharacterFile>(*r.p.c->character_file(false, false));
+      r.l = new_game(w);
+      r.l->clients[0] = r.p.c;
+      r.p.c->lobby_client_id = 0;
+      r.p.c->lobby = r.l;
+      return r;
+    };
+    e2e_case("a protected character: the quest load is refused, no snapshot, no marker, no run copy", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      w.s->data->spire_blocked_characters.emplace_back(SERIAL, "Eindtest");
+      const GCCharacter real = real_character();
+      auto r = before_quest_load(w, real);
+      auto& p = r.p;
+      must(p.c->is_spire_protected(), "the character is not protected in this setup");
+      must(!spire_create_battle_overlay(p.c, r.l), "a protected character got a run");
+      must(!p.c->has_overlay(), "a protected character got a run copy");
+      must(server_holds(p, *r.server_real), "the server's character data of a protected character changed");
+      expect_real(p.ch->memory, real, "after the refused quest load of a protected character");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      for (const auto& entry : std::filesystem::directory_iterator(SPIRE_BRIDGE_DIRECTORY)) {
+        must(!entry.path().string().ends_with(".snapshot.json"), "the guard wrote a snapshot file for a protected character");
+      }
+    });
+    e2e_case("the snapshot cannot be written: the quest load is refused, no run copy, the real character untouched", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = before_quest_load(w, real);
+      auto& p = r.p;
+      // the guard's directory is gone and a file stands in its place: no snapshot can be written
+      std::filesystem::remove_all(SPIRE_BRIDGE_DIRECTORY);
+      phosg::save_file(SPIRE_BRIDGE_DIRECTORY, "not a directory");
+      must(!spire_create_battle_overlay(p.c, r.l), "the run started without a stored snapshot");
+      must(!p.c->has_overlay(), "a run copy was made without a stored snapshot");
+      must(server_holds(p, *r.server_real), "the server's character data changed at a quest load that was refused");
+      expect_real(p.ch->memory, real, "after the quest load that could not store its snapshot");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+    });
+
+    // Two players in one game (intern-1 b1, round 3). A seat is a client with what the server wrote to it; the driver
+    // serves every seat, so a command the server sends to the partner never waits. A client that is gone answers nothing.
+    constexpr uint32_t SERIAL_2 = 8765;
+    struct Seat {
+      Session p;
+      ServerWrote seen;
+      size_t exits_asked = 0; // 6x73 from the server
+    };
+    auto drive_seats = [&](World& w, const std::vector<Seat*>& seats, const std::function<bool()>& finished, const char* what) {
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      for (;;) {
+        w.s->io_context->restart();
+        size_t ran = w.s->io_context->poll();
+        if (answer_failed) {
+          auto e = answer_failed;
+          answer_failed = nullptr;
+          std::rethrow_exception(e);
+        }
+        bool handled = false;
+        for (Seat* seat : seats) {
+          auto inbox = std::move(seat->p.ch->inbox);
+          seat->p.ch->inbox.clear();
+          for (const auto& raw : inbox) {
+            handled = true;
+            const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+            if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+                (raw[sizeof(header)] == 0x77)) {
+              const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+              seat->seen.registers.emplace_back(reg.register_number.load(), reg.value.as_int.load());
+            } else if ((header.command == 0x60) && (raw.size() > sizeof(header)) && (raw[sizeof(header)] == 0x73)) {
+              seat->exits_asked++;
+            } else if (header.command == 0x95) {
+              seat->seen.asked_61++;
+            }
+            if (seat->p.ch->open) {
+              client_handles(w, seat->p, raw);
+            }
+          }
+        }
+        if (handled || ran) {
+          continue;
+        }
+        if (finished()) {
+          return;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+          throw std::runtime_error(std::format("the server did not get to {} within 15 seconds", what));
+        }
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(50));
+      }
+    };
+    auto seats_bool = [&](World& w, const std::vector<Seat*>& seats, asio::awaitable<bool> what, const char* name) {
+      std::optional<bool> result;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e, bool r) {
+        failed = e;
+        result = r;
+      });
+      drive_seats(w, seats, [&]() { return result.has_value(); }, name);
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+      return *result;
+    };
+    auto seats_void = [&](World& w, const std::vector<Seat*>& seats, asio::awaitable<void> what, const char* name) {
+      bool done = false;
+      std::exception_ptr failed;
+      asio::co_spawn(*w.s->io_context, std::move(what), [&](std::exception_ptr e) {
+        failed = e;
+        done = true;
+      });
+      drive_seats(w, seats, [&]() { return done; }, name);
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+    };
+    auto seat_sends = [&](World& w, const std::vector<Seat*>& seats, Seat& from, uint8_t command, std::string data) {
+      seats_void(w, seats, on_command(from.p.c, std::make_unique<Channel::Message>(Channel::Message{.command = command, .flag = 0, .data = std::move(data)})), "the end of a client's command");
+    };
+    // a connection of another console: `connect` makes a login of its own for every connection
+    auto connect_as = [&](World& w, const GCCharacter& memory, uint32_t serial) {
+      Session p = connect(w, memory);
+      p.c->login->gc_license->serial_number = serial;
+      return p;
+    };
+    // The second player's real character: another name, class and section ID, other items and mag, five items instead
+    // of six, another level, EXP, meseta and stats, and a bank of two items with its own meseta
+    auto second_character = [&]() {
+      GCCharacter ch = real_character();
+      ch.inventory.hp_from_materials = 2;
+      ch.inventory.tp_from_materials = 1;
+      ch.inventory.items[0].data.data1[1] = 0x03;
+      ch.inventory.items[0].data.data1[3] = 0x02;
+      ch.inventory.items[1].data.data1[2] = 0x07;
+      ch.inventory.items[2].data.data1[2] = 0x09;
+      // the mag: another kind, level 50, other numbers, synchro 80, IQ 50
+      const uint8_t mag[12] = {0x02, 0x09, 0x32, 0x00, 0xD0, 0x07, 0xB8, 0x0B, 0xE8, 0x03, 0xF4, 0x01};
+      for (size_t x = 0; x < 12; x++) {
+        ch.inventory.items[MAG_SLOT].data.data1[x] = mag[x];
+      }
+      ch.inventory.items[MAG_SLOT].data.data2[0] = 0x50;
+      ch.inventory.items[MAG_SLOT].data.data2[1] = 0x32;
+      ch.inventory.items[4].data.data1[5] = 0x03; // three Monomates
+      ch.inventory.items[5] = ch.inventory.items[29]; // no sixth item
+      ch.inventory.num_items = 5;
+      for (size_t z = 0; z < 5; z++) {
+        ch.inventory.items[z].data.id = 0x00210000 + z;
+      }
+      PlayerDispDataV4 disp = ch.disp.to_v4(Language::ENGLISH, Language::ENGLISH);
+      disp.stats.char_stats.atp = 211;
+      disp.stats.char_stats.mst = 522;
+      disp.stats.char_stats.evp = 133;
+      disp.stats.char_stats.hp = 244;
+      disp.stats.char_stats.dfp = 155;
+      disp.stats.char_stats.ata = 96;
+      disp.stats.char_stats.lck = 17;
+      disp.stats.level = 23;
+      disp.stats.exp = 98765;
+      disp.stats.meseta = 1111;
+      disp.visual.name.encode("Tweede", Language::ENGLISH);
+      disp.visual.sh.char_class = 4;
+      disp.visual.sh.section_id = 7;
+      ch.disp = disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH);
+      ch.bank.items[0].data.data1[1] = 0x07;
+      ch.bank.items[1].data.data1[1] = 0x08;
+      ch.bank.items[2] = ch.bank.items[3]; // no third bank item
+      ch.bank.num_items = 2;
+      ch.bank.meseta = 5000;
+      ch.guild_card.guild_card_number = SERIAL_2;
+      ch.play_time_seconds = 1234;
+      ch.death_count = 1;
+      ch.save_count = 9;
+      return ch;
+    };
+    // a run wears a run copy down on the client and on the server's overlay: one run weapon, levels, EXP, meseta
+    auto wear_down = [&](Session& p, uint8_t weapon, uint32_t item_id, uint32_t levels, uint32_t exp, uint32_t meseta) {
+      auto overlay = p.c->character_file(false, true);
+      PlayerInventoryBE worn;
+      worn.language = Language::ENGLISH;
+      worn.num_items = 1;
+      worn.items[0].data.data1[0] = 0x00;
+      worn.items[0].data.data1[1] = weapon;
+      worn.items[0].data.id = item_id;
+      worn.items[0].flags = 0x0000000C;
+      overlay->inventory = worn;
+      overlay->disp.stats.level = overlay->disp.stats.level + levels;
+      overlay->disp.stats.exp = overlay->disp.stats.exp + exp;
+      overlay->disp.stats.meseta = meseta;
+      p.ch->memory.inventory = worn;
+      p.ch->memory.disp.stats = overlay->disp.to_v123<true>(Language::ENGLISH, Language::ENGLISH).stats;
+    };
+    auto snapshot_files = [&]() {
+      size_t count = 0;
+      for (const auto& entry : std::filesystem::directory_iterator(SPIRE_BRIDGE_DIRECTORY)) {
+        count += entry.path().string().ends_with(".snapshot.json");
+      }
+      return count;
+    };
+
+    // A game that a client leaves while another stays makes its item creator again for the new leader
+    // (Lobby::reassign_leader_on_client_departure), from the tables a server always has; read before a case changes
+    // the working directory
+    auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    auto common_v3 = std::make_shared<JSONCommonItemSet>(phosg::JSON::parse(phosg::load_file("system/tables/common-table-v3-v4.json")));
+    auto armor_set = std::make_shared<ArmorShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/armor-shop-random-set.json")));
+    auto tool_set = std::make_shared<ToolShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/tool-shop-random-set.json")));
+    auto weapon_set = std::make_shared<WeaponShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/weapon-shop-random-set-normal.json")));
+    auto tekker_set = std::make_shared<TekkerAdjustmentSet>(phosg::JSON::parse(phosg::load_file("system/tables/tekker-adjustment-set.json")));
+    auto give_item_tables = [&](World& w) {
+      auto& data = *w.s->data;
+      data.item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = pmt_v3;
+      data.item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] =
+          std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+      data.common_item_sets["common-table-v3-v4"] = common_v3;
+      data.rare_item_sets["rare-table-v3"] = std::make_shared<RareItemSet>(phosg::JSON::dict());
+      data.armor_random_set = armor_set;
+      data.tool_random_set = tool_set;
+      data.weapon_random_sets[static_cast<size_t>(Difficulty::NORMAL)] = weapon_set;
+      data.tekker_adjustment_set = tekker_set;
+    };
+
+    // One of the two drops out mid-run, the other plays on, gets the server's run end and leaves through the 98
+    auto two_players = [&](bool leader_drops) {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      give_item_tables(w);
+      const GCCharacter real[2] = {real_character(), second_character()};
+      const uint32_t serial[2] = {SERIAL, SERIAL_2};
+      Seat seat[2];
+      std::vector<Seat*> both{&seat[0], &seat[1]};
+      std::shared_ptr<PSOBBCharacterFile> server_real[2];
+      std::string file[2];
+      for (size_t z = 0; z < 2; z++) {
+        seat[z].p = connect_as(w, real[z], serial[z]);
+      }
+      for (size_t z = 0; z < 2; z++) {
+        seat_sends(w, both, seat[z], 0x61, seat[z].p.ch->as_61());
+        must(seats_bool(w, both, spire_guard_restore_if_needed(seat[z].p.c), "the login"), "a login without a marker was refused");
+        expect_eq(0u, seat[z].p.ch->pushes);
+        server_real[z] = std::make_shared<PSOBBCharacterFile>(*seat[z].p.c->character_file(false, false));
+        file[z] = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial[z], spire_guard_character_id(server_real[z]->disp));
+      }
+      must(file[0] != file[1], "the two players share a snapshot file name");
+      must(!server_holds(seat[0].p, *server_real[1]) && !server_holds(seat[1].p, *server_real[0]), "the two characters of this case are not different");
+
+      // both in one game, the first as its leader; the quest start as ReceiveCommands.cc plays it for every client of the
+      // game: the earlier overlay goes, the run start, then the snapshot and the run copy
+      auto l = new_game(w);
+      l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      l->leader_id = 0;
+      l->rand_crypt = std::make_shared<MT19937Generator>(l->random_seed); // as create_game_generic gives every game
+      for (size_t z = 0; z < 2; z++) {
+        l->clients[z] = seat[z].p.c;
+        seat[z].p.c->lobby_client_id = z;
+        seat[z].p.c->lobby = l;
+      }
+      for (size_t z = 0; z < 2; z++) {
+        seat[z].p.c->delete_overlay();
+        spire_checkpoint_run_started(seat[z].p.c);
+        must(spire_create_battle_overlay(seat[z].p.c, l), "the quest load was refused for one of two players");
+      }
+      // each got its own snapshot of its own real character and its own run copy
+      expect_eq(2u, snapshot_files());
+      for (size_t z = 0; z < 2; z++) {
+        must(std::filesystem::is_regular_file(file[z]), "a player has no snapshot file under its own serial and character");
+        auto snap = spire_guard_load(file[z]);
+        must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker at the run start is not RunInProgress alone");
+        must(snapshot_is(snap, *server_real[z]), "a player's snapshot is not its own real character");
+        must(!snapshot_is(snap, *server_real[1 - z]), "a player's snapshot holds the other player's character");
+        must(!memcmp(&snap.disp.visual.name, &server_real[z]->disp.visual.name, sizeof(snap.disp.visual.name)), "a player's snapshot carries another name");
+        must(seat[z].p.c->has_overlay(), "a player got no run copy");
+        auto overlay = seat[z].p.c->character_file(false, true);
+        must(!memcmp(&overlay->disp.visual.name, &server_real[z]->disp.visual.name, sizeof(overlay->disp.visual.name)), "a player's run copy carries another name");
+        expect_eq(0u, overlay->disp.stats.level.load());
+        must(server_holds(seat[z].p, *server_real[z]), "the run copy changed a player's real character on the server");
+      }
+      must(seat[0].p.c->character_file(false, true) != seat[1].p.c->character_file(false, true), "the two players share one run copy");
+      wear_down(seat[0].p, 0x02, 0x00810000, 9, 54321, 0);
+      wear_down(seat[1].p, 0x04, 0x00A10000, 3, 777, 45);
+      const GCCharacter run_copy[2] = {seat[0].p.ch->memory, seat[1].p.ch->memory};
+      for (size_t z = 0; z < 2; z++) {
+        must(server_holds(seat[z].p, *server_real[z]), "the run changed a player's real character on the server");
+      }
+      // the leader's run start: the server's run timer counts two clients from here on ('S', SpireFlagBridge.hh)
+      must(spire_bridge_handle_register(seat[0].p.c, l, SPIRE_BRIDGE_REQUEST_REGISTER,
+               (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_START) << 24) | (5u << 16) | 3600u),
+          "the bridge did not take the leader's 'S'");
+
+      size_t gone = leader_drops ? 0 : 1;
+      size_t stays = 1 - gone;
+      auto stayer_untouched = [&](const std::string& file_before, const char* when) {
+        if ((phosg::load_file(file[stays]) != file_before) || (seat[stays].p.ch->pushes != 0) ||
+            memcmp(&seat[stays].p.ch->memory, &run_copy[stays], sizeof(GCCharacter)) || !seat[stays].p.c->has_overlay() ||
+            !server_holds(seat[stays].p, *server_real[stays])) {
+          throw std::runtime_error(std::format("{}: the player who stayed lost its snapshot file's content, its run copy or its real character on the server", when));
+        }
+      };
+      const std::string stays_file = phosg::load_file(file[stays]);
+
+      // one drops out (on_disconnect): nothing is restored, its marker stays RunInProgress with its real character
+      seat[gone].p.ch->open = false;
+      seats_void(w, both, on_disconnect(seat[gone].p.c), "the end of the disconnect");
+      must(!seat[gone].p.c->lobby.lock() && !l->clients[gone], "the dropped client is still in the game");
+      must((l->clients[stays] == seat[stays].p.c) && (seat[stays].p.c->lobby.lock() == l), "the player who stayed is no longer in the game");
+      expect_eq(stays, static_cast<size_t>(l->leader_id));
+      auto snap = spire_guard_load(file[gone]);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker of the dropped player is not RunInProgress alone");
+      must(snapshot_is(snap, *server_real[gone]), "the snapshot of the dropped player is not its real character");
+      expect_eq(0u, seat[gone].p.ch->pushes);
+      stayer_untouched(stays_file, "after the partner dropped out");
+
+      // The server ends the run for the one who stayed: the timer sees fewer clients than at the 'S' and writes
+      // r252 = 'E', cause 2 (player left). The guard is not part of that: no push, the marker and the run copy stay.
+      const uint32_t player_left = (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 8) | SPIRE_BRIDGE_TIMER_PLAYER_LEFT;
+      auto told_run_end = [&](const Seat& s) {
+        for (const auto& reg : s.seen.registers) {
+          if ((reg.first == SPIRE_BRIDGE_TIMER_REGISTER) && ((reg.second >> 16) == player_left)) {
+            return true;
+          }
+        }
+        return false;
+      };
+      drive_seats(w, both, [&]() { return told_run_end(seat[stays]); }, "the run end for the player who stayed (r252, player left)");
+      must(!told_run_end(seat[gone]), "the run end was sent to the client that is gone");
+      stayer_untouched(stays_file, "after the server ended the run");
+      seat[gone].p.c.reset();
+
+      // the dropped player logs in again: a new connection whose 61 is the run copy its client kept
+      Seat back;
+      back.p = connect_as(w, run_copy[gone], serial[gone]);
+      std::vector<Seat*> now{&seat[stays], &back};
+      seat_sends(w, now, back, 0x61, back.p.ch->as_61());
+      must(!spire_guard_game_join_allowed(back.p.c, false), "a game join was allowed before the login restore");
+      must(seats_bool(w, now, spire_guard_restore_if_needed(back.p.c), "the login restore"), "the login restore of the dropped player was refused");
+      expect_real(back.p.ch->memory, real[gone], "after the login of the player who dropped out of a two-player game");
+      expect_eq(1u, back.p.ch->pushes);
+      expect_eq(0u, back.p.ch->card_writes.size());
+      must(server_holds(back.p, *server_real[gone]), "the server's character data of the dropped player is not its real character after the login");
+      snap = spire_guard_load(file[gone]);
+      must(!snap.run_in_progress && !snap.restore_pending, "the login restore left a run or a restore open");
+      must(snapshot_is(snap, *server_real[gone]), "the snapshot of the dropped player changed at its login");
+      expect_eq(2u, snapshot_files());
+      stayer_untouched(stays_file, "after the partner's login restore");
+      const std::string gone_file = phosg::load_file(file[gone]);
+      auto partner_untouched = [&](const char* when) {
+        if ((phosg::load_file(file[gone]) != gone_file) || (back.p.ch->pushes != 1) || !server_holds(back.p, *server_real[gone])) {
+          throw std::runtime_error(std::format("{}: the snapshot file or the server's character data of the player who dropped changed", when));
+        }
+        expect_real(back.p.ch->memory, real[gone], when);
+      };
+
+      // the one who stayed leaves through the 98 and gets its own real character before the lobby join
+      seat_sends(w, now, seat[stays], 0x98, seat[stays].p.ch->as_61());
+      must(!seat[stays].p.c->lobby.lock() && !seat[stays].p.c->has_overlay(), "the 98 left the player in the game or with its run copy");
+      snap = spire_guard_load(file[stays]);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the 98 is not RestorePending alone");
+      must(snapshot_is(snap, *server_real[stays]), "the snapshot after the 98 is not the real character of the player who stayed");
+      partner_untouched("after the 98 of the player who stayed");
+      must(seats_bool(w, now, spire_guard_restore_at_game_exit(seat[stays].p.c), "the game exit restore"), "the game exit restore was refused");
+      expect_real(seat[stays].p.ch->memory, real[stays], "after the game exit of the player who stayed in a two-player game");
+      expect_eq(1u, seat[stays].p.ch->pushes);
+      expect_eq(1u, seat[stays].p.ch->card_writes.size());
+      expect_real(seat[stays].p.ch->card_writes[0], real[stays], "on the memory card of the player who stayed");
+      must(server_holds(seat[stays].p, *server_real[stays]), "the server's character data of the player who stayed is not its real character after the game exit");
+      partner_untouched("after the game exit restore of the player who stayed");
+
+      // its next login shows the card's character and closes the marker; the partner's file is not part of it
+      seat[stays].p.ch->open = false;
+      Seat again;
+      again.p = connect_as(w, seat[stays].p.ch->card_writes[0], serial[stays]);
+      std::vector<Seat*> last{&back, &again};
+      seat_sends(w, last, again, 0x61, again.p.ch->as_61());
+      must(seats_bool(w, last, spire_guard_restore_if_needed(again.p.c), "the next login"), "the next login of the player who stayed was refused");
+      expect_eq(0u, again.p.ch->pushes);
+      expect_real(again.p.ch->memory, real[stays], "after the login that follows the two-player game");
+      must(no_marker(spire_guard_load(file[stays])), "the marker of the player who stayed is still open after its next login");
+      must(server_holds(again.p, *server_real[stays]), "the server's character data at the next login is not the real character");
+      partner_untouched("after the next login of the player who stayed");
+      expect_eq(2u, snapshot_files());
+    };
+    e2e_case("two players in one game: each its own snapshot and run copy; the follower drops, the leader plays on and leaves; each gets its own real character", [&]() {
+      two_players(false);
+    });
+    e2e_case("two players in one game, the leader drops: the follower leads on, gets the server's run end and leaves; each gets its own real character", [&]() {
+      two_players(true);
+    });
+
+    // The proof on Pioneer 2 that fails (spire_base_return_prove). The push of an 'O' reaches the save buffer only; on
+    // the Wii the client copied its live player, still the run copy, back over it at the warp (live 2026-10-26).
+    e2e_case("the proof on Pioneer 2 fails, the client fell back on the run copy at the warp: no 'I', the server's 6x73, the game exit restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      Seat seat;
+      seat.p = p;
+      std::vector<Seat*> alone{&seat};
+      ServerWrote seen;
+      r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS); // as set_lobby_quest leaves a game with a quest loaded
+      p.c->floor = 1; // a field floor
+      spire_checkpoint_run_started(p.c);
+      p.ch->live = r.run_copy; // the player that walks around is the run copy, whatever the save buffer holds
+
+      // the run ends, 'O' pushes the real character into the save buffer and answers OK
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::NONE),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' after the run end"));
+      expect_real(p.ch->memory, real, "in the save buffer at the 'O' OK");
+      expect_eq(1u, p.ch->pushes);
+
+      // the warp: the floor change puts the live player's items and stats back, so the proof's 61 shows the run copy
+      p.c->floor = 0;
+      p.ch->floor_change();
+      auto holds_run_copy = [&]() {
+        return !memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)) &&
+            !memcmp(&p.ch->memory.disp, &r.run_copy.disp, sizeof(r.run_copy.disp));
+      };
+      must(holds_run_copy(), "the client of this case did not fall back on the run copy");
+      drive_seats(w, alone, [&]() { return seat.exits_asked > 0; }, "the server's 6x73 after the failed proof");
+      must(seat.seen.asked_61 >= 1, "the 6x73 came without a 61 asked on Pioneer 2");
+      expect_eq(1u, seat.exits_asked);
+      // nothing else was done to the client: no second push, no card write, it still holds the run copy
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      must(holds_run_copy(), "the failed proof changed what the client holds");
+      // the run copy that the 61 carried never became the real character: not on the server, not in the snapshot
+      must(server_holds(p, *r.server_real), "the server's real character changed at the failed proof");
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after the failed proof is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after the failed proof is not the real character");
+      // no 'I': a run again would take the run copy as the real character
+      expect_eq(spire_run_again_answer(SpireRunAgainRefusal::NOT_RETURNED),
+          quest_asks(w, r, seen, SPIRE_RUN_AGAIN_TAG, "the answer to 'I' after the failed proof"));
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "the refused 'I' changed the snapshot");
+      must(server_holds(p, *r.server_real), "the refused 'I' changed the server's real character");
+      expect_eq(1u, p.ch->pushes);
+
+      // the client obeys the 6x73: its 98 carries the run copy, and the snapshot does not follow it (that is only for a
+      // proven return); the restore before the lobby join pushes the real character, and the card gets that one
+      client_sends(w, p, 0x98, p.ch->as_61());
+      p.ch->live.reset(); // no player walks around outside a game
+      must(!p.c->lobby.lock() && !p.c->has_overlay(), "the 98 left the client in the game or with its run copy");
+      snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the 98 is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot followed the 98 of a return to base that was never proven");
+      must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore after the failed proof was refused");
+      expect_real(p.ch->memory, real, "after the game exit that follows the failed proof");
+      expect_eq(2u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after the game exit that follows the failed proof");
+      must(server_holds(p, *r.server_real), "the server's character data after the game exit is not the real character");
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes[0]);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the failed proof was refused");
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the failed proof");
+      must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the failed proof");
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
+    });
+    // The base game (spire_base_game_request, spire_base_new_run). With a base quest on the server an 'O' after the run
+    // end never pushes in the run's game: the party leaves it (6x73), the game exit restores the real character, and the
+    // base game is a Normal game with the base quest. The base game's own creation and quest start
+    // (spire_base_game_join, spire_base_game_start: create_game_generic, set_lobby_quest) are not played here: the case
+    // builds that game as they leave it. "Start a new run" there sends the party out again, and the new run's quest load
+    // (on_quest_loaded: spire_create_battle_overlay) takes the snapshot again.
+    e2e_case("the base game: the run ends, 'O' sends the party to the base game, the game exit restores the real character, the base game, a new run from there and its game exit", [&]() {
+      TempCwd temp_cwd;
+      constexpr uint32_t BASE_QUEST = 987656;
+      auto w = make_world();
+      give_item_tables(w);
+      // the server's quests: the base quest (a Normal quest) and the run quest that "Start a new run" starts
+      auto index = std::make_shared<QuestIndex>(nullptr, "no-quests-here", std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), false);
+      auto base_vq = std::make_shared<VersionedQuest>();
+      base_vq->meta.quest_number = BASE_QUEST;
+      base_vq->meta.episode = Episode::EP1;
+      base_vq->meta.version = Version::GC_V3;
+      base_vq->meta.language = Language::ENGLISH;
+      auto base_quest = std::make_shared<Quest>(base_vq);
+      index->quests_by_number[BASE_QUEST] = base_quest;
+      auto rules = std::make_shared<BattleRules>();
+      rules->replace_char = true;
+      rules->char_level = 0;
+      auto run_vq = std::make_shared<VersionedQuest>();
+      run_vq->meta.quest_number = QUEST;
+      run_vq->meta.episode = Episode::EP1;
+      run_vq->meta.battle_rules = rules;
+      run_vq->meta.version = Version::GC_V3;
+      run_vq->meta.language = Language::ENGLISH;
+      auto run_quest = std::make_shared<Quest>(run_vq);
+      index->quests_by_number[SPIRE_BASE_DEFAULT_RUN_QUEST] = run_quest;
+      w.s->data->quest_index = index;
+      w.s->data->spire_base_quest_number = BASE_QUEST;
+
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      p.c->floor = 1;
+      spire_checkpoint_run_started(p.c);
+      auto server_and_snapshot_real = [&](const char* when, bool run_in_progress, bool restore_pending, bool awaiting_save) {
+        if (!server_holds(p, *r.server_real)) {
+          throw std::runtime_error(std::format("{}: the server's real character changed", when));
+        }
+        auto snap = snapshot_on_disk(p);
+        if (!snapshot_is(snap, *r.server_real)) {
+          throw std::runtime_error(std::format("{}: the snapshot is not the real character", when));
+        }
+        if ((snap.run_in_progress != run_in_progress) || (snap.restore_pending != restore_pending) || (snap.awaiting_save != awaiting_save)) {
+          throw std::runtime_error(std::format("{}: the marker is {}{}{}", when, snap.run_in_progress ? "RunInProgress " : "",
+              snap.restore_pending ? "RestorePending " : "", snap.awaiting_save ? "AwaitingSave" : ""));
+        }
+      };
+
+      // the run ends; the 'O' answers BASE_GAME and pushes nothing: the client still holds the run copy
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::BASE_GAME),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' with a base quest"));
+      expect_eq(0u, p.ch->pushes);
+      must(!memcmp(&p.ch->memory.inventory, &r.run_copy.inventory, sizeof(r.run_copy.inventory)), "the 'O' of the base game changed what the client holds");
+      server_and_snapshot_real("after the 'O' of the base game", true, false, false);
+
+      // the client obeys the 6x73: the 98 carries the run copy, the 84's restore pushes the real character, the card gets it
+      client_sends(w, p, 0x98, p.ch->as_61());
+      must(!p.c->lobby.lock() && !p.c->has_overlay(), "the 98 left the client in the run's game or with its run copy");
+      must(snapshot_is(snapshot_on_disk(p), *r.server_real), "the snapshot followed the run copy's 98 on the way to the base game");
+      must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore on the way to the base game was refused");
+      expect_real(p.ch->memory, real, "after the game exit on the way to the base game");
+      expect_eq(1u, p.ch->pushes);
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card on the way to the base game");
+      server_and_snapshot_real("after the game exit on the way to the base game", false, false, true);
+
+      // the base game, as spire_base_game_join and spire_base_game_start leave it: a Normal game with the base quest
+      auto base = std::make_shared<Lobby>(w.s, 0x7B02, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->quest = base_quest;
+      base->leader_id = 0;
+      base->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      base->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = base;
+      p.c->floor = 0;
+      must(!p.c->has_overlay(), "the client has a run copy in the base game");
+      expect_real(p.ch->memory, real, "in the base game");
+      server_and_snapshot_real("in the base game", false, false, true);
+
+      // "Start a new run" (the leader's 'O' sub 2): every client of the base game gets a 6x73, nothing is pushed
+      Seat seat;
+      seat.p = p;
+      std::vector<Seat*> alone{&seat};
+      must(spire_bridge_handle_register(p.c, base, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BASE_NEW_RUN_VALUE), "the bridge did not take the base game's new run");
+      drive_seats(w, alone, [&]() { return seat.exits_asked > 0; }, "the base game's 6x73 for the new run");
+      expect_eq(1u, seat.exits_asked);
+      expect_eq(1u, p.ch->pushes);
+      expect_real(p.ch->memory, real, "after the new run's 6x73 in the base game");
+      server_and_snapshot_real("after the new run's 6x73 in the base game", false, false, true);
+
+      // the base game's 98 carries the real character; the 84 that follows restores nothing that differs
+      seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+      must(!p.c->lobby.lock(), "the 98 left the client in the base game");
+      server_and_snapshot_real("after the base game's 98", false, false, true);
+      must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the base game exit"), "the base game exit was refused");
+      expect_real(p.ch->memory, real, "after the base game exit");
+      for (const auto& written : p.ch->card_writes) {
+        expect_real(written, real, "on the memory card after the base game exit");
+      }
+      server_and_snapshot_real("after the base game exit", false, false, true);
+
+      // the new run's Battle game and its quest load: the snapshot is taken again, the run copy is made
+      auto again = std::make_shared<Lobby>(w.s, 0x7B03, true);
+      again->episode = Episode::EP1;
+      again->mode = GameMode::BATTLE;
+      again->quest = run_quest;
+      again->leader_id = 0;
+      again->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      w.s->id_to_lobby.emplace(again->lobby_id, again);
+      again->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = again;
+      p.c->delete_overlay();
+      spire_checkpoint_run_started(p.c);
+      must(spire_create_battle_overlay(p.c, again), "the new run's quest load was refused");
+      must(p.c->has_overlay(), "no run copy in the new run");
+      expect_eq(0u, p.c->character_file(false, true)->disp.stats.level.load());
+      server_and_snapshot_real("at the new run's quest load", true, false, false);
+      wear_down(p, 0x05, 0x00830000, 6, 6543, 10);
+      must(server_holds(p, *r.server_real), "the new run changed the server's real character");
+
+      // the new run's game exit: the 98 carries its run copy, the restore pushes the real character, the card gets it
+      size_t pushes = p.ch->pushes;
+      size_t cards = p.ch->card_writes.size();
+      seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+      // the 98 makes the run copy the server's character data until the restore, as at any game exit
+      auto snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after the new run's 98 is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after the new run's 98 is not the real character");
+      must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the new run's game exit"), "the new run's game exit restore was refused");
+      expect_real(p.ch->memory, real, "after the new run's game exit");
+      expect_eq(pushes + 1, p.ch->pushes);
+      expect_eq(cards + 1, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes.back(), real, "on the memory card after the new run's game exit");
+      server_and_snapshot_real("after the new run's game exit", false, false, true);
+
+      // the next login shows the card's character and closes the marker
+      p.ch->open = false;
+      auto p2 = connect(w, p.ch->card_writes.back());
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game and the new run was refused");
+      expect_eq(0u, p2.ch->pushes);
+      expect_real(p2.ch->memory, real, "after the login that follows the base game and the new run");
+      must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the new run");
+      must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
+    });
+    // Known gap B1 (output/systeem-8-itemveiligheid-critic.md B1; SpireFlagBridge.cc spire_guard_end_run, the base
+    // game's 98 under AwaitingSave): what the base changes is pushed back at the next login, and an item taken from the
+    // bank there is gone. Red on 3fe378d, fixed by 8-B1 on spike/veilig. One line turns it on.
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B1 = false;
+    if (SPIRE_E2E_KNOWN_GAP_B1) {
+      e2e_case("the base game, the player takes an item from the bank there: after the base game exit and the next login the item is in the inventory or the bank (known gap B1)", [&]() {
+        TempCwd temp_cwd;
+        constexpr uint32_t BASE_QUEST = 987656;
+        auto w = make_world();
+        give_item_tables(w);
+        auto index = std::make_shared<QuestIndex>(nullptr, "no-quests-here", std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), false);
+        auto base_vq = std::make_shared<VersionedQuest>();
+        base_vq->meta.quest_number = BASE_QUEST;
+        base_vq->meta.episode = Episode::EP1;
+        base_vq->meta.version = Version::GC_V3;
+        base_vq->meta.language = Language::ENGLISH;
+        auto base_quest = std::make_shared<Quest>(base_vq);
+        index->quests_by_number[BASE_QUEST] = base_quest;
+        w.s->data->quest_index = index;
+        w.s->data->spire_base_quest_number = BASE_QUEST;
+
+        const GCCharacter real = real_character();
+        auto r = start_run(w, real);
+        auto& p = r.p;
+        ServerWrote seen;
+        r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+        p.c->floor = 1;
+        spire_checkpoint_run_started(p.c);
+        must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+        expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::BASE_GAME),
+            quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' with a base quest"));
+        client_sends(w, p, 0x98, p.ch->as_61());
+        must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore on the way to the base game was refused");
+        expect_real(p.ch->memory, real, "after the game exit on the way to the base game");
+
+        // the base game, as spire_base_game_join and spire_base_game_start leave it
+        auto base = std::make_shared<Lobby>(w.s, 0x7B02, true);
+        base->episode = Episode::EP1;
+        base->mode = GameMode::NORMAL;
+        base->quest = base_quest;
+        base->leader_id = 0;
+        base->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+        base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+        w.s->id_to_lobby.emplace(base->lobby_id, base);
+        base->clients[0] = p.c;
+        p.c->lobby_client_id = 0;
+        p.c->lobby = base;
+        p.c->floor = 0;
+
+        // in the base the player takes bank item 0 into the inventory (slot 6)
+        const uint32_t taken_id = real.bank.items[0].data.id;
+        GCCharacter at_base = real;
+        at_base.inventory.items[6].data = real.bank.items[0].data;
+        at_base.inventory.items[6].flags = 0;
+        at_base.inventory.num_items = 7;
+        for (size_t z = 0; z + 1 < at_base.bank.items.size(); z++) {
+          at_base.bank.items[z] = real.bank.items[z + 1];
+        }
+        at_base.bank.items[at_base.bank.items.size() - 1] = real.bank.items[real.bank.items.size() - 1];
+        at_base.bank.num_items = 2;
+        p.ch->memory = at_base;
+
+        // the base game exit: its 98, the 84's restore and its 97, the card
+        Seat seat;
+        seat.p = p;
+        std::vector<Seat*> alone{&seat};
+        seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+        must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the base game exit"), "the base game exit was refused");
+        auto has_taken = [&](const GCCharacter& ch) {
+          size_t found = 0;
+          for (size_t z = 0; z < ch.inventory.num_items; z++) {
+            found += (ch.inventory.items[z].data.id == taken_id);
+          }
+          for (size_t z = 0; z < ch.bank.num_items; z++) {
+            found += (ch.bank.items[z].data.id == taken_id);
+          }
+          return found == 1;
+        };
+        must(has_taken(p.ch->memory), "after the base game exit the item taken from the bank is in neither the inventory nor the bank");
+        must(!p.ch->card_writes.empty(), "no card write after the base game exit");
+        must(has_taken(p.ch->card_writes.back()), "on the memory card after the base game exit the item taken from the bank is gone");
+
+        // the next login: what the card holds
+        p.ch->open = false;
+        auto p2 = connect(w, p.ch->card_writes.back());
+        client_sends(w, p2, 0x61, p2.ch->as_61());
+        must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game was refused");
+        must(has_taken(p2.ch->memory), "after the login that follows the base game the item taken from the bank is in neither the inventory nor the bank");
+        expect_real(p2.ch->memory, at_base, "after the login that follows the base game");
+      });
+    }
 
     expect_eq(0u, e2e_failed);
 
