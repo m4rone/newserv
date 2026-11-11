@@ -958,7 +958,11 @@ void spire_guard_after_98(std::shared_ptr<Client> c);
 // loses it (at most the credit) and the picker's, if it follows, gains at most what the dropper's lost. A pickup by the
 // dropper himself changes nothing; nobody picking it up changes nothing (his restore gives it back). If the dropper's
 // 98 follows his real character after the drop, the credit is settled (his snapshot no longer holds the item) and a
-// following picker gains it without a take. A floor item without a credit (from a box or an enemy, from a player whose
+// following picker gains it without a take. Leaving (K7b, B-AF-53: no double before nothing lost): when the dropper leaves the
+// game (98, a lobby change or a dropped connection) while another player stays, his snapshot loses his open floor items
+// now (at most the credit), since another can still pick them up after his restore; a later pickup gives them to
+// another picker only, never to him. Is he the last player, the game ends with its floor items and his snapshot keeps
+// them. The narrow loss this accepts: he leaves with another present and nobody picks the item up. A floor item without a credit (from a box or an enemy, from a player whose
 // snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
 // What the server cannot see (shop, tekker, trade window, a 6x29 on its own) changes no snapshot: the 98 still does.
 bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo);
@@ -975,16 +979,27 @@ uint32_t spire_guard_snapshot_give_pickup(
 // dropper's snapshot); the snapshot itself stays as it is.
 uint32_t spire_guard_floor_drop_credit(
     const SpireGuardSnapshot& dropper, const ItemData& dropped, const ItemData::StackLimits& limits);
+// K7b: the state of a floor credit. OPEN: the dropper's snapshot still holds it. SETTLED: the dropper's 98 made his
+// snapshot follow his real character, which no longer holds it. LEFT: his snapshot lost it when he left the game while
+// another player stayed.
+enum class SpireGuardFloorCreditState { OPEN, SETTLED, LEFT };
 // K7b: the pickup step on the snapshots. dropper: the dropper's snapshot (nullptr if not loaded); picker: the picker's
-// followed snapshot (nullptr if it does not follow). Settled: give at most the credit. Else a pickup by the dropper
-// changes nothing, and by another player the dropper's snapshot (if it follows) loses at most the credit (taken) and
-// the picker's gains at most that (given).
+// followed snapshot (nullptr if it does not follow). SETTLED: give at most the credit. Else a pickup by the dropper
+// changes nothing; by another player LEFT gives at most the credit, and OPEN takes at most the credit from the
+// dropper's snapshot (if it follows; taken) and gives the picker at most that (given).
 struct SpireGuardFloorPickup {
   uint32_t taken = 0;
   uint32_t given = 0;
 };
 SpireGuardFloorPickup spire_guard_floor_pickup_step(SpireGuardSnapshot* dropper, SpireGuardSnapshot* picker,
-    bool picker_is_dropper, bool settled, const ItemData& item, uint32_t credit, const ItemData::StackLimits& limits);
+    bool picker_is_dropper, SpireGuardFloorCreditState state, const ItemData& item, uint32_t credit,
+    const ItemData::StackLimits& limits);
+// K7b: the leave step for one OPEN credit of the leaving dropper: with another player staying, his snapshot loses at
+// most the credit (if it follows); the last player out keeps it. Returns the amount taken (the credit from then on).
+uint32_t spire_guard_floor_leave_step(SpireGuardSnapshot& dropper, const ItemData& item, uint32_t credit,
+    bool others_remain, const ItemData::StackLimits& limits);
+// K7b: called from Lobby::remove_client for a game, before c is removed. Never throws.
+void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain);
 // K7b: after the 98 of c made its snapshot follow its real character: the credits of what c dropped are settled.
 void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c);
 // Called from 6x2A and 6x5D after the server put the dropped item on the floor. Never throws.

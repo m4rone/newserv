@@ -2,12 +2,15 @@
 
 #include <string.h>
 
+#include <algorithm>
+
 #include <phosg/Random.hh>
 
 #include "Compression.hh"
 #include "HTTPServer.hh"
 #include "Loggers.hh"
 #include "SendCommands.hh"
+#include "SpireFlagBridge.hh"
 #include "ServerState.hh"
 #include "Text.hh"
 
@@ -498,6 +501,12 @@ void Lobby::remove_client(std::shared_ptr<Client> c) {
         "client\'s lobby client id ({}) does not match client list ({})",
         c->lobby_client_id,
         static_cast<uint8_t>(other_c ? other_c->lobby_client_id : 0xFF)));
+  }
+  if (this->is_game()) {
+    // K7b: what c dropped on the floor and nobody picked up yet (SpireFlagBridge.hh)
+    bool others_remain = std::any_of(this->clients.begin(), this->clients.end(),
+        [&](const auto& lc) { return lc && (lc != c); });
+    spire_guard_note_floor_leave(c, others_remain);
   }
   this->clients[c->lobby_client_id] = nullptr;
 

@@ -5419,45 +5419,64 @@ uint32_t spire_guard_floor_drop_credit(
   return spire_guard_snapshot_take_drop(copy, dropped, limits);
 }
 
-SpireGuardFloorPickup spire_guard_floor_pickup_step(SpireGuardSnapshot* dropper, SpireGuardSnapshot* picker,
-    bool picker_is_dropper, bool settled, const ItemData& item, uint32_t credit, const ItemData::StackLimits& limits) {
-  SpireGuardFloorPickup ret;
-  if (!credit) {
-    return ret;
+// The take from the dropper's snapshot of at most credit of item, only while that snapshot follows
+static uint32_t spire_guard_floor_take_capped(
+    SpireGuardSnapshot* dropper, const ItemData& item, uint32_t credit, const ItemData::StackLimits& limits) {
+  if (!dropper || !credit || !spire_guard_floor_follows(*dropper, true)) {
+    return 0;
   }
-  if (settled) {
-    // the dropper's snapshot no longer holds it (it followed his 98 after the drop): whoever picks it up gets it
-    ret.given = picker ? spire_guard_snapshot_give_pickup(*picker, item, credit, limits) : 0;
-    return ret;
-  }
-  if (picker_is_dropper) {
-    return ret; // the dropper takes his own item back: his snapshot still holds it, nothing changes
-  }
-  // another player has it now: the dropper's snapshot loses it (at most the credit), the picker gains at most that
   ItemData capped = item;
   if (item.primary_identifier() == 0x04000000) {
     capped.data2d = std::min<uint32_t>(item.data2d, credit);
   } else if (item.max_stack_size(limits) > 1) {
     capped.data1[5] = std::min<uint32_t>(std::max<uint32_t>(item.data1[5], 1), credit);
   }
-  ret.taken = (dropper && spire_guard_floor_follows(*dropper, true))
-      ? spire_guard_snapshot_take_drop(*dropper, capped, limits)
-      : 0;
+  return spire_guard_snapshot_take_drop(*dropper, capped, limits);
+}
+
+SpireGuardFloorPickup spire_guard_floor_pickup_step(SpireGuardSnapshot* dropper, SpireGuardSnapshot* picker,
+    bool picker_is_dropper, SpireGuardFloorCreditState state, const ItemData& item, uint32_t credit,
+    const ItemData::StackLimits& limits) {
+  SpireGuardFloorPickup ret;
+  if (!credit) {
+    return ret;
+  }
+  if (state == SpireGuardFloorCreditState::SETTLED) {
+    // the dropper's snapshot no longer holds it (it followed his 98 after the drop): whoever picks it up gets it
+    ret.given = picker ? spire_guard_snapshot_give_pickup(*picker, item, credit, limits) : 0;
+    return ret;
+  }
+  if (picker_is_dropper) {
+    // OPEN: his snapshot still holds it, nothing changes. LEFT: his snapshot lost it when he left the game while
+    // another player stayed; his restore may already have given the card of before back, so never to him again
+    return ret;
+  }
+  if (state == SpireGuardFloorCreditState::LEFT) {
+    ret.given = picker ? spire_guard_snapshot_give_pickup(*picker, item, credit, limits) : 0;
+    return ret;
+  }
+  // OPEN, another player has it now: the dropper's snapshot loses it (at most the credit), the picker gains at most that
+  ret.taken = spire_guard_floor_take_capped(dropper, item, credit, limits);
   ret.given = picker ? spire_guard_snapshot_give_pickup(*picker, item, ret.taken, limits) : 0;
   return ret;
 }
 
+uint32_t spire_guard_floor_leave_step(SpireGuardSnapshot& dropper, const ItemData& item, uint32_t credit,
+    bool others_remain, const ItemData::StackLimits& limits) {
+  // the last player out: the game ends and its floor items go, so the dropper keeps them (no loss)
+  return others_remain ? spire_guard_floor_take_capped(&dropper, item, credit, limits) : 0;
+}
+
 // K7b: the credit of each floor item that a followed drop would take from its dropper's snapshot, with the dropper.
 // Keyed by the floor item's address; the weak pointer makes a reused address count as no credit. An entry goes at the
-// pickup that uses it, and expired entries go at each new drop. Settled: the dropper's 98 after the drop made his
-// snapshot follow his real character, which no longer holds the item.
+// pickup that uses it, and expired entries go at each new drop and each leave. States: SpireFlagBridge.hh.
 struct SpireGuardFloorCredit {
   std::weak_ptr<const Lobby::FloorItem> item;
   uint32_t amount = 0;
   std::string dropper_filename;
   uint32_t dropper_serial = 0;
   std::weak_ptr<const Client> dropper_client;
-  bool settled = false;
+  SpireGuardFloorCreditState state = SpireGuardFloorCreditState::OPEN;
 };
 static std::unordered_map<const Lobby::FloorItem*, SpireGuardFloorCredit> spire_guard_floor_credits;
 
@@ -5500,7 +5519,7 @@ void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobb
           item_id, l->quest ? l->quest->meta.quest_number : 0, serial_number);
       return;
     }
-    spire_guard_floor_credits[fi.get()] = SpireGuardFloorCredit{fi, credit, filename, serial_number, c, false};
+    spire_guard_floor_credits[fi.get()] = SpireGuardFloorCredit{fi, credit, filename, serial_number, c, SpireGuardFloorCreditState::OPEN};
     c->log.info_f("Spire guard: floor drop {:08X} ({}) for serial {:010}: a credit of {} on the floor item; the snapshot keeps it until another player picks it up (K7b)",
         item_id, s->data->describe_item(c->version(), fi->data), serial_number, credit);
   } catch (const std::exception& e) {
@@ -5529,18 +5548,18 @@ void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lo
     uint32_t picker_serial = spire_bridge_serial_for_client(c);
     std::string picker_filename = picker_serial ? spire_guard_filename_for(c, picker_serial) : std::string();
     bool picker_is_dropper = !picker_filename.empty() && (picker_filename == credit.dropper_filename);
-    if (picker_is_dropper && !credit.settled) {
-      c->log.info_f("Spire guard: floor pickup {:08X} by its own dropper (serial {:010}); the snapshot stays as it was (K7b)",
-          fi->data.id.load(), picker_serial);
+    if (picker_is_dropper && (credit.state != SpireGuardFloorCreditState::SETTLED)) {
+      c->log.info_f("Spire guard: floor pickup {:08X} by its own dropper (serial {:010}); the snapshot stays as it is (K7b{})",
+          fi->data.id.load(), picker_serial, (credit.state == SpireGuardFloorCreditState::LEFT) ? ", it lost it when he left" : "");
       return;
     }
-    // the dropper's snapshot, loaded only when it loses something (another picker, credit not settled)
+    // the dropper's snapshot, loaded only when it loses something (another picker, credit still open)
     std::optional<SpireGuardSnapshot> dropper;
-    if (!credit.settled && std::filesystem::is_regular_file(credit.dropper_filename)) {
+    if ((credit.state == SpireGuardFloorCreditState::OPEN) && std::filesystem::is_regular_file(credit.dropper_filename)) {
       dropper = spire_guard_load(credit.dropper_filename);
     }
     SpireGuardSnapshot* picker = followed ? &std::get<0>(*followed) : nullptr;
-    auto step = spire_guard_floor_pickup_step(dropper ? &*dropper : nullptr, picker, picker_is_dropper, credit.settled,
+    auto step = spire_guard_floor_pickup_step(dropper ? &*dropper : nullptr, picker, picker_is_dropper, credit.state,
         fi->data, credit.amount, limits);
     if (step.taken) {
       spire_guard_save(credit.dropper_filename, credit.dropper_serial, *dropper);
@@ -5550,7 +5569,8 @@ void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lo
     }
     c->log.info_f("Spire guard: floor pickup {:08X} ({}) with a credit of {}{} from serial {:010}: the dropper's snapshot lost {}, the picker's {} {} (K7b)",
         fi->data.id.load(), s->data->describe_item(c->version(), fi->data), credit.amount,
-        credit.settled ? " (settled by the dropper's 98)" : "", credit.dropper_serial, step.taken,
+        (credit.state == SpireGuardFloorCreditState::SETTLED) ? " (settled by the dropper's 98)"
+            : (credit.state == SpireGuardFloorCreditState::LEFT) ? " (taken from the dropper when he left)" : "", credit.dropper_serial, step.taken,
         followed ? "gained" : "does not follow and gained", step.given);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to follow a floor pickup: {}; the snapshots stay (K7b)", e.what());
@@ -5559,9 +5579,54 @@ void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lo
 
 void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c) {
   for (auto& [_, credit] : spire_guard_floor_credits) {
-    if (!credit.settled && (credit.dropper_client.lock() == c)) {
-      credit.settled = true;
+    if ((credit.state == SpireGuardFloorCreditState::OPEN) && (credit.dropper_client.lock() == c)) {
+      credit.state = SpireGuardFloorCreditState::SETTLED;
     }
+  }
+}
+
+void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain) {
+  try {
+    std::erase_if(spire_guard_floor_credits, [](const auto& it) { return it.second.item.expired(); });
+    uint32_t serial_number = spire_bridge_serial_for_client(c);
+    std::string filename = serial_number ? spire_guard_filename_for(c, serial_number) : std::string();
+    std::vector<SpireGuardFloorCredit*> open;
+    for (auto& [_, credit] : spire_guard_floor_credits) {
+      if ((credit.state == SpireGuardFloorCreditState::OPEN) &&
+          ((credit.dropper_client.lock() == c) || (!filename.empty() && (credit.dropper_filename == filename)))) {
+        open.emplace_back(&credit);
+      }
+    }
+    if (open.empty() || !others_remain) {
+      if (!open.empty()) {
+        c->log.info_f("Spire guard: serial {:010} leaves the game last; the game ends, the snapshot keeps its {} dropped floor item(s) (K7b)",
+            serial_number, open.size());
+      }
+      return; // the credits go with the floor items
+    }
+    std::optional<SpireGuardSnapshot> snapshot;
+    if (std::filesystem::is_regular_file(open.front()->dropper_filename)) {
+      snapshot = spire_guard_load(open.front()->dropper_filename);
+    }
+    auto s = c->require_server_state();
+    const auto& limits = *s->data->item_stack_limits(c->version());
+    uint32_t total = 0;
+    for (auto* credit : open) {
+      auto fi = credit->item.lock();
+      uint32_t taken = (snapshot && fi && (credit->dropper_filename == open.front()->dropper_filename))
+          ? spire_guard_floor_leave_step(*snapshot, fi->data, credit->amount, true, limits)
+          : 0;
+      credit->amount = taken; // a later pickup gives at most what the dropper lost, never back to him
+      credit->state = SpireGuardFloorCreditState::LEFT;
+      total += taken;
+    }
+    if (total) {
+      spire_guard_save(open.front()->dropper_filename, open.front()->dropper_serial, *snapshot);
+    }
+    c->log.info_f("Spire guard: serial {:010} leaves the game while another player stays; the snapshot lost its {} dropped floor item(s) ({} taken), a later pickup gives them to the picker only (K7b)",
+        open.front()->dropper_serial, open.size(), total);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to follow a game leave with floor items: {} (K7b)", e.what());
   }
 }
 
