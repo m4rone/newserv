@@ -707,8 +707,9 @@ uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
   return (k && !bosses_beaten.contains(k)) ? k : 0;
 }
 
+// open_rung: the open rung of num_runs runs (2: Run I and II, the form before Run III; 3: with Run III, audit 1 A1)
 static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t* open_rung, size_t num_runs, bool kit2_owned,
     const std::set<uint8_t>& bosses_beaten) {
   if (index >= cat.items.size()) {
     return SpireShopRefusal::UNKNOWN_ITEM;
@@ -728,23 +729,25 @@ static SpireShopRefusal spire_shop_item_refusal(const SpireShopCatalogue& cat, s
     return SpireShopRefusal::ALREADY_OPEN; // route B F3: the second kit is the character's already
   }
   if (item.rung) {
-    if (std::min(open_rung[0], open_rung[1]) >= item.rung) {
+    uint8_t least_open = *std::min_element(open_rung, open_rung + num_runs);
+    uint8_t most_open = *std::max_element(open_rung, open_rung + num_runs);
+    if (least_open >= item.rung) {
       return SpireShopRefusal::ALREADY_OPEN; // nothing to open: never take splinters for it
     }
     if (spire_shop_strength(cat, upgrades) < item.p_needed) {
       return SpireShopRefusal::STRENGTH;
     }
-    if (std::max(open_rung[0], open_rung[1]) + 1 < item.rung) {
+    if (most_open + 1 < item.rung) {
       return SpireShopRefusal::RUNG_CLOSED;
     }
   }
   return SpireShopRefusal::NONE;
 }
 
-SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2], bool kit2_owned,
-    const std::set<uint8_t>& bosses_beaten) {
-  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned, bosses_beaten);
+static SpireShopRefusal spire_shop_buy_refusal_runs(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t* open_rung, size_t num_runs,
+    bool kit2_owned, const std::set<uint8_t>& bosses_beaten) {
+  auto r = spire_shop_item_refusal(cat, index, upgrades, open_rung, num_runs, kit2_owned, bosses_beaten);
   if (r != SpireShopRefusal::NONE) {
     return r;
   }
@@ -752,13 +755,38 @@ SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t in
                                                                                 : SpireShopRefusal::NONE;
 }
 
-uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
-    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned,
+static uint32_t spire_shop_next_price_runs(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t* open_rung, size_t num_runs, bool kit2_owned,
     const std::set<uint8_t>& bosses_beaten) {
-  if (spire_shop_item_refusal(cat, index, upgrades, open_rung, kit2_owned, bosses_beaten) != SpireShopRefusal::NONE) {
+  if (spire_shop_item_refusal(cat, index, upgrades, open_rung, num_runs, kit2_owned, bosses_beaten) !=
+      SpireShopRefusal::NONE) {
     return 0;
   }
   return cat.items[index].price[spire_shop_level(upgrades, index)];
+}
+
+SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const uint8_t open_rung[2], bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
+  return spire_shop_buy_refusal_runs(cat, index, upgrades, balance, open_rung, 2, kit2_owned, bosses_beaten);
+}
+
+SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const std::array<uint8_t, 3>& open_rung,
+    bool kit2_owned, const std::set<uint8_t>& bosses_beaten) {
+  return spire_shop_buy_refusal_runs(cat, index, upgrades, balance, open_rung.data(), 3, kit2_owned, bosses_beaten);
+}
+
+uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
+  return spire_shop_next_price_runs(cat, index, upgrades, open_rung, 2, kit2_owned, bosses_beaten);
+}
+
+uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const std::array<uint8_t, 3>& open_rung, bool kit2_owned,
+    const std::set<uint8_t>& bosses_beaten) {
+  return spire_shop_next_price_runs(cat, index, upgrades, open_rung.data(), 3, kit2_owned, bosses_beaten);
 }
 
 uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, SpireMetaFile& file) {

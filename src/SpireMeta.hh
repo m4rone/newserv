@@ -295,6 +295,16 @@ SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t in
 uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, const uint8_t open_rung[2], bool kit2_owned = false,
     const std::set<uint8_t>& bosses_beaten = {});
+// Audit 1 A1: the same over three runs, open_rung[r - 1] for Run I, II and III. A rung item is ALREADY_OPEN only when
+// every run has its rung open (a character with Hard won in Run I and II still buys open_hard for Run III), and
+// RUNG_CLOSED when no run has the rung below open. With Run III's rung between those of Run I and II, the answer is
+// the one of the two-run form.
+SpireShopRefusal spire_shop_buy_refusal(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, uint32_t balance, const std::array<uint8_t, 3>& open_rung,
+    bool kit2_owned = false, const std::set<uint8_t>& bosses_beaten = {});
+uint32_t spire_shop_next_price(const SpireShopCatalogue& cat, size_t index,
+    const std::map<std::string, uint32_t>& upgrades, const std::array<uint8_t, 3>& open_rung, bool kit2_owned = false,
+    const std::set<uint8_t>& bosses_beaten = {});
 // B-AF-1: the boss room k the next level of item index waits for (its Boss entry, not in bosses_beaten), or 0.
 uint8_t spire_shop_boss_needed(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, const std::set<uint8_t>& bosses_beaten);

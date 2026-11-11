@@ -2878,6 +2878,66 @@ void run_static_tests() {
     expect_eq(0, spire_meta_base_rung(strength_only, 3)); // a strength item opens no rung
   }
   {
+    // the shop over three runs: a rung item is already open only when Run III has it open too; with Run III's rung
+    // between those of Run I and II every answer is the one of the two-run form (Run I and II as before)
+    using R = SpireShopRefusal;
+    auto cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 1, "Price": [10], "P": [0, 0]}, "kit_tier": {"Max": 1, "Price": [10], "P": [0, 0]},
+        "hp_mat": {"Max": 1, "Price": [10], "P": [0, 0]}, "atp_grind": {"Max": 1, "Price": [10], "P": [0, 3]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 0}, "open_vh": {"Max": 1, "Price": [120], "PNeeded": 3},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 0}},
+      "MetaHeat": {"HAuto": {}}})");
+    std::map<std::string, uint32_t> p3 = {{"atp_grind", 1}};
+    std::array<uint8_t, 3> hard_12 = {1, 1, 0}; // Hard won in Run I and II, Run III closed
+    uint8_t hard_12_two[2] = {1, 1};
+    expect(R::ALREADY_OPEN == spire_shop_buy_refusal(cat, 4, {}, 9999, hard_12_two)); // the two-run form, as before
+    expect(R::NONE == spire_shop_buy_refusal(cat, 4, {}, 9999, hard_12));
+    expect_eq(60u, spire_shop_next_price(cat, 4, {}, hard_12));
+    std::array<uint8_t, 3> hard_all = {1, 1, 1};
+    expect(R::ALREADY_OPEN == spire_shop_buy_refusal(cat, 4, {}, 9999, hard_all));
+    expect_eq(0u, spire_shop_next_price(cat, 4, {}, hard_all));
+    std::array<uint8_t, 3> ult_12 = {3, 3, 0};
+    expect(R::NONE == spire_shop_buy_refusal(cat, 6, {}, 9999, ult_12)); // open_ult for Run III
+    expect(R::BALANCE == spire_shop_buy_refusal(cat, 6, {}, 239, ult_12));
+    std::array<uint8_t, 3> hard_3 = {0, 0, 1}; // only Run III has Hard: Very Hard is sold
+    expect(R::NONE == spire_shop_buy_refusal(cat, 5, p3, 9999, hard_3));
+    expect(R::STRENGTH == spire_shop_buy_refusal(cat, 5, {}, 9999, hard_3));
+    std::array<uint8_t, 3> none = {0, 0, 0};
+    expect(R::RUNG_CLOSED == spire_shop_buy_refusal(cat, 5, p3, 9999, none));
+    // the buy opens the rung for Run III, so the next ask is already open
+    SpireMetaFile file;
+    file.flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN1_WON)] = true;
+    file.flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN2_WON)] = true;
+    std::array<uint8_t, 3> before = {spire_meta_open_rung(file, 1), spire_meta_open_rung(file, 2), spire_meta_open_rung(file, 3)};
+    expect(before == hard_12);
+    expect_eq(60u, spire_shop_apply_buy(cat, 4, file));
+    std::array<uint8_t, 3> after = {spire_meta_open_rung(file, 1), spire_meta_open_rung(file, 2), spire_meta_open_rung(file, 3)};
+    expect(after == hard_all);
+    expect(R::MAX_LEVEL == spire_shop_buy_refusal(cat, 4, file.upgrades, 9999, after));
+    // Run I and II as before: every item, upgrade set, rung pair and balance
+    const std::vector<std::map<std::string, uint32_t>> upgrade_sets = {{}, p3, {{"open_hard", 1}},
+        {{"open_hard", 1}, {"open_vh", 1}, {"atp_grind", 1}}, {{"open_ult", 1}}, {{"kit_tier", 1}}};
+    for (const auto& up : upgrade_sets) {
+      for (size_t z = 0; z <= SPIRE_SHOP_NUM_ITEMS; z++) {
+        for (uint8_t r1 = 0; r1 <= 3; r1++) {
+          for (uint8_t r2 = 0; r2 <= 3; r2++) {
+            uint8_t two[2] = {r1, r2};
+            for (uint8_t r3 = std::min(r1, r2); r3 <= std::max(r1, r2); r3++) {
+              std::array<uint8_t, 3> three = {r1, r2, r3};
+              for (bool kit2 : {false, true}) {
+                for (uint32_t balance : {0u, 59u, 9999u}) {
+                  expect(spire_shop_buy_refusal(cat, z, up, balance, two, kit2) ==
+                      spire_shop_buy_refusal(cat, z, up, balance, three, kit2));
+                }
+                expect_eq(spire_shop_next_price(cat, z, up, two, kit2), spire_shop_next_price(cat, z, up, three, kit2));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  {
     // the last room per run and per quest: 15, 30, 32. Every quest of Run I and II keeps its episode's final boss room
     expect_eq(15, spire_meta_run_final_room(1));
     expect_eq(30, spire_meta_run_final_room(2));
