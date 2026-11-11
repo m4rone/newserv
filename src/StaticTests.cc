@@ -8779,6 +8779,39 @@ void run_static_tests() {
     auto awaiting_only = [](const SpireGuardSnapshot& snap) {
       return !snap.run_in_progress && !snap.restore_pending && snap.awaiting_save;
     };
+    // Right after a verified login restore: no run and no restore open, the snapshot still the real character. Whether
+    // the marker is already closed or waits for the card (AwaitingSave) is not asked: that is the order of gap B2, and
+    // the invariant is what the next login gives back (next_login_is_real).
+    auto restored_at_login = [&](const Session& p, const PSOBBCharacterFile& server_real) {
+      auto snap = snapshot_on_disk(p);
+      if (snap.run_in_progress || snap.restore_pending) {
+        throw std::runtime_error("after a verified login restore a run or a restore is still open");
+      }
+      if (!snapshot_is(snap, server_real)) {
+        throw std::runtime_error("after a verified login restore the snapshot is not the real character");
+      }
+      if (!spire_guard_game_join_allowed(p.c, false)) {
+        throw std::runtime_error("after a verified login restore a game join is refused");
+      }
+    };
+    // The login of a console whose card holds `card`: the client and the server hold the real character after it, and
+    // the marker is closed
+    auto next_login_is_real = [&](World& w, const GCCharacter& card, const GCCharacter& real,
+                                  const PSOBBCharacterFile& server_real, const std::string& when) {
+      auto p = connect(w, card);
+      client_sends(w, p, 0x61, p.ch->as_61());
+      if (!run_bool(w, p, spire_guard_restore_if_needed(p.c))) {
+        throw std::runtime_error(when + ": the login was refused");
+      }
+      expect_real(p.ch->memory, real, when);
+      if (!server_holds(p, server_real)) {
+        throw std::runtime_error(when + ": the server's character data is not the real character");
+      }
+      if (!no_marker(snapshot_on_disk(p))) {
+        throw std::runtime_error(when + ": the marker is still open");
+      }
+      return p;
+    };
     e2e_case("start, run copy, game exit: the 98, the restore before the lobby join, the next login", [&]() {
       TempCwd temp_cwd;
       auto w = make_world();
@@ -8848,6 +8881,7 @@ void run_static_tests() {
       expect_eq(1u, p2.ch->pushes);
       expect_eq(0u, p2.ch->card_writes.size());
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       // 8-B2 (was no_marker): the restore at login leaves AwaitingSave, since the 97 goes out only after it
       expect(awaiting_only(snap));
@@ -8872,6 +8906,10 @@ void run_static_tests() {
       expect_real(p4.ch->memory, real, "after the login whose card held the real character");
       expect(no_marker(snapshot_on_disk(p4)));
       expect(server_holds(p4, *r.server_real));
+      p4.ch->open = false;
+      // the card gets what the client holds now; the login after that is the real character and closes the marker
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->memory, real, *r.server_real, "after the login whose card holds what the login restore pushed");
     });
     e2e_case("game exit, but the card kept the run copy: the next login pushes the real character again", [&]() {
       TempCwd temp_cwd;
@@ -8892,9 +8930,12 @@ void run_static_tests() {
       expect_real(p2.ch->memory, real, "after the login whose card still held the run copy");
       expect_eq(1u, p2.ch->pushes);
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       expect(awaiting_only(snap)); // 8-B2 (was no_marker): the login restore awaits the save too
       expect(snapshot_is(snap, *r.server_real));
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->memory, real, *r.server_real, "after the login whose card holds what the second login restore pushed");
     });
 
     e2e_case("game exit, the client is gone before the restore: refused, the marker stays, the next login restores", [&]() {
@@ -8919,8 +8960,37 @@ void run_static_tests() {
       expect_real(p2.ch->memory, real, "after the login that follows a refused game exit restore");
       expect_eq(1u, p2.ch->pushes);
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       expect(awaiting_only(snapshot_on_disk(p2))); // 8-B2 (was no_marker): the login restore awaits the save too
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->memory, real, *r.server_real, "after the login whose card holds what the restore after a refused game exit pushed");
     });
+
+    // Gap B2 (output/systeem-8-itemveiligheid-critic.md B2): a login restore closes the marker before the 97, so a
+    // connection that drops in between leaves the run copy on the card with no marker for it. The invariant: whatever
+    // the card holds after that, the next login gives the real character back. Red on code that still has gap B2.
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = false;
+    if (SPIRE_E2E_KNOWN_GAP_B2) {
+      e2e_case("the login restore, then the connection drops before the 97: the card kept the run copy, the next login restores the real character (known gap B2)", [&]() {
+        TempCwd temp_cwd;
+        auto w = make_world();
+        const GCCharacter real = real_character();
+        auto r = start_run(w, real);
+        r.p.ch->open = false;
+        run_void(w, r.p, on_disconnect(r.p.c));
+        r.p.c.reset();
+        // the login restore pushes the real character into the save buffer; the console goes off before any 97
+        auto p2 = connect(w, r.run_copy);
+        client_sends(w, p2, 0x61, p2.ch->as_61());
+        expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+        expect_real(p2.ch->memory, real, "in the save buffer after the login restore");
+        expect_eq(0u, p2.ch->card_writes.size());
+        restored_at_login(p2, *r.server_real);
+        p2.ch->open = false;
+        // the card was never written: the next login's 61 is the run copy again
+        next_login_is_real(w, r.run_copy, real, *r.server_real, "after the login whose card still held the run copy because the connection dropped before the 97");
+      });
+    }
 
     // The return to base ('O') and the run again ('I'). The quest's write to register 248 goes in through
     // spire_bridge_handle_register, as on_sync_quest_register hands a 6x77 over. The registers the server writes back
