@@ -948,6 +948,32 @@ std::string spire_guard_verified_scope(uint32_t bank_items, uint32_t bank_meseta
 // Never throws.
 void spire_guard_after_98(std::shared_ptr<Client> c);
 
+// K7 (critic, B-REGIE-21-5): items and meseta handed over through the floor. The snapshot follows a 98 only, so a
+// player whose Wii drops after a floor hand-over, without a 98, used to get the snapshot of before back at the next
+// login: the dropper still had the item (doubled with the partner who picked it up), the picker lost it. Now, in the
+// games whose 98 the snapshot follows (a Normal or Solo game under AwaitingSave alone, the base game included), the
+// snapshot also follows each floor drop (6x2A, 6x5D) and each pickup (6x59, 6x5A) the server itself handles. The rule
+// is conservation, never more: the dropper's snapshot loses what was dropped (as far as it holds it, meseta at most
+// what it holds); that amount is a credit on the floor item, and only a pickup of that floor item by a player whose
+// snapshot follows gives it back, at most the credit. A floor item without a credit (from a box or an enemy, from a
+// player whose snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
+// What the server cannot see (shop, tekker, trade window, a 6x29 on its own) changes no snapshot: the 98 still does.
+bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo);
+// The drop step on a snapshot: removes the dropped item (by its data, item IDs ignored; a stack by its kind, at most
+// what the stack holds; a non-stackable item without an exact match by its kind) or the dropped meseta (at most what
+// the snapshot holds). Returns the credit: the amount removed (1 for a non-stackable item), 0 if nothing was removed.
+uint32_t spire_guard_snapshot_take_drop(
+    SpireGuardSnapshot& snapshot, const ItemData& dropped, const ItemData::StackLimits& limits);
+// The pickup step on a snapshot: adds the picked-up item, a stack or meseta with at most credit of its amount (meseta
+// capped at 999999). Returns the amount added; 0 (snapshot unchanged) if credit is 0 or the item does not fit.
+uint32_t spire_guard_snapshot_give_pickup(
+    SpireGuardSnapshot& snapshot, const ItemData& picked, uint32_t credit, const ItemData::StackLimits& limits);
+// Called from 6x2A and 6x5D after the server put the dropped item on the floor. Never throws.
+void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id);
+// Called from the pickup after the server moved the floor item into c's inventory. Never throws.
+void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l,
+    std::shared_ptr<const Lobby::FloorItem> fi);
+
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
 // The login confirmation of a lobby restore requires this (spire_guard_same_state, v39).
 bool spire_guard_same_inventory(const PlayerInventory& a, uint32_t a_meseta, const PlayerInventory& b, uint32_t b_meseta);

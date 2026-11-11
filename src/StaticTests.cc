@@ -2233,6 +2233,206 @@ void run_static_tests() {
     }
   }
 
+  phosg::log_info_f("-- Spire guard: a floor hand-over in the base game, then a Wii drops without a 98 (K7)");
+  {
+    // A drops an item or meseta in the base game, B picks it up, and one of them drops out without a 98. Each player's
+    // character after the next login is what the login does with his card: the card if its 61 equals the snapshot,
+    // else the snapshot pushed. Counted over both players, a handed-over item must exist once, never twice; and the
+    // picker's restore must not lose it.
+    const auto& limits = ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4;
+    using Character = std::pair<PlayerInventory, PlayerDispDataV4>;
+    auto make = [](size_t n, uint8_t kind, uint32_t level, uint32_t exp, uint32_t meseta) {
+      Character ret;
+      ret.first.num_items = n;
+      for (size_t z = 0; z < n; z++) {
+        ret.first.items[z].state = 1;
+        ret.first.items[z].data.data1[0] = 0x00;
+        ret.first.items[z].data.data1[1] = 0x01 + z;
+        ret.first.items[z].data.data1[2] = kind;
+        ret.first.items[z].data.id = 0x00010000 + z;
+      }
+      for (size_t z = 8; z <= 12; z++) {
+        ret.first.items[z].extension_data2 = 3 + z; // material counters, by position
+      }
+      ret.second.stats.level = level;
+      ret.second.stats.exp = exp;
+      ret.second.stats.meseta = meseta;
+      ret.second.visual.sh.char_class = 2;
+      ret.second.visual.sh.section_id = 5;
+      return ret;
+    };
+    auto awaiting = [](const Character& ch) {
+      SpireGuardSnapshot ret;
+      ret.awaiting_save = true;
+      ret.has_character = true;
+      ret.quest_number = 921;
+      ret.inventory = ch.first;
+      ret.disp = ch.second;
+      return ret;
+    };
+    auto as_character = [](const SpireGuardSnapshot& snap) { return Character{snap.inventory, snap.disp}; };
+    // the character after the next login with this card (spire_guard_awaiting_save_login_apply decides)
+    auto after_login = [](SpireGuardSnapshot snap, const Character& card) {
+      return spire_guard_awaiting_save_login_apply(snap, card.first, card.second) ? card
+                                                                                   : Character{snap.inventory, snap.disp};
+    };
+    auto count = [](const Character& ch, const ItemData& item) {
+      size_t ret = 0;
+      for (size_t z = 0; z < ch.first.num_items; z++) {
+        const auto& d = ch.first.items[z].data;
+        ret += (!memcmp(d.data1.data(), item.data1.data(), 12) && !memcmp(d.data2.data(), item.data2.data(), 4));
+      }
+      return ret;
+    };
+    // what the server does with the player's own data (PSOBBCharacterFile): the client's memory after the hand-over
+    auto drop_from = [&](Character ch, const ItemData& item) {
+      PSOBBCharacterFile f;
+      f.inventory = ch.first;
+      f.disp = ch.second;
+      if (item.primary_identifier() == 0x04000000) {
+        f.remove_item(0xFFFFFFFF, item.data2d, limits);
+      } else {
+        f.remove_item(item.id, 0, limits);
+      }
+      return Character{f.inventory, f.disp};
+    };
+    auto pick_into = [&](Character ch, const ItemData& item) {
+      PSOBBCharacterFile f;
+      f.inventory = ch.first;
+      f.disp = ch.second;
+      f.add_item(item, limits);
+      return Character{f.inventory, f.disp};
+    };
+
+    auto a_real = make(6, 0x00, 51, 370758, 1000);
+    auto b_real = make(4, 0x07, 40, 200000, 500);
+    auto run_copy = make(7, 0x01, 11, 4200, 300); // a card that still holds a run copy
+    ItemData sword = a_real.first.items[3].data; // the item A hands over (game item ID 0x00010003)
+    auto a_memory = drop_from(a_real, sword);
+    auto b_memory = pick_into(b_real, sword);
+    expect_eq(1u, count(b_memory, sword) + count(a_memory, sword));
+
+    // the hand-over as the server follows it: the drop takes from A's snapshot, the pickup gives to B's with A's credit
+    auto a_snap = awaiting(a_real);
+    auto b_snap = awaiting(b_real);
+    expect(spire_guard_floor_follows(a_snap, true) && spire_guard_floor_follows(b_snap, true));
+    uint32_t credit = spire_guard_snapshot_take_drop(a_snap, sword, limits);
+    expect_eq(1u, credit);
+    expect_eq(1u, spire_guard_snapshot_give_pickup(b_snap, sword, credit, limits));
+    expect(spire_guard_same_state(a_snap.inventory, a_snap.disp, a_memory.first, a_memory.second));
+    expect(spire_guard_same_materials(a_snap.inventory, a_real.first)); // the counters stay in their slots
+    expect_eq(1u, count(as_character(b_snap), sword));
+
+    // (a) A's Wii drops after the hand-over, while B keeps it: A's card holds the state before the drop (the snapshot of
+    // before), the run copy, or the state after it. After A's login the sword exists once: with B.
+    for (const auto& card : {a_real, run_copy, a_memory}) {
+      auto a_after = after_login(a_snap, card);
+      expect_eq(0u, count(a_after, sword));
+      expect_eq(1u, count(a_after, sword) + count(b_memory, sword));
+    }
+
+    // (b) B's Wii drops after the pickup: B's card holds the state before the pickup, the run copy or the state after
+    // it. B's restore keeps the sword, also when A left with a 98 (the snapshot follows A's 98, 8-B1); and when A's
+    // login restore runs too, the sword is not doubled.
+    {
+      auto a_left = awaiting(a_real);
+      expect(spire_guard_base_game_follow(a_left, a_memory.first, a_memory.second));
+      for (const auto& card : {b_real, run_copy, b_memory}) {
+        auto b_after = after_login(b_snap, card);
+        expect_eq(1u, count(b_after, sword));
+        expect_eq(1u, count(b_after, sword) + count(as_character(a_left), sword));
+        for (const auto& a_card : {a_real, run_copy, a_memory}) {
+          expect_eq(1u, count(b_after, sword) + count(after_login(a_snap, a_card), sword));
+        }
+      }
+    }
+
+    // (c) A drops the sword, nobody picks it up, and A's Wii drops: A's restore does not give it back (the partner can
+    // still pick it up from the floor; giving it back would double it then)
+    {
+      auto snap = awaiting(a_real);
+      expect_eq(1u, spire_guard_snapshot_take_drop(snap, sword, limits));
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(0u, count(after_login(snap, card), sword));
+      }
+      // a later pickup by B gives it once; a floor item without a credit (a box, an enemy) is never added
+      auto b = awaiting(b_real);
+      expect_eq(0u, spire_guard_snapshot_give_pickup(b, sword, 0, limits));
+      expect(spire_guard_same_state(b.inventory, b.disp, b_real.first, b_real.second));
+    }
+
+    // meseta: the same rule, and at most what the dropper's snapshot held (meseta earned in the base without a 98 is
+    // not in it): the picker gains at most that credit
+    {
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 300;
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      uint32_t m = spire_guard_snapshot_take_drop(a, meseta, limits);
+      expect_eq(300u, m);
+      expect_eq(300u, spire_guard_snapshot_give_pickup(b, meseta, m, limits));
+      expect_eq(700u, a.disp.stats.meseta.load());
+      expect_eq(800u, b.disp.stats.meseta.load());
+      auto a_after = after_login(a, a_real); // the card of before (1000) is pushed down to 700
+      auto b_after = after_login(b, b_real); // the card of before (500) is pushed up to 800
+      expect_eq(1500u, a_after.second.stats.meseta.load() + b_after.second.stats.meseta.load()); // 1000 + 500, once
+      meseta.data2d = 1500; // more than A's snapshot holds
+      auto a2 = awaiting(a_real);
+      auto b2 = awaiting(b_real);
+      uint32_t m2 = spire_guard_snapshot_take_drop(a2, meseta, limits);
+      expect_eq(1000u, m2);
+      expect_eq(0u, a2.disp.stats.meseta.load());
+      expect_eq(1000u, spire_guard_snapshot_give_pickup(b2, meseta, m2, limits));
+      expect_eq(1500u, b2.disp.stats.meseta.load());
+      b2.disp.stats.meseta = 999500; // never above the cap
+      expect_eq(499u, spire_guard_snapshot_give_pickup(b2, meseta, 1000, limits));
+      expect_eq(999999u, b2.disp.stats.meseta.load());
+    }
+
+    // a partial stack: 3 of A's 8 Monomates; the picker gets 3, at most the credit
+    {
+      auto a = awaiting(a_real);
+      auto& stack = a.inventory.items[a.inventory.num_items++];
+      stack.state = 1;
+      stack.data.data1[0] = 0x03;
+      stack.data.data1[5] = 8;
+      ItemData three = stack.data;
+      three.data1[5] = 3;
+      expect_eq(3u, spire_guard_snapshot_take_drop(a, three, limits));
+      expect_eq(5u, static_cast<uint32_t>(a.inventory.items[a.inventory.num_items - 1].data.data1[5]));
+      auto b = awaiting(b_real);
+      expect_eq(2u, spire_guard_snapshot_give_pickup(b, three, 2, limits));
+      expect_eq(5u, b.inventory.num_items);
+      expect_eq(2u, static_cast<uint32_t>(b.inventory.items[4].data.data1[5]));
+      // an item the dropper's snapshot does not hold (bought in the base): no credit, the snapshot stays
+      ItemData bought;
+      bought.data1[0] = 0x01;
+      bought.data1[1] = 0x02;
+      bought.data1[2] = 0x30;
+      auto before = a;
+      expect_eq(0u, spire_guard_snapshot_take_drop(a, bought, limits));
+      expect(spire_guard_same_state(a.inventory, a.disp, before.inventory, before.disp));
+    }
+
+    // only where the 98 is followed: a Normal or Solo game under AwaitingSave alone, with a stored character
+    {
+      auto snap = awaiting(a_real);
+      expect(!spire_guard_floor_follows(snap, false)); // a Battle or Challenge game (a Spire run)
+      for (auto [run, restore, awaits] : std::vector<std::tuple<bool, bool, bool>>{
+               {true, false, false}, {false, true, false}, {false, false, false}, {true, false, true}, {false, true, true}}) {
+        snap.run_in_progress = run;
+        snap.restore_pending = restore;
+        snap.awaiting_save = awaits;
+        expect(!spire_guard_floor_follows(snap, true));
+      }
+      SpireGuardSnapshot empty;
+      empty.awaiting_save = true;
+      expect(!spire_guard_floor_follows(empty, true));
+      expect_eq(0u, spire_guard_snapshot_take_drop(empty, sword, limits));
+    }
+  }
+
   phosg::log_info_f("-- Spire guard: the restore check finds a different item count or material counter (v32, v38, v39)");
   {
     PlayerInventory real;
