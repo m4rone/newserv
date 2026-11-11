@@ -9001,6 +9001,97 @@ void run_static_tests() {
       must(no_marker(snapshot_on_disk(p2)), "the marker is still open after the login that follows the new run");
       must(server_holds(p2, *r.server_real), "the server's character data at the next login is not the real character");
     });
+    // Known gap B1 (output/systeem-8-itemveiligheid-critic.md B1; SpireFlagBridge.cc spire_guard_end_run, the base
+    // game's 98 under AwaitingSave): what the base changes is pushed back at the next login, and an item taken from the
+    // bank there is gone. Red on 3fe378d, fixed by 8-B1 on spike/veilig. One line turns it on.
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B1 = false;
+    if (SPIRE_E2E_KNOWN_GAP_B1) {
+      e2e_case("the base game, the player takes an item from the bank there: after the base game exit and the next login the item is in the inventory or the bank (known gap B1)", [&]() {
+        TempCwd temp_cwd;
+        constexpr uint32_t BASE_QUEST = 987656;
+        auto w = make_world();
+        give_item_tables(w);
+        auto index = std::make_shared<QuestIndex>(nullptr, "no-quests-here", std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), false);
+        auto base_vq = std::make_shared<VersionedQuest>();
+        base_vq->meta.quest_number = BASE_QUEST;
+        base_vq->meta.episode = Episode::EP1;
+        base_vq->meta.version = Version::GC_V3;
+        base_vq->meta.language = Language::ENGLISH;
+        auto base_quest = std::make_shared<Quest>(base_vq);
+        index->quests_by_number[BASE_QUEST] = base_quest;
+        w.s->data->quest_index = index;
+        w.s->data->spire_base_quest_number = BASE_QUEST;
+
+        const GCCharacter real = real_character();
+        auto r = start_run(w, real);
+        auto& p = r.p;
+        ServerWrote seen;
+        r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+        p.c->floor = 1;
+        spire_checkpoint_run_started(p.c);
+        must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+        expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::BASE_GAME),
+            quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' with a base quest"));
+        client_sends(w, p, 0x98, p.ch->as_61());
+        must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore on the way to the base game was refused");
+        expect_real(p.ch->memory, real, "after the game exit on the way to the base game");
+
+        // the base game, as spire_base_game_join and spire_base_game_start leave it
+        auto base = std::make_shared<Lobby>(w.s, 0x7B02, true);
+        base->episode = Episode::EP1;
+        base->mode = GameMode::NORMAL;
+        base->quest = base_quest;
+        base->leader_id = 0;
+        base->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+        base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+        w.s->id_to_lobby.emplace(base->lobby_id, base);
+        base->clients[0] = p.c;
+        p.c->lobby_client_id = 0;
+        p.c->lobby = base;
+        p.c->floor = 0;
+
+        // in the base the player takes bank item 0 into the inventory (slot 6)
+        const uint32_t taken_id = real.bank.items[0].data.id;
+        GCCharacter at_base = real;
+        at_base.inventory.items[6].data = real.bank.items[0].data;
+        at_base.inventory.items[6].flags = 0;
+        at_base.inventory.num_items = 7;
+        for (size_t z = 0; z + 1 < at_base.bank.items.size(); z++) {
+          at_base.bank.items[z] = real.bank.items[z + 1];
+        }
+        at_base.bank.items[at_base.bank.items.size() - 1] = real.bank.items[real.bank.items.size() - 1];
+        at_base.bank.num_items = 2;
+        p.ch->memory = at_base;
+
+        // the base game exit: its 98, the 84's restore and its 97, the card
+        Seat seat;
+        seat.p = p;
+        std::vector<Seat*> alone{&seat};
+        seat_sends(w, alone, seat, 0x98, p.ch->as_61());
+        must(seats_bool(w, alone, spire_guard_restore_at_game_exit(p.c), "the base game exit"), "the base game exit was refused");
+        auto has_taken = [&](const GCCharacter& ch) {
+          size_t found = 0;
+          for (size_t z = 0; z < ch.inventory.num_items; z++) {
+            found += (ch.inventory.items[z].data.id == taken_id);
+          }
+          for (size_t z = 0; z < ch.bank.num_items; z++) {
+            found += (ch.bank.items[z].data.id == taken_id);
+          }
+          return found == 1;
+        };
+        must(has_taken(p.ch->memory), "after the base game exit the item taken from the bank is in neither the inventory nor the bank");
+        must(!p.ch->card_writes.empty(), "no card write after the base game exit");
+        must(has_taken(p.ch->card_writes.back()), "on the memory card after the base game exit the item taken from the bank is gone");
+
+        // the next login: what the card holds
+        p.ch->open = false;
+        auto p2 = connect(w, p.ch->card_writes.back());
+        client_sends(w, p2, 0x61, p2.ch->as_61());
+        must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game was refused");
+        must(has_taken(p2.ch->memory), "after the login that follows the base game the item taken from the bank is in neither the inventory nor the bank");
+        expect_real(p2.ch->memory, at_base, "after the login that follows the base game");
+      });
+    }
 
     expect_eq(0u, e2e_failed);
   }
