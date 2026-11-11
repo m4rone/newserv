@@ -9,9 +9,12 @@ Tak `spike/veilig`, gestart op 9e40c01 (de versie op de pc). Worktree `/home/m4r
 | 8-B2 herstel bij login sluit de marker te vroeg | klopt | gebouwd, test rood en groen | 6068558 |
 | 8-B1 beloning uit de basis wordt teruggedraaid | klopt | gebouwd, test rood en groen | 89e0e17 |
 | 7-M2 losse kamer overschrijft geparkeerde run | klopt | gebouwd, test rood en groen | 27dee5b |
+| Tests van spoor intern meenemen (aanvulling regie) | n.v.t. | samengevoegd, drie verwachtingen aangepast aan 8-B2 | a8515fd, 5d0ac72 |
+| Bank na een herstel (aanvulling regie) | klopt | eerlijke logregel en serverkant-controle gebouwd; teruglezen van de client niet gebouwd | 5d0ac72 |
 
-Alle drie de punten zijn af. De code staat op 27dee5b; de laatste commit op de tak is die van dit rapport, en van die
-commit is de binary gebouwd. Blockers: geen.
+Alle punten zijn af. De code staat op 5d0ac72; de laatste commit op de tak is die van dit rapport, en van die commit
+is de binary gebouwd. Blockers: geen. Eén keuze ligt bij de regie: de bank teruglezen van de client (zie "Bank na een
+herstel").
 
 ## Dekking
 
@@ -22,6 +25,10 @@ bouwer, veilig-1b) en de back-up (`InventoryBackup`). Er is niets gemeten op een
 Basis op 9e40c01, vóór enige wijziging: `build/newserv run-static-tests` eindigt met
 `-- All static tests passed`, exitcode 0, 10 W-regels, 0 E-regels. De 10 W-regels zijn de bestaande gevallen met
 een bewust kapot bestand (3x Overlay, 3x RunCopyPrint, 3x run mag lean, 1x print niet opgeslagen).
+
+Na het samenvoegen van de tests van spoor intern zijn het 12 W-regels: de twee nieuwe komen uit hun geval "the client
+is gone before the restore" (`failed to restore character ...: Client has already disconnected; marker kept` en
+`game exit restore ... not verified; dropping the client`), en horen bij wat dat geval speelt.
 
 ## 8-B2: herstel bij de login sluit de marker voordat de kaart geschreven is
 
@@ -201,6 +208,96 @@ exit=1
 
 Groen (met de fix): `I 840011 2026-11-11 15:00:06 - -- All static tests passed`, exit 0, 10 W, 0 E.
 
+## Tests van spoor intern (d97ca83, drie commits, alleen `src/StaticTests.cc`)
+
+Samengevoegd met `git merge --no-edit d97ca83` op een schone werkboom, zonder conflict (a8515fd). De vier gevallen
+spelen de bewaker van begin tot eind tegen een nagebootste GameCube-client die via de echte commandoafhandeling
+antwoordt.
+
+Tegen de fixes: geval 1 (run, game-exit, volgende login) bleef groen. Drie gevallen waren rood, alle drie op dezelfde
+verwachting, die het oude gedrag van 8-B2 vastlegde: "na een herstel bij de login is er geen marker meer".
+
+```
+E    GUARD E2E (the connection drops mid-run: no 98, the next login restores the real character) FAILED: failure at .../src/StaticTests.cc:8409: !(no_marker(snap))
+E    GUARD E2E (game exit, but the card kept the run copy: the next login pushes the real character again) FAILED: failure at .../src/StaticTests.cc:8433: !(no_marker(snap))
+E    GUARD E2E (game exit, the client is gone before the restore: refused, the marker stays, the next login restores) FAILED: failure at .../src/StaticTests.cc:8459: !(no_marker(snapshot_on_disk(p2)))
+```
+
+Aangepast, met de reden in het commentaar erbij: na een herstel bij de login staat de marker op "wacht op save"
+(`awaiting_only`), omdat de 97 pas daarna de deur uit gaat. Het geval "verbinding valt weg midden in een run" speelt
+nu ook het vervolg van 8-B2 met de echte afhandeling: de client valt weg vóór de save, de volgende login (kaart draagt
+de run-kopie) duwt opnieuw, en de login daarna (kaart draagt het echte karakter) sluit de marker zonder duw. Geen
+verwachting over 8-B1 hoefde aangepast: geen van de vier gevallen speelt de basisgame. Daarna alle vier groen.
+
+## Bank na een herstel (aanvulling regie)
+
+**Nameting: klopt.** De bank wordt na een herstel door niets gecontroleerd.
+
+- Wat de verificatie vergelijkt (`spire_guard_verify_restore`, `SpireFlagBridge.cc:5169-5215` op 9e40c01): uit de 61 van
+  de client het level en de EXP, de items (data1 en data2, in elke volgorde, zonder item-ID) met de meseta, en de
+  materiaaltellers. Niet: de bank, de technieken, de overige stats, de volgorde en de uitrustvlaggen van de items.
+- Wat er in de momentopname zit (`SpireGuardSnapshot`, `SpireFlagBridge.hh:839-864`): de inventaris (items,
+  uitrustvlaggen, materiaaltellers) en het disp-blok (stats met level, EXP en meseta; uiterlijk; config; technieken).
+  Geen bank.
+- Wat de duw doet (`:5339-5344`): hij haalt het volledige karakter op (de 30), vervangt daarin inventaris en disp door
+  de momentopname en stuurt het geheel terug. De bank die teruggaat is dus de bank die de client zelf net stuurde.
+- Hoe de server de bank van een GameCube-client ziet: alleen als hij er zelf om vraagt, met de functieaanroep
+  GetExtendedPlayerInfo, waarop de client een 30 stuurt (`SendCommands.cc:2433-2487`, `ReceiveCommands.cc` `on_30`). De
+  client stuurt hem nooit uit zichzelf: de 61 en de 98 dragen geen bank (`CommandFormats.hh:1093-1104`), en het
+  bankverkeer aan de balie (6xBB, 6xBD) bestaat alleen voor BB (`ReceiveSubcommands.cc:2643-2650`, `:2714`). Op de
+  GameCube leeft de bank in de client en op de kaart.
+
+**Kan de server de bank na een herstel betrouwbaar zien?** Hij kan er een tweede keer om vragen. Ik heb dat niet
+gebouwd, om drie redenen die ik niet weg kan meten vanaf hier:
+
+1. Het is een nieuwe functieaanroep in de handdruk van het herstel, direct na de duw. Op die plek hebben
+   functieaanroepen eerder clients laten vastlopen (v33, v46, v47), en geen enkel bestaand pad vraagt een 30 ná een
+   duw. Of een echte client dan antwoordt en doorspeelt, is clientgedrag en dus pas waar na een meting.
+2. Er is niets om tegen te vergelijken behalve de 30 van vlak vóór de duw. De vergelijking zegt dan alleen "de duw
+   heeft de bank niet veranderd", niet "dit is de juiste bank".
+3. De server zet de 30 om naar zijn eigen vorm en terug. Een teruggelezen bank in die vorm kan een verlies in de
+   omzetting niet tonen.
+
+Wil de regie het teruglezen toch: het is een kleine wijziging (na de 61 nog een 30, alleen bij login en game-exit;
+wijkt de bank af dan geen 97 en de marker blijft; komt er geen antwoord dan doorgaan met "niet gecontroleerd"), maar
+hij hoort eerst op een client gemeten.
+
+**Wel gebouwd, zonder nieuw verkeer naar de client.**
+
+- De logregel zegt wat er wel en niet geverifieerd is. Nieuw, uit de testrun:
+  `restore verified for serial 0000004321: 61 shows Lv52 EXP 1234567; inventory 6 items, snapshot 6 (equal count);
+  marker kept until a login 61 shows the same; verified by the 61: level, EXP, items, meseta, material counters; bank
+  NOT checked (a 61 carries no bank): sent back as the client held it, 3 items, meseta 777000`. Het begin van de regel
+  is gelijk gebleven, zodat bestaande zoekopdrachten in het journal blijven werken.
+- Vóór de duw controleert de server dat het karakter dat hij gaat sturen byte voor byte de bank draagt die de client
+  net stuurde (`spire_guard_push_keeps_bank`). Zo niet: niets geduwd, geen 97, marker blijft. Dat is precies de mutatie
+  van intern (bank gewist aan de serverkant): die geeft nu geen "verified" meer maar een geweigerd herstel.
+- De marker: er is niets veranderd om een later zichtbare bankafwijking te herstellen, omdat dat niet veilig kan. De
+  server heeft geen kopie van de bank, ziet hem alleen bij een volgend herstel, en kan dan een gewiste bank niet
+  onderscheiden van een bank die de speler zelf leeghaalde. Bij de geweigerde duw hierboven blijft de marker wel open
+  en wordt de kaart niet geschreven, dus de bank op de kaart blijft heel en de volgende login probeert opnieuw.
+
+**Wat de speler met zijn bank riskeert na een herstel.** Vóór: als het herstel de bank zou beschadigen, zei de server
+"verified", schreef de Wii de beschadigde bank naar de kaart, en niemand merkte het. Na: een beschadiging die aan de
+serverkant ontstaat houdt het herstel tegen voordat er iets naar de client gaat. Een beschadiging die in de client
+zelf ontstaat ziet de server nog steeds niet; het logboek zegt dat nu ook, met het aantal items en de meseta van de
+bank die is teruggestuurd, zodat achteraf te zien is wat de bank op dat moment was. Het risico uit 8-B1 (bankbezoek in
+de basis gevolgd door een Wii die niet opslaat) staat onder "Gezien, niet gebouwd".
+
+**Test** (in het blok van de eind-tot-eind-gevallen, "Bank (regie)"): een gewiste bank, één afwijkend item en afwijkende
+meseta worden geweigerd; de weg die het herstel loopt (30 naar de servervorm, inventaris en disp vervangen, terug)
+levert de bank van de client byte voor byte; dezelfde weg met een gewiste bank wordt geweigerd; en de logtekst noemt
+de bank "NOT checked" en nooit volledig geverifieerd.
+
+Rood (test erin, gedrag van 9e40c01: geen controle, logregel zwijgt over de bank):
+
+```
+E 933937 2026-11-11 15:10:27 - run-static-tests: failure at /home/m4rck/code/worktrees/newserv/veilig-1/src/StaticTests.cc:8498: !(!spire_guard_push_keeps_bank(real.bank, wiped.bank))
+exit=1
+```
+
+Groen (met de fix): `I 941687 2026-11-11 15:11:25 - -- All static tests passed`, exit 0, 12 W, 0 E.
+
 ## Beslissingen (voor de orchestrator, die deze ronde decisions.md schrijft)
 
 1. 8-B1 volgt bij "level en EXP niet lager", niet bij "exact gelijk". Dekking: het voorstel van de critic in de
@@ -215,6 +312,11 @@ Groen (met de fix): `I 840011 2026-11-11 15:00:06 - -- All static tests passed`,
    in `spire_savestate_practice_kept_text`.
 5. De nieuwe stukken dragen de naam van het bezwaar (8-B1, 8-B2, 7-M2) en geen volgend versienummer, zodat de tak van
    veilig-1b een eigen nummer kan kiezen zonder botsing.
+6. Bank: de bank wordt niet van de client teruggelezen (geen nieuwe functieaanroep in het herstel zonder meting op een
+   client). Dekking: de opdracht ("kan de server de bank op dat moment niet zien: bouw geen schijnzekerheid") en de
+   projectregel dat clientgedrag pas waar is na een meting. Dit is een keuze voor de regie om om te draaien.
+7. De aanpassing van de drie verwachtingen van spoor intern en het bankpunt staan samen in één commit (5d0ac72): ze
+   raken dezelfde regels in `StaticTests.cc` en lieten zich niet schoon splitsen.
 
 ## Gezien, niet gebouwd
 
@@ -233,6 +335,12 @@ Groen (met de fix): `I 840011 2026-11-11 15:00:06 - -- All static tests passed`,
   `spire_savestate_may_replace` · een keuze over wat de speler dan te zien krijgt.
 - datakwaliteit · 7-M3 (episode 1 en 2 delen één bewaarpunt per moeilijkheid) en 7-M1 (volger één kamer achter) zijn
   niet geraakt; bij 7-M1 houdt de volger door 7-M2 nu wel zijn echte bewaarpunt in plaats van een oefenpunt · `:695-698`, `:2175` · eigen punten.
+- datakwaliteit · de verificatie na een herstel vergelijkt de technieken, de overige stats en de uitrustvlaggen niet
+  (wel level, EXP, items, meseta, materialen); de eind-tot-eind-tests van intern vergelijken ze wel, aan de testkant ·
+  `spire_guard_verify_restore` · klein, alles staat in de 61.
+- datakwaliteit · een kopie van de bank bij het herstel in het bestand van de momentopname zou een verloren bank met de
+  hand terug te halen maken; nu staat alleen het aantal items en de meseta in het logboek · `spire_guard_save` · klein,
+  maar vraagt ook een importcommando om nut te hebben.
 - werkwijze · de commit-hook meldt dat voor deze newserv-repo geen integratietak en uitrol zijn vastgelegd (waarschuwing,
   niets geweigerd); er is niets gepusht of samengevoegd · `.claude/omgeving.json` of `CLAUDE.md § Git flow` · één regel van de regie.
 
@@ -242,12 +350,15 @@ Groen (met de fix): `I 840011 2026-11-11 15:00:06 - -- All static tests passed`,
   vóór de commit (gebouwd en getest, daarna ongewijzigd gecommit), niet opnieuw erna. Alleen de laatste commit is
   volgens het voorschrift gebouwd en gemeten.
 - Het eind-sha en de meting op de eindbinary kunnen niet in dit bestand staan (het bestand is zelf de laatste commit);
-  ze staan in de overdracht aan de orchestrator. De laatste commit wijzigt alleen dit rapport; de code is die van 27dee5b.
+  ze staan in de overdracht aan de orchestrator. De laatste commit wijzigt alleen dit rapport; de code is die van 5d0ac72.
+- De aanvullingen van de regie (tests van intern, bank) kwamen binnen nadat de eerste eindstand al gebouwd was
+  (0e5b44d, groen, 10 W, 0 E); daarna is doorgebouwd en is de eindprocedure opnieuw gedaan.
 
 ## Wat er gewijzigd is
 
 - `src/SpireFlagBridge.cc`, `src/SpireFlagBridge.hh`: de drie fixes. Geen regel in de functies van het vangnet
   (regels 6591-6801 op 9e40c01); de laatste gewijzigde plek ligt rond regel 6325 van 9e40c01.
 - `src/StaticTests.cc`: drie testblokken, bij de bestaande bewaker- en bewaarpunttests; het commentaar boven de
-  assertie van regel 240 (de assertie zelf is gelijk).
+  assertie van regel 240 (de assertie zelf is gelijk); de 530 regels van spoor intern, met drie aangepaste
+  verwachtingen, één uitgebreid geval en het bankblok.
 - Niet geraakt: `src/InventoryBackup.*`, `src/SpireDrops.*`, `tests/`.
