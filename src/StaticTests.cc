@@ -7781,16 +7781,39 @@ void run_static_tests() {
       return prs_decompress(*spire_start_level_quest_bin(c, cl, quest_bin));
     };
 
-    // the client with +14 leads: its own Lv15; the trailing client gets Lv13 instead of the quest's Lv1
+    // The floor follows the quest's leader: the client in the slot of SpireFollowLeader's LeaderClient (else slot 0),
+    // as the quest and the resume take it (spire_resume_level_for_client), whoever leads the game (l->leader_id).
+    // the client with +14 in slot 0: its own Lv15; the client in slot 1 gets Lv13 instead of the quest's Lv1
     l->leader_id = 0;
     expect_eq(bin_at(14), sent_to(strong));
     expect_eq(bin_at(12), sent_to(fresh));
-    // the client that owns nothing leads: it keeps the quest's own .bin, and its partner keeps its own Lv15
+    // the game's leader is the client in slot 1 (slot 0 went to the lobby and came back): slot 0 is the measure still
     l->leader_id = 1;
-    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
     expect_eq(bin_at(14), sent_to(strong));
-    // alone in the game: the quest's own .bin
+    expect_eq(bin_at(12), sent_to(fresh));
+    // SpireFollowLeader names slot 1: the client there owns nothing, so both keep their own level
+    s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(1, 0);
+    for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+      l->leader_id = game_leader;
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      expect_eq(bin_at(14), sent_to(strong));
+    }
+    s->data->spire_follow_leader.reset();
+    // the client that owns nothing in slot 0: it keeps the quest's own .bin, and its partner keeps its own Lv15
+    seat(fresh, 0);
+    seat(strong, 1);
+    for (uint8_t game_leader : {uint8_t(0), uint8_t(1)}) {
+      l->leader_id = game_leader;
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      expect_eq(bin_at(14), sent_to(strong));
+    }
+    // alone in the game, in slot 0 and in slot 1 (nobody in the quest leader's slot): the quest's own .bin
+    l->clients[1] = nullptr;
+    l->leader_id = 0;
+    expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
     l->clients[0] = nullptr;
+    seat(fresh, 1);
+    l->leader_id = 1;
     expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
     // a quest the guard does not cover: no floor, the quest's own .bin
     seat(strong, 0);

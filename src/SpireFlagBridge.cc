@@ -4654,21 +4654,25 @@ static std::optional<uint32_t> spire_resume_level_for_client(
 
 // B-REGIE-20-5: the trailing player's level floor (SpireMeta.hh spire_level_floor_char_level) for the quest .bin of a
 // client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
-// The leader is the game's (l->leader_id, as spire_heat_for_leader), at the level its own .bin gets. Never throws.
+// The leader is the quest's: SpireFollowLeader's LeaderClient (else lobby client 0), as spire_resume_level_for_client
+// takes it and whoever leads the game (l->leader_id), at the level its own .bin gets. Never throws.
 static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
     std::optional<uint32_t> resume_level, uint32_t bonus) {
   const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
-  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
-  if (!leader || !l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
+  if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
       !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
       (c->version() != Version::GC_V3)) {
     return std::nullopt;
   }
+  const auto& follow = c->require_server_state()->data->spire_follow_leader;
+  uint8_t leader_id = follow ? follow->first : 0;
+  auto leader = (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
+  bool is_leader = !leader || (leader == c); // nobody in the leader's slot: nobody to follow
   std::optional<uint32_t> unused;
   uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
-  uint32_t leader_level = (leader == c) ? own : spire_quest_load_char_level(rules->char_level,
+  uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,
       spire_start_level_bonus_for_client(leader, l), spire_resume_level_for_client(leader, l, &unused));
-  uint32_t level = spire_level_floor_char_level(own, leader_level, leader == c);
+  uint32_t level = spire_level_floor_char_level(own, leader_level, is_leader);
   if (level > own) {
     c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
         SPIRE_LEVEL_FLOOR_GAP);

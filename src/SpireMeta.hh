@@ -346,9 +346,11 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
 
 // B-REGIE-20-5 (kwaliteit-3 measurement 128): the level floor of the trailing player. The GC client computes EXP itself
 // and the server cannot give any, so the second player of a co-op run hardly grows along. At every quest load (run
-// start, room quest, resume) a client that is not the game's leader gets at least the leader's level for that quest
+// start, room quest, resume) a client that is not the quest's leader gets at least the leader's level for that quest
 // load minus SPIRE_LEVEL_FLOOR_GAP in the quest .bin it is sent, and never less than its own; the leader and a solo
-// player keep their own. Levels are 0-based, as ba_set_char_level; the floor is at most SPIRE_START_LEVEL_LEVEL_CAP.
+// player keep their own. The quest's leader is SpireFollowLeader's LeaderClient (else lobby client 0), as the quest and
+// the resume take it; not the game's leader (l->leader_id), which can be another client after a lobby visit.
+// Levels are 0-based, as ba_set_char_level; the floor is at most SPIRE_START_LEVEL_LEVEL_CAP.
 // The floor is not a start_level bonus: the run's bonus (P, heat, the run mag's start floors) stays the bought one.
 constexpr uint32_t SPIRE_LEVEL_FLOOR_GAP = 2;
 // A client's own level for a quest load, before the floor: the saved level of a resume (SpireSavestate::level), else
