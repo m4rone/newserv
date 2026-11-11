@@ -1358,6 +1358,17 @@ void run_static_tests() {
     expect_eq(0, spire_meta_ladder_quest_rung(1980));
     expect_eq(0, spire_meta_ladder_quest_rung(1981)); // not a ladder quest plus 1000
     expect_eq(0, spire_meta_ladder_quest_rung(4940));
+    // audit 1 A3: the elite and rest room quests after room 8 are q987-q998 (build.sh --rooms, spire-expeditions.json
+    // room_quests_variants), outside q940-q979; on a rung they are that number plus 1000 per rung as well
+    expect_eq(0, spire_meta_ladder_quest_rung(998)); // a variant room quest on Normal
+    expect_eq(1, spire_meta_ladder_quest_rung(1987));
+    expect_eq(1, spire_meta_ladder_quest_rung(1998));
+    expect_eq(2, spire_meta_ladder_quest_rung(2991));
+    expect_eq(3, spire_meta_ladder_quest_rung(3987));
+    expect_eq(3, spire_meta_ladder_quest_rung(3998));
+    expect_eq(0, spire_meta_ladder_quest_rung(1986)); // between the two ranges: a ladder quest plus 1000
+    expect_eq(0, spire_meta_ladder_quest_rung(1999));
+    expect_eq(0, spire_meta_ladder_quest_rung(4987));
     auto rung_cat = spire_shop_parse(R"({"Items": {
         "start_level": {"Max": 1, "Price": [15], "P": [0, 1]},
         "kit_tier": {"Max": 1, "Price": [30], "P": [0, 2]},
