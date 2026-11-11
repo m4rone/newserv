@@ -2042,6 +2042,7 @@ static void on_player_drop_item(std::shared_ptr<Client> c, SubcommandMessage& ms
   }
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
   inventory_backup_note_removed(c, item); // not missing for $restore (InventoryBackup.hh)
+  spire_guard_note_floor_drop(c, l, cmd.floor, item.id); // K7: the snapshot follows the floor hand-over
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -2127,6 +2128,7 @@ static void on_drop_partial_stack_t(std::shared_ptr<Client> c, SubcommandMessage
   item.decode_for_version(c->version());
   l->on_item_id_generated_externally(item.id);
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
+  spire_guard_note_floor_drop(c, l, cmd.floor, item.id); // K7: a partial stack or meseta (the 6x29 follows)
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -2363,6 +2365,7 @@ static asio::awaitable<void> on_pick_up_item_generic(
       l->add_item(floor, fi);
       co_return;
     }
+    spire_guard_note_floor_pickup(c, l, fi); // K7: only a floor item with a credit from a followed drop
 
     if (l->log.should_log(phosg::LogLevel::L_INFO)) {
       auto s = c->require_server_state();

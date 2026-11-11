@@ -5281,6 +5281,232 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
   }
 }
 
+// K7: see SpireFlagBridge.hh
+bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo) {
+  return normal_or_solo && snapshot.awaiting_save && !snapshot.run_in_progress && !snapshot.restore_pending &&
+      snapshot.has_character;
+}
+
+// Removes the item at index from a snapshot inventory as PSOBBCharacterFile::remove_item does: the slots after it move
+// up with their state, flags and data only, so the material counters (extension_data2 by position) stay in place.
+static void spire_guard_snapshot_remove_index(PlayerInventory& inv, size_t index) {
+  if (inv.items[index].flags & 0x00000008) {
+    inv.unequip_item_index(index);
+  }
+  inv.num_items--;
+  for (size_t x = index; x < inv.num_items; x++) {
+    auto& to_item = inv.items[x];
+    const auto& from_item = inv.items[x + 1];
+    to_item.state = from_item.state;
+    to_item.unknown_a1 = from_item.unknown_a1;
+    to_item.flags = from_item.flags;
+    to_item.data = from_item.data;
+  }
+  auto& last_item = inv.items[inv.num_items];
+  last_item.state = 0;
+  last_item.unknown_a1 = 0;
+  last_item.flags = 0;
+  last_item.data.clear();
+}
+
+uint32_t spire_guard_snapshot_take_drop(
+    SpireGuardSnapshot& snapshot, const ItemData& dropped, const ItemData::StackLimits& limits) {
+  if (!snapshot.has_character) {
+    return 0;
+  }
+  auto& inv = snapshot.inventory;
+  uint32_t pi = dropped.primary_identifier();
+  if (pi == 0x04000000) {
+    // meseta: at most what the snapshot holds (the rest came from something the snapshot does not follow)
+    uint32_t taken = std::min<uint32_t>(dropped.data2d, snapshot.disp.stats.meseta);
+    snapshot.disp.stats.meseta = snapshot.disp.stats.meseta - taken;
+    return taken;
+  }
+  size_t n = std::min<size_t>(inv.num_items, inv.items.size());
+  if (dropped.max_stack_size(limits) > 1) {
+    for (size_t z = 0; z < n; z++) {
+      auto& item = inv.items[z];
+      if (item.data.primary_identifier() != pi) {
+        continue;
+      }
+      uint32_t have = item.data.data1[5];
+      uint32_t taken = std::min<uint32_t>(std::max<uint32_t>(dropped.data1[5], 1), have);
+      if (taken >= have) {
+        spire_guard_snapshot_remove_index(inv, z);
+      } else {
+        item.data.data1[5] = have - taken;
+      }
+      return taken;
+    }
+    return 0;
+  }
+  // a non-stackable item: its exact data first (item IDs ignored), else the first of its kind (a mag that was fed, a
+  // unit that was unequipped): the dropper never keeps a copy of what is now on the floor
+  for (int pass = 0; pass < 2; pass++) {
+    for (size_t z = 0; z < n; z++) {
+      const auto& d = inv.items[z].data;
+      bool match = pass ? (d.primary_identifier() == pi)
+                        : (!memcmp(d.data1.data(), dropped.data1.data(), 12) && !memcmp(d.data2.data(), dropped.data2.data(), 4));
+      if (match) {
+        spire_guard_snapshot_remove_index(inv, z);
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+uint32_t spire_guard_snapshot_give_pickup(
+    SpireGuardSnapshot& snapshot, const ItemData& picked, uint32_t credit, const ItemData::StackLimits& limits) {
+  if (!credit || !snapshot.has_character) {
+    return 0;
+  }
+  auto& inv = snapshot.inventory;
+  uint32_t pi = picked.primary_identifier();
+  if (pi == 0x04000000) {
+    uint32_t meseta = snapshot.disp.stats.meseta;
+    uint32_t given = std::min<uint32_t>(std::min<uint32_t>(picked.data2d, credit), 999999 - std::min<uint32_t>(meseta, 999999));
+    snapshot.disp.stats.meseta = meseta + given;
+    return given;
+  }
+  size_t n = std::min<size_t>(inv.num_items, inv.items.size());
+  size_t max_stack = picked.max_stack_size(limits);
+  uint32_t amount = 1;
+  if (max_stack > 1) {
+    amount = std::min<uint32_t>(std::max<uint32_t>(picked.data1[5], 1), credit);
+    for (size_t z = 0; z < n; z++) {
+      auto& item = inv.items[z];
+      if (item.data.primary_identifier() == pi) {
+        uint32_t room = (item.data.data1[5] < max_stack) ? (max_stack - item.data.data1[5]) : 0;
+        uint32_t given = std::min(amount, room);
+        item.data.data1[5] += given;
+        return given;
+      }
+    }
+  }
+  if (n >= 30) {
+    return 0; // the snapshot's inventory is full: nothing is added (less back, never more)
+  }
+  // the item keeps its game item ID unless the snapshot already uses that ID
+  uint32_t max_id = 0;
+  bool id_used = false;
+  for (size_t z = 0; z < n; z++) {
+    uint32_t id = inv.items[z].data.id;
+    max_id = std::max(max_id, id);
+    id_used |= (id == picked.id);
+  }
+  auto& slot = inv.items[n];
+  slot.state = 1;
+  slot.unknown_a1 = 0;
+  slot.flags = 0;
+  slot.data = picked;
+  if (id_used) {
+    slot.data.id = max_id + 1;
+  }
+  if (max_stack > 1) {
+    slot.data.data1[5] = amount;
+  }
+  inv.num_items = n + 1;
+  return amount;
+}
+
+// K7: the credit of each floor item that a followed drop took from its dropper's snapshot. Keyed by the floor item's
+// address; the weak pointer makes a reused address count as no credit. An entry goes at the pickup that uses it, and
+// expired entries go at each new drop.
+struct SpireGuardFloorCredit {
+  std::weak_ptr<const Lobby::FloorItem> item;
+  uint32_t amount = 0;
+};
+static std::unordered_map<const Lobby::FloorItem*, SpireGuardFloorCredit> spire_guard_floor_credits;
+
+// The followed snapshot of c in l, with its file name and serial number; nullopt if c's snapshot does not follow l
+static std::optional<std::tuple<SpireGuardSnapshot, std::string, uint32_t>> spire_guard_floor_snapshot(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  bool normal_or_solo = l && l->is_game() && ((l->mode == GameMode::NORMAL) || (l->mode == GameMode::SOLO));
+  if (!normal_or_solo || c->is_spire_protected()) {
+    return std::nullopt;
+  }
+  uint32_t serial_number = spire_bridge_serial_for_client(c);
+  auto character = c->character_file(false, false);
+  if (!serial_number || !character) {
+    return std::nullopt;
+  }
+  std::string filename = spire_guard_filename_for(c, serial_number);
+  if (filename.empty() || !std::filesystem::is_regular_file(filename)) {
+    return std::nullopt;
+  }
+  auto snapshot = spire_guard_load(filename);
+  if (!spire_guard_floor_follows(snapshot, normal_or_solo) || !spire_guard_same_character(character->disp, snapshot.disp)) {
+    return std::nullopt;
+  }
+  return std::make_tuple(std::move(snapshot), std::move(filename), serial_number);
+}
+
+void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint32_t item_id) {
+  try {
+    std::erase_if(spire_guard_floor_credits, [](const auto& it) { return it.second.item.expired(); });
+    auto fi = l->find_item(floor, item_id);
+    auto followed = fi ? spire_guard_floor_snapshot(c, l) : std::nullopt;
+    if (!followed) {
+      return;
+    }
+    auto& [snapshot, filename, serial_number] = *followed;
+    auto s = c->require_server_state();
+    uint32_t credit = spire_guard_snapshot_take_drop(snapshot, fi->data, *s->data->item_stack_limits(c->version()));
+    if (!credit) {
+      c->log.info_f("Spire guard: floor drop {:08X} in q{} for serial {:010} is not in the snapshot; no credit, the snapshot stays (K7)",
+          item_id, l->quest ? l->quest->meta.quest_number : 0, serial_number);
+      return;
+    }
+    spire_guard_save(filename, serial_number, snapshot);
+    spire_guard_floor_credits[fi.get()] = SpireGuardFloorCredit{fi, credit};
+    c->log.info_f("Spire guard: floor drop {:08X} ({}) for serial {:010}: the snapshot lost {} of it, now {} items meseta {} (K7)",
+        item_id, s->data->describe_item(c->version(), fi->data), serial_number, credit, snapshot.inventory.num_items,
+        snapshot.disp.stats.meseta.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to follow a floor drop: {}; no credit on the floor item (K7)", e.what());
+  }
+}
+
+void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l,
+    std::shared_ptr<const Lobby::FloorItem> fi) {
+  try {
+    if (!fi) {
+      return;
+    }
+    auto it = spire_guard_floor_credits.find(fi.get());
+    if (it == spire_guard_floor_credits.end()) {
+      return; // no credit: never added to a snapshot
+    }
+    bool same_item = (it->second.item.lock() == fi);
+    uint32_t credit = it->second.amount;
+    spire_guard_floor_credits.erase(it); // the credit is used once, whether it is given or not
+    if (!same_item) {
+      return;
+    }
+    auto followed = spire_guard_floor_snapshot(c, l);
+    if (!followed) {
+      c->log.info_f("Spire guard: floor pickup {:08X} with a credit of {} by a player whose snapshot does not follow; the credit goes (K7)",
+          fi->data.id.load(), credit);
+      return;
+    }
+    auto& [snapshot, filename, serial_number] = *followed;
+    auto s = c->require_server_state();
+    uint32_t given = spire_guard_snapshot_give_pickup(snapshot, fi->data, credit, *s->data->item_stack_limits(c->version()));
+    if (!given) {
+      c->log.warning_f("Spire guard: floor pickup {:08X} for serial {:010} does not fit the snapshot; the snapshot stays without it (K7)",
+          fi->data.id.load(), serial_number);
+      return;
+    }
+    spire_guard_save(filename, serial_number, snapshot);
+    c->log.info_f("Spire guard: floor pickup {:08X} ({}) for serial {:010}: the snapshot gained {} of it (credit {}), now {} items meseta {} (K7)",
+        fi->data.id.load(), s->data->describe_item(c->version(), fi->data), serial_number, given, credit,
+        snapshot.inventory.num_items, snapshot.disp.stats.meseta.load());
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to follow a floor pickup: {}; the snapshot stays (K7)", e.what());
+  }
+}
+
 // How long the guard waits for each client answer during a restore (30, the B3 of SetExtendedPlayerInfo, and the
 // verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
 // room for a slow Wii without letting a stuck login sit forever.
