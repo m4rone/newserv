@@ -7921,6 +7921,13 @@ void run_static_tests() {
     expect(spire_create_battle_overlay(fresh, cl));
     expect_eq(14u, static_cast<uint32_t>(strong->character_file(false, true)->disp.stats.level));
     expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    // the run again ('I', spire_run_again_push): the run copy made again keeps the floor, the leader its bought +14
+    fresh->delete_overlay();
+    expect(spire_create_battle_overlay(fresh, cl, true));
+    expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    strong->delete_overlay();
+    expect(spire_create_battle_overlay(strong, cl, true));
+    expect_eq(14u, static_cast<uint32_t>(strong->character_file(false, true)->disp.stats.level));
 
     for (const auto& c : {strong, fresh}) {
       spire_static_test_forget(c, cl);

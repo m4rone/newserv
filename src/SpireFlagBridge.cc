@@ -4656,9 +4656,10 @@ static std::optional<uint32_t> spire_resume_level_for_client(
 // client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
 // The leader is the quest's: SpireFollowLeader's LeaderClient (else lobby client 0), as spire_resume_level_for_client
 // takes it and whoever leads the game (l->leader_id), at the level its own .bin gets; with nobody in that slot the
-// game's leader, as the heat (spire_heat_for_leader), and with nobody there either no floor. Never throws.
+// game's leader, as the heat (spire_heat_for_leader), and with nobody there either no floor. Never throws. At the run
+// again ('I') the leader counts its bought bonus only, as its run copy made again.
 static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
-    std::optional<uint32_t> resume_level, uint32_t bonus) {
+    std::optional<uint32_t> resume_level, uint32_t bonus, bool run_again = false) {
   const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
   if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
       !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
@@ -4675,7 +4676,7 @@ static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Clie
   std::optional<uint32_t> unused;
   uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
   uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,
-      spire_start_level_bonus_for_client(leader, l), spire_resume_level_for_client(leader, l, &unused));
+      spire_start_level_bonus_for_client(leader, l), run_again ? std::nullopt : spire_resume_level_for_client(leader, l, &unused));
   uint32_t level = spire_level_floor_char_level(own, leader_level, is_leader);
   if (level > own) {
     c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
@@ -4865,6 +4866,10 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
   std::optional<uint32_t> resume_start_bonus; // B-AF-7
   if (run_again) {
     bonus = spire_start_level_bonus_for_client(c, l);
+    // B-REGIE-20-5: the floor as at a quest load, the leader's run copy made again at its bought bonus only
+    if ((resume_level = spire_level_floor_for_client(c, l, std::nullopt, bonus, true))) {
+      resume_start_bonus = bonus;
+    }
   } else {
     auto it = spire_start_level_sent.find(c.get());
     if ((it != spire_start_level_sent.end()) && l->quest && (it->second.lobby_id == l->lobby_id) &&
