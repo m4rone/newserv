@@ -3373,10 +3373,11 @@ static void check_wave_defeated(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room, uint16_t wave_number, bool was_defeat) {
   bool all_enemies_defeated = true;
   l->log.info_f("Checking for defeated enemies with room={:04X} wave_number={:04X}", room, wave_number);
+  bool spire_bridged = spire_bridge_lobby_is_bridged(c, l); // only a Spire game skips the Dark Gunner control
   for (auto ene_st : l->map_state->enemy_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
     if (ene_st->super_ene->child_index) {
       l->log.info_f("E-{:03X} is a child of another enemy", ene_st->e_id);
-    } else if (!spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index)) {
+    } else if (!spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index, spire_bridged)) {
       l->log.info_f("E-{:03X} is a Dark Gunner control; not an enemy in the game", ene_st->e_id);
     } else if (!(ene_st->set_flags & 8)) {
       l->log.info_f("E-{:03X} is not defeated; cannot advance event to finished state", ene_st->e_id);

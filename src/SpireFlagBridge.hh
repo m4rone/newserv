@@ -1067,9 +1067,13 @@ std::string spire_lives_revive_log_line(uint32_t serial_number, uint32_t value);
 bool spire_drop_is_forbidden(const ItemData& item);
 bool spire_drop_filter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l, ItemData& item);
 // B-REGIE-21-17 (audit 1, q976): whether an enemy can hold a wave open. A child counts through its parent; the Dark
-// Gunner control enemy (TObjEneDarkGunCenter, Map.cc) does not exist in the game and nobody can hit it, so it never
-// counts. Used by the 6x76 wave check, the room clear check and the safety nets.
-bool spire_enemy_counts_for_wave(EnemyType type, uint16_t child_index);
+// Gunner control enemy (TObjEneDarkGunCenter, Map.cc) does not exist in the game and nobody can hit it, so in a
+// bridged game (spire_bridged) it never counts. Outside one it counts as any enemy, as before. Used by the 6x76 wave
+// check, the room clear check and the safety nets.
+bool spire_enemy_counts_for_wave(EnemyType type, uint16_t child_index, bool spire_bridged);
+// Whether the bridge runs in this lobby: a GC V3 client in a game running a quest listed in SpireBridgeQuests, the
+// gate of the room clear check (spire_bridge_quest_is_bridged). Never throws.
+bool spire_bridge_lobby_is_bridged(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l);
 // v36 (regie, pc 2026-10-25 09:26: q921 room 10 wave 2 stayed open, E-02C sat in a warp and was never hit): safety net
 // for an enemy nobody can reach. In a quest listed in SpireBridgeQuests (GC V3), when a defeat leaves a wave held only by
 // enemies that were never hit (no hit claim, no damage, no 6x0A update; never a boss), the server waits

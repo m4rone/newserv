@@ -6501,7 +6501,7 @@ static bool spire_bridge_room_is_clear(std::shared_ptr<Lobby> l, Version v, uint
     }
     auto wave_undefeated = [&](uint16_t c_wave) -> bool {
       for (const auto& ene_st : ms->enemy_states_for_floor_room_wave(v, floor, room, c_wave)) {
-        if (spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index) &&
+        if (spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index, true) &&
             !(ene_st->set_flags & 8)) {
           return true;
         }
@@ -6589,8 +6589,16 @@ void spire_bridge_check_room_clear(
 }
 
 // B-REGIE-21-17: who can hold a wave open (SpireFlagBridge.hh)
-bool spire_enemy_counts_for_wave(EnemyType type, uint16_t child_index) {
-  return !child_index && (type != EnemyType::DARK_GUNNER_CONTROL); // Map.cc TObjEneDarkGunCenter: nobody can hit it
+bool spire_enemy_counts_for_wave(EnemyType type, uint16_t child_index, bool spire_bridged) {
+  if (child_index) {
+    return false;
+  }
+  return !spire_bridged || (type != EnemyType::DARK_GUNNER_CONTROL); // Map.cc TObjEneDarkGunCenter: nobody can hit it
+}
+
+bool spire_bridge_lobby_is_bridged(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  return c && l && (c->version() == Version::GC_V3) && l->is_game() && l->quest &&
+      spire_bridge_quest_is_bridged(c, l->quest->meta.quest_number);
 }
 
 // v36: safety net for an enemy nobody ever hit (SpireFlagBridge.hh)
@@ -6616,7 +6624,7 @@ static std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<Lobby> l, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
   std::vector<SpireWaveEnemy> ret;
   for (const auto& ene_st : l->map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number)) {
-    if (!spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index)) {
+    if (!spire_enemy_counts_for_wave(ene_st->super_ene->type, ene_st->super_ene->child_index, true)) {
       continue; // as in the wave check: a child counts through its parent, a Dark Gunner control never
     }
     ret.emplace_back(SpireWaveEnemy{.defeated = !!(ene_st->set_flags & 8), .ever_hit = spire_enemy_ever_hit(*ene_st),

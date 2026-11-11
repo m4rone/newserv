@@ -2304,24 +2304,71 @@ void run_static_tests() {
       uint16_t child_index;
       bool defeated;
     };
-    std::vector<Member> wave{{EnemyType::DARK_GUNNER_CONTROL, 0, false}};
-    for (size_t z = 0; z < 5; z++) {
-      wave.emplace_back(Member{EnemyType::DARK_GUNNER, 0, true});
-    }
-    auto wave_undefeated = [&]() -> bool { // as the room clear check and the 6x76 wave check count
+    const Member gunner{EnemyType::DARK_GUNNER, 0, true};
+    std::array<Member, 6> wave{{{EnemyType::DARK_GUNNER_CONTROL, 0, false}, gunner, gunner, gunner, gunner, gunner}};
+    // as the room clear check and the 6x76 wave check count
+    auto wave_undefeated = [&](bool spire_bridged) -> bool {
       for (const auto& m : wave) {
-        if (spire_enemy_counts_for_wave(m.type, m.child_index) && !m.defeated) {
+        if (spire_enemy_counts_for_wave(m.type, m.child_index, spire_bridged) && !m.defeated) {
           return true;
         }
       }
       return false;
     };
-    expect(!wave_undefeated()); // every gunner defeated, the control never: the wave is empty
+
+    // the lobbies: a game running a bridged quest, one running another quest, one without a quest
+    struct NullChannel : Channel {
+      NullChannel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&&) {}
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->io_context = std::make_shared<asio::io_context>(1);
+    s->data->spire_bridge_quest_numbers.emplace(976);
+    auto server = std::make_shared<GameServer>(s);
+    auto c = std::make_shared<Client>(server, std::make_shared<NullChannel>(), ServerBehavior::GAME_SERVER);
+    auto game_with_quest = [&](std::optional<uint32_t> quest_number) {
+      auto l = std::make_shared<Lobby>(s, 0x7B01, true);
+      if (quest_number) {
+        auto vq = std::make_shared<VersionedQuest>();
+        vq->meta.quest_number = *quest_number;
+        l->quest = std::make_shared<Quest>(vq);
+      }
+      return std::shared_ptr<const Lobby>(l);
+    };
+    bool spire = spire_bridge_lobby_is_bridged(c, game_with_quest(976));
+    bool other = spire_bridge_lobby_is_bridged(c, game_with_quest(58)); // a quest not in SpireBridgeQuests
+    bool no_quest = spire_bridge_lobby_is_bridged(c, game_with_quest(std::nullopt));
+    expect(spire);
+    expect(!other);
+    expect(!no_quest);
+
+    expect(!wave_undefeated(spire)); // every gunner defeated, the control never: in a Spire game the wave is empty
+    expect(wave_undefeated(other));  // outside a Spire quest the control counts, as before 12f06d1
+    expect(wave_undefeated(no_quest));
     wave[3].defeated = false;
-    expect(wave_undefeated()); // a living gunner still holds it
-    expect(spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 0));
-    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 1)); // a child counts through its parent
-    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER_CONTROL, 0));
+    expect(wave_undefeated(spire)); // a living gunner still holds it
+    expect(spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 0, true));
+    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 1, true));  // a child counts through its parent
+    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER, 1, false)); // in any game
+    expect(!spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER_CONTROL, 0, true));
+    expect(spire_enemy_counts_for_wave(EnemyType::DARK_GUNNER_CONTROL, 0, false));
   }
 
   phosg::log_info_f("-- Spire bridge: an enemy never hit holds no wave forever (v36)");
