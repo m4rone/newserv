@@ -1316,9 +1316,10 @@ void DataIndex::load_spire_checkpoint_config() {
     for (const auto& item : this->config_json->get_list("SpireCheckpointRooms")) {
       int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0);
       int64_t room = item->get_int("Room", -1), episode = item->get_int("Episode", 1);
-      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || (room < -1) || (room > 0xFFFF) ||
+      // audit 1 A1: K up to 32, the top of the Tower (Run III); the checkpoint mask has 32 bits
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 32) || (room < -1) || (room > 0xFFFF) ||
           ((episode != 1) && (episode != 2) && (episode != 4))) {
-        throw std::runtime_error("SpireCheckpointRooms: Episode 1, 2 or 4, Floor 0-255, Room -1-65535, K 1-31");
+        throw std::runtime_error("SpireCheckpointRooms: Episode 1, 2 or 4, Floor 0-255, Room -1-65535, K 1-32");
       }
       auto& rooms = this->spire_checkpoint_rooms[static_cast<uint8_t>(episode)];
       auto key = std::make_pair(static_cast<uint8_t>(floor), static_cast<int32_t>(room));
@@ -1333,8 +1334,8 @@ void DataIndex::load_spire_checkpoint_config() {
     size_t count = 0;
     for (const auto& item : this->config_json->get_list("SpireCheckpointArrivals")) {
       int64_t floor = item->get_int("Floor", -1), k = item->get_int("K", 0), episode = item->get_int("Episode", 1);
-      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 31) || ((episode != 1) && (episode != 2) && (episode != 4))) {
-        throw std::runtime_error("SpireCheckpointArrivals: Episode 1, 2 or 4, Floor 0-255, K 1-31");
+      if ((floor < 0) || (floor > 0xFF) || (k < 1) || (k > 32) || ((episode != 1) && (episode != 2) && (episode != 4))) {
+        throw std::runtime_error("SpireCheckpointArrivals: Episode 1, 2 or 4, Floor 0-255, K 1-32");
       }
       auto& arrivals = this->spire_checkpoint_arrivals[static_cast<uint8_t>(episode)];
       count += arrivals.count(floor) ? 0 : 1;
@@ -1348,9 +1349,9 @@ void DataIndex::load_spire_checkpoint_config() {
     for (const auto& item : this->config_json->get_list("SpireRoomQuests")) { // B-AF-3
       int64_t quest = item->get_int("Quest", 0), k = item->get_int("K", 0), variant = item->get_int("Variant", -1);
       int64_t episode = item->get_int("Episode", 1);
-      if ((quest < 1) || (k < 1) || (k > 31) || (variant < 0) || (variant > 2) ||
+      if ((quest < 1) || (k < 1) || (k > 32) || (variant < 0) || (variant > 2) ||
           ((episode != 1) && (episode != 2) && (episode != 4))) {
-        throw std::runtime_error("SpireRoomQuests: Quest above 0, Episode 1, 2 or 4, K 1-31, Variant 0-2");
+        throw std::runtime_error("SpireRoomQuests: Quest above 0, Episode 1, 2 or 4, K 1-32, Variant 0-2");
       }
       this->spire_room_quests[quest] = SpireRoomQuest{
           static_cast<uint8_t>(episode), static_cast<uint8_t>(k), static_cast<uint8_t>(variant)};

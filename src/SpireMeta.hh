@@ -32,6 +32,9 @@ constexpr uint16_t SPIRE_META_FLAG_PACT_FIRST = 0x0384; // Iron man, Haste, Bare
 constexpr uint16_t SPIRE_META_FLAG_KIT2_FIRST = 0x0388; // HU, RA, FO
 constexpr uint16_t SPIRE_META_FLAG_RUN1_WON = 0x038B; // ladder (plan-unlockables §2): Spire Run I won on that difficulty
 constexpr uint16_t SPIRE_META_FLAG_RUN2_WON = 0x038C; // the same for Spire Run II
+// audit 1 A1: the same for Spire Run III. Free: no quest of quests/ (gset/gget/flag) and no other src/ file uses 0x38D as a
+// quest flag; 0x38D-0x38F lie between the second kits (0x388-0x38A) and the relics (0x390-0x39E)
+constexpr uint16_t SPIRE_META_FLAG_RUN3_WON = 0x038D;
 constexpr uint16_t SPIRE_META_FLAG_PAY_WIN = 0x03A0;
 constexpr uint16_t SPIRE_META_FLAG_PAY_DEATHLESS = 0x03A1;
 constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
@@ -72,8 +75,9 @@ struct SpireMetaFile {
   bool exists = false;
   SpireMetaAdopted adopted = SpireMetaAdopted::NO_MARKER;
   SpireMetaFlags flags;
-  // v49 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II; 0-3, see spire_meta_open_rung), in
-  // the file as "BaseRung": {"1": n, "2": n}; written only if a run has one, so older files stay as they are
+  // v49 (B-BASIS-13): the rung the base opened per ladder run (1 Run I, 2 Run II, 3 Run III; 0-3, see
+  // spire_meta_open_rung), in the file as "BaseRung": {"1": n, "2": n, "3": n}; written only if a run has one, so older
+  // files stay as they are
   std::map<uint8_t, uint8_t> base_rung;
   // v50 (B-BASIS-2): the base shop's upgrades, name -> level (SPIRE_SHOP_ITEM_NAMES), in the file as
   // "Upgrades": {"hp_mat": 2, ...}. One block for every difficulty (a flag is per difficulty, an upgrade is not);
@@ -127,13 +131,15 @@ bool spire_meta_record_applies(bool bridged_quest, bool meta_quest, uint16_t fla
 
 // The difficulty ladder (plan-unlockables-2026-10-25 §2): per character and per run, a win on a difficulty opens the
 // next one. Run I is q921 (and the retired q920) on Normal plus q981-q983 (Hard, Very Hard, Ultimate); Run II is q922
-// plus q984-q986. 0 = a quest of neither run (no ladder flag).
+// plus q984-q986; Run III (audit 1 A1, B-AUDIT-1-10: Seaside Night k31 and the top of the Tower k32, after Olga Flow) is
+// q913 plus q914-q916. 0 = a quest of no run (no ladder flag; a room quest too, q917/q918 included).
 uint8_t spire_meta_ladder_run(uint32_t quest_number);
-// v54: the rung a ladder quest plays (1 Hard q981/q984, 2 Very Hard q982/q985, 3 Ultimate q983/q986), and of a room
-// quest on a rung (q1940-q1979 Hard, q2940-q2979 Very Hard, q3940-q3979 Ultimate; spel-af item 3); 0 for q920-q922,
-// the Normal room quests q940-q979 and every other quest. The heat table of that rung applies (SpireShopCatalogue::heat).
+// v54: the rung a ladder quest plays (1 Hard q981/q984/q914, 2 Very Hard q982/q985/q915, 3 Ultimate q983/q986/q916),
+// and of a room quest on a rung (q1940-q1979 Hard, q2940-q2979 Very Hard, q3940-q3979 Ultimate; spel-af item 3; the
+// variant rooms q987-q998 and Run III's rooms q917/q918 the same, B-AUDIT-1-10); 0 for q920-q922, q913, the Normal room
+// quests and every other quest. The heat table of that rung applies (SpireShopCatalogue::heat).
 uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number);
-uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0 for neither
+uint16_t spire_meta_ladder_flag(uint8_t run); // 0x38B, 0x38C, 0x38D, 0 for none
 // The highest difficulty won open for a run (0 Normal ... 3 Ultimate): Normal always, then one past the highest won.
 uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
 // v49 (B-BASIS-13, Marck via the regie): a rung is open if it was won (spire_meta_ladder_rung) or the base opened it
@@ -141,6 +147,9 @@ uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run);
 // as a win: records "Won", the ladder flags 0x38B/0x38C and the "Unlocked" text come from wins only. Every open rung
 // the server computes (SPIRE_RUN1/2 in AvailableIf, the difficulty gate, the quest menu note) goes through
 // spire_meta_ladder_rung_for_client, which combines them. Nothing sets BaseRung yet (the base shop, slice 4).
+// audit 1 A1: Run III came after the base shop, whose rung items open their rung for every run (spire_shop_apply_buy);
+// a rung item bought before Run III wrote BaseRung for Run I and II only, so Run III's base rung is also at least the
+// rung of every rung item the character owns (Upgrades). Run I and II read their BaseRung only, as before.
 uint8_t spire_meta_base_rung(const SpireMetaFile& file, uint8_t run); // 0 without one, at most 3
 uint8_t spire_meta_open_rung(uint8_t won_rung, uint8_t base_rung);
 uint8_t spire_meta_open_rung(const SpireMetaFile& file, uint8_t run);
@@ -159,10 +168,11 @@ SpireLadderGate spire_meta_ladder_gate(bool battle_game, bool spire_character, u
 std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level);
 // "Normal", "Hard", "Very Hard" or "Ultimate" (a ladder rung or a difficulty, 0-3)
 const char* spire_meta_difficulty_name(uint8_t difficulty);
-// The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if both
-// runs are open there), so a hidden run quest is never a silent nothing. The rooms of that run on that difficulty open
+// The info line in a Battle quest menu on a difficulty above Normal for a run whose rung does not reach it ("" if every
+// run is open there), so a hidden run quest is never a silent nothing. The rooms of that run on that difficulty open
 // with it (spel-af item 3: their AvailableIf carries the same SPIRE_RUN condition), so the line names them too.
-std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty);
+// audit 1 A1: three runs; "Spire Run" when all three are closed, else the closed ones ("Spire Run II, III").
+std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t rung3, uint8_t difficulty);
 // The open rung of a run for a client's real character (its meta file, v49 won or BaseRung; 0 without one or on a read
 // error). Never throws.
 uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run);
@@ -201,7 +211,7 @@ SpireMetaFinishApplied spire_meta_apply_finish(SpireMetaFlags& flags, const std:
 // below is the protocol's: item index i is SPIRE_SHOP_ITEM_NAMES[i] in the 'M' code and in the answer registers.
 // - start_level, kit_tier, hp_mat, atp_grind: strength. P = the sum over them of the catalogue's P at the owned level
 //   (level equivalents, B-BASIS-3). The kit hook applies them at the run start ('M' START).
-// - open_hard, open_vh, open_ult (B-BASIS-13): BaseRung 1, 2, 3 for Spire Run I and II. Buyable only with P at least
+// - open_hard, open_vh, open_ult (B-BASIS-13): BaseRung 1, 2, 3 for Spire Run I, II and III. Buyable only with P at least
 //   the item's threshold (PNeeded) and the rung below open for one of the runs (won or BaseRung); refused while both
 //   runs have the rung open already. They count 0 toward P. BaseRung is never a win.
 // - H = H_auto(P, class) (curve_spire.economy() meta_heat): the heat the run gets from its strength; P past the table
@@ -296,11 +306,19 @@ const char* spire_meta_boss_name(uint8_t k);
 // won run beat. Pure.
 bool spire_meta_boss_room_before(uint32_t k);
 uint8_t spire_meta_final_boss_room(uint8_t episode);
+// audit 1 A1: the last room of a run (15 Run I, 30 Run II, 32 Run III: the top of the Tower, Epsilon, which the server
+// does not count as a boss), 0 for another run. A Run III quest is q913-q916 or one of its room quests q917/q918 on any
+// rung (B-AUDIT-1-10). The last room of a quest: 32 for a Run III quest, else its episode's final boss room
+// (spire_meta_final_boss_room), so every quest of Run I and II, room quests too, keeps the room it had.
+uint8_t spire_meta_run_final_room(uint8_t run);
+bool spire_meta_quest_is_run3(uint32_t quest_number);
+uint8_t spire_meta_quest_final_room(uint32_t quest_number, uint8_t episode);
 // B-AF-1: the ticker line for a BUY refused because the next level waits for boss room k ("" for k 0).
 std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, uint8_t k);
 // B-AF-1: what the first clear of boss room k opens, one line for the lobby ("" if it opens nothing): every shop level
-// whose Boss is k ("Start level 18"), and Spire Run II for Dark Falz (q922's AvailableIf reads SPIRE_K15).
+// whose Boss is k ("Start level 18"), Spire Run II for Dark Falz (q922's AvailableIf reads SPIRE_K15) and Spire Run III
+// for Olga Flow (audit 1 A1: q913 follows k30).
 // kwaliteit-1 266: checkpoint_new is whether room k entered the character's checkpoint in this game; Run II is named
 // only then (a k15 checkpoint of an earlier run, a practice run too, opened it already).
 std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k, bool checkpoint_new);

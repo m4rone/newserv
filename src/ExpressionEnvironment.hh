@@ -18,6 +18,7 @@ struct ExpressionEnvironment {
   uint32_t spire_rooms = 0; // v23: rooms cleared by this character (bit k-1 = room k), SpireFlagBridge checkpoint
   uint8_t spire_run1 = 0; // ladder: highest difficulty open for Spire Run I for this character (0 Normal ... 3 Ultimate)
   uint8_t spire_run2 = 0; // the same for Spire Run II (SpireMeta 0x38B/0x38C, spire_meta_ladder_rung)
+  uint8_t spire_run3 = 0; // audit 1 A1: the same for Spire Run III (SpireMeta 0x38D)
 
   int64_t evaluate(const ResourceDASM::Expression::Node& expr) const {
     return expr.evaluate(std::bind(&ExpressionEnvironment::env_lookup, this, std::placeholders::_1)).as_int();
@@ -34,6 +35,8 @@ struct ExpressionEnvironment {
       return static_cast<int64_t>(this->spire_run1);
     } else if (name == "SPIRE_RUN2") { // the same for Run II
       return static_cast<int64_t>(this->spire_run2);
+    } else if (name == "SPIRE_RUN3") { // the same for Run III (audit 1 A1: q914-q916)
+      return static_cast<int64_t>(this->spire_run3);
     } else if (name == "SPIRE_MAX") { // Spire: highest room cleared by this character (0 = none)
       return static_cast<int64_t>(this->spire_rooms ? (32 - __builtin_clz(this->spire_rooms)) : 0);
     } else if (name.starts_with("SPIRE_K")) { // SPIRE_K<k>: Spire room k cleared by this character

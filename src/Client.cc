@@ -392,6 +392,7 @@ bool Client::evaluate_quest_availability_expression(
       .spire_rooms = spire_checkpoint_mask_for_client(this->shared_from_this()),
       .spire_run1 = spire_meta_ladder_rung_for_client(this->shared_from_this(), 1),
       .spire_run2 = spire_meta_ladder_rung_for_client(this->shared_from_this(), 2),
+      .spire_run3 = spire_meta_ladder_rung_for_client(this->shared_from_this(), 3),
   };
   // v28: a SpireTestSerials console sees rooms 1-10 as cleared here only; the checkpoint file and the card are untouched
   if ((this->version() == Version::GC_V3) && this->login && this->login->gc_license) {

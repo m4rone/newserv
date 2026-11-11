@@ -82,7 +82,7 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
     }
   }
   if (json.contains("BaseRung")) { // v49 (B-BASIS-13)
-    for (uint8_t run = 1; run <= 2; run++) {
+    for (uint8_t run = 1; run <= 3; run++) { // audit 1 A1: Run III's too
       int64_t rung = json.at("BaseRung").get_int(std::to_string(run), 0);
       if (rung > 0) {
         ret.base_rung[run] = std::min<int64_t>(rung, 3);
@@ -317,6 +317,9 @@ uint8_t spire_meta_ladder_run(uint32_t quest_number) {
   if ((quest_number == 922) || ((quest_number >= 984) && (quest_number <= 986))) {
     return 2;
   }
+  if ((quest_number >= 913) && (quest_number <= 916)) { // audit 1 A1 (B-AUDIT-1-10): Run III, after Olga Flow
+    return 3;
+  }
   return 0;
 }
 
@@ -324,19 +327,26 @@ uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number) {
   if ((quest_number >= 981) && (quest_number <= 986)) {
     return (quest_number - 981) % 3 + 1;
   }
+  if ((quest_number >= 914) && (quest_number <= 916)) { // audit 1 A1: Run III on Hard, Very Hard, Ultimate
+    return quest_number - 913;
+  }
   // spel-af item 3: a room quest on a rung is the Normal room quest (q940-q979) plus 1000 per rung (build.sh --rooms).
   // audit 1 A3: so are the elite and rest variants of the rooms after room 8, q987-q998 (q980-q986 and q999 are not
-  // room quests: q981-q986 plus 1000 stays Normal, as StaticTests has it)
+  // room quests: q981-q986 plus 1000 stays Normal, as StaticTests has it). Audit 1 A1 (B-AUDIT-1-10): so are Run
+  // III's rooms q917 (k31) and q918 (k32); q913-q916 plus 1000 are no room quests
   uint32_t room = quest_number % 1000;
   if ((quest_number >= 1000) && (quest_number < 4000) &&
-      (((room >= 940) && (room <= 979)) || ((room >= 987) && (room <= 998)))) {
+      (((room >= 940) && (room <= 979)) || ((room >= 987) && (room <= 998)) || ((room >= 917) && (room <= 918)))) {
     return quest_number / 1000;
   }
   return 0;
 }
 
 uint16_t spire_meta_ladder_flag(uint8_t run) {
-  return (run == 1) ? SPIRE_META_FLAG_RUN1_WON : (run == 2) ? SPIRE_META_FLAG_RUN2_WON : 0;
+  return (run == 1) ? SPIRE_META_FLAG_RUN1_WON
+      : (run == 2)   ? SPIRE_META_FLAG_RUN2_WON
+      : (run == 3)   ? SPIRE_META_FLAG_RUN3_WON
+                     : 0;
 }
 
 uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run) {
@@ -358,7 +368,16 @@ uint8_t spire_meta_ladder_rung(const SpireMetaFlags& flags, uint8_t run) {
 
 uint8_t spire_meta_base_rung(const SpireMetaFile& file, uint8_t run) {
   auto it = file.base_rung.find(run);
-  return (it == file.base_rung.end()) ? 0 : std::min<uint8_t>(it->second, 3);
+  uint8_t ret = (it == file.base_rung.end()) ? 0 : std::min<uint8_t>(it->second, 3);
+  if (run == 3) { // audit 1 A1: a rung item bought before Run III opened its rung for every run (SpireMeta.hh)
+    for (size_t z = 0; z < SPIRE_SHOP_NUM_ITEMS; z++) {
+      uint8_t item_rung = (z >= 4) ? (z - 3) : 0; // as spire_shop_parse: open_hard 1, open_vh 2, open_ult 3
+      if (item_rung && spire_shop_level(file.upgrades, z)) {
+        ret = std::max(ret, item_rung);
+      }
+    }
+  }
+  return ret;
 }
 
 uint8_t spire_meta_open_rung(uint8_t won_rung, uint8_t base_rung) {
@@ -395,21 +414,27 @@ std::string spire_meta_ladder_refuse_text(uint8_t difficulty, uint32_t min_level
       static_cast<size_t>(min_level + 1), spire_meta_difficulty_name(difficulty ? (difficulty - 1) : 0));
 }
 
-std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t difficulty) {
+std::string spire_meta_ladder_menu_note(uint8_t rung1, uint8_t rung2, uint8_t rung3, uint8_t difficulty) {
   if (!difficulty) {
     return "";
   }
   const char* below = spire_meta_difficulty_name(difficulty - 1);
   const char* here = spire_meta_difficulty_name(difficulty);
-  bool open1 = difficulty <= rung1, open2 = difficulty <= rung2;
-  if (open1 && open2) {
-    return "";
-  } else if (!open1 && !open2) {
-    return std::format("Spire Run and rooms on {} open after a win on {}.", here, below);
-  } else if (!open1) {
-    return std::format("Spire Run I and rooms on {} open after a win on {}.", here, below);
+  static const char* names[3] = {"I", "II", "III"};
+  uint8_t rungs[3] = {rung1, rung2, rung3};
+  std::string closed;
+  size_t num_closed = 0;
+  for (size_t z = 0; z < 3; z++) {
+    if (difficulty > rungs[z]) {
+      closed += std::format("{}{}", num_closed ? ", " : " ", names[z]);
+      num_closed++;
+    }
   }
-  return std::format("Spire Run II and rooms on {} open after a win on {}.", here, below);
+  if (!num_closed) {
+    return "";
+  }
+  return std::format("Spire Run{} and rooms on {} open after a win on {}.", (num_closed == 3) ? "" : closed, here,
+      below);
 }
 
 uint8_t spire_meta_ladder_rung_for_client(std::shared_ptr<const Client> c, uint8_t run) {
@@ -442,9 +467,10 @@ SpireMetaFinishApplied spire_meta_apply_finish(SpireMetaFlags& flags, const std:
     ret.set_str += std::format(" {:04X}{}", flag_num, was_set ? "" : "*");
     if (flag_num >= SPIRE_META_FLAG_PAY_WIN) {
       ret.payout = true; // the payout flags are cleared by q925, so each won run opens them again at its first won 'F'
-    } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON)) {
+    } else if ((flag_num == SPIRE_META_FLAG_RUN1_WON) || (flag_num == SPIRE_META_FLAG_RUN2_WON) ||
+        (flag_num == SPIRE_META_FLAG_RUN3_WON)) {
       if (!was_set && (difficulty < 3)) {
-        std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : "II",
+        std::string what = std::format("Spire Run {} on {}", (ladder_run == 1) ? "I" : (ladder_run == 2) ? "II" : "III",
             spire_meta_difficulty_name(difficulty + 1));
         ret.unlocked += ret.unlocked.empty() ? what : std::format(", {}", what);
       }
@@ -741,7 +767,7 @@ uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, Spire
   uint32_t price = item.price.at(level);
   file.upgrades[SPIRE_SHOP_ITEM_NAMES[index]] = level + 1;
   if (item.rung) {
-    for (uint8_t run = 1; run <= 2; run++) {
+    for (uint8_t run = 1; run <= 3; run++) { // audit 1 A1: every run, Run III too
       file.base_rung[run] = std::max<uint8_t>(spire_meta_base_rung(file, run), item.rung);
     }
   }
@@ -794,6 +820,20 @@ uint8_t spire_meta_final_boss_room(uint8_t episode) {
   return (episode == 1) ? 15 : (episode == 2) ? 30 : 0; // Episode 2: Olga Flow in k30 (spel-af item 5)
 }
 
+uint8_t spire_meta_run_final_room(uint8_t run) {
+  return (run == 1) ? 15 : (run == 2) ? 30 : (run == 3) ? 32 : 0; // audit 1 A1: Run III ends at the top of the Tower
+}
+
+bool spire_meta_quest_is_run3(uint32_t quest_number) {
+  uint32_t room = quest_number % 1000;
+  return (spire_meta_ladder_run(quest_number) == 3) ||
+      ((quest_number < 4000) && ((room == 917) || (room == 918))); // its room quests on every rung (B-AUDIT-1-10)
+}
+
+uint8_t spire_meta_quest_final_room(uint32_t quest_number, uint8_t episode) {
+  return spire_meta_quest_is_run3(quest_number) ? spire_meta_run_final_room(3) : spire_meta_final_boss_room(episode);
+}
+
 // "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
 static std::string spire_shop_level_name(const SpireShopCatalogue& cat, size_t index, uint32_t level) {
   if ((index == 0) && (level < cat.items[0].levels.size())) {
@@ -820,6 +860,9 @@ std::string spire_meta_boss_unlock_text(const SpireShopCatalogue* cat, uint8_t k
   };
   if ((k == 15) && checkpoint_new) { // kwaliteit-1 266: Run II only when this clear opened it (not after a practice run)
     add("Spire Run II");
+  }
+  if ((k == 30) && checkpoint_new) { // audit 1 A1: Run III follows Olga Flow, named as Run II after Dark Falz
+    add("Spire Run III");
   }
   if (cat) {
     for (size_t z = 0; z < cat->items.size(); z++) {

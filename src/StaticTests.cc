@@ -1678,7 +1678,8 @@ void run_static_tests() {
         spire_meta_boss_unlock_text(&repo, 11, true));
     expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II, Start level 22 at the Quartermaster."),
         spire_meta_boss_unlock_text(&repo, 15, true));
-    expect_eq(std::string("Olga Flow beaten! Unlocked: Start level 38 at the Quartermaster."),
+    // audit 1 A1: Olga Flow opens Spire Run III (q913 follows k30), named as Run II after Dark Falz
+    expect_eq(std::string("Olga Flow beaten! Unlocked: Spire Run III, Start level 38 at the Quartermaster."),
         spire_meta_boss_unlock_text(&repo, 30, true));
     expect_eq(std::string("Gal Gryphon beaten! Unlocked: Start level 34 at the Quartermaster."),
         spire_meta_boss_unlock_text(&repo, 27, true));
@@ -2729,11 +2730,217 @@ void run_static_tests() {
         spire_meta_ladder_refuse_text(1, 19));
 
     // quest menu on a difficulty whose run quest is hidden: one info line, nothing when both are open or on Normal
-    expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0));
-    expect_eq(std::string(""), spire_meta_ladder_menu_note(1, 1, 1));
-    expect_eq(std::string("Spire Run and rooms on Hard open after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 1));
-    expect_eq(std::string("Spire Run II and rooms on Very Hard open after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 2));
-    expect_eq(std::string("Spire Run I and rooms on Ultimate open after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3));
+    // (audit 1 A1: the third rung is Run III's; open, the lines of Run I and II are as before)
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0, 0));
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(1, 1, 1, 1));
+    expect_eq(std::string("Spire Run and rooms on Hard open after a win on Normal."), spire_meta_ladder_menu_note(0, 0, 0, 1));
+    expect_eq(std::string("Spire Run II and rooms on Very Hard open after a win on Hard."), spire_meta_ladder_menu_note(3, 1, 3, 2));
+    expect_eq(std::string("Spire Run I and rooms on Ultimate open after a win on Very Hard."), spire_meta_ladder_menu_note(2, 3, 3, 3));
+  }
+
+  phosg::log_info_f("-- Spire Run III: k31-k32 after Olga Flow, q913-q918 (audit 1 A1, B-AUDIT-1-10)");
+  {
+    // the run quests: q913 Normal, q914-q916 Hard, Very Hard, Ultimate; the room quests q917 (k31) and q918 (k32)
+    // have no ladder of their own, as every room quest
+    for (uint32_t q : {913u, 914u, 915u, 916u}) {
+      expect_eq(3, spire_meta_ladder_run(q));
+    }
+    for (uint32_t q : {912u, 917u, 918u, 919u, 1913u, 1917u, 3918u}) {
+      expect_eq(0, spire_meta_ladder_run(q));
+    }
+    expect_eq(1, spire_meta_ladder_run(921)); // Run I and II as before
+    expect_eq(2, spire_meta_ladder_run(922));
+    expect_eq(2, spire_meta_ladder_run(986));
+  }
+  {
+    // the rung a quest plays: q914-q916 like q981-q983; the room quests of k31/k32 per rung D*1000+N
+    expect_eq(0, spire_meta_ladder_quest_rung(913));
+    expect_eq(1, spire_meta_ladder_quest_rung(914));
+    expect_eq(2, spire_meta_ladder_quest_rung(915));
+    expect_eq(3, spire_meta_ladder_quest_rung(916));
+    expect_eq(0, spire_meta_ladder_quest_rung(917)); // the room quests on Normal
+    expect_eq(0, spire_meta_ladder_quest_rung(918));
+    for (uint32_t d = 1; d <= 3; d++) {
+      expect_eq(d, spire_meta_ladder_quest_rung(d * 1000 + 917));
+      expect_eq(d, spire_meta_ladder_quest_rung(d * 1000 + 918));
+      for (uint32_t n : {912u, 913u, 914u, 915u, 916u, 919u}) { // no room quests: a run quest plus 1000 stays Normal
+        expect_eq(0, spire_meta_ladder_quest_rung(d * 1000 + n));
+      }
+    }
+    expect_eq(0, spire_meta_ladder_quest_rung(4917));
+    expect_eq(0, spire_meta_ladder_quest_rung(4918));
+    expect_eq(1, spire_meta_ladder_quest_rung(1940)); // Run I and II as before
+    expect_eq(3, spire_meta_ladder_quest_rung(986));
+  }
+  {
+    // the ladder flag of Run III: its own, server-owned, next to Run I and II
+    expect_eq(SPIRE_META_FLAG_RUN3_WON, spire_meta_ladder_flag(3));
+    expect_eq(0x038D, SPIRE_META_FLAG_RUN3_WON);
+    expect_eq(SPIRE_META_FLAG_RUN1_WON, spire_meta_ladder_flag(1));
+    expect_eq(SPIRE_META_FLAG_RUN2_WON, spire_meta_ladder_flag(2));
+    expect_eq(0, spire_meta_ladder_flag(4));
+    expect((SPIRE_META_FLAG_RUN3_WON >= SPIRE_BRIDGE_FIRST_FLAG) && (SPIRE_META_FLAG_RUN3_WON <= SPIRE_META_SERVER_LAST_FLAG));
+    expect(SPIRE_META_FLAG_RUN3_WON < 0x0390); // below the relic flags (score.py FLAG_RELIC_BASE, 0x390 + n - 1)
+    expect(SPIRE_META_FLAG_RUN3_WON > SPIRE_META_FLAG_KIT2_FIRST + 2); // above the second kits (0x388-0x38A)
+    expect(spire_meta_flag_name(SPIRE_META_FLAG_RUN3_WON) == nullptr);
+    SpireMetaFlags flags;
+    flags[std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN3_WON)] = true; // Run III won on Normal
+    expect_eq(1, spire_meta_ladder_rung(flags, 3));
+    expect_eq(0, spire_meta_ladder_rung(flags, 1)); // Run I and II have their own ladders
+    expect_eq(0, spire_meta_ladder_rung(flags, 2));
+    SpireMetaFile file;
+    file.flags = flags;
+    expect_eq(1, spire_meta_open_rung(file, 3));
+    expect_eq(0, spire_meta_open_rung(file, 4));
+  }
+  {
+    // a won 'F' of Run III sets its ladder flag and names the rung it opens
+    SpireMetaFlags flags;
+    std::vector<uint16_t> fl{spire_meta_ladder_flag(spire_meta_ladder_run(913))};
+    auto a = spire_meta_apply_finish(flags, fl, 0, spire_meta_ladder_run(913), true);
+    expect(flags.at(std::make_pair(uint8_t(0), SPIRE_META_FLAG_RUN3_WON)));
+    expect_eq(std::string("Spire Run III on Hard"), a.unlocked);
+    auto again = spire_meta_apply_finish(flags, fl, 0, 3, true);
+    expect_eq(std::string(""), again.unlocked); // named once
+    auto ult = spire_meta_apply_finish(flags, fl, 3, 3, true);
+    expect_eq(std::string(""), ult.unlocked); // nothing past Ultimate
+  }
+  {
+    // the quest menu note with Run III closed: it names the closed runs
+    expect_eq(std::string("Spire Run III and rooms on Hard open after a win on Normal."),
+        spire_meta_ladder_menu_note(3, 3, 0, 1));
+    expect_eq(std::string("Spire Run I, III and rooms on Very Hard open after a win on Hard."),
+        spire_meta_ladder_menu_note(1, 3, 1, 2));
+    expect_eq(std::string("Spire Run II, III and rooms on Very Hard open after a win on Hard."),
+        spire_meta_ladder_menu_note(3, 1, 0, 2));
+    expect_eq(std::string("Spire Run I, II and rooms on Hard open after a win on Normal."),
+        spire_meta_ladder_menu_note(0, 0, 3, 1));
+    expect_eq(std::string("Spire Run and rooms on Ultimate open after a win on Very Hard."),
+        spire_meta_ladder_menu_note(2, 2, 2, 3));
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(3, 3, 3, 3));
+    expect_eq(std::string(""), spire_meta_ladder_menu_note(0, 0, 0, 0)); // Normal: no line
+  }
+  {
+    // AvailableIf of q914-q916: SPIRE_RUN3
+    auto available = [&](const char* expr_str, Difficulty difficulty, uint8_t run3) -> bool {
+      auto expr = ResourceDASM::Expression::Node::parse(expr_str);
+      ExpressionEnvironment env{.num_players = 1, .section_id = 0, .event = 0, .v1_present = false,
+          .difficulty = difficulty, .quest_flags = nullptr, .challenge_records = nullptr, .team = nullptr,
+          .spire_rooms = 0, .spire_run1 = 3, .spire_run2 = 3, .spire_run3 = run3};
+      return env.evaluate(*expr) != 0;
+    };
+    expect(available("V_Difficulty == 1 && SPIRE_RUN3 >= 1", Difficulty::HARD, 1)); // q914 open
+    expect(!available("V_Difficulty == 1 && SPIRE_RUN3 >= 1", Difficulty::HARD, 0)); // q914 closed, Run I and II open
+    expect(!available("V_Difficulty == 3 && SPIRE_RUN3 >= 3", Difficulty::ULTIMATE, 2)); // q916 closed
+    expect(available("V_Difficulty == 3 && SPIRE_RUN3 >= 3", Difficulty::ULTIMATE, 3));
+  }
+  {
+    // BaseRung: Run III's is read back from meta.json, and a rung bought in the shop opens it for Run III too
+    auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-run3-{}", getpid());
+    std::filesystem::create_directories(dir);
+    auto name = (dir / "run3.meta.json").string();
+    SpireMetaFile saved;
+    saved.base_rung = {{1, 1}, {2, 1}, {3, 2}};
+    spire_meta_save_file(name, 42, saved);
+    auto loaded = spire_meta_load_file(name);
+    expect_eq(2, spire_meta_base_rung(loaded, 3));
+    expect_eq(1, spire_meta_base_rung(loaded, 2));
+    std::filesystem::remove_all(dir);
+
+    auto cat = spire_shop_parse(R"({"Items": {
+        "start_level": {"Max": 1, "Price": [10], "P": [0, 0]}, "kit_tier": {"Max": 1, "Price": [10], "P": [0, 0]},
+        "hp_mat": {"Max": 1, "Price": [10], "P": [0, 0]}, "atp_grind": {"Max": 1, "Price": [10], "P": [0, 0]},
+        "open_hard": {"Max": 1, "Price": [60], "PNeeded": 0}, "open_vh": {"Max": 1, "Price": [120], "PNeeded": 0},
+        "open_ult": {"Max": 1, "Price": [240], "PNeeded": 0}},
+      "MetaHeat": {"HAuto": {}}})");
+    SpireMetaFile bought;
+    expect_eq(60u, spire_shop_apply_buy(cat, 4, bought));
+    expect_eq(1, bought.base_rung.at(1));
+    expect_eq(1, bought.base_rung.at(2));
+    expect_eq(1, bought.base_rung.at(3)); // written for Run III as well
+    expect_eq(1, spire_meta_open_rung(bought, 3));
+
+    // a file of a character that bought a rung before Run III: BaseRung for Run I and II only. Run III's base rung is
+    // the rung of the items it owns; Run I and II read their BaseRung as before
+    SpireMetaFile before;
+    before.upgrades = {{"open_hard", 1}, {"open_vh", 1}};
+    before.base_rung = {{1, 2}, {2, 2}};
+    expect_eq(2, spire_meta_base_rung(before, 3));
+    expect_eq(2, spire_meta_open_rung(before, 3));
+    SpireMetaFile edited; // a hand-edited file: an owned item never lowers Run I or II, and is not read for them
+    edited.upgrades = {{"open_ult", 1}};
+    edited.base_rung = {{1, 1}};
+    expect_eq(1, spire_meta_base_rung(edited, 1));
+    expect_eq(0, spire_meta_base_rung(edited, 2));
+    expect_eq(3, spire_meta_base_rung(edited, 3));
+    SpireMetaFile strength_only;
+    strength_only.upgrades = {{"hp_mat", 1}, {"start_level", 1}};
+    expect_eq(0, spire_meta_base_rung(strength_only, 3)); // a strength item opens no rung
+  }
+  {
+    // the last room per run and per quest: 15, 30, 32. Every quest of Run I and II keeps its episode's final boss room
+    expect_eq(15, spire_meta_run_final_room(1));
+    expect_eq(30, spire_meta_run_final_room(2));
+    expect_eq(32, spire_meta_run_final_room(3));
+    expect_eq(0, spire_meta_run_final_room(0));
+    expect_eq(0, spire_meta_run_final_room(4));
+    for (uint32_t q : {913u, 914u, 915u, 916u, 917u, 918u, 1917u, 1918u, 2917u, 2918u, 3917u, 3918u}) {
+      expect(spire_meta_quest_is_run3(q));
+      expect_eq(32, spire_meta_quest_final_room(q, 2));
+    }
+    for (uint32_t q : {0u, 912u, 919u, 920u, 921u, 922u, 940u, 971u, 981u, 984u, 986u, 998u, 1913u, 1916u, 4917u, 4918u}) {
+      expect(!spire_meta_quest_is_run3(q));
+    }
+    expect_eq(15, spire_meta_quest_final_room(921, 1));
+    expect_eq(30, spire_meta_quest_final_room(922, 2));
+    expect_eq(30, spire_meta_quest_final_room(986, 2));
+    expect_eq(30, spire_meta_quest_final_room(1971, 2)); // a room quest of Run II plays on to Olga Flow
+    for (uint32_t q = 0; q < 5000; q++) {
+      for (uint8_t episode = 0; episode <= 4; episode++) {
+        if (!spire_meta_quest_is_run3(q)) {
+          expect_eq(spire_meta_final_boss_room(episode), spire_meta_quest_final_room(q, episode));
+        }
+      }
+    }
+  }
+  {
+    // Olga Flow opens Run III only when this clear stored k30 (as Dark Falz and Run II); Epsilon (k32) is no boss
+    expect_eq(std::string("Olga Flow beaten! Unlocked: Spire Run III."), spire_meta_boss_unlock_text(nullptr, 30, true));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 30, false));
+    expect_eq(std::string("Dark Falz beaten! Unlocked: Spire Run II."), spire_meta_boss_unlock_text(nullptr, 15, true));
+    expect_eq(std::string(""), spire_meta_boss_unlock_text(nullptr, 32, true));
+    expect(spire_meta_boss_name(32) == nullptr);
+  }
+  {
+    // the config: K up to 32 in SpireCheckpointRooms, SpireCheckpointArrivals and SpireRoomQuests; 33 refused
+    DataIndex d;
+    d.config_json = std::make_shared<phosg::JSON>(phosg::JSON::parse(R"({
+      "SpireCheckpointRooms": [{"Episode": 2, "Floor": 16, "K": 31}, {"Episode": 2, "Floor": 17, "K": 32}],
+      "SpireCheckpointArrivals": [{"Episode": 2, "Floor": 17, "K": 32}],
+      "SpireRoomQuests": [{"Quest": 917, "Episode": 2, "K": 31, "Variant": 0},
+          {"Quest": 3918, "Episode": 2, "K": 32, "Variant": 0}]})"));
+    d.load_spire_checkpoint_config();
+    expect_eq(31, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 16, 0));
+    expect_eq(32, spire_checkpoint_room_k(d.spire_checkpoint_rooms, Episode::EP2, 17, 5));
+    expect_eq(32, spire_checkpoint_arrival_k(d.spire_checkpoint_arrivals, Episode::EP2, 17));
+    expect_eq(31, d.spire_room_quests.at(917).k);
+    expect_eq(32, d.spire_room_quests.at(3918).k);
+    expect(spire_checkpoint_room_first(0x7FFFFFFF, 32)); // the 32-bit mask holds k32
+    expect(!spire_checkpoint_room_first(0xFFFFFFFF, 32));
+    auto refused = [&](const char* config, const char* what) {
+      DataIndex bad;
+      bad.config_json = std::make_shared<phosg::JSON>(phosg::JSON::parse(config));
+      try {
+        bad.load_spire_checkpoint_config();
+      } catch (const std::runtime_error& e) {
+        return std::string(e.what()).find(what) != std::string::npos;
+      }
+      return false;
+    };
+    expect(refused(R"({"SpireCheckpointRooms": [{"Episode": 2, "Floor": 17, "K": 33}]})", "K 1-32"));
+    expect(refused(R"({"SpireCheckpointArrivals": [{"Episode": 2, "Floor": 17, "K": 33}]})", "K 1-32"));
+    expect(refused(R"({"SpireRoomQuests": [{"Quest": 918, "Episode": 2, "K": 33, "Variant": 0}]})", "K 1-32"));
+    expect(refused(R"({"SpireCheckpointRooms": [{"Episode": 2, "Floor": 17, "K": 0}]})", "K 1-32"));
   }
 
   phosg::log_info_f("-- Spire test serials: room quests available server-side, no flags written (v28)");
