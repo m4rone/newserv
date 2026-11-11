@@ -93,12 +93,12 @@ inline std::string spire_run_mag_reminder_text_now(const std::string& text, cons
 // waits SPIRE_EQUIP_CHECK_DELAY after the send for that client's 6x25 (on_equip_item marks the item equipped in its
 // copy); when the item is still there and not equipped, one line tells the player to equip it by hand.
 constexpr auto SPIRE_EQUIP_CHECK_DELAY = std::chrono::milliseconds(1000);
-constexpr const char* SPIRE_EQUIP_KIT_MISSING_TEXT = "Equip your kit weapon: Item Pack > Equip.";
-constexpr const char* SPIRE_EQUIP_MAG_MISSING_TEXT = "Equip your mag: Item Pack > Mag.";
+constexpr const char* SPIRE_EQUIP_KIT_MISSING_TEXT = "Equip your kit weapon: Item Pack, Equip.";
+constexpr const char* SPIRE_EQUIP_MAG_MISSING_TEXT = "Equip your mag: Item Pack, Mag.";
 // kwaliteit-1 (observaties 209/216): newserv's own point for the weapon it equips again on a resume (not a 'C' code;
 // the mag of a resume uses SPIRE_PROMPT_RUN_MAG_REPLACED's line), and that weapon's line when the 6x25 does not come
 constexpr uint8_t SPIRE_EQUIP_RESUME_WEAPON = 0x80;
-constexpr const char* SPIRE_EQUIP_WEAPON_MISSING_TEXT = "Equip your weapon: Item Pack > Equip.";
+constexpr const char* SPIRE_EQUIP_WEAPON_MISSING_TEXT = "Equip your weapon: Item Pack, Equip.";
 // The line for 'C' point after SpireEquipItem for item_id, or nullopt: the 6x25 came (the item is equipped), the item
 // is no longer in newserv's copy, or another point.
 inline std::optional<std::string> spire_equip_missing_text(uint8_t point, uint32_t item_id, const PlayerInventory& inventory) {

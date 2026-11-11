@@ -1001,6 +1001,8 @@ asio::awaitable<void> spire_bba_tx_guard_if_needed(std::shared_ptr<Client> c);
 
 // v35: a text for the client during a Spire run as one line: line breaks become spaces, trailing spaces go.
 std::string spire_ticker_line(const std::string& text);
+// veilig-1: no text for the client carries a loose '<' or '>' (the GameCube client reads a tag there).
+bool spire_client_text_safe(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
 // v62 (B-REGIE-16-13): what a bundle 8 text needs besides the code. The overload above is this with an empty context

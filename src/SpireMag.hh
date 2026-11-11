@@ -261,7 +261,7 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex); // throws on
 // room clear rewards). FIRST: no mag was issued before this offer, so there is no mag that could grow.
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_TEXT = "Pack full: your mag did not grow. Keep slots free";
 constexpr const char* SPIRE_RUN_MAG_PACK_FULL_FIRST_TEXT = "Pack full: no room for your mag. Keep slots free";
-constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack > Mag)";
+constexpr const char* SPIRE_RUN_MAG_REMINDER_TEXT = "Your mag is in your pack: equip it (Item Pack, Mag)";
 // v62: unchanged in bundle 8. The grind on the kit weapon moved to bundle 9 (B-REGIE-16-15: equip_item cannot set a
 // grind), so the kit still holds Monogrinders to use next to the HP Materials
 constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now (Item Pack)";
@@ -272,15 +272,15 @@ constexpr const char* SPIRE_KIT_USE_TEXT = "Use your materials and grinders now 
 std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level);
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before. Bundle 9:
 // server_equips (its RESULT's 'C' 14 came, so the server equips the new mag; spire_run_mag_evolve_text_take) drops
-// " Equip it: Item Pack > Mag."
+// " Equip it: Item Pack, Mag."
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false, bool server_equips = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
 // round (F10S critic N4): a Shell mag names the choice as the evolve text does; otherwise SPIRE_RUN_MAG_REMINDER_TEXT.
-constexpr const char* SPIRE_RUN_MAG_REMINDER_SHELL_TEXT = "Your mag (Shell) is in your pack: equip it (Item Pack > Mag)";
+constexpr const char* SPIRE_RUN_MAG_REMINDER_SHELL_TEXT = "Your mag (Shell) is in your pack: equip it (Item Pack, Mag)";
 std::string spire_run_mag_reminder_text(bool shell);
 // The longest ticker line of the run mag (measured 2026-10-27: "Your mag evolves: Kabanda (Shell). Equip it: Item
 // Pack > Mag.", 61 characters); the static tests keep every run mag line at or below it
-constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 61;
+constexpr size_t SPIRE_RUN_MAG_TICKER_MAX = 60;
 
 // Route B bundle 2 S: the kit text ('M' START, SpireFlagBridge.cc spire_shop_handle). Due once per client and run when
 // the START answer carries an hp_mat level above 0 (the kit creates 2 x level HP Materials, rewards.py kit_meta) and the
@@ -314,7 +314,7 @@ std::string spire_kit_ticker_take(SpireKitMagTexts& st, uint32_t hp_mat_level, u
 // At 'C' 13 (grind G): stores G and returns the bundle 9 kit line when the ticker already went out in the old form
 // (the quest's kit was slower than the ticker, e.g. a leader's long lean list), once; "" otherwise.
 std::string spire_kit_c13_take(SpireKitMagTexts& st, uint8_t grind);
-// kwaliteit-2 275: SPIRE_EQUIP_KIT_MISSING_TEXT ("Equip your kit weapon: Item Pack > Equip.", SPIRE_EQUIP_CHECK_DELAY
+// kwaliteit-2 275: SPIRE_EQUIP_KIT_MISSING_TEXT ("Equip your kit weapon: Item Pack, Equip.", SPIRE_EQUIP_CHECK_DELAY
 // after the SpireEquipItem of a 'C' 13) and the kit line (SPIRE_KIT_USE_TEXT_DELAY after the 'M' START answer, or at a
 // late 'C' 13) came within a second or two of each other, in either order, and the second pushed the first off the
 // ticker. One order: the kit line first, the hint after it; each takes its turn (SpireFlagBridge.hh

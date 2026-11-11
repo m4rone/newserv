@@ -5486,7 +5486,7 @@ void run_static_tests() {
     });
 
     f6_case("texts", [&]() {
-      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna"));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack, Mag."), spire_run_mag_evolve_text("Varuna"));
       for (const std::string& t : {spire_run_mag_evolve_text("Ashvinau"), std::string(SPIRE_RUN_MAG_PACK_FULL_TEXT),
                std::string(SPIRE_RUN_MAG_REMINDER_TEXT), std::string(SPIRE_BOSS_BURST_TEXT),
                std::string(SPIRE_KIT_USE_TEXT), std::string(SPIRE_RESUME_MAG_TEXT)}) {
@@ -5665,14 +5665,14 @@ void run_static_tests() {
     });
 
     f6_case("F10: the evolve text names Shell", [&]() {
-      expect_eq(std::string("Your mag evolves: Varuna (Shell). Equip it: Item Pack > Mag."),
+      expect_eq(std::string("Your mag evolves: Varuna (Shell). Equip it: Item Pack, Mag."),
           spire_run_mag_evolve_text("Varuna", true));
-      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack, Mag."), spire_run_mag_evolve_text("Varuna", false));
       expect_eq(spire_run_mag_evolve_text("Bana", true), spire_ticker_line(spire_run_mag_evolve_text("Bana", true)));
       // fix round (F10S critic N4): the first mag of a run (the kit, or a practice run's first ASK) names Shell too
-      expect_eq(std::string("Your mag (Shell) is in your pack: equip it (Item Pack > Mag)"), spire_run_mag_reminder_text(true));
+      expect_eq(std::string("Your mag (Shell) is in your pack: equip it (Item Pack, Mag)"), spire_run_mag_reminder_text(true));
       expect_eq(std::string(SPIRE_RUN_MAG_REMINDER_TEXT), spire_run_mag_reminder_text(false));
-      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack > Mag)"), spire_run_mag_reminder_text(false));
+      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack, Mag)"), spire_run_mag_reminder_text(false));
       // no run mag line is longer than the longest before this round: every Id of the shipped table, both columns
       auto names = phosg::JSON::parse(phosg::load_file("system/tables/names-v3.json"));
       size_t longest = 0;
@@ -5692,8 +5692,8 @@ void run_static_tests() {
       for (bool shell : {false, true}) {
         longest = std::max(longest, spire_run_mag_reminder_text(shell).size());
       }
-      expect_eq(SPIRE_RUN_MAG_TICKER_MAX, longest); // Kabanda (Shell): 61
-      expect_eq(61u, spire_run_mag_evolve_text("Kabanda", true).size());
+      expect_eq(SPIRE_RUN_MAG_TICKER_MAX, longest); // Kabanda (Shell): 60 (veilig-1: ", " for " > ")
+      expect_eq(60u, spire_run_mag_evolve_text("Kabanda", true).size());
       expect(spire_run_mag_reminder_text(true).size() <= SPIRE_RUN_MAG_TICKER_MAX);
     });
 
@@ -7121,18 +7121,19 @@ void run_static_tests() {
       auto lines = spire_savestate_notice_take(&told, b9_savestate(1, 0, 3, 125), category, "Spire room 1");
       expect_eq(size_t(2), lines.size());
       expect_eq(std::string("Saved run: Room 1, 3 lives, 2:05."), lines.at(0));
-      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 1."), lines.at(1));
+      expect_eq(std::string("To continue: Quest, PSO Spire: losse kamers, Spire room 1."), lines.at(1));
+      expect(spire_client_text_safe(lines.at(0)) && spire_client_text_safe(lines.at(1))); // veilig-1: no loose < or >
       expect(told);
       told = false;
       lines = spire_savestate_notice_take(&told, b9_savestate(5, 1, 2, 725), category, "Spire room 5 elite");
       expect_eq(size_t(2), lines.size());
       expect_eq(std::string("Saved run: Room 5 elite, 2 lives, 12:05."), lines.at(0));
-      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 5 elite."), lines.at(1));
+      expect_eq(std::string("To continue: Quest, PSO Spire: losse kamers, Spire room 5 elite."), lines.at(1));
       told = false;
       lines = spire_savestate_notice_take(&told, b9_savestate(3, 2, 0, 3725), category, "Spire room 3 rest");
       expect_eq(size_t(2), lines.size());
       expect_eq(std::string("Saved run: Room 3 rest, 0 lives, 1:02:05."), lines.at(0)); // h:mm:ss from an hour on
-      expect_eq(std::string("To continue: Quest > PSO Spire: losse kamers > Spire room 3 rest."), lines.at(1));
+      expect_eq(std::string("To continue: Quest, PSO Spire: losse kamers, Spire room 3 rest."), lines.at(1));
       expect_eq(std::string("Saved run: Room 7, 1 life, 59:59."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3599)));
       expect_eq(std::string("Saved run: Room 7, 1 life, 1:00:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 3600)));
       expect_eq(std::string("Saved run: Room 7, 1 life, 0:00."), spire_savestate_notice_saved_line(b9_savestate(7, 0, 1, 0)));
@@ -7347,7 +7348,7 @@ void run_static_tests() {
     b9_case("kit ticker and evolution text in both r143 states, one line within 90 characters", [&]() {
       // r143 = 0: both as today
       expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_use_text(false, 10, 5));
-      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."), spire_run_mag_evolve_text("Varuna", false, false));
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack, Mag."), spire_run_mag_evolve_text("Varuna", false, false));
       // r143 = 1
       expect_eq(std::string("Your kit weapon is ground +10. Use your HP Materials now (Item Pack)."), spire_kit_use_text(true, 10, 5));
       expect_eq(std::string("Your kit weapon is ground +4."), spire_kit_use_text(true, 4, 0)); // no HP Materials
@@ -7365,13 +7366,13 @@ void run_static_tests() {
     b9_case("critic N-4: no 6x25 after SpireEquipItem gives one equip line, a 6x25 none", [&]() {
       auto kit_unequipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, false}});
       auto kit_equipped = b9_inventory({{0x0001000A00000000ULL, 0x00010001, true}});
-      expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."),
+      expect_eq(std::string("Equip your kit weapon: Item Pack, Equip."),
           spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_unequipped).value_or(""));
       expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010001, kit_equipped).has_value());
       expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010002, kit_unequipped).has_value()); // item gone
       auto mag_unequipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, false}});
       auto mag_equipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, true}});
-      expect_eq(std::string("Equip your mag: Item Pack > Mag."),
+      expect_eq(std::string("Equip your mag: Item Pack, Mag."),
           spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_unequipped).value_or(""));
       expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_equipped).has_value());
       expect(!spire_equip_missing_text(0x0C, 0x00010003, mag_unequipped).has_value()); // another point
@@ -7385,7 +7386,7 @@ void run_static_tests() {
       SpireKitMagTexts old_quest;
       expect_eq(std::string(SPIRE_KIT_USE_TEXT), spire_kit_ticker_take(old_quest, 5, 3));
       expect(old_quest.kit_sent && !old_quest.kit_b9_sent);
-      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack, Mag."),
           spire_run_mag_evolve_text_take(old_quest, "Varuna", false));
       // the bundle 9 quest: 'C' 13 before the ticker, 'C' 14 after the RESULT 1
       SpireKitMagTexts new_quest;
@@ -7415,7 +7416,7 @@ void run_static_tests() {
       // 'C' 14 with r143 = 0 (or no such mag in the copy): nothing equips it, the hint stays
       SpireKitMagTexts not_sent;
       spire_run_mag_c14_take(not_sent, false);
-      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack > Mag."),
+      expect_eq(std::string("Your mag evolves: Varuna. Equip it: Item Pack, Mag."),
           spire_run_mag_evolve_text_take(not_sent, "Varuna", false));
       // 'C' 14 and SpireEquipItem sent: no hint
       SpireKitMagTexts sent;
@@ -7521,7 +7522,7 @@ void run_static_tests() {
       expect(held == t0 + seconds(1) + gap);
       expect(held_until == t0 + seconds(1) + gap);
       // the texts themselves are those of before
-      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack > Mag)"), std::string(SPIRE_RUN_MAG_REMINDER_TEXT));
+      expect_eq(std::string("Your mag is in your pack: equip it (Item Pack, Mag)"), std::string(SPIRE_RUN_MAG_REMINDER_TEXT));
       expect_eq(std::string("Boss ahead: you are buffed"), std::string(SPIRE_BOSS_BURST_TEXT));
     });
 
@@ -7617,7 +7618,25 @@ void run_static_tests() {
         expect_eq(3 * gap - 2000, spire_ticker_turn_delay(lane, t0 + seconds(3)).count()); // the hint a gap after it
       }
       // both lines are those of before
-      expect_eq(std::string("Equip your kit weapon: Item Pack > Equip."), std::string(SPIRE_EQUIP_KIT_MISSING_TEXT));
+      expect_eq(std::string("Equip your kit weapon: Item Pack, Equip."), std::string(SPIRE_EQUIP_KIT_MISSING_TEXT));
+    });
+
+    // veilig-1 (system critic round 3): no server text for the client carries a loose '<' or '>'
+    k2_case("no server line for the client carries a loose angle bracket", [&]() {
+      for (const std::string& text : {
+               std::string(SPIRE_EQUIP_KIT_MISSING_TEXT), std::string(SPIRE_EQUIP_MAG_MISSING_TEXT),
+               std::string(SPIRE_EQUIP_WEAPON_MISSING_TEXT), std::string(SPIRE_RUN_MAG_REMINDER_TEXT),
+               std::string(SPIRE_RUN_MAG_REMINDER_SHELL_TEXT), spire_run_mag_reminder_text(true),
+               spire_run_mag_reminder_text(false), spire_run_mag_evolve_text("Varuna"),
+               spire_run_mag_evolve_text("Varuna", false, false)}) {
+        if (!spire_client_text_safe(text)) {
+          throw std::runtime_error("a server text carries a loose angle bracket: " + text);
+        }
+      }
+      // a name from the config that carries one never reaches the client as such
+      expect(!spire_client_text_safe("Quest > A < B"));
+      expect_eq(std::string("Quest - A - B"), spire_ticker_line("Quest > A\n< B"));
+      expect(spire_client_text_safe(spire_ticker_line("To continue: Quest > X > Y.")));
     });
 
     // ---- round 2 (critic K2, K3, K5, K7 and round 1's "seen, not built")
@@ -7729,9 +7748,9 @@ void run_static_tests() {
       // the mag of a 'C' 14 or a resume, and a resumed weapon: the line of before while the item is not equipped,
       // none once its 6x25 came or the item is gone
       auto inv = k2_inventory({{0x00, false}, {0x02, false}});
-      expect_eq(std::string("Equip your weapon: Item Pack > Equip."),
+      expect_eq(std::string("Equip your weapon: Item Pack, Equip."),
           spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, inv).value_or(""));
-      expect_eq(std::string("Equip your mag: Item Pack > Mag."),
+      expect_eq(std::string("Equip your mag: Item Pack, Mag."),
           spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, inv).value_or(""));
       auto worn = k2_inventory({{0x00, true}, {0x02, true}});
       expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, worn).has_value());

@@ -370,6 +370,10 @@ std::string spire_ticker_line(const std::string& text) {
       if (!ret.empty() && (ret.back() != ' ')) {
         ret.push_back(' ');
       }
+    } else if ((ch == '<') || (ch == '>')) {
+      // veilig-1: a loose angle bracket freezes the GameCube client in a quest text (it reads a tag); for a server line
+      // that is unmeasured, so none goes out: a name from the config that carries one gets a hyphen instead
+      ret.push_back('-');
     } else {
       ret.push_back(ch);
     }
@@ -378,6 +382,10 @@ std::string spire_ticker_line(const std::string& text) {
     ret.pop_back();
   }
   return ret;
+}
+
+bool spire_client_text_safe(const std::string& text) {
+  return text.find_first_of("<>") == std::string::npos;
 }
 
 static void spire_send_ticker(std::shared_ptr<Client> c, const std::string& text) {
@@ -1000,7 +1008,7 @@ std::string spire_savestate_notice_continue_line(const std::string& category_nam
   if (category_name.empty() || quest_name.empty()) {
     return SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
   }
-  std::string ret = spire_ticker_line(std::format("To continue: Quest > {} > {}.", category_name, quest_name));
+  std::string ret = spire_ticker_line(std::format("To continue: Quest, {}, {}.", category_name, quest_name));
   return (ret.size() <= SPIRE_BRIDGE_TEXT_MAX) ? ret : SPIRE_SAVESTATE_NOTICE_NO_QUEST_TEXT;
 }
 
@@ -3481,7 +3489,7 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, st
 // game while it waits. Never throws.
 static constexpr auto SPIRE_RESUME_EQUIP_POLL_DELAY = std::chrono::milliseconds(500);
 static constexpr size_t SPIRE_RESUME_EQUIP_POLLS = 10;
-static constexpr const char* SPIRE_RESUME_EQUIP_MISSING_TEXT = "Equip your gear: Item Pack > Equip.";
+static constexpr const char* SPIRE_RESUME_EQUIP_MISSING_TEXT = "Equip your gear: Item Pack, Equip.";
 static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, SpireSavestate ss) {
   try {
     std::weak_ptr<Client> weak_c = c;

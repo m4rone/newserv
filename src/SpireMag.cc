@@ -465,7 +465,7 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
 
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell, bool server_equips) {
   return std::format("Your mag evolves: {}{}.{}", sega_name, shell ? " (Shell)" : "",
-      server_equips ? "" : " Equip it: Item Pack > Mag.");
+      server_equips ? "" : " Equip it: Item Pack, Mag.");
 }
 
 std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level) {
