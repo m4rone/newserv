@@ -791,6 +791,21 @@ uint8_t spire_meta_final_boss_room(uint8_t episode) {
   return (episode == 1) ? 15 : (episode == 2) ? 30 : 0; // Episode 2: Olga Flow in k30 (spel-af item 5)
 }
 
+uint8_t spire_meta_episode_first_room(uint8_t episode) {
+  return (episode == 2) ? (spire_meta_final_boss_room(1) + 1) : 1;
+}
+
+uint8_t spire_meta_exams_passed(uint8_t episode, uint8_t start_room, uint8_t reached_room, bool won) {
+  uint8_t ret = 0;
+  uint32_t final_k = spire_meta_final_boss_room(episode);
+  for (uint32_t k = std::max<uint32_t>(start_room, spire_meta_episode_first_room(episode)); k <= final_k; k++) {
+    if (spire_meta_boss_name(k) && (won || (k < reached_room))) {
+      ret++;
+    }
+  }
+  return ret;
+}
+
 // "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
 static std::string spire_shop_level_name(const SpireShopCatalogue& cat, size_t index, uint32_t level) {
   if ((index == 0) && (level < cat.items[0].levels.size())) {

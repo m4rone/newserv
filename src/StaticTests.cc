@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "Channel.hh"
+#include "Compression.hh"
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
 #include "GameServer.hh"
@@ -6265,7 +6266,8 @@ void run_static_tests() {
       // kwaliteit-2 197/202: 0xF0 is Sega's own teleporter; one pipe of another type keeps the two-pipe words
       expect_eq(std::string("The way is open. Take the teleporter: Room 3."), spire_bridge_message_text(0x43F00603));
       expect_eq(std::string("The way is open. Walk to the warp: Room 3 REST."), spire_bridge_message_text(0x43F20603));
-      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43050605)); // no such type
+      // kwaliteit-3 4: the types 4-7 are 0-3 behind Sega's teleporter now (0x05 was "no such type" before); 8 is none
+      expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43080605)); // no such type
       expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43FF0605));
     });
 
@@ -7578,6 +7580,577 @@ void run_static_tests() {
     });
 
     expect_eq(0u, k2_failed);
+  }
+
+  phosg::log_info_f("-- Spire kwaliteit-3 (samenspel en robuustheid): the server counts, keeps and unlocks only what was played");
+  {
+    // every case runs, a failed one is logged, and the section fails at its end if any did
+    size_t k3_failed = 0;
+    auto k3_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   K3 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        k3_failed++;
+        phosg::log_error_f("   K3 ({}) FAILED: {}", name, e.what());
+      }
+    };
+
+    // an inventory of items by data1[0] (0 weapon, 2 mag), id 0x00010000 + index
+    auto k3_inventory = [](std::initializer_list<uint8_t> types) {
+      PlayerInventory inv;
+      size_t z = 0;
+      for (uint8_t type : types) {
+        inv.items[z].data.data1[0] = type;
+        inv.items[z].data.data1[1] = 0x01;
+        inv.items[z].data.id = 0x00010000 + z;
+        z++;
+      }
+      inv.num_items = z;
+      return inv;
+    };
+
+    // What the quest of d6fc2ef sends at a run end (score.py score_and_persist): r169 = k - 1 (no rest room taken),
+    // exams 1 from ROOMS_EXAM1 4 and 2 from ROOMS_WIN 8, rooms = r169 - exams, S = 100 kills + 500 rooms + 2000 exams
+    // (no lives, no meseta, no time bonus: 3000 s played), score = S (4 + pacts) / 4; 'F' = seconds | exams << 16 |
+    // deathless << 18 | pacts << 19 | won << 23. k_end is the quest's room counter at the end (a won run: last room + 1).
+    struct K3QuestEnd {
+      uint32_t finish;
+      uint32_t score;
+    };
+    auto k3_quest_end = [](uint32_t k_end, bool won, bool deathless, uint32_t pacts, uint32_t kills) {
+      uint32_t r169 = k_end - 1;
+      uint32_t exams = (r169 >= 8) ? 2 : (r169 >= 4) ? 1 : 0;
+      uint32_t s = 100 * kills + 500 * (r169 - exams) + 2000 * exams;
+      K3QuestEnd ret;
+      ret.score = (s * (4 + pacts)) / 4;
+      ret.finish = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | 3000 | (exams << 16) | (pacts << 19) |
+          (won ? ((1u << 23) | (deathless ? SPIRE_META_FINISH_DEATHLESS : 0)) : 0);
+      return ret;
+    };
+
+    k3_case("1: the exams of a run are the bosses of its episode it left behind", [&]() {
+      expect_eq(1, spire_meta_episode_first_room(1));
+      expect_eq(16, spire_meta_episode_first_room(2));
+      // Episode 1 from k1: the Dragon k4, De Rol Le k8, Vol Opt k11, Dark Falz k15
+      expect_eq(0, spire_meta_exams_passed(1, 1, 1, false));
+      expect_eq(0, spire_meta_exams_passed(1, 1, 4, false)); // in the Dragon's room: not passed yet
+      expect_eq(1, spire_meta_exams_passed(1, 1, 5, false));
+      expect_eq(1, spire_meta_exams_passed(1, 1, 8, false));
+      expect_eq(2, spire_meta_exams_passed(1, 1, 9, false));
+      expect_eq(3, spire_meta_exams_passed(1, 1, 15, false));
+      expect_eq(4, spire_meta_exams_passed(1, 1, 15, true));
+      expect_eq(4, spire_meta_exams_passed(1, 1, 0, true)); // a win beat them all, whatever the server saw of the rooms
+      // Episode 2 from k16: Barba Ray k18, the Gol Dragon k21, the Gal Gryphon k27, Olga Flow k30; never a boss of
+      // Episode 1, whatever the room number is
+      expect_eq(0, spire_meta_exams_passed(2, 16, 16, false));
+      expect_eq(0, spire_meta_exams_passed(2, 16, 18, false));
+      expect_eq(1, spire_meta_exams_passed(2, 16, 19, false));
+      expect_eq(2, spire_meta_exams_passed(2, 16, 22, false));
+      expect_eq(3, spire_meta_exams_passed(2, 16, 30, false));
+      expect_eq(4, spire_meta_exams_passed(2, 16, 30, true));
+      expect_eq(0, spire_meta_exams_passed(2, 1, 16, false)); // a start room before the episode's first room
+      // a run that began after a boss never passed it
+      expect_eq(1, spire_meta_exams_passed(1, 5, 9, false));
+      expect_eq(0, spire_meta_exams_passed(3, 1, 30, true)); // no such episode
+      // the room a client reached: the highest of what the server saw
+      expect_eq(16, spire_run_reached_room(16, 0, 0, {}));
+      expect_eq(20, spire_run_reached_room(16, 20, 0, {}));
+      expect_eq(19, spire_run_reached_room(16, 0, 19, {17, 18}));
+      expect_eq(5, spire_run_reached_room(1, 0, 0, {4, 5}));
+      expect_eq(255, spire_run_reached_room(1, 0, 4000, {}));
+    });
+
+    k3_case("1: a finished run gets the exams and the score of what it played", [&]() {
+      auto seen = [](uint8_t episode, uint8_t start_room, uint8_t reached_room) {
+        return SpireRunSeen{.known = true, .episode = episode, .start_room = start_room, .reached_room = reached_room};
+      };
+      // Spire Run II lost in its first room, as the quest of d6fc2ef sends it: both exams and 13 rooms nobody played
+      auto e2_k16 = k3_quest_end(16, false, false, 0, 10);
+      expect_eq(2, spire_meta_decode_finish(e2_k16.finish).exams);
+      expect_eq(11500u, e2_k16.score);
+      auto got = spire_finish_seen(e2_k16.finish, e2_k16.score, seen(2, 16, 16));
+      expect_eq(2, got.quest_exams);
+      expect_eq(0, got.exams);
+      expect_eq(0, spire_meta_decode_finish(got.finish_value).exams);
+      expect_eq(15u, got.rooms_removed);
+      expect_eq(2u, got.exams_removed);
+      expect_eq(10500u, got.score_removed); // 13 rooms and 2 exams: 15 x 500 + 2 x 1500
+      expect_eq(1000u, got.score);
+      expect_eq(e2_k16.finish & ~(3u << 16), got.finish_value); // seconds, pacts and the won bit as sent
+      // the same with two pacts: the quest's multiplier (4 + 2) / 4 on what is taken off too
+      auto e2_k16_p2 = k3_quest_end(16, false, false, 2, 10);
+      expect_eq(17250u, e2_k16_p2.score);
+      got = spire_finish_seen(e2_k16_p2.finish, e2_k16_p2.score, seen(2, 16, 16));
+      expect_eq(1500u, got.score);
+      expect_eq(2, spire_meta_decode_finish(got.finish_value).pacts);
+      // lost after Barba Ray (in k19): one exam, the rooms k16 and k17 and the exam k18
+      auto e2_k19 = k3_quest_end(19, false, false, 0, 10);
+      got = spire_finish_seen(e2_k19.finish, e2_k19.score, seen(2, 16, 19));
+      expect_eq(1, got.exams);
+      expect_eq(1000u + 2 * 500 + 2000, got.score);
+      // lost after the Gol Dragon (in k22): both, as the quest said, and only the 15 rooms before k16 go
+      auto e2_k22 = k3_quest_end(22, false, false, 0, 10);
+      got = spire_finish_seen(e2_k22.finish, e2_k22.score, seen(2, 16, 22));
+      expect_eq(2, got.exams);
+      expect_eq(0u, got.exams_removed);
+      expect_eq(1000u + 4 * 500 + 2 * 2000, got.score);
+      // won: both exams as before, whatever the server saw of the rooms; the score still loses the rooms before k16
+      auto e2_won = k3_quest_end(31, true, true, 0, 10);
+      got = spire_finish_seen(e2_won.finish, e2_won.score, seen(2, 16, 16));
+      expect_eq(2, got.exams);
+      expect(spire_meta_decode_finish(got.finish_value).won && spire_meta_decode_finish(got.finish_value).deathless);
+      expect_eq(e2_won.score - 15 * 500, got.score);
+      // a score smaller than what would go (no 'K' came: 0) never goes below 0
+      expect_eq(0u, spire_finish_seen(e2_k16.finish, 0, seen(2, 16, 16)).score);
+      // Episode 1 from room 1 loses nothing: every end the quest can send keeps its 'F' and its score
+      for (uint32_t k_end = 1; k_end <= 16; k_end++) {
+        for (bool won : {false, true}) {
+          if (won != (k_end == 16)) {
+            continue;
+          }
+          auto e1 = k3_quest_end(k_end, won, false, 1, 7);
+          got = spire_finish_seen(e1.finish, e1.score, seen(1, 1, std::min<uint32_t>(k_end, 15)));
+          expect_eq(e1.finish, got.finish_value);
+          expect_eq(e1.score, got.score);
+          expect_eq(0u, got.score_removed);
+        }
+      }
+      // ... and even when the server saw nothing of its rooms (no 'V' stored, no checkpoint), the quest's count stands
+      auto e1_k9 = k3_quest_end(9, false, false, 0, 10);
+      got = spire_finish_seen(e1_k9.finish, e1_k9.score, seen(1, 1, 1));
+      expect_eq(2, got.exams);
+      expect_eq(e1_k9.score, got.score);
+      // the Dragon after a rest room: the quest counts 3 rooms (r169 = 4 - 1) and no exam; the server saw the run
+      // leave k4 behind, so the Dragon's unlocks come. The score stays the quest's.
+      uint32_t rest_finish = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | 3000;
+      got = spire_finish_seen(rest_finish, 2500, seen(1, 1, 5));
+      expect_eq(1, got.exams);
+      expect_eq(2500u, got.score);
+      // a run the server does not know (no 'B' with a start room): everything as sent
+      got = spire_finish_seen(e2_k16.finish, e2_k16.score, SpireRunSeen{});
+      expect_eq(e2_k16.finish, got.finish_value);
+      expect_eq(e2_k16.score, got.score);
+      expect_eq(2, got.exams);
+      // the next quest counts from the run's first room and says so (bit 22): its score is not corrected, and the
+      // exams are still the server's (here the quest claims one the run did not pass)
+      uint32_t from_start = (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | 3000 | SPIRE_FINISH_FROM_START;
+      got = spire_finish_seen(from_start, 1000, seen(2, 16, 16));
+      expect_eq(0, got.exams);
+      expect_eq(1000u, got.score);
+      expect_eq(0u, got.score_removed);
+      got = spire_finish_seen(from_start | (1 << 16), 4000, seen(2, 16, 19));
+      expect_eq(1, got.exams);
+      expect_eq(4000u, got.score);
+      expect_eq(0x00400000u, SPIRE_FINISH_FROM_START);
+      expect_eq(500u, SPIRE_SCORE_PER_ROOM);
+      expect_eq(2000u, SPIRE_SCORE_PER_EXAM);
+    });
+
+    // ---- a real client in a real game, through spire_bridge_handle_register, in a temp directory (the bridge reads
+    // and writes by relative paths) with the real shop catalogue (its Payout block)
+    struct K3TempCwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir;
+      explicit K3TempCwd(const char* tag)
+          : dir(std::filesystem::temp_directory_path() / std::format("newserv-static-spire-k3-{}-{}", tag, getpid())) {
+        std::string shop_json = phosg::load_file(SPIRE_SHOP_CATALOGUE_FILE);
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+        phosg::save_file(SPIRE_SHOP_CATALOGUE_FILE, shop_json);
+      }
+      ~K3TempCwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    };
+    struct K3Channel : Channel {
+      std::vector<std::string> sent;
+      bool open = true;
+      K3Channel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return this->open;
+      }
+      virtual void disconnect() {
+        this->open = false;
+      }
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      // the values of every 6x77 for this register, in order
+      std::vector<uint32_t> register_values(uint16_t register_number) const {
+        std::vector<uint32_t> ret;
+        for (const auto& data : this->sent) {
+          for (size_t z = 0; z + sizeof(G_SyncQuestRegister_6x77) <= data.size(); z += 4) {
+            const auto* cmd = reinterpret_cast<const G_SyncQuestRegister_6x77*>(data.data() + z);
+            if ((cmd->header.subcommand == 0x77) && (cmd->header.size == sizeof(G_SyncQuestRegister_6x77) / 4) &&
+                (cmd->register_number == register_number)) {
+              ret.emplace_back(cmd->value.as_int);
+            }
+          }
+        }
+        return ret;
+      }
+    };
+    struct K3TestState : ServerState {
+      K3TestState() = default;
+    };
+    struct K3Player {
+      std::shared_ptr<K3Channel> ch;
+      std::shared_ptr<Client> c;
+      uint32_t serial_number = 0;
+      std::string stem() const {
+        return std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, this->serial_number,
+            spire_guard_character_id(this->c->character_file(false, false)->disp));
+      }
+    };
+    // Every K3World starts its lobby ids and serial numbers at the same values on purpose: a case after another one
+    // gets games and characters the bridge has seen before, so a key that spire_static_test_forget leaves behind shows
+    // (kwaliteit-3 6, critic r2 K-4: the run end of the first case's game 0x7B02 made the resume case's 'J' "fresh")
+    struct K3World {
+      std::shared_ptr<K3TestState> s = std::make_shared<K3TestState>();
+      std::shared_ptr<GameServer> server;
+      uint32_t next_lobby_id = 0x7B01;
+      uint32_t next_serial = 5200;
+      K3World() {
+        this->s->data = std::make_shared<DataIndex>();
+        this->s->io_context = std::make_shared<asio::io_context>(1);
+        this->server = std::make_shared<GameServer>(this->s);
+      }
+      std::shared_ptr<Lobby> game(uint32_t quest_number, Episode episode) {
+        this->s->data->spire_bridge_quest_numbers.emplace(quest_number);
+        auto vq = std::make_shared<VersionedQuest>();
+        vq->meta.quest_number = quest_number;
+        auto l = std::make_shared<Lobby>(this->s, this->next_lobby_id++, true);
+        l->episode = episode;
+        l->mode = GameMode::BATTLE;
+        l->quest = std::make_shared<Quest>(vq);
+        return l;
+      }
+      // a GC client with a run copy holding a weapon and a mag
+      K3Player player() {
+        K3Player p;
+        p.serial_number = this->next_serial++;
+        p.ch = std::make_shared<K3Channel>();
+        p.c = std::make_shared<Client>(this->server, p.ch, ServerBehavior::GAME_SERVER);
+        auto login = std::make_shared<Login>();
+        login->account = std::make_shared<Account>();
+        login->gc_license = std::make_shared<GCLicense>();
+        login->gc_license->serial_number = p.serial_number;
+        p.c->login = login;
+        p.c->character_file(true, false); // a GC client's character data: an empty file, nothing is read
+        return p;
+      }
+      void join(K3Player& p, std::shared_ptr<Lobby> l, const PlayerInventory& run_copy) {
+        p.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
+        p.c->character_file(false, true)->inventory = run_copy;
+        p.c->lobby_client_id = 0;
+        l->clients[0] = p.c;
+        p.c->lobby = l;
+      }
+      void leave(K3Player& p, std::shared_ptr<Lobby> l) {
+        spire_static_test_forget(p.c, l);
+        l->clients.fill(nullptr);
+        p.c->lobby.reset();
+      }
+    };
+    auto k3_reg = [&](K3Player& p, std::shared_ptr<const Lobby> l, uint16_t register_number, uint32_t value) {
+      expect(spire_bridge_handle_register(p.c, l, register_number, value)); // taken by the bridge
+    };
+    // the quest's room start: SPIRE_SAVESTATE_NUM_VALUES values (the room and the variant value first), then 'V'
+    auto k3_v_write = [&](K3Player& p, std::shared_ptr<const Lobby> l, uint32_t room, uint32_t variant_value) {
+      for (uint32_t z = 0; z < SPIRE_SAVESTATE_NUM_VALUES; z++) {
+        k3_reg(p, l, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == SPIRE_SS_K) ? room : (z == SPIRE_SS_VARIANT) ? variant_value : 0);
+      }
+      k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER,
+          (static_cast<uint32_t>(SPIRE_BRIDGE_SAVESTATE_WRITE) << 24) | SPIRE_SAVESTATE_NUM_VALUES);
+    };
+    // the flags set on Normal in the character's meta file, "0380 0381 ..."
+    auto k3_flags = [&](const K3Player& p) {
+      std::string ret;
+      auto file = spire_meta_load_file(spire_meta_filename_for(p.serial_number, &p.c->character_file(false, false)->disp));
+      for (const auto& [key, is_set] : file.flags) {
+        expect_eq(0, key.first); // a Normal game writes no flag on another difficulty
+        if (is_set) {
+          ret += std::format("{}{:04X}", ret.empty() ? "" : " ", key.second);
+        }
+      }
+      return ret;
+    };
+
+    k3_case("1: what a lost and a won run of Episode 1 and 2 set, through 'B', 'V', 'K' and 'F'", [&]() {
+      K3TempCwd temp_cwd("finish");
+      K3World w;
+      struct Run {
+        const char* name;
+        uint32_t quest_number;
+        Episode episode;
+        uint32_t k0;
+        uint32_t reached; // the room the client dies in (a won run: the last room)
+        bool won;
+        const char* flags; // on Normal, after the 'F'
+        uint32_t best_score;
+        uint32_t best_time;
+        uint32_t won_count;
+      };
+      const char* dragon = "0380 0381 0384 0385";
+      const char* derolle = "0380 0381 0382 0384 0385 0386 0387";
+      const std::vector<Run> runs = {
+          {"Episode 1 q921 lost in k1", 921, Episode::EP1, 1, 1, false, "0380", 1000, 0, 0},
+          {"Episode 1 q921 lost in k5", 921, Episode::EP1, 1, 5, false, dragon, 4500, 0, 0},
+          {"Episode 1 q921 lost in k9", 921, Episode::EP1, 1, 9, false, derolle, 8000, 0, 0},
+          {"Episode 1 q921 won deathless", 921, Episode::EP1, 1, 15, true,
+              "0380 0381 0382 0383 0384 0385 0386 0387 0388 038B 03A0 03A1 03A2", 11500, 3000, 1},
+          {"Episode 2 q922 lost in k16", 922, Episode::EP2, 16, 16, false, "0380", 1000, 0, 0},
+          {"Episode 2 q922 lost in k19", 922, Episode::EP2, 16, 19, false, dragon, 4000, 0, 0},
+          {"Episode 2 q922 lost in k22", 922, Episode::EP2, 16, 22, false, derolle, 7000, 0, 0},
+          {"Episode 2 q922 won deathless", 922, Episode::EP2, 16, 30, true,
+              "0380 0381 0382 0383 0384 0385 0386 0387 0388 038C 03A0 03A1 03A2", 11500, 3000, 1},
+      };
+      size_t wrong = 0;
+      for (const auto& run : runs) {
+        auto l = w.game(run.quest_number, run.episode);
+        auto p = w.player();
+        w.join(p, l, k3_inventory({0x00, 0x02}));
+        k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER,
+            (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (run.k0 << 8) | run.k0);
+        for (uint32_t k = run.k0 + 1; k <= run.reached; k++) {
+          k3_v_write(p, l, k, 0);
+        }
+        auto end = k3_quest_end(run.won ? (run.reached + 1) : run.reached, run.won, run.won, 0, 10);
+        k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_SCORE) << 24) | end.score);
+        k3_reg(p, l, SPIRE_BRIDGE_REQUEST_REGISTER, end.finish);
+        std::string flags = k3_flags(p);
+        auto rec = spire_records_load(p.stem() + ".records.json");
+        bool ok = (flags == run.flags) && (rec.best_score == run.best_score) && (rec.best_time == run.best_time) &&
+            (rec.runs == 1) && (rec.won == run.won_count);
+        wrong += ok ? 0 : 1;
+        phosg::log_info_f("   K3 measure: {}: quest 'F' {:08X} score {} -> flags {}; BestScore {}, BestTime {}, Runs {}, "
+            "Won {}, Splinters {}{}", run.name, end.finish, end.score, flags, rec.best_score, rec.best_time, rec.runs,
+            rec.won, rec.splinters, ok ? "" : std::format(" (EXPECTED flags {}; BestScore {})", run.flags, run.best_score));
+        w.leave(p, l);
+      }
+      expect_eq(0u, wrong);
+    });
+
+    k3_case("3: a savestate keeps the rest rooms, and a file from before loads as it did", [&]() {
+      // a file as newserv 9e40c01 wrote it (spire_savestate_to_json before "RestRooms"): Spire Run II saved at the
+      // start of k20, a rest room
+      const std::string old_file = "{\"SerialNumber\": 5300, \"RunId\": 305419896, \"Episode\": 2, \"Quest\": 922, "
+          "\"StartRoom\": 16, \"Practice\": false, \"Room\": 20, "
+          "\"Values\": [20, 2, 0, 0, 0, 3, 600, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0], \"Items\": [], "
+          "\"GlassIndex\": -1, \"Time\": 1, \"Level\": 30, \"Equipped\": []}";
+      auto old_ss = spire_savestate_from_json(old_file);
+      expect(old_ss.exists);
+      expect_eq(0, old_ss.rest_rooms);
+      expect_eq(16, old_ss.start_room);
+      expect_eq(2u, old_ss.values[SPIRE_SS_VARIANT]);
+      expect(spire_savestate_matches(old_ss, 2, 20, 2, 0));
+      // written again it has no new key, so a server from before reads what it wrote
+      expect(spire_savestate_to_json(old_ss, 5300).find("RestRooms") == std::string::npos);
+      // 2: its resume answer carries the run's first room in bits 16-23, and nothing in bits 12-15
+      expect_eq(0x4A100100u, spire_resume_answer_value(old_ss));
+      old_ss.start_room = 0; // a savestate without a start room: the answer of before, the quest falls back on its K0
+      expect_eq(SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME, spire_resume_answer_value(old_ss));
+      old_ss.start_room = 16;
+
+      // the 'V' of the next quest: r131 & 0x3F in the variant value (here rest, with rest bits 0 and 2)
+      std::vector<uint32_t> values(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      values[SPIRE_SS_K] = 20;
+      values[SPIRE_SS_VARIANT] = 2 | (5 << 2);
+      expect_eq(5, spire_savestate_take_rest_rooms(values));
+      expect_eq(2u, values[SPIRE_SS_VARIANT]);
+      // the 'V' of the quest of d6fc2ef: r131 & 3
+      values[SPIRE_SS_VARIANT] = 2;
+      expect_eq(0, spire_savestate_take_rest_rooms(values));
+      expect_eq(2u, values[SPIRE_SS_VARIANT]);
+      std::vector<uint32_t> none;
+      expect_eq(0, spire_savestate_take_rest_rooms(none));
+
+      // a savestate with rest rooms goes to the file and back
+      auto new_ss = old_ss;
+      new_ss.rest_rooms = 5;
+      new_ss.items.resize(3);
+      std::string new_file = spire_savestate_to_json(new_ss, 5300);
+      expect(new_file.find("\"RestRooms\"") != std::string::npos);
+      auto back = spire_savestate_from_json(new_file);
+      expect_eq(5, back.rest_rooms);
+      expect_eq(16, back.start_room);
+      expect_eq(2u, back.values[SPIRE_SS_VARIANT]);
+      expect(spire_savestate_matches(back, 2, 20, 2, 0));
+      uint32_t answer = spire_resume_answer_value(back);
+      expect_eq(0x4A105103u, answer);
+      // the next quest: the run's first room, and r131 |= (answer >> 10) & 0x3C puts the rest bits back
+      expect_eq(16u, (answer >> SPIRE_RESUME_ANSWER_START_ROOM_SHIFT) & 0xFF);
+      expect_eq(5u << 2, (answer >> 10) & 0x3C);
+      // the quest of d6fc2ef (make_spire.py rs_begin): the top byte is the tag, RS_ON = answer & 0xFFFF is used as
+      // "not 0" and as & 0xFF, the item count
+      expect_eq(SPIRE_RESUME_ANSWER_TAG, answer & 0xFF000000);
+      expect((answer & 0xFFFF) != 0);
+      expect_eq(3u, (answer & 0xFFFF) & 0xFF);
+      // every rest bit and every start room stays out of the low byte and the top byte
+      for (uint32_t rest = 0; rest <= 15; rest++) {
+        for (uint32_t start : {0u, 1u, 16u, 30u, 255u}) {
+          auto ss = back;
+          ss.rest_rooms = rest;
+          ss.start_room = start;
+          uint32_t a = spire_resume_answer_value(ss);
+          expect_eq(SPIRE_RESUME_ANSWER_TAG, a & 0xFF000000);
+          expect_eq(3u, a & 0xFF);
+          expect_eq(SPIRE_RESUME_ANSWER_RESUME, a & 0x0F00);
+          expect_eq(rest, (a >> SPIRE_RESUME_ANSWER_REST_SHIFT) & 0x0F);
+          expect_eq(start, (a >> SPIRE_RESUME_ANSWER_START_ROOM_SHIFT) & 0xFF);
+        }
+      }
+      // a RestRooms that is no integer in 0-15 is none; the file still resumes
+      for (const char* bad : {"99", "-1", "\"x\"", "[1]"}) {
+        std::string file = old_file;
+        file.insert(file.size() - 1, std::format(", \"RestRooms\": {}", bad));
+        auto ss = spire_savestate_from_json(file);
+        expect(ss.exists);
+        expect_eq(0, ss.rest_rooms);
+        expect(spire_savestate_matches(ss, 2, 20, 2, 0));
+      }
+    });
+
+    k3_case("2 and 3: a 'V' stores the rest rooms, the 'J' answer gives them back with the run's first room", [&]() {
+      K3TempCwd temp_cwd("resume");
+      K3World w;
+      const uint32_t REQ = SPIRE_BRIDGE_REQUEST_REGISTER;
+      auto p = w.player();
+      // Spire Run II (K0 16), no practice run; the next quest's 'V' at k20, a rest room, with rest bits 0 and 2
+      auto l1 = w.game(922, Episode::EP2);
+      w.join(p, l1, k3_inventory({0x00, 0x02}));
+      k3_reg(p, l1, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (16 << 8) | 16);
+      k3_v_write(p, l1, 17, 0);
+      k3_v_write(p, l1, 20, 2 | (5 << SPIRE_SS_REST_SHIFT));
+      std::string file = p.stem() + ".savestate.normal.json";
+      auto ss = spire_savestate_from_json(phosg::load_file(file));
+      expect_eq(16, ss.start_room);
+      expect_eq(5, ss.rest_rooms);
+      expect_eq(20u, ss.values[SPIRE_SS_K]);
+      expect_eq(2u, ss.values[SPIRE_SS_VARIANT]);
+      expect_eq(1u, ss.items.size()); // the weapon; a mag that is no run mag stays out
+      w.leave(p, l1); // the player is gone without a run end: the savestate stays
+      expect(std::filesystem::is_regular_file(file));
+
+      // the room quest of k20 (rest): 'J' << 24 | variant << 8 | k
+      auto l2 = w.game(960, Episode::EP2);
+      w.join(p, l2, k3_inventory({}));
+      size_t answers_before = p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER).size();
+      k3_reg(p, l2, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (2 << 8) | 20);
+      auto answers = p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER);
+      expect_eq(answers_before + 1, answers.size());
+      expect_eq(0x4A105101u, answers.back());
+      // 1: its 'B' (resumed, K0 16, the room quest's own start room 20), and the run dies in k20. The quest of
+      // d6fc2ef counts r169 = 19: both exams and 17 rooms; the server saw the run from k16 to k20: Barba Ray (k18)
+      // and the rooms k16, k17 and k19
+      k3_reg(p, l2, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 16) | (16 << 8) | 20);
+      auto end = k3_quest_end(20, false, false, 0, 10);
+      expect_eq(13500u, end.score);
+      k3_reg(p, l2, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_SCORE) << 24) | end.score);
+      k3_reg(p, l2, REQ, end.finish);
+      std::string flags = k3_flags(p);
+      auto rec = spire_records_load(p.stem() + ".records.json");
+      phosg::log_info_f("   K3 measure: Episode 2 q922 resumed in k20 and lost there: quest 'F' {:08X} score {} -> flags {}; "
+          "BestScore {}, Runs {}, Won {}", end.finish, end.score, flags, rec.best_score, rec.runs, rec.won);
+      expect_eq(std::string("0380 0381 0384 0385"), flags);
+      expect_eq(1000u + 3 * 500 + 2000, rec.best_score);
+      expect_eq(1u, rec.runs); // the resume is no new run
+      w.leave(p, l2);
+    });
+
+    k3_case("4: 'C' 6 with the teleporter bit names Sega's teleporter; without it every line is the one of before", [&]() {
+      SpireDrawTable named;
+      named.exams[4].boss = "Dragon";
+      SpireBridgeTextContext with_names, on_map;
+      with_names.draw = &named;
+      on_map.boss_teleporter = true;
+      const std::string before = "The way is open: Room 12 normal or Room 12 ELITE. Walk close to a warp to read it.";
+      // k11 (after Vol Opt): side A is Sega's teleporter, side B our pipe to the elite room
+      expect_eq(before, spire_bridge_message_text(0x4310060C));
+      expect_eq(std::string("The way is open: teleporter to Room 12 normal, warp to Room 12 ELITE."),
+          spire_bridge_message_text(0x4314060C));
+      expect_eq(std::string("The way is open: warp to Room 12 normal, teleporter to Room 12 ELITE."),
+          spire_bridge_message_text(0x4350060C));
+      expect_eq(std::string("The way is open: Room 12 normal or Room 12 ELITE. Take a teleporter."),
+          spire_bridge_message_text(0x4354060C));
+      // the exit before a boss: 0xF7 says the teleporter itself, 0xF3 leaves it to the game's map as before
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Dragon."), spire_bridge_message_text(0x43F70604, with_names));
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Room 4."), spire_bridge_message_text(0x43F70604));
+      expect_eq(std::string("The way is open. Walk to the warp: Exam Dragon."), spire_bridge_message_text(0x43F30604, with_names));
+      expect_eq(std::string("The way is open. Take the teleporter: Exam Room 4."), spire_bridge_message_text(0x43F30604, on_map));
+      // one way of another type behind Sega's teleporter
+      expect_eq(std::string("The way is open. Take the teleporter: Room 3."), spire_bridge_message_text(0x43F40603));
+      expect_eq(std::string("The way is open. Take the teleporter: Room 3 REST."), spire_bridge_message_text(0x43F60603));
+      expect_eq(std::string("The way is open. Walk to the warp: Room 3 REST."), spire_bridge_message_text(0x43F20603));
+      // a type that still does not exist
+      for (uint32_t bits : {0x08u, 0x80u, 0xF8u, 0x9Fu, 0xFFu}) {
+        expect_eq(std::string("The way is open. Walk to a warp."), spire_bridge_message_text(0x43000605 | (bits << 16)));
+      }
+      for (uint32_t bits = 1; bits <= 0xFF; bits++) {
+        uint32_t type_a = bits & 0x0F, type_b = bits >> 4;
+        bool one_way = (type_b == 0x0F);
+        if ((type_a > 7) || (!one_way && (type_b > 7))) {
+          continue;
+        }
+        bool teleporter = (type_a & 4) || (!one_way && (type_b & 4));
+        for (uint32_t k : {1u, 12u, 30u, 255u}) {
+          std::string text = spire_bridge_message_text(0x43000600 | (bits << 16) | k);
+          expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+          if (teleporter) {
+            // a side with nothing to read is never told to be read, and the teleporter is named
+            expect((text.find("read it") == std::string::npos) && (text.find("eleporter") != std::string::npos));
+          } else if (!one_way) {
+            expect_eq(std::format("The way is open: Room {} {} or Room {} {}. Walk close to a warp to read it.", k,
+                    std::array<const char*, 4>{"normal", "ELITE", "REST", "EXAM"}[type_a], k,
+                    std::array<const char*, 4>{"normal", "ELITE", "REST", "EXAM"}[type_b]),
+                text);
+          }
+        }
+      }
+      expect_eq(4u, SPIRE_WAY_SEGA_TELEPORTER);
+    });
+
+    k3_case("5: Sega's boss teleporter is found on its floor in a built quest map", [&]() {
+      // tests/spire-gc.dat: the q920/q921 map as pso-roguelike quests/spire/build.sh built it (2026-11-11). Its object
+      // list has one TObjWarpBoss (type 0x0019) on the floors 2, 5, 7 and 10 (k3, k7, k10 and k14, the rooms before
+      // the four bosses) and none on any other floor (newserv disassemble-quest-map --gc)
+      auto data = std::make_shared<std::string>(prs_decompress(phosg::load_file("tests/spire-gc.dat")));
+      std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+      map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(data);
+      QuestMetadata meta;
+      meta.episode = Episode::EP1;
+      meta.assign_default_floors();
+      auto supermap = std::make_shared<SuperMap>(map_files, meta.get_floor_to_area());
+      MapState map_state(0x7C01, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, nullptr, supermap);
+      size_t objects = 0;
+      for (const auto& obj_st : map_state.iter_object_states(Version::GC_V3)) {
+        objects += obj_st->super_obj ? 1 : 0;
+      }
+      expect(objects > 100);
+      std::string with;
+      for (uint8_t floor = 0; floor < 0x12; floor++) {
+        bool has = spire_map_has_boss_teleporter(map_state, Version::GC_V3, floor);
+        with += has ? std::format(" {}", floor) : "";
+        expect_eq((floor == 2) || (floor == 5) || (floor == 7) || (floor == 10), has);
+      }
+      phosg::log_info_f("   K3: tests/spire-gc.dat has {} objects; Sega's boss teleporter on floor(s){}", objects, with);
+      MapState empty;
+      expect(!spire_map_has_boss_teleporter(empty, Version::GC_V3, 2));
+    });
+
+    expect_eq(0u, k3_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");

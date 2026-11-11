@@ -20,6 +20,8 @@
 //
 // The run's unlocks are decided here, not in the quest: the 'F' record code carries the exams passed (bits 16-17:
 // 1 = Dragon, 2 = De Rol Le) and a deathless team (bit 18) next to the won bit (23) and the seconds (low 16 bits).
+// kwaliteit-3 1: the exams are the first and the second boss of the run's episode (Episode 2: Barba Ray, Gol Dragon),
+// and for a run the server knows they are what the server saw the run pass (spire_finish_seen), not the quest's field.
 // From that the server sets 0x380 (first run), 0x381/0x384/0x385 (Dragon: Iron man, Haste), 0x382/0x386/0x387/0x3A0
 // (De Rol Le: Bare, Hungry, payout win), 0x383/0x3A1 + the second kit of the class's archetype (0x388 HU, 0x389 RA,
 // 0x38A FO) for a deathless win, and 0x3A2 on a new best time; it delivers them at once and names what is new.
@@ -39,8 +41,9 @@ constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
 constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits
 constexpr uint32_t SPIRE_META_FINISH_DEATHLESS = 1 << 18;
 // Route B F2: the pacts the run carried, bits 19-21 of 'F' (the quest adds pacts << 19 before its score_keep jump, so a
-// lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 22 is unused and bit 23
-// is the won bit; a quest that does not send pacts sends 0.
+// lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 23 is the won bit; a
+// quest that does not send pacts sends 0. Bit 22 (kwaliteit-3 1, SPIRE_FINISH_FROM_START in SpireFlagBridge.hh): the
+// quest counted its rooms and exams from the run's first room; a quest from before sends 0.
 constexpr uint32_t SPIRE_META_FINISH_PACTS_SHIFT = 19; // 3 bits
 constexpr uint8_t SPIRE_META_FINISH_PACTS_MAX = 4;
 
@@ -296,6 +299,13 @@ const char* spire_meta_boss_name(uint8_t k);
 // won run beat. Pure.
 bool spire_meta_boss_room_before(uint32_t k);
 uint8_t spire_meta_final_boss_room(uint8_t episode);
+// kwaliteit-3 1: the first room of an episode's run: k1 in Episode 1, the room after Dark Falz (k16) in Episode 2.
+uint8_t spire_meta_episode_first_room(uint8_t episode);
+// kwaliteit-3 1: the exams a run passed as the server saw it: the boss rooms b of the run's episode from the run's
+// first room on that the run left behind (start_room <= b < reached_room: it started the room after the boss, B-AF-1),
+// and for a won run every boss room from its first room on (a win beat the episode's last boss; the rooms are one
+// line). A run that never left its first room passed none, whatever its room number is. Pure.
+uint8_t spire_meta_exams_passed(uint8_t episode, uint8_t start_room, uint8_t reached_room, bool won);
 // B-AF-1: the ticker line for a BUY refused because the next level waits for boss room k ("" for k 0).
 std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, uint8_t k);
