@@ -72,7 +72,7 @@ het voeren van de mag, dan heeft hij na de login het item terug zoals vóór dez
 een ruil afgebroken, dan houdt hij zijn items. Netjes verlaten (98) houdt alles zoals het spel het opsloeg.
 
 ## Build en checks
-- `build/newserv help | head -1` (na de rapport-commit opnieuw gebouwd): zie de regel hieronder
+- `build/newserv help | head -1`: `newserv-aca05da built 2026-11-11 22:07:51.000000 UTC` (src gelijk aan 6ac4c46; de statische tests liepen op die bronnen)
 - `build/newserv run-static-tests`: exit 0; GUARD E2E 16, FAILED 0
 - `git diff --quiet ee0fa66 HEAD -- src/SpireDrops.cc src/SpireDrops.hh`: exit 0 (gelijk)
 - K7-valafhandeling: `git diff 37bd1f8 HEAD -- src/SpireFlagBridge.cc` heeft 0 verwijderde regels; ReceiveSubcommands.cc verschilt van 37bd1f8 alleen in de 6x29-aanroep
