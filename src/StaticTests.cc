@@ -1533,7 +1533,12 @@ void run_static_tests() {
     expect_eq(14u, spire_quest_load_char_level(0, 14, std::nullopt));
     expect_eq(37u, spire_quest_load_char_level(27, 10, std::nullopt));
     expect_eq(22u, spire_quest_load_char_level(0, 14, 22)); // a resume: the saved level, the bonus is in it already
-    expect_eq(0u, spire_quest_load_char_level(27, 10, 0));
+    // a saved level below the quest's own start level (a room quest raised after the savestate): the quest's level
+    expect_eq(27u, spire_quest_load_char_level(27, 10, 0));
+    expect_eq(14u, spire_quest_load_char_level(14, 0, 9));
+    expect_eq(20u, spire_quest_load_char_level(14, 0, 20)); // above it: the saved level
+    expect_eq(14u, spire_quest_load_char_level(14, 0, 14));
+    expect_eq(17u, spire_quest_load_char_level(14, 3, std::nullopt)); // no saved level: as before
     expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(0, 0, 5000));
     expect_eq(SPIRE_START_LEVEL_LEVEL_CAP, spire_quest_load_char_level(198, 5, std::nullopt));
     // the trailing player below the floor: the leader's level minus 2
@@ -10757,8 +10762,59 @@ void run_static_tests() {
     expect(spire_create_battle_overlay(fresh, cl));
     expect_eq(14u, static_cast<uint32_t>(strong->character_file(false, true)->disp.stats.level));
     expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    // the run again ('I', spire_run_again_push): the run copy made again keeps the floor, the leader its bought +14
+    fresh->delete_overlay();
+    expect(spire_create_battle_overlay(fresh, cl, true));
+    expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    strong->delete_overlay();
+    expect(spire_create_battle_overlay(strong, cl, true));
+    expect_eq(14u, static_cast<uint32_t>(strong->character_file(false, true)->disp.stats.level));
 
-    for (const auto& c : {strong, fresh}) {
+    // a third client: the same leader's floor; a protected or non-GC trailing player: the quest's own .bin, no floor
+    auto third = make_client(4303, {});
+    seat(third, 2);
+    expect_eq(bin_at(12), sent_to(third));
+    s->data->spire_blocked_characters.emplace_back(4303, "");
+    expect(spire_start_level_quest_bin(third, cl, quest_bin) == quest_bin);
+    s->data->spire_blocked_characters.clear();
+    third->channel->version = Version::PC_V2;
+    expect(spire_start_level_quest_bin(third, cl, quest_bin) == quest_bin);
+    third->channel->version = Version::GC_V3;
+
+    // the resume (spire_resume_level_for_client): fresh resumes at its saved Lv12 next to strong's saved Lv31 in the
+    // same run, so its .bin and its overlay carry the floor Lv29; strong keeps its saved Lv31
+    s->data->spire_room_quests[QUEST] = DataIndex::SpireRoomQuest{1, 5, 1};
+    auto store_savestate = [&](std::shared_ptr<Client> c, uint32_t level) {
+      SpireSavestate ss;
+      ss.run_id = 0xF1007;
+      ss.episode = 1;
+      ss.quest_number = QUEST;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = 5;
+      ss.values[SPIRE_SS_VARIANT] = 1;
+      ss.level = level;
+      uint32_t serial_number = c->login->gc_license->serial_number;
+      spire_savestate_store_rung(std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, serial_number,
+                                     spire_guard_character_id(c->character_file(false, false)->disp)),
+          spire_meta_ladder_quest_rung(QUEST), spire_savestate_to_json(ss, serial_number));
+    };
+    store_savestate(strong, 30);
+    store_savestate(fresh, 11);
+    expect_eq(bin_at(28), sent_to(fresh));
+    expect_eq(bin_at(30), sent_to(strong));
+    fresh->delete_overlay();
+    expect_eq(bin_at(28), sent_to(fresh));
+    expect(spire_create_battle_overlay(fresh, cl));
+    expect_eq(28u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    // the quest starts at Lv30 now, above fresh's saved Lv12 and its floor: fresh resumes at the quest's Lv30
+    rules->char_level = 29;
+    auto raised_bin = std::make_shared<const std::string>(prs_compress(bin_at(29)));
+    expect_eq(bin_at(29), prs_decompress(*spire_start_level_quest_bin(fresh, cl, raised_bin)));
+    expect_eq(bin_at(30), prs_decompress(*spire_start_level_quest_bin(strong, cl, raised_bin)));
+    rules->char_level = 0;
+    s->data->spire_room_quests.clear();
+
+    for (const auto& c : {strong, fresh, third}) {
       spire_static_test_forget(c, cl);
       c->lobby.reset();
     }

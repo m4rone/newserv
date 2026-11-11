@@ -368,8 +368,8 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
 // Levels are 0-based, as ba_set_char_level; the floor is at most SPIRE_START_LEVEL_LEVEL_CAP.
 // The floor is not a start_level bonus: the run's bonus (P, heat, the run mag's start floors) stays the bought one.
 constexpr uint32_t SPIRE_LEVEL_FLOOR_GAP = 2;
-// A client's own level for a quest load, before the floor: the saved level of a resume (SpireSavestate::level), else
-// the quest's level plus its start_level bonus; at most SPIRE_START_LEVEL_LEVEL_CAP.
+// A client's own level for a quest load, before the floor: the saved level of a resume (SpireSavestate::level), never
+// below the quest's own level, else the quest's level plus its start_level bonus; at most SPIRE_START_LEVEL_LEVEL_CAP.
 uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level);
 // The level the client's quest .bin carries: own_level for the leader (a solo player is its own leader), else the
 // higher of own_level and leader_level - SPIRE_LEVEL_FLOOR_GAP (0 if that is below Lv1).
