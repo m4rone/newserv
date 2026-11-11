@@ -6955,6 +6955,36 @@ void run_static_tests() {
           spire_bridge_message_text(0x43100605));
     });
 
+    k2_case("258: a relic gift that does not fit at the quest's last clear does not say it waits", [&]() {
+      SpireBridgeTextContext last;
+      last.last_clear = true;
+      expect_eq(std::string("Hoarder: inventory full. This was the last room: the gift is not given."),
+          spire_bridge_message_text(0x43000C01, last));
+      expect_eq(std::string("Thread: inventory full. This was the last room: the gift is not given."),
+          spire_bridge_message_text(0x43000C05, last));
+      expect_eq(std::string("Inventory full. This was the last room: the gift is not given."),
+          spire_bridge_message_text(0x43000C00, last));
+      for (uint32_t gift = 0; gift <= 0xFF; gift++) {
+        std::string text = spire_bridge_message_text(0x43000C00 | gift, last);
+        expect(text.find("waits") == std::string::npos);
+        expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)));
+      }
+      // any other clear: the next room start gives it (gw_retry), so it waits
+      expect_eq(std::string("Hoarder: inventory full. Make room, it waits."), spire_bridge_message_text(0x43000C01));
+      // the exam's rare and extra get a last try at the run's end (the quest's run_end): their lines keep their words
+      for (uint32_t exam : {0x43830A40u, 0x43830C40u, 0x43800C00u}) {
+        expect_eq(spire_bridge_message_text(exam), spire_bridge_message_text(exam, last));
+      }
+      // the last room of a quest is its episode's final boss room; the writer's room comes from its last 'V'
+      expect(spire_gift_last_clear(1, 15));
+      expect(spire_gift_last_clear(2, 30));
+      for (uint32_t k = 0; k <= 0x100; k++) {
+        expect(spire_gift_last_clear(1, k) == (k == 15));
+        expect(spire_gift_last_clear(2, k) == (k == 30));
+        expect(!spire_gift_last_clear(0, k) && !spire_gift_last_clear(3, k) && !spire_gift_last_clear(4, k));
+      }
+    });
+
     expect_eq(0u, k2_failed);
   }
 

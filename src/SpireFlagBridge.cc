@@ -1016,6 +1016,7 @@ struct SpireClientRun {
   bool kit_text_sent = false; // route B bundle 2 S: SPIRE_KIT_USE_TEXT went to this client in this run
   SpireKitMagTexts b9_texts; // route B bundle 9 critic B-1: the 'C' 13/14 that pick the kit and evolution texts
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
+  uint32_t v_room = 0; // kwaliteit-2 258: the room of its last 'V' (the room it is in), 0 = none came
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
@@ -1865,6 +1866,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   // N-3: only the store is skipped (spire_savestate_v_plan); K-3: with a slow item loop (up to 30 items) the resumed
   // room's own 'V' is usually "not stored", which is expected: that savestate is the one it resumed from
   uint32_t room_k = values[SPIRE_SS_K];
+  cr->v_room = room_k; // kwaliteit-2 258: the room this client is in, for its 'C' 12 (spire_gift_last_clear)
   auto plan = spire_savestate_v_plan(spire_savestate_items_owed(cr->answered_resume, cr->savestate.items.size(),
       cr->resume_items_asked, cr->resume_items_in, spire_resume_last_item_in(cr->savestate, overlay->inventory)));
   if (!plan.store) {
@@ -2362,9 +2364,14 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
             return spire_text_exam_reward_waiting(value, ctx);
           }
           uint32_t gift = value & 0xFF;
-          return (gift >= 1) && (gift < spire_relic_gift_names.size())
-              ? std::format("{}: inventory full. Make room, it waits.", spire_relic_gift_names[gift])
-              : "Inventory full: make room, it waits.";
+          bool named = (gift >= 1) && (gift < spire_relic_gift_names.size());
+          if (ctx.last_clear) { // kwaliteit-2 258: no room start follows, so nothing gives it (spire_gift_last_clear)
+            return named ? std::format("{}: inventory full. This was the last room: the gift is not given.",
+                               spire_relic_gift_names[gift])
+                         : "Inventory full. This was the last room: the gift is not given.";
+          }
+          return named ? std::format("{}: inventory full. Make room, it waits.", spire_relic_gift_names[gift])
+                       : "Inventory full: make room, it waits.";
         }
         case 16: { // kwaliteit-1 relic gift: a relic gift that waited (rewards.py gw_retry) is now in the pack; low byte
           // the gift as in 'C' 12 (rewards.py GIFT_KIND)
@@ -2399,6 +2406,10 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
     default:
       return "";
   }
+}
+
+bool spire_gift_last_clear(uint8_t episode, uint32_t room_k) {
+  return room_k && (room_k == spire_meta_final_boss_room(episode));
 }
 
 bool spire_bridge_is_pack_line(uint32_t value) {
@@ -3692,6 +3703,11 @@ bool spire_bridge_handle_register(
       }
       if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 2)) {
         text_ctx.overview = spire_overview_kept_line(spire_overview_kept_for(c), l->lobby_id, c->floor);
+      }
+      if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && (text_point == 12) && !((value >> 23) & 1)) {
+        // kwaliteit-2 258: a relic gift that does not fit after the quest's last room has no room start to wait for
+        const auto* gift_cr = spire_client_run_for(c, l, false);
+        text_ctx.last_clear = gift_cr && spire_gift_last_clear(static_cast<uint8_t>(l->episode), gift_cr->v_room);
       }
       std::string msg = spire_bridge_message_text(value, text_ctx);
       if (msg.empty() && ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT)) {

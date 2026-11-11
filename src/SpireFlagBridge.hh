@@ -958,8 +958,16 @@ struct SpireBridgeTextContext {
   const SpireDrawTable* draw = nullptr; // the quest's draw table, for the names; nullptr = no names known
   int archetype = -1; // 'C' 10 and 'C' 12: the writer's archetype (0 HU, 1 RA, 2 FO), -1 = not known
   std::string overview; // 'C' 2: the writer's kept overview line (spire_overview_kept_line), "" = none
+  bool last_clear = false; // kwaliteit-2 258: 'C' 12 relic gift: the writer is in the quest's last room (spire_gift_last_clear)
 };
 std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);
+// kwaliteit-2 258: a relic gift that does not fit ('C' 12, bit 23 clear) waits for the next room start (the quest's
+// gw_retry in its room_start hook). After the clear of a quest's last room no room start comes, and the quest's run_end
+// retries only the exam rare and extra, so that gift is never made: the line then says so instead of "it waits".
+// The server knows the writer's room from its last 'V' (the room start; room_k 0 = none seen) and a quest's last room
+// as its episode's final boss room (the run and every room quest play on to it: spire_meta_final_boss_room). A quest
+// that ends earlier (a lab variant) keeps "it waits".
+bool spire_gift_last_clear(uint8_t episode, uint32_t room_k);
 // kwaliteit-1: 'C' 15 and 'C' 16 (a reward that waited is now in the pack) arrive in the same frame as another line
 // (the exam's 'C' 10 after ex_retry) or as each other (two extras that fit in one ex_retry round, two gifts in one
 // gw_retry), and a B0 line that follows at once pushes the one before aside (pc 2026-10-25, see
