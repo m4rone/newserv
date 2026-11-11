@@ -73,6 +73,50 @@ veranderd).
 - `build/newserv run-static-tests` op die binary: exit 0, 0 keer FAILED, laatste regel "All static tests passed".
 - `git diff --quiet ee0fa66 HEAD -- src/SpireDrops.cc src/SpireDrops.hh`: exit 0, SpireDrops gelijk.
 
+## Vervolg: bovengrens voor de basisgame (commit 4d601b4)
+
+Gemeten in de bron: een volger wacht `SPIRE_BASE_GAME_LEADER_WAIT_POLLS` = 40 keer 500 ms = 20 s op de basisgame van de
+leider (`SpireFlagBridge.hh:1244`, de lus in `SpireFlagBridge.cc:5999-6004` op 54f6958), te tellen vanaf zijn eigen
+wachttijd van minstens 4 s. 2321231 liet de leider met 5 of meer teksten langer wachten dan dat.
+
+- Bovengrens `SPIRE_BASE_GAME_SETTLE_MAX` = 16 s: 4 s onder de 20 s van de volger. De basisgame komt nooit later dan
+  dat.
+- In de lobby gaan alleen de teksten die vóór die grens nog 4 s kunnen staan, en dat zijn er drie (+3, +7, +11 s).
+  De basisgame komt dan op 15 s.
+- Wat er niet meer in past, gaat **door in de basisgame** en valt niet weg. Zodra de basisquest loopt en de speler niets
+  meer laadt, gaan die teksten in volgorde door de rij per speler: de eerste 3 s later, daarna steeds 4 s ertussen.
+  Waarom doorlopen en niet wegvallen: dit zijn de enige meldingen van wat er is vrijgespeeld, en de rij kan ze in de
+  basisgame net zo goed tonen als tijdens de run (als één regel, net als elke regel in een game).
+- Is de speler binnen 120 s (3 x `SPIRE_BASE_GAME_WAIT`) niet in een basisgame met een lopende quest, dan wachten die
+  teksten weer op de volgende lobby. Elke tekst wordt dus verstuurd of opnieuw bewaard, nooit allebei. Daarom komt geen
+  tekst twee keer.
+- Gaat een speler niet naar een basisgame (alleen terug naar de lobby), dan blijven alle teksten in de lobby, 4 s uit
+  elkaar, zoals in 2321231.
+
+Rood op 54f6958 (het gedrag van 54f6958, waarin alle teksten in de lobby gaan; alleen de nieuwe functie bestond als
+stub), `run-static-tests` exit 1:
+
+```
+K3 10-M3 r2: 6 text(s): base game at 27000 ms (bound 16000 ms), 6 in the lobby
+K3 (10-M3: …) FAILED: failure at …/src/StaticTests.cc:8570: !(settle <= SPIRE_BASE_GAME_SETTLE_MAX)
+```
+
+Groen op 4d601b4, exit 0:
+
+```
+K3 10-M3: 3 text(s), 3 in the lobby: last there at 11000 ms, base game at 15000 ms
+K3 10-M3 r2: 6 text(s): base game at 15000 ms (bound 16000 ms), 3 in the lobby
+K3 10-M3 r2: 8 text(s): base game at 15000 ms (bound 16000 ms), 3 in the lobby
+-- All static tests passed
+```
+
+De lus 1 t/m 8 in de bestaande 10-M3-test toetst nu de laatste tekst die in de lobby gaat, niet de laatste tekst van
+allemaal. Dat gedrag is bewust veranderd. Het geval met 3 teksten is ongewijzigd groen: basisgame op 15000 ms.
+
+Build: `build/newserv help | head -1` gaf `newserv-4d601b4 built 2026-11-11 20:33:53.000000 UTC`.
+`run-static-tests` op die binary: exit 0, 0 keer FAILED. `git diff --quiet ee0fa66 HEAD -- src/SpireDrops.cc
+src/SpireDrops.hh`: exit 0, SpireDrops nog gelijk.
+
 ## Gezien maar niet gebouwd
 
 - De oude 'ROOM'-route (register 248, `SpireFlagBridge.cc` 0f65124 rond 4096) stuurt de klaar-tekst nog direct; die
@@ -81,5 +125,11 @@ veranderd).
   buiten de rij.
 - Stapt de speler binnen ongeveer 5 s na de klaar, dan komt het overzicht ("… Walk to choose.") terwijl de lijst al
   open is. De server weet niet of de lijst open is (dat is r103 in de quest).
-- Met 5 of meer lobbyteksten wacht de leider langer dan de 20 s die de volger op zijn game wacht; de volger maakt dan
-  zelf de basisgame, in dezelfde groep. In de eerste acht kamers komen er hoogstens drie of vier.
+- (Opgelost in 4d601b4: met 5 of meer lobbyteksten wachtte de leider langer dan de 20 s van de volger.)
+- Een tekst die in de basisgame op zijn beurt wacht en de speler verlaat die game vóór zijn beurt, valt weg. Dat is
+  hetzelfde gedrag als bij elke regel in de rij tijdens een run.
+- Gaat een speler al tijdens de lobbyteksten een game in, dan wachten de lobbyteksten die nog niet weg zijn op de
+  volgende lobby. De teksten voor de basisgame lopen dan wel door, dus de volgorde kan dan door elkaar raken (geen
+  tekst dubbel).
+- Lukt de basisgame niet (de speler blijft in de lobby), dan komen de overgebleven teksten pas bij de volgende lobby
+  en niet meteen in deze.
