@@ -937,6 +937,11 @@ uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level,
   return std::max<uint32_t>(own_level, floor);
 }
 
+uint32_t spire_room_level_floor(uint8_t episode, uint8_t k) {
+  static constexpr uint32_t ep1_floors[] = {0, 3, 5, 7, 9, 10, 11, 12}; // k1..k8: Lv1 4 6 8 10 11 12 13 (B-BAL-21)
+  return ((episode == 1) && (k >= 1) && (k <= std::size(ep1_floors))) ? ep1_floors[k - 1] : 0;
+}
+
 // v53: the server-side heat steps (SpireMeta.hh)
 static std::string spire_heat_hex_bytes(const std::string& hex) {
   auto nibble = [&](char ch) -> uint8_t {

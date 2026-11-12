@@ -10681,6 +10681,78 @@ void run_static_tests() {
     expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
     s->data->spire_bridge_quest_numbers.emplace(QUEST);
 
+    // B-BAL-21: the fixed floor of a room quest (SpireRoomQuests K), for every player at the quest load: Episode 1
+    // k1 Lv1 ... k5 Lv10 ... k8 Lv13; the higher of it and the leader's level minus 2; nothing for another room
+    {
+      uint8_t rung = spire_meta_ladder_quest_rung(QUEST);
+      auto save_resume = [&](std::shared_ptr<Client> c, uint32_t serial_number, uint32_t k, uint32_t level) {
+        SpireSavestate ss;
+        ss.exists = true;
+        ss.run_id = 0xBA121;
+        ss.episode = 1;
+        ss.quest_number = QUEST;
+        ss.start_room = k;
+        ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+        ss.values[SPIRE_SS_K] = k;
+        ss.level = level;
+        std::string stem = std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, serial_number,
+            spire_guard_character_id(c->character_file(false, false)->disp));
+        phosg::save_file(spire_savestate_rung_filename(stem, rung), spire_savestate_to_json(ss, serial_number));
+      };
+      auto forget_resume = [&](std::shared_ptr<Client> c, uint32_t serial_number) {
+        std::filesystem::remove(spire_savestate_rung_filename(std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY,
+            serial_number, spire_guard_character_id(c->character_file(false, false)->disp)), rung));
+      };
+      s->data->spire_room_quests[QUEST] = DataIndex::SpireRoomQuest{1, 5, 0};
+      // alone in k5 at Lv1: a start of the room gets Lv10, the real character stays Lv1 (only the run copy follows)
+      l->clients[0] = nullptr;
+      seat(fresh, 0);
+      l->leader_id = 0;
+      expect_eq(bin_at(9), sent_to(fresh));
+      expect_eq(0u, fresh->character_file(false, false)->disp.stats.level.load());
+      // a resume of k5 at a saved Lv1 gets Lv10; at a saved Lv14 it stays Lv14
+      save_resume(fresh, 4301, 5, 0);
+      expect_eq(bin_at(9), sent_to(fresh));
+      save_resume(fresh, 4301, 5, 13);
+      expect_eq(bin_at(13), sent_to(fresh));
+      forget_resume(fresh, 4301);
+      // the leader at Lv15 gives the trailing player Lv13, above k5's Lv10: the higher one; the leader keeps Lv15
+      seat(strong, 0);
+      seat(fresh, 1);
+      expect_eq(bin_at(14), sent_to(strong));
+      expect_eq(bin_at(12), sent_to(fresh));
+      // the leader at Lv1 in k5: both get the room's Lv10
+      seat(fresh, 0);
+      seat(strong, 1);
+      s->data->spire_follow_leader = std::pair<uint8_t, uint32_t>(0, 0);
+      expect_eq(bin_at(9), sent_to(fresh));
+      expect_eq(bin_at(14), sent_to(strong));
+      s->data->spire_follow_leader.reset();
+      l->clients[1] = nullptr;
+      // k1 (Lv1), k8 (Lv13), and rooms without a fixed floor: k9, k0, an Episode 2 room in an Episode 1 game
+      s->data->spire_room_quests[QUEST] = DataIndex::SpireRoomQuest{1, 1, 0};
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      s->data->spire_room_quests[QUEST] = DataIndex::SpireRoomQuest{1, 8, 0};
+      expect_eq(bin_at(12), sent_to(fresh));
+      for (auto rq : {DataIndex::SpireRoomQuest{1, 9, 0}, DataIndex::SpireRoomQuest{1, 0, 0},
+               DataIndex::SpireRoomQuest{2, 5, 0}}) {
+        s->data->spire_room_quests[QUEST] = rq;
+        expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      }
+      // a protected (real) character and a quest the guard does not cover get nothing in k5
+      s->data->spire_room_quests[QUEST] = DataIndex::SpireRoomQuest{1, 5, 0};
+      s->data->spire_blocked_characters.emplace_back(4301, "");
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      s->data->spire_blocked_characters.clear();
+      s->data->spire_bridge_quest_numbers.clear();
+      expect(spire_start_level_quest_bin(fresh, cl, quest_bin) == quest_bin);
+      s->data->spire_bridge_quest_numbers.emplace(QUEST);
+      s->data->spire_room_quests.clear();
+      // the state the next part expects: strong in slot 0, fresh in slot 1
+      seat(strong, 0);
+      seat(fresh, 1);
+    }
+
     // The heat follows the quest's leader too (spire_heat_quest_bin): the game plays the rows of the H of the client in
     // SpireFollowLeader's LeaderClient slot (else slot 0), whoever leads the game; with nobody in that slot the game's
     // leader (l->leader_id), never an empty slot. hot owns every hp_mat and atp_grind level, fresh owns nothing.

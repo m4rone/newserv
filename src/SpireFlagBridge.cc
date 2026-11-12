@@ -4780,7 +4780,15 @@ static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Clie
     uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,
         spire_start_level_bonus_for_client(leader, l), run_again ? std::nullopt : spire_resume_level_for_client(leader, l, &unused));
     uint32_t level = spire_level_floor_char_level(own, leader_level, is_leader);
-    if (level > own) {
+    // B-BAL-21: a room quest's fixed floor (SpireRoomQuests K), for every player, the higher of the two
+    const auto& rooms = l->require_server_state()->data->spire_room_quests;
+    auto rq_it = rooms.find(l->quest->meta.quest_number);
+    uint32_t room_floor = ((rq_it == rooms.end()) || (rq_it->second.episode != static_cast<uint8_t>(l->episode)))
+        ? 0 : spire_room_level_floor(rq_it->second.episode, rq_it->second.k);
+    if (room_floor > level) {
+      c->log.info_f("Spire level floor: Lv{} -> Lv{} (room {}'s floor)", own + 1, room_floor + 1, rq_it->second.k);
+      level = room_floor;
+    } else if (level > own) {
       c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
           SPIRE_LEVEL_FLOOR_GAP);
     }

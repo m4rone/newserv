@@ -374,6 +374,10 @@ uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, s
 // The level the client's quest .bin carries: own_level for the leader (a solo player is its own leader), else the
 // higher of own_level and leader_level - SPIRE_LEVEL_FLOOR_GAP (0 if that is below Lv1).
 uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level, bool is_leader);
+// B-BAL-21: the fixed level floor of a room, 0-based, for every player at the load of a room quest (start or resume):
+// Episode 1 k1 Lv1, k2 Lv4, k3 Lv6, k4 Lv8, k5 Lv10, k6 Lv11, k7 Lv12, k8 Lv13; 0 (none) for any other room or episode.
+// The .bin carries the higher of this and spire_level_floor_char_level.
+uint32_t spire_room_level_floor(uint8_t episode, uint8_t k);
 
 // v53 (B-BASIS-54): the heat steps server-side. A Spire quest built with the heat steps carries the override rows of H 0
 // in a layout that is the same for every step H 0..HeatMax, and a sidecar SPIRE_HEAT_PATCH_DIR/q<N>.json (pso-roguelike
