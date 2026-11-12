@@ -120,3 +120,30 @@ voeren. Ze staan zowel in de rode als in de groene run en horen niet bij het nie
 en de run-kopie zet, en zijn statische tests. Het dekt niet de achterblijver in de doorlopende run q920 (daar bestaat
 geen route, zie boven), niet of de GC-client het opgetilde level werkelijk toont en gebruikt (een waarneming op de
 Wii), en niet de balans van de vijanden.
+
+## Hervatten van een doorlopende run: al gedekt
+
+Een doorlopende run (q920) hervat via een kamerquest uit `SpireRoomQuests`, niet in q920 zelf. Er is dus niets
+bijgebouwd en de code is ongewijzigd sinds 4b0741a.
+
+- Alleen een quest die na de eerste kamer begint heeft het hervatpad: `RESUME = SAVESTATE and bool(START) and
+  START[0] > K0` (balans-bundel4 `quests/spire/make_spire.py:837-839`). q920 begint bij K0 = k1 en vraagt dus nooit
+  'J'. Het protocol zegt hetzelfde: "Resume: a room quest that starts after K0 writes 'J'" (`src/SpireFlagBridge.hh:300`).
+- De melding bij binnenkomst wijst de speler naar de kamerquest: "To continue: Quest > {categorie} > Spire room {k}"
+  (`src/SpireFlagBridge.cc:1036`, de naam uit `spire_savestate_room_quest_name` `:983`). De build geeft die quests
+  precies die naam (`quests/spire/build.sh:508`, `name='Spire room %s'`) en zet ze in `SpireRoomQuests`
+  (`build-rooms/newserv-config.json`, Ep1 k1-k15, Ep2 k16-k30).
+- Het hervatlevel bestaat alleen voor een quest in `SpireRoomQuests` (`src/SpireFlagBridge.cc:4723-4725`). Die kamerquest
+  gaat door `spire_level_floor_for_client` en krijgt dus de vaste vloer van 4b0741a. Het padblok test dat al: hervatten
+  in k5 op een bewaarde Lv1 geeft Lv10.
+- `SpireCheckpointRooms` laadt niets. Het koppelt een gewonnen kamer aan zijn k voor het checkpointrecord
+  (`src/DataIndex.hh:187-191`).
+- Een verse start van q920 verandert niet: q920 staat niet in `SpireRoomQuests`.
+
+**Gezien.** De kamerquests k2-k8 hebben in de build al het vloerlevel als eigen questlevel:
+`spire-expeditions.json` `room_quests_k2_k8.char_level` = k2 3, k3 5, k4 7, k5 9, k6 10, k7 11, k8 12 (0-based, zelfde
+tabel als B-BAL-21; `quests/spire/build.sh:511-512`). Het hervatpad zet nooit een level onder dat van de quest
+(`spire_quest_load_char_level`, `src/SpireMeta.cc:924-929`). Op de kamerquests die nu bestaan gaf de server dus al het
+vloerlevel, voor zowel een start als een hervat. De vloer van 4b0741a is daar een vangnet; hij werkt pas als een
+kamerquest ooit met een lager questlevel wordt gebouwd. De gemeten achterblijver (Lv1 in k1-k4) speelt in q920, en
+daar is midden in de quest geen route (zie boven).
