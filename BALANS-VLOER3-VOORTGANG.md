@@ -6,3 +6,4 @@
 - B-BAL-23: route 1 bouwen (vaste kamervloer bij laden kamerquest en hervatten). Plan: pure functie in SpireMeta,
   max in spire_level_floor_for_client, padtest in StaticTests (eerst rood met een stomp).
 - Test rood met de stomp (StaticTests.cc:10711 bin_at(9) != sent_to(fresh)), groen met de tabel (exit 0). Commit volgt.
+- Route 1 af: 4b0741a, static-tests exit 0, rapport bijgewerkt.
