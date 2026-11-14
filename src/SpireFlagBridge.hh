@@ -1398,11 +1398,12 @@ bool spire_guard_base_game_follow(
 // drops before its card is written logs in with the bank of before (a deposit was gone, a withdrawal doubled). So the
 // 98 of the base game keeps the inventory and meseta of before it next to the snapshot, and the login push reconciles
 // the snapshot with the bank of the card (the 30), once. On V3 the server sees a deposit as a 6x29, like a sale, a mag
-// feed, the tekker or a tool used, and it does not see the trade window at all: so only a base game the player had to
-// himself gets the record (shared false); in a game shared with another player any item that left the inventory may be
-// with him (B-AF-53: never doubled between players before nothing lost), and the push stays the one of before.
-// before is the snapshot right before spire_guard_base_game_follow took the 98 (with every floor hand-over of K7b).
-void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared);
+// feed, the tekker or a tool used. What went to another player is out of the record already (B-AF-53: never doubled
+// between players before nothing lost): before is the snapshot right before spire_guard_base_game_follow took the 98,
+// and the snapshot loses an item at a floor pickup by another (K7b) and at a trade's execution (Veilig-2, D0 list);
+// B-REGIE-21-24: so a base game shared with another player gets the record too. Each of those steps drops an older
+// record (spire_guard_snapshot_take_drop, spire_guard_snapshot_give_pickup).
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before);
 // The login push's step on a snapshot with that record, given the bank of the card. Items by their data (item IDs
 // ignored), a stack by its kind and amount:
 // - a non-stackable item of before that the inventory no longer holds and the card's bank does not hold comes back

@@ -5140,40 +5140,6 @@ static std::unordered_set<const Client*> spire_guard_base_follow_pending;
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 
-// B-REGIE-21-20: the clients whose current game had another player in it at some moment (a trade, which the server
-// does not follow, could have moved an item to him). Set by every leave of a game with others in it
-// (spire_guard_note_floor_leave, for the leaver and every client still in it), read and removed at the client's 98
-// (spire_guard_after_98). The weak pointer makes a reused address count as not marked.
-static std::unordered_map<const Client*, std::weak_ptr<const Client>> spire_guard_shared_game;
-
-static void spire_guard_note_shared_game(std::shared_ptr<Client> c, bool others_remain) {
-  if (!others_remain) {
-    return;
-  }
-  std::erase_if(spire_guard_shared_game, [](const auto& it) { return it.second.expired(); });
-  spire_guard_shared_game[c.get()] = c;
-  auto l = c->lobby.lock();
-  if (l && l->is_game() && (c->lobby_client_id < l->clients.size()) && (l->clients[c->lobby_client_id] == c)) {
-    for (const auto& lc : l->clients) {
-      if (lc) {
-        spire_guard_shared_game[lc.get()] = lc;
-      }
-    }
-  } else {
-    c->log.warning_f("Spire guard: a game leave with others in it, but the client's lobby is not that game; the others are not marked as sharing it (B-REGIE-21-20)");
-  }
-}
-
-static bool spire_guard_take_shared_game(std::shared_ptr<const Client> c) {
-  auto it = spire_guard_shared_game.find(c.get());
-  if (it == spire_guard_shared_game.end()) {
-    return false;
-  }
-  bool ret = (it->second.lock() == c);
-  spire_guard_shared_game.erase(it);
-  return ret;
-}
-
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
@@ -5241,7 +5207,6 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 }
 
 void spire_guard_after_98(std::shared_ptr<Client> c) {
-  bool shared_game = spire_guard_take_shared_game(c); // B-REGIE-21-20: the game this 98 leaves
   if (spire_guard_base_exit_pending.erase(c.get())) {
     // v51: the game exit after a verified 'O'; the 98 is the real character with what the base changed
     try {
@@ -5295,7 +5260,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
             before.inventory.num_items);
         return;
       }
-      spire_guard_base_before_apply(snapshot, before, shared_game);
+      spire_guard_base_before_apply(snapshot, before);
       spire_guard_save(filename, serial_number, snapshot);
       spire_guard_floor_settle_dropper(c); // K7b: what he left on the floor is no longer in it
       bool same = spire_guard_same_state(snapshot.inventory, snapshot.disp, before.inventory, before.disp);
@@ -5303,8 +5268,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
           serial_number, same ? ", equal to the one before" : std::format(", changed in the base (was {}, {} items)",
               spire_guard_describe(before), before.inventory.num_items),
           spire_guard_describe(snapshot), snapshot.inventory.num_items);
-      c->log.info_f("Spire guard: the base game for serial {:010} {}; {} (B-REGIE-21-20)", serial_number,
-          shared_game ? "had another player in it" : "was the player's own",
+      c->log.info_f("Spire guard: the base game for serial {:010}: {} (B-REGIE-21-20, B-REGIE-21-24)", serial_number,
           snapshot.has_base_before ? "the inventory of before it is kept for a login push to reconcile with the card's bank"
                                    : "no record of before it: a login push sends the snapshot as it is");
     } catch (const std::exception& e) {
@@ -5475,8 +5439,8 @@ uint32_t spire_guard_snapshot_give_pickup(
 }
 
 // B-REGIE-21-20: see SpireFlagBridge.hh
-void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared) {
-  snapshot.has_base_before = !shared && before.has_character;
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before) {
+  snapshot.has_base_before = before.has_character;
   if (snapshot.has_base_before) {
     snapshot.base_before_inventory = before.inventory;
     snapshot.base_before_meseta = before.disp.stats.meseta;
@@ -5739,7 +5703,6 @@ void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c) {
 
 void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain) {
   try {
-    spire_guard_note_shared_game(c, others_remain); // B-REGIE-21-20
     std::erase_if(spire_guard_floor_credits, [](const auto& it) { return it.second.item.expired(); });
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     std::string filename = serial_number ? spire_guard_filename_for(c, serial_number) : std::string();

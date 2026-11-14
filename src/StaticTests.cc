@@ -2639,7 +2639,7 @@ void run_static_tests() {
       auto name = (dir / "0000000042.json").string();
       auto before = awaiting(a_real);
       auto snap = awaiting(a_memory);
-      spire_guard_base_before_apply(snap, before, false);
+      spire_guard_base_before_apply(snap, before);
       expect(snap.has_base_before && (snap.base_before_meseta == 1000));
       expect(!memcmp(&snap.base_before_inventory, &a_real.first, sizeof(a_real.first)));
       spire_guard_save(name, 42, snap);
@@ -2658,11 +2658,13 @@ void run_static_tests() {
       expect(!loaded.has_base_before && loaded.awaiting_save && loaded.has_character);
       std::filesystem::remove_all(dir);
 
-      // a shared base game keeps no record (and drops an older one); so does a floor hand-over, a run start, the 98 of
-      // a normal game and a login that confirms the snapshot
-      auto shared = snap;
-      spire_guard_base_before_apply(shared, before, true);
-      expect(!shared.has_base_before);
+      // a floor hand-over, a trade's execution, a run start, the 98 of a normal game and a login that confirms the
+      // snapshot drop the record (B-REGIE-21-24: a shared base game keeps one, see the e2e cases)
+      auto traded = snap;
+      SpireGuardTradeSide traded_side;
+      traded_side.items = {traded.inventory.items[0].data};
+      expect_eq(1u, spire_guard_trade_take_rest(&traded, traded_side, limits));
+      expect(!traded.has_base_before);
       auto handed = snap;
       expect_eq(1u, spire_guard_snapshot_take_drop(handed, handed.inventory.items[0].data, limits));
       expect(!handed.has_base_before);
@@ -2699,7 +2701,7 @@ void run_static_tests() {
       auto mono_before = with_stack(a_real, 0x00, 0x00, 10);
       auto mono_now = with_stack(with_stack(a_real, 0x00, 0x00, 6), 0x10, 0x00, 10);
       auto st = awaiting(mono_now);
-      spire_guard_base_before_apply(st, awaiting(mono_before), false);
+      spire_guard_base_before_apply(st, awaiting(mono_before));
       PlayerBank200 bank;
       bank.num_items = 2;
       bank.items[0].data = mono_before.first.items[mono_before.first.num_items - 1].data;
@@ -2723,7 +2725,7 @@ void run_static_tests() {
       Character full_before = full;
       full_before.first.items[29].data.data1[1] = 0x7E; // another item in the last slot before the base
       auto fs = awaiting(full);
-      spire_guard_base_before_apply(fs, awaiting(full_before), false);
+      spire_guard_base_before_apply(fs, awaiting(full_before));
       fs.disp.stats.meseta = 400;
       r = spire_guard_base_reconcile(fs, PlayerBank200(), limits);
       expect_eq(0u, r.returned_items);
@@ -10599,6 +10601,7 @@ void run_static_tests() {
       bool floor_handover = false; // A drops inventory item 5, the partner picks it up (6x2A, 6x59 as the server sees them)
       bool payout = false; // the quartermaster's collect: its clear of the payout flag, as on_set_quest_flag records it
       bool card_written = false; // the 84 after the base game and its 97 come through
+      bool trade = false; // A gives inventory item 5 to the partner through the trade window (D0, D2 as the server sees them)
     };
     constexpr uint8_t PHOTON_DROP[3] = {0x03, 0x10, 0x00};
     auto base_fall = [&](const BaseFallSetup& setup, const std::function<void(GCCharacter&)>& in_base,
@@ -10675,6 +10678,31 @@ void run_static_tests() {
         for (size_t z = 0; z < snap.inventory.num_items; z++) {
           must(memcmp(snap.inventory.items[z].data.data1.data(), dropped.data1.data(), 12) != 0,
               "the dropper's snapshot still holds the item the partner picked up (K7b)");
+        }
+      }
+      if (setup.trade) {
+        // the trade window: each side's D0 (A gives item 5, the partner nothing), then both D2s; the server executes
+        // it at the second D2 (spire_guard_note_trade_executed)
+        must(setup.partner != BasePartner::NONE, "a trade needs a partner");
+        auto d0 = [&](uint16_t target, const std::vector<ItemData>& items) {
+          SC_TradeItems_D0_D3 cmd;
+          cmd.target_client_id = target;
+          cmd.item_count = items.size();
+          for (size_t z = 0; z < items.size(); z++) {
+            cmd.item_datas[z] = items[z];
+          }
+          return std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        };
+        const ItemData given = p.c->character_file(false, false)->inventory.items[5].data;
+        seat_sends(w, seats, seat, 0xD0, d0(1, {given}));
+        seat_sends(w, seats, partner, 0xD0, d0(0, {}));
+        seat_sends(w, seats, seat, 0xD2, "");
+        seat_sends(w, seats, partner, 0xD2, "");
+        must(!p.c->pending_item_trade && !partner.p.c->pending_item_trade, "the trade was not executed");
+        auto snap = snapshot_on_disk(p);
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          must(memcmp(snap.inventory.items[z].data.data1.data(), given.data1.data(), 12) != 0,
+              "the giver's snapshot still holds the traded item (Veilig-2)");
         }
       }
       GCCharacter at_base = real;
@@ -10801,7 +10829,7 @@ void run_static_tests() {
       });
     }
     // (e): what went to another player in the base never comes back to the first: a floor hand-over (K7b), and the
-    // trade window, which the server does not follow (the item leaves the inventory without a server step, as a deposit)
+    // trade window (Veilig-2: the execution takes the D0 list from the giver's snapshot)
     e2e_case("B-REGIE-21-20 (e) the base game with a partner, a floor hand-over to him, the client drops before the card write: the item does not come back", [&]() {
       base_fall({.partner = BasePartner::STAYS, .floor_handover = true}, [&](GCCharacter& ch) {
         ch.inventory.items[5] = ch.inventory.items[29];
@@ -10813,11 +10841,32 @@ void run_static_tests() {
     for (BasePartner partner : {BasePartner::STAYS, BasePartner::LEFT_BEFORE}) {
       e2e_case(std::format("B-REGIE-21-20 (e) the base game with a partner who {}, a trade to him, the client drops before the card write: the item does not come back",
                    (partner == BasePartner::STAYS) ? "stays" : "left before").c_str(), [&]() {
-        base_fall({.partner = partner}, [&](GCCharacter& ch) {
+        base_fall({.partner = partner, .trade = true}, [&](GCCharacter& ch) {
           ch.inventory.items[5] = ch.inventory.items[29];
           ch.inventory.num_items = 5;
         }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
           must(held(p2.ch->memory, rare) == 0, "the item traded to the partner came back to the first player");
+        });
+      });
+    }
+    // B-REGIE-21-24 (f): a base game shared with another player is reconciled too, now that the server follows the
+    // trade window: a deposit and a withdrawal exist once, and a traded item still never comes back
+    for (BasePartner partner : {BasePartner::STAYS, BasePartner::LEFT_BEFORE}) {
+      const char* who = (partner == BasePartner::STAYS) ? "stays" : "left before";
+      e2e_case(std::format("B-REGIE-21-24 (f) the base game with a partner who {}, a deposit on the bank, the client drops before the card write: the item exists once", who).c_str(), [&]() {
+        base_fall({.partner = partner}, deposit, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 1, std::format("the deposited item is there {} times after the login", held(p2.ch->memory, rare)).c_str());
+        });
+      });
+      e2e_case(std::format("B-REGIE-21-24 (f) the base game with a partner who {}, a trade to him and a withdrawal from the bank, the client drops before the card write: the withdrawn item once, the traded one gone", who).c_str(), [&]() {
+        base_fall({.partner = partner, .trade = true}, [&](GCCharacter& ch) {
+          withdraw(ch); // bank item 0 into slot 6
+          ch.inventory.items[5] = ch.inventory.items[6]; // item 5 traded away: the withdrawn item moves up
+          ch.inventory.items[6] = ch.inventory.items[29];
+          ch.inventory.num_items = 6;
+        }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 0, "the item traded to the partner came back to the first player");
+          must(held(p2.ch->memory, banked) == 1, std::format("the withdrawn item is there {} times after the login", held(p2.ch->memory, banked)).c_str());
         });
       });
     }
