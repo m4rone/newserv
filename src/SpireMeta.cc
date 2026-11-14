@@ -791,6 +791,21 @@ uint8_t spire_meta_final_boss_room(uint8_t episode) {
   return (episode == 1) ? 15 : (episode == 2) ? 30 : 0; // Episode 2: Olga Flow in k30 (spel-af item 5)
 }
 
+uint8_t spire_meta_episode_first_room(uint8_t episode) {
+  return (episode == 2) ? (spire_meta_final_boss_room(1) + 1) : 1;
+}
+
+uint8_t spire_meta_exams_passed(uint8_t episode, uint8_t start_room, uint8_t reached_room, bool won) {
+  uint8_t ret = 0;
+  uint32_t final_k = spire_meta_final_boss_room(episode);
+  for (uint32_t k = std::max<uint32_t>(start_room, spire_meta_episode_first_room(episode)); k <= final_k; k++) {
+    if (spire_meta_boss_name(k) && (won || (k < reached_room))) {
+      ret++;
+    }
+  }
+  return ret;
+}
+
 // "Start level 18" for start_level (its Levels: what the level gives), else the item's name and level
 static std::string spire_shop_level_name(const SpireShopCatalogue& cat, size_t index, uint32_t level) {
   if ((index == 0) && (level < cat.items[0].levels.size())) {
@@ -903,6 +918,28 @@ size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_
     decompressed_bin.replace(found + 1, 4, le32(new_char_level));
   }
   return count;
+}
+
+// B-REGIE-20-5: the level floor of the trailing player (SpireMeta.hh)
+uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level) {
+  if (resume_level) {
+    return std::min<uint32_t>(std::max(*resume_level, base_char_level), SPIRE_START_LEVEL_LEVEL_CAP);
+  }
+  return spire_start_level_char_level(base_char_level, bonus);
+}
+
+uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level, bool is_leader) {
+  if (is_leader) {
+    return own_level;
+  }
+  uint32_t capped = std::min<uint32_t>(leader_level, SPIRE_START_LEVEL_LEVEL_CAP);
+  uint32_t floor = (capped > SPIRE_LEVEL_FLOOR_GAP) ? (capped - SPIRE_LEVEL_FLOOR_GAP) : 0;
+  return std::max<uint32_t>(own_level, floor);
+}
+
+uint32_t spire_room_level_floor(uint8_t episode, uint8_t k) {
+  static constexpr uint32_t ep1_floors[] = {0, 3, 5, 7, 9, 10, 11, 12}; // k1..k8: Lv1 4 6 8 10 11 12 13 (B-BAL-21)
+  return ((episode == 1) && (k >= 1) && (k <= std::size(ep1_floors))) ? ep1_floors[k - 1] : 0;
 }
 
 // v53: the server-side heat steps (SpireMeta.hh)

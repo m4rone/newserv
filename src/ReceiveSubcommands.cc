@@ -2043,6 +2043,7 @@ static void on_player_drop_item(std::shared_ptr<Client> c, SubcommandMessage& ms
     throw std::logic_error("Stack should not be split when entire stack was dropped");
   }
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
+  inventory_backup_note_dropped(c, l, cmd.floor, item); // the floor item remembers whose own drop it is
   inventory_backup_note_removed(c, item); // not missing for $restore (InventoryBackup.hh)
   spire_guard_note_floor_drop(c, l, cmd.floor, item.id); // K7: the snapshot follows the floor hand-over
 
@@ -2131,6 +2132,8 @@ static void on_drop_partial_stack_t(std::shared_ptr<Client> c, SubcommandMessage
   l->on_item_id_generated_externally(item.id);
   l->add_item(cmd.floor, item, cmd.pos, nullptr, nullptr, 0x00F);
   spire_guard_note_floor_drop(c, l, cmd.floor, item.id); // K7: a partial stack or meseta (the 6x29 follows)
+  // Inventory backup: his own split (also Meseta), with the proven units of its source (critic round 2, M2)
+  inventory_backup_note_dropped_partial(c, l, cmd.floor, item);
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto s = c->require_server_state();
@@ -2290,6 +2293,9 @@ static void on_box_or_enemy_item_drop_t(std::shared_ptr<Client> c, SubcommandMes
   item.decode_for_version(c->version());
   l->on_item_id_generated_externally(item.id);
   l->add_item(cmd.item.floor, item, cmd.item.pos, obj_st, ene_st, should_notify ? 0x100F : 0x000F);
+  // Inventory backup: the leader's word for this item counts only for an enemy or box whose drop request the server
+  // itself saw and marked (reconcile_drop_request_with_map), and once (InventoryBackup.hh, Provenance)
+  inventory_backup_note_leader_drop(l, cmd.item.floor, item.id, l->drop_mode == ServerDropMode::CLIENT, ene_st, obj_st);
 
   auto name = s->data->describe_item(c->version(), item);
   l->log.info_f("Player {} (leader) created floor item {:08X} ({}){} at {}:({:g}, {:g})",
@@ -2368,6 +2374,7 @@ static asio::awaitable<void> on_pick_up_item_generic(
       co_return;
     }
     spire_guard_note_floor_pickup(c, l, fi); // K7: only a floor item with a credit from a followed drop
+    inventory_backup_note_picked_up(c, fi->data, fi->backup_origin); // InventoryBackup.hh, Provenance
 
     if (l->log.should_log(phosg::LogLevel::L_INFO)) {
       auto s = c->require_server_state();
@@ -3133,6 +3140,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
                 l->log.info_f("Creating item {:08X} at {:02X}:{:g},{:g} for {}",
                     res.item.id, cmd.floor, cmd.pos.x, cmd.pos.z, lc->channel->name);
                 l->add_item(cmd.floor, res.item, cmd.pos, rec.obj_st, rec.ref_ene_st, 0x1000 | (1 << lc->lobby_client_id));
+                inventory_backup_note_floor_world(l, cmd.floor, res.item.id); // the server made it itself
                 send_drop_item_to_channel(
                     s, lc->channel, res.item, rec.obj_st ? 2 : 1, cmd.floor, cmd.pos, get_entity_index(lc->version()));
                 send_item_notification_if_needed(lc, res.item, res.is_from_rare_table);
@@ -3144,6 +3152,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
             l->log.info_f("Creating item {:08X} at {:02X}:{:g},{:g} for all clients",
                 res.item.id, cmd.floor, cmd.pos.x, cmd.pos.z);
             l->add_item(cmd.floor, res.item, cmd.pos, rec.obj_st, rec.ref_ene_st, 0x100F);
+            inventory_backup_note_floor_world(l, cmd.floor, res.item.id); // the server made it itself
             for (auto lc : l->clients) {
               if (lc) {
                 send_drop_item_to_channel(
@@ -3168,6 +3177,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
               l->log.info_f("Creating item {:08X} at {:02X}:{:g},{:g} for {}",
                   res.item.id, cmd.floor, cmd.pos.x, cmd.pos.z, lc->channel->name);
               l->add_item(cmd.floor, res.item, cmd.pos, rec.obj_st, rec.ref_ene_st, 0x1000 | (1 << lc->lobby_client_id));
+              inventory_backup_note_floor_world(l, cmd.floor, res.item.id); // the server made it itself
               send_drop_item_to_channel(
                   s, lc->channel, res.item, rec.obj_st ? 2 : 1, cmd.floor, cmd.pos, get_entity_index(lc->version()));
               send_item_notification_if_needed(lc, res.item, res.is_from_rare_table);
@@ -6073,6 +6083,9 @@ asio::awaitable<void> on_subcommand_multi(std::shared_ptr<Client> c, Channel::Me
     } else {
       co_await std::get<SubcommandHandlerCoro>(def->handler)(c, sub_msg);
     }
+    // Inventory backup: what came into the inventory in this subcommand without the server vouching for it is of
+    // unknown origin (InventoryBackup.hh, Provenance)
+    inventory_backup_after_subcommand(c);
     offset += cmd_size;
   }
 }

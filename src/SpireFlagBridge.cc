@@ -730,6 +730,10 @@ bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id
   return !run_ended && game_resumed && game_run_id && own_matches && (own_run_id == game_run_id);
 }
 
+bool spire_alone_off_leader_slot(uint8_t leader_slot, uint32_t occupied_slots, uint8_t client_slot) {
+  return (client_slot < 32) && (client_slot != leader_slot) && (occupied_slots == (1u << client_slot));
+}
+
 std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_number) {
   phosg::JSON values_json = phosg::JSON::list();
   for (uint32_t v : ss.values) {
@@ -764,6 +768,9 @@ std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_nu
       equipped_json.emplace_back(index);
     }
     json.emplace("Equipped", std::move(equipped_json));
+  }
+  if (ss.rest_rooms) { // kwaliteit-3 3
+    json.emplace("RestRooms", ss.rest_rooms);
   }
   if (ss.run_mag) { // F6: the run mag ledger, keyed by run id and step, never by item id
     const auto& led = *ss.run_mag;
@@ -846,6 +853,17 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
   } catch (const std::exception&) {
     ret.equipped.reset();
   }
+  // kwaliteit-3 3: the rest bits; a file from before has none, and a value that is no integer in 0-15 is none (the
+  // run still resumes; its end screen then counts a rest room as a cleared room, as before)
+  try {
+    if (json.contains("RestRooms")) {
+      int64_t v = json.get_int("RestRooms");
+      if ((v >= 0) && (v <= static_cast<int64_t>(SPIRE_SS_REST_MASK))) {
+        ret.rest_rooms = v;
+      }
+    }
+  } catch (const std::exception&) {
+  }
   if (json.contains("RunMag")) {
     const auto& led_json = json.at("RunMag");
     SpireRunMagLedger led;
@@ -868,6 +886,21 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
   }
   ret.exists = true;
   return ret;
+}
+
+uint8_t spire_savestate_take_rest_rooms(std::vector<uint32_t>& values) {
+  if (values.size() <= SPIRE_SS_VARIANT) {
+    return 0;
+  }
+  uint8_t ret = (values[SPIRE_SS_VARIANT] >> SPIRE_SS_REST_SHIFT) & SPIRE_SS_REST_MASK;
+  values[SPIRE_SS_VARIANT] &= SPIRE_SS_VARIANT_MASK;
+  return ret;
+}
+
+uint32_t spire_resume_answer_value(const SpireSavestate& ss) {
+  return SPIRE_RESUME_ANSWER_TAG | (static_cast<uint32_t>(ss.start_room) << SPIRE_RESUME_ANSWER_START_ROOM_SHIFT) |
+      (static_cast<uint32_t>(ss.rest_rooms & SPIRE_SS_REST_MASK) << SPIRE_RESUME_ANSWER_REST_SHIFT) |
+      SPIRE_RESUME_ANSWER_RESUME | (ss.items.size() & 0xFF);
 }
 
 bool spire_run_is_practice(uint8_t start_k, uint8_t first_k, bool resumed, bool savestate_practice) {
@@ -1083,6 +1116,7 @@ struct SpireClientRun {
   std::set<uint8_t> boss_burst_texts; // route B bundle 2 S: the rooms whose SPIRE_BOSS_BURST_TEXT went to this client
   uint32_t v_room = 0; // kwaliteit-2 258: the room of its last 'V' (the room it is in), 0 = none came
   bool practice_kept_told = false; // 7-M2: spire_savestate_practice_kept_text went to this client in this run
+  bool savestate_kept = false; // kwaliteit-3 plek 2: alone off the leader's slot; its fitting savestate is not replaced
 };
 static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
@@ -1251,10 +1285,10 @@ static std::string spire_savestate_describe(const SpireSavestate& ss) {
   if (!ss.exists) {
     return "none";
   }
-  return std::format("run {:08X} room {} variant {} ({} items, {} lives, {} s, start room {}{}{})", ss.run_id,
+  return std::format("run {:08X} room {} variant {} ({} items, {} lives, {} s, start room {}{}{}{})", ss.run_id,
       ss.values[SPIRE_SS_K], ss.values[SPIRE_SS_VARIANT], ss.items.size(), ss.values[SPIRE_SS_LIVES],
       ss.values[SPIRE_SS_ELAPSED], ss.start_room, ss.level ? std::format(", Lv{}", *ss.level + 1) : std::string(),
-      ss.practice ? ", practice" : "");
+      ss.practice ? ", practice" : "", ss.rest_rooms ? std::format(", rest bits {:X}", ss.rest_rooms) : std::string());
 }
 
 // ---- Route B F6: the run mag ledger (SpireMag.hh) per (serial, character id, run id). In memory, and in the savestate
@@ -1985,6 +2019,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
   // may still run; the run copy then lacks items the savestate has, so the savestate it resumed from stays. Critic r2
   // N-3: only the store is skipped (spire_savestate_v_plan); K-3: with a slow item loop (up to 30 items) the resumed
   // room's own 'V' is usually "not stored", which is expected: that savestate is the one it resumed from
+  uint8_t rest_rooms = spire_savestate_take_rest_rooms(values); // kwaliteit-3 3: out of the variant value
   uint32_t room_k = values[SPIRE_SS_K];
   cr->v_room = room_k; // kwaliteit-2 258: the room this client is in, for its 'C' 12 (spire_gift_last_clear)
   auto plan = spire_savestate_v_plan(spire_savestate_items_owed(cr->answered_resume, cr->savestate.items.size(),
@@ -1993,6 +2028,12 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} room {} not stored (expected while the resume item loop "
         "runs): the resume still owes items ({} of {} asked); the savestate it resumed from stays", serial_number,
         quest_number, room_k, cr->resume_items_asked, cr->savestate.items.size());
+  }
+  if (plan.store && cr->savestate_kept) {
+    // kwaliteit-3 plek 2 (spire_alone_off_leader_slot): the savestate this client could not resume here stays
+    plan.store = false;
+    c->log.info_f("Spire savestate: 'V' for serial {:010} in q{} room {} not stored: the client came alone off the "
+        "leader's slot with a savestate that fits this quest; that savestate stays", serial_number, quest_number, room_k);
   }
   // F6: the ledger follows the feed mirror (the overlay), unless an in-game 61 refreshed it; only its run mag comes back
   auto* led = spire_run_mag_ledger_for(c, run->run_id, false);
@@ -2009,6 +2050,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     ss.quest_number = quest_number;
     ss.start_room = cr->start_room;
     ss.practice = cr->practice;
+    ss.rest_rooms = rest_rooms;
     std::vector<uint32_t> equipped; // kwaliteit-1: put on again at the resume (spire_resume_equip)
     ss.items = spire_savestate_items(overlay->inventory, values[SPIRE_SS_GLASS], &ss.glass_index,
         led ? led->last_mirrored : std::nullopt, &equipped);
@@ -2260,8 +2302,8 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
       spire_send_register(c, reg, cr->savestate.values[index]);
     }
-    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER,
-        SPIRE_RESUME_ANSWER_TAG | SPIRE_RESUME_ANSWER_RESUME | cr->savestate.items.size());
+    // kwaliteit-3 2 and 3: with the run's first room and its rest bits (spire_resume_answer_value)
+    spire_send_register(c, SPIRE_RESUME_ANSWER_REGISTER, spire_resume_answer_value(cr->savestate));
     c->log.info_f("Spire savestate: serial {:010} resumes in q{} room {} from {}", serial_number, quest_number, k,
         spire_savestate_describe(cr->savestate));
     // kwaliteit-1 r2 (critic B-3b): the safety net in case the last item's ack never comes
@@ -2279,6 +2321,21 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     c->log.info_f("Spire savestate: serial {:010} starts q{} room {} variant {} fresh on {} (own savestate {}, game run {:08X}{})",
         serial_number, quest_number, k, variant, spire_meta_difficulty_name(rung), spire_savestate_describe(own),
         run->run_id, run->resumed ? " resumed" : "");
+    // kwaliteit-3 plek 2 (spire_alone_off_leader_slot): no leader in the game to run the quest, so no resume; the
+    // savestate that fits stays, and the player reads what to do, once
+    uint32_t occupied_slots = 0;
+    for (size_t z = 0; (z < l->clients.size()) && (z < 32); z++) {
+      occupied_slots |= l->clients[z] ? (1u << z) : 0;
+    }
+    const auto& follow_leader = c->require_server_state()->data->spire_follow_leader;
+    if (!end && !cr->savestate_kept && spire_savestate_matches(own, episode, k, variant, rung) &&
+        spire_alone_off_leader_slot(follow_leader ? follow_leader->first : 0, occupied_slots, c->lobby_client_id)) {
+      cr->savestate_kept = true;
+      spire_send_ticker(c, SPIRE_SAVESTATE_ALONE_TEXT);
+      c->log.info_f("Spire savestate: serial {:010} is alone in this game on slot {}, not the leader's slot {}; {} is "
+          "not resumed and stays saved; sent \"{}\"", serial_number, c->lobby_client_id,
+          follow_leader ? follow_leader->first : 0, spire_savestate_describe(own), SPIRE_SAVESTATE_ALONE_TEXT);
+    }
     // critic spel-af-3 r2 S-1 (B-REGIE-18-6): a run of this room parked on another difficulty stays saved; say where
     for (uint8_t other = 0; !end && (other < SPIRE_SAVESTATE_RUNGS); other++) {
       if (other == rung) {
@@ -2325,18 +2382,25 @@ static std::string spire_text_first_fitting(std::initializer_list<std::string> f
 }
 
 // 'C' 6 with bits 16-23 = typeB << 4 | typeA (0 normal, 1 elite, 2 rest, 3 exam; typeB 0xF one pipe); "" for 0 (an
-// older quest) or a type it does not know
+// older quest) or a type it does not know. kwaliteit-3 4: a type with SPIRE_WAY_SEGA_TELEPORTER (4-7) is that type
+// behind Sega's own teleporter
 static std::string spire_text_way_open(uint32_t bits, uint32_t k, const SpireBridgeTextContext& ctx) {
   static const char* const TYPE_WORDS[4] = {"normal", "ELITE", "REST", "EXAM"};
   uint32_t type_a = bits & 0x0F, type_b = (bits >> 4) & 0x0F;
-  if ((bits == 0) || (type_a > 3) || ((type_b > 3) && (type_b != 0x0F))) {
+  bool one_way = (type_b == 0x0F);
+  if ((bits == 0) || (type_a > 7) || (!one_way && (type_b > 7))) {
     return "";
   }
-  if (type_b == 0x0F) {
+  bool teleporter_a = type_a & SPIRE_WAY_SEGA_TELEPORTER, teleporter_b = !one_way && (type_b & SPIRE_WAY_SEGA_TELEPORTER);
+  type_a &= 3;
+  type_b = one_way ? type_b : (type_b & 3);
+  if (one_way) {
     if (type_a == 3) {
       // contract: the boss from exams[k]; unknown, or a line over the limit: "Room k" in its place
       const auto* exam = spire_text_exam(ctx, k);
-      if (ctx.boss_teleporter) { // kwaliteit-2 r2 (critic K5): Sega's boss teleporter stands there, no pipe of ours
+      // kwaliteit-2 r2 (critic K5): Sega's boss teleporter stands there, no pipe of ours: the game's map has one on
+      // the writer's floor, or (kwaliteit-3 4) the quest says so itself
+      if (ctx.boss_teleporter || teleporter_a) {
         return spire_text_first_fitting({exam ? std::format("The way is open. Take the teleporter: Exam {}.", exam->boss) : "",
             std::format("The way is open. Take the teleporter: Exam Room {}.", k)});
       }
@@ -2350,7 +2414,18 @@ static std::string spire_text_way_open(uint32_t bits, uint32_t k, const SpireBri
       return std::format("The way is open. Take the teleporter: Room {}.", k);
     }
     // one pipe that is no exam: not in the contract; the two-pipe words for it (route-b-8 report, deviation 2)
-    return std::format("The way is open. Walk to the warp: Room {} {}.", k, TYPE_WORDS[type_a]);
+    return std::format("The way is open. {}: Room {} {}.", teleporter_a ? "Take the teleporter" : "Walk to the warp", k,
+        TYPE_WORDS[type_a]);
+  }
+  if (teleporter_a && teleporter_b) {
+    return spire_text_first_fitting({std::format("The way is open: Room {} {} or Room {} {}. Take a teleporter.",
+        k, TYPE_WORDS[type_a], k, TYPE_WORDS[type_b])});
+  }
+  if (teleporter_a || teleporter_b) {
+    // one side is Sega's teleporter (no board to read), the other a pipe of ours: each side by what stands there
+    return spire_text_first_fitting({std::format("The way is open: {} to Room {} {}, {} to Room {} {}.",
+        teleporter_a ? "teleporter" : "warp", k, TYPE_WORDS[type_a], teleporter_b ? "teleporter" : "warp", k,
+        TYPE_WORDS[type_b])});
   }
   return spire_text_first_fitting({std::format("The way is open: Room {} {} or Room {} {}. Walk close to a warp to read it.",
       k, TYPE_WORDS[type_a], k, TYPE_WORDS[type_b])});
@@ -3117,6 +3192,31 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   if (it != spire_records_pending_score.end()) {
     spire_records_pending_score.erase(it);
   }
+  // kwaliteit-3 1: the exams and the score from what the server saw of this run (spire_finish_seen), not from the
+  // quest's absolute room counter; from here on `value` and `score` are the server's
+  {
+    SpireRunSeen seen;
+    if (auto* cr = spire_client_run_for(c, l, false); cr && cr->began && cr->start_room) {
+      seen.known = true;
+      seen.episode = static_cast<uint8_t>(l->episode);
+      seen.start_room = cr->start_room;
+      uint32_t resumed_room = (cr->resumed && (cr->savestate.values.size() > SPIRE_SS_K)) ? cr->savestate.values[SPIRE_SS_K] : 0;
+      seen.reached_room = spire_run_reached_room(
+          cr->start_room, resumed_room, cr->v_room, spire_run_rooms_for(c, l->lobby_id).rooms);
+    }
+    auto counted = spire_finish_seen(value, score, seen);
+    if (!seen.known) {
+      c->log.info_f("Spire records: 'F' {:08X} of a run without a start room ('B'): unlock step(s) {} and score {} as the quest sent them",
+          value, counted.exams, score);
+    } else if ((counted.finish_value != value) || (counted.score != score)) {
+      c->log.info_f("Spire records: 'F' {:08X} of the run from room {} that reached room {} (episode {}): the quest sent {} "
+          "unlock step(s) and score {}; the server counts {} exam(s) and score {} ({} room(s) and {} exam(s) before or outside the "
+          "run taken off)", value, seen.start_room, seen.reached_room, seen.episode, counted.quest_exams, score,
+          counted.exams, counted.score, counted.rooms_removed, counted.exams_removed);
+    }
+    value = counted.finish_value;
+    score = counted.score;
+  }
   // Route B F2: the rooms were paid when their checkpoint was stored (spire_records_credit_room); 'F' adds the pact
   // bonus and pays rooms of this game the checkpoint could not pay. Without a Payout block, the old V (v48 below).
   // v48: photon splinters (SPIRE_SPLINTERS_PER_BOSS); the heat choice is not known on the server yet, so it counts 0
@@ -3189,6 +3289,7 @@ struct SpireStartLevelSent {
   uint32_t bonus = 0;
   std::optional<uint32_t> resume_level; // B-AF-3: the saved level the .bin carried for a resume (then bonus is 0)
   std::optional<uint32_t> resume_start_bonus; // B-AF-7: that savestate's start_level bonus, if it has one
+  bool floored = false; // B-REGIE-20-5: resume_level is the level floor over the bought bonus, no resume (log only)
 };
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_sent;
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_run;
@@ -3882,19 +3983,21 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
 // this client is on, in the game's map (the quest's .dat as newserv loaded it). The quest puts it on the spot of the
 // exit pipe before a boss and leaves its own pipe out there (make_spire.py boss_tp); a floor without one (Seaside
 // before the Gal Gryphon) keeps the pipe. False without a map. Never throws.
-static bool spire_floor_has_boss_teleporter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
-  try {
-    if (!l->map_state) {
-      return false;
-    }
-    for (const auto& obj_st : l->map_state->iter_object_states(c->version())) {
-      if (obj_st->super_obj && (obj_st->super_obj->floor == c->floor)) {
-        const auto* set_entry = obj_st->super_obj->version(c->version()).set_entry;
-        if (set_entry && (set_entry->base_type == SPIRE_BOSS_TELEPORTER_OBJECT_TYPE)) {
-          return true;
-        }
+bool spire_map_has_boss_teleporter(MapState& map_state, Version version, uint8_t floor) {
+  for (const auto& obj_st : map_state.iter_object_states(version)) {
+    if (obj_st->super_obj && (obj_st->super_obj->floor == floor)) {
+      const auto* set_entry = obj_st->super_obj->version(version).set_entry;
+      if (set_entry && (set_entry->base_type == SPIRE_BOSS_TELEPORTER_OBJECT_TYPE)) {
+        return true;
       }
     }
+  }
+  return false;
+}
+
+static bool spire_floor_has_boss_teleporter(std::shared_ptr<const Client> c, std::shared_ptr<const Lobby> l) {
+  try {
+    return l->map_state && spire_map_has_boss_teleporter(*l->map_state, c->version(), c->floor);
   } catch (const std::exception&) {
   }
   return false;
@@ -3949,13 +4052,6 @@ void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<cons
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   const auto* cr = spire_client_run_for(c, l, false);
   return cr ? cr->v_room : 0;
-}
-
-void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
-  spire_game_runs.erase(l->lobby_id);
-  spire_client_runs.erase(c.get());
-  spire_draw_inputs.erase(c.get());
-  spire_run_mag_store.erase(spire_run_mag_key(c));
 }
 
 bool spire_bridge_handle_register(
@@ -4792,6 +4888,57 @@ static std::optional<uint32_t> spire_resume_level_for_client(
   }
 }
 
+// B-REGIE-20-5: the quest's leader, the measure of the level floor and the heat: the client in SpireFollowLeader's
+// LeaderClient slot (else lobby client 0), as spire_resume_level_for_client takes it, whoever leads the game; with nobody
+// in that slot the game's leader (l->leader_id); with nobody there either none. Throws without a server state.
+static std::shared_ptr<Client> spire_quest_leader(std::shared_ptr<const Lobby> l) {
+  const auto& follow = l->require_server_state()->data->spire_follow_leader;
+  uint8_t leader_id = follow ? follow->first : 0;
+  if ((leader_id >= l->clients.size()) || !l->clients[leader_id]) {
+    leader_id = l->leader_id;
+  }
+  return (leader_id < l->clients.size()) ? l->clients[leader_id] : nullptr;
+}
+
+// B-REGIE-20-5: the trailing player's level floor (SpireMeta.hh spire_level_floor_char_level) for the quest .bin of a
+// client the start_level path covers: the floored level if it is above the client's own for this quest load, else none.
+// The leader is spire_quest_leader's, at the level its own .bin gets; at the run again ('I') at its bought bonus only, as
+// its run copy made again. Never throws: on an error (logged) no floor.
+static std::optional<uint32_t> spire_level_floor_for_client(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    std::optional<uint32_t> resume_level, uint32_t bonus, bool run_again = false) {
+  try {
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    if (!l->is_game() || (l->mode != GameMode::BATTLE) || !rules || !rules->replace_char ||
+        !spire_guard_quest_is_guarded(c, l->quest->meta.quest_number) || c->is_spire_protected() ||
+        (c->version() != Version::GC_V3)) {
+      return std::nullopt;
+    }
+    auto leader = spire_quest_leader(l);
+    bool is_leader = !leader || (leader == c); // no leader in the game at all: nobody to follow
+    std::optional<uint32_t> unused;
+    uint32_t own = spire_quest_load_char_level(rules->char_level, bonus, resume_level);
+    uint32_t leader_level = is_leader ? own : spire_quest_load_char_level(rules->char_level,
+        spire_start_level_bonus_for_client(leader, l), run_again ? std::nullopt : spire_resume_level_for_client(leader, l, &unused));
+    uint32_t level = spire_level_floor_char_level(own, leader_level, is_leader);
+    // B-BAL-21: a room quest's fixed floor (SpireRoomQuests K), for every player, the higher of the two
+    const auto& rooms = l->require_server_state()->data->spire_room_quests;
+    auto rq_it = rooms.find(l->quest->meta.quest_number);
+    uint32_t room_floor = ((rq_it == rooms.end()) || (rq_it->second.episode != static_cast<uint8_t>(l->episode)))
+        ? 0 : spire_room_level_floor(rq_it->second.episode, rq_it->second.k);
+    if (room_floor > level) {
+      c->log.info_f("Spire level floor: Lv{} -> Lv{} (room {}'s floor)", own + 1, room_floor + 1, rq_it->second.k);
+      level = room_floor;
+    } else if (level > own) {
+      c->log.info_f("Spire level floor: Lv{} -> Lv{} (the leader's Lv{} minus {})", own + 1, level + 1, leader_level + 1,
+          SPIRE_LEVEL_FLOOR_GAP);
+    }
+    return (level > own) ? std::optional<uint32_t>(level) : std::nullopt;
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire level floor: not computed: {}; the client's own level", e.what());
+    return std::nullopt;
+  }
+}
+
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents) {
   spire_start_level_sent.erase(c.get());
@@ -4800,7 +4947,8 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
   if (auto resume_level = bin_contents ? spire_resume_level_for_client(c, l, &resume_start_bonus) : std::nullopt) {
     uint32_t quest_number = l->quest->meta.quest_number;
     uint32_t base = l->quest->meta.battle_rules->char_level;
-    uint32_t level = std::min<uint32_t>(*resume_level, SPIRE_START_LEVEL_LEVEL_CAP);
+    uint32_t level = spire_quest_load_char_level(base, 0, resume_level); // never below the quest's own level
+    level = spire_level_floor_for_client(c, l, resume_level, 0).value_or(level); // B-REGIE-20-5
     try {
       std::string bin = prs_decompress(*bin_contents);
       size_t count = spire_start_level_patch_bin(bin, base, level);
@@ -4820,13 +4968,14 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
     }
   }
   uint32_t bonus = spire_start_level_bonus_for_client(c, l);
-  if (!bonus || !bin_contents) {
+  auto floor_level = bin_contents ? spire_level_floor_for_client(c, l, std::nullopt, bonus) : std::nullopt; // B-REGIE-20-5
+  if ((!bonus && !floor_level) || !bin_contents) {
     return bin_contents;
   }
   uint32_t quest_number = l->quest->meta.quest_number;
   try {
     uint32_t base = l->quest->meta.battle_rules->char_level;
-    uint32_t level = spire_start_level_char_level(base, bonus);
+    uint32_t level = floor_level.value_or(spire_start_level_char_level(base, bonus));
     std::string bin = prs_decompress(*bin_contents);
     size_t count = spire_start_level_patch_bin(bin, base, level);
     if (count != 1) {
@@ -4835,9 +4984,11 @@ std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<C
       return bin_contents;
     }
     auto ret = std::make_shared<const std::string>(prs_compress(bin));
-    spire_start_level_sent[c.get()] = SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
+    // B-REGIE-20-5: a floored level reaches the overlay as an absolute level; the run's bonus stays the bought one
+    spire_start_level_sent[c.get()] = floor_level ? SpireStartLevelSent{l->lobby_id, quest_number, 0, level, bonus, true}
+        : SpireStartLevelSent{l->lobby_id, quest_number, level - base, std::nullopt, std::nullopt};
     c->log.info_f("Spire start level: q{} sent with the rule block's level Lv{} -> Lv{} (start_level +{})",
-        quest_number, base + 1, level + 1, level - base);
+        quest_number, base + 1, level + 1, floor_level ? bonus : (level - base));
     return ret;
   } catch (const std::exception& e) {
     c->log.warning_f("Spire start level: q{} .bin not changed: {}; quest and overlay keep the quest's level",
@@ -4852,12 +5003,13 @@ struct SpireHeatLeader {
   std::string detail;
 };
 
-// The game leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
+// The quest leader's heat as its 'M' START computes it (spire_shop_handle): H_auto(class, P) from its meta.json upgrades
 // and the shop catalogue, start_level counted as the run copy this quest load gives it (spire_start_level_bonus_for_client),
 // plus the chosen heat (H_keuze), which the server does not know yet (0). Throws on a file error.
+// B-REGIE-20-5: the leader is the quest's, as for the level floor (spire_quest_leader).
 static SpireHeatLeader spire_heat_for_leader(std::shared_ptr<const Lobby> l) {
   SpireHeatLeader ret;
-  auto leader = (l->leader_id < l->clients.size()) ? l->clients[l->leader_id] : nullptr;
+  auto leader = spire_quest_leader(l);
   if (!leader || (leader->version() != Version::GC_V3) || !leader->login || !leader->login->gc_license) {
     ret.detail = "no GC leader";
     return ret;
@@ -4960,8 +5112,14 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
   uint32_t bonus = 0;
   std::optional<uint32_t> resume_level; // B-AF-3
   std::optional<uint32_t> resume_start_bonus; // B-AF-7
+  bool floored = false; // B-REGIE-20-5: resume_level is the level floor, for the log
   if (run_again) {
     bonus = spire_start_level_bonus_for_client(c, l);
+    // B-REGIE-20-5: the floor as at a quest load, the leader's run copy made again at its bought bonus only
+    if ((resume_level = spire_level_floor_for_client(c, l, std::nullopt, bonus, true))) {
+      resume_start_bonus = bonus;
+      floored = true;
+    }
   } else {
     auto it = spire_start_level_sent.find(c.get());
     if ((it != spire_start_level_sent.end()) && l->quest && (it->second.lobby_id == l->lobby_id) &&
@@ -4969,6 +5127,7 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
       bonus = it->second.bonus;
       resume_level = it->second.resume_level;
       resume_start_bonus = it->second.resume_start_bonus;
+      floored = it->second.floored;
     }
     spire_start_level_sent.erase(c.get());
   }
@@ -4976,8 +5135,8 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
   if (resume_level && rules) {
     auto saved = std::make_shared<BattleRules>(*rules);
     saved->char_level = *resume_level;
-    c->log.info_f("Spire savestate: overlay Lv{} -> Lv{} (the saved run level, as its .bin)", rules->char_level + 1,
-        saved->char_level + 1);
+    c->log.info_f("Spire {}: overlay Lv{} -> Lv{} ({}, {})", floored ? "level floor" : "savestate", rules->char_level + 1,
+        saved->char_level + 1, floored ? "the trailing player's floor" : "the saved run level", run_again ? "run again" : "as its .bin");
     rules = saved;
   } else if (bonus && rules) {
     auto raised = std::make_shared<BattleRules>(*rules);
@@ -4998,8 +5157,8 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
                   : 0);
     spire_start_level_run[c.get()] = SpireStartLevelSent{l->lobby_id, l->quest->meta.quest_number, run_bonus, std::nullopt, std::nullopt};
     if (resume_level) {
-      c->log.info_f("Spire savestate: the run's start_level bonus +{} ({})", run_bonus,
-          resume_start_bonus ? "saved" : "owned now; the savestate has none");
+      c->log.info_f("Spire {}: the run's start_level bonus +{} ({})", floored ? "level floor" : "savestate", run_bonus,
+          floored ? "bought" : resume_start_bonus ? "saved" : "owned now; the savestate has none");
     }
   }
   return true;
@@ -6424,6 +6583,25 @@ static asio::awaitable<void> spire_base_game_start(
       co_return;
     }
   }
+  // kwaliteit-3: the same once more for the new run's game as it stands now (a client may have come into it from the
+  // lobby before this start). The base quest itself has no such test, as before.
+  if (game->mode == GameMode::BATTLE) {
+    bool unlocked = false;
+    try {
+      unlocked = quest_unlocked_for_all_players(game, q);
+    } catch (const std::exception& e) {
+      game->log.warning_f("Spire base game: q{} could not be tested for the clients of this game: {}", quest_number, e.what());
+    }
+    if (!unlocked) {
+      auto leader = (game->leader_id < game->max_clients) ? game->clients[game->leader_id] : nullptr;
+      if (leader) {
+        spire_send_ticker(leader, QUEST_NOT_UNLOCKED_TEXT);
+      }
+      game->log.info_f("Spire base game: q{} is not unlocked for every client of the new run's game {:08X} ({} client(s)); not started",
+          quest_number, game->lobby_id, game->count_clients());
+      co_return;
+    }
+  }
   set_lobby_quest(game, q, true);
   game->log.info_f("Spire base game: q{} started in {} game {:08X} with {} of {} client(s)", quest_number,
       (game->mode == GameMode::BATTLE) ? "the new run's Battle" : "the base", game->lobby_id, game->count_clients(),
@@ -6517,6 +6695,15 @@ static void spire_base_new_run(std::shared_ptr<Client> c, std::shared_ptr<Lobby>
     if (!q) {
       spire_send_ticker(c, "No run quest on this server.");
       c->log.warning_f("Spire base game: 'O' sub 2 (new run): run quest q{} not found", run_quest_number);
+      return;
+    }
+    // kwaliteit-3: what the quest board asks (quest_unlocked_for_all_players), in the base game, whose difficulty and
+    // clients the new run's game gets: a client that came into the base game before its quest started may not have
+    // the run quest. Nobody is sent out; the leader reads the board's line.
+    if (!quest_unlocked_for_all_players(l, q)) {
+      spire_send_ticker(c, QUEST_NOT_UNLOCKED_TEXT);
+      c->log.info_f("Spire base game: 'O' sub 2 (new run): q{} is not unlocked for every client of base game {:08X} ({} client(s)); refused",
+          run_quest_number, l->lobby_id, l->count_clients());
       return;
     }
     size_t expected = std::max<size_t>(1, l->count_clients());
@@ -7917,6 +8104,41 @@ uint8_t spire_finish_boss_store_room(bool won, uint8_t episode) {
   return (won && (episode == 1)) ? spire_meta_final_boss_room(episode) : 0;
 }
 
+uint8_t spire_run_reached_room(uint8_t start_room, uint32_t resumed_room, uint32_t v_room, const std::set<uint8_t>& cleared) {
+  uint32_t ret = std::max<uint32_t>({start_room, resumed_room, v_room, cleared.empty() ? 0u : *cleared.rbegin()});
+  return static_cast<uint8_t>(std::min<uint32_t>(ret, 0xFF));
+}
+
+SpireFinishSeen spire_finish_seen(uint32_t finish_value, uint32_t score, const SpireRunSeen& seen) {
+  auto finish = spire_meta_decode_finish(finish_value);
+  SpireFinishSeen ret;
+  ret.finish_value = finish_value;
+  ret.score = score;
+  ret.quest_exams = std::min<uint32_t>((finish_value >> SPIRE_META_FINISH_EXAMS_SHIFT) & 3, 2);
+  ret.exams = finish.exams;
+  if (!seen.known) {
+    return ret;
+  }
+  uint8_t passed = std::min<uint8_t>(
+      spire_meta_exams_passed(seen.episode, seen.start_room, seen.reached_room, finish.won), 2);
+  if (seen.start_room <= 1) {
+    ret.exams = std::max(finish.exams, passed);
+  } else {
+    ret.exams = finish.won ? finish.exams : passed;
+  }
+  if ((seen.start_room > 1) && !(finish_value & SPIRE_FINISH_FROM_START)) {
+    ret.rooms_removed = seen.start_room - 1;
+    ret.exams_removed = (ret.quest_exams > passed) ? (ret.quest_exams - passed) : 0;
+    uint64_t base = static_cast<uint64_t>(SPIRE_SCORE_PER_ROOM) * ret.rooms_removed +
+        static_cast<uint64_t>(SPIRE_SCORE_PER_EXAM - SPIRE_SCORE_PER_ROOM) * ret.exams_removed;
+    ret.score_removed = static_cast<uint32_t>(std::min<uint64_t>((base * (4 + finish.pacts)) / 4, score));
+    ret.score = score - ret.score_removed;
+  }
+  ret.finish_value = (finish_value & ~(3u << SPIRE_META_FINISH_EXAMS_SHIFT)) |
+      (static_cast<uint32_t>(ret.exams) << SPIRE_META_FINISH_EXAMS_SHIFT);
+  return ret;
+}
+
 uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor) {
   auto ep_it = arrivals_by_episode.find(static_cast<uint8_t>(episode));
@@ -8527,4 +8749,46 @@ void spire_pvp_log_strip(std::shared_ptr<const Client> c, std::shared_ptr<Lobby>
   l->spire_pvp_logged_clients |= bit;
   l->log.info_f("Spire PvP: stripped {} player target(s) from 6x{:02X} of C-{:X} (no player damage in a Spire run)",
       count, subcommand, c->id);
+}
+
+void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number) {
+  spire_base_game_run_quests[l->lobby_id] = quest_number;
+}
+
+// kwaliteit-2 r2 (critic K7), for StaticTests. kwaliteit-3 6 (critic r2 K-4): every key a test client and its game left
+// in the bridge's tables goes, so a later case that reuses the lobby id or gets the Client's address starts clean (a
+// run end kept under a lobby id made the next game with that id answer every 'J' "fresh"). Defined last: every table
+// is in sight here.
+void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  const Client* key = c.get();
+  // per game: by lobby id and by Lobby address
+  spire_game_runs.erase(l->lobby_id);
+  spire_run_ends.erase(l->lobby_id);
+  spire_run_again_games.erase(l->lobby_id);
+  spire_base_game_run_quests.erase(l->lobby_id);
+  spire_run_timers.erase(l.get());
+  spire_replay_states.erase(l.get());
+  // per client: by Client address, the base game mark by its serial number and the run mag store by its character
+  // (spire_base_game_groups is by group id and drops an entry whose game is gone itself)
+  spire_base_game_marks.erase(spire_bridge_serial_for_client(c));
+  spire_lobby_texts.erase(key);
+  spire_client_runs.erase(key);
+  spire_overlay_refreshed.erase(key);
+  spire_base_returned.erase(key);
+  spire_draw_inputs.erase(key);
+  spire_overview_entries.erase(key);
+  spire_checkpoint_lives.erase(key);
+  spire_follow_pending.erase(key);
+  spire_follow_holds.erase(key);
+  spire_run_rooms.erase(key);
+  spire_records_pending_score.erase(key);
+  spire_start_level_sent.erase(key);
+  spire_start_level_run.erase(key);
+  spire_heat_sent.erase(key);
+  spire_guard_run_files.erase(key);
+  spire_guard_follow_pending.erase(key);
+  spire_guard_base_game_left.erase(key);
+  spire_guard_base_exit_pending.erase(key);
+  spire_guard_restoring_clients.erase(key);
+  spire_run_mag_store.erase(spire_run_mag_key(c));
 }

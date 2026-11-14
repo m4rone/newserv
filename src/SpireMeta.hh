@@ -20,6 +20,13 @@
 //
 // The run's unlocks are decided here, not in the quest: the 'F' record code carries the exams passed (bits 16-17:
 // 1 = Dragon, 2 = De Rol Le) and a deathless team (bit 18) next to the won bit (23) and the seconds (low 16 bits).
+// kwaliteit-3 1: the exams are the first and the second boss of the run's episode (Episode 2: Barba Ray, Gol Dragon),
+// and for a run the server knows they are what the server saw the run pass (spire_finish_seen), not the quest's field.
+// balans-4 (B-REGIE-20-9): bits 16-17 are the unlock steps (0-2), not the number of exams in the run's score. The
+// quest's score ('K') counts every boss the run beat as an exam (score.py: 2000 each, up to four in an episode's run)
+// and says so with bit 22; the server keeps that score as sent (spire_finish_seen) and stores no exam count next to
+// it (records.json: BestScore). The quest caps the field at 2: bit 18 above it is the deathless bit. Nothing below
+// changes with it: every unlock hangs on step 1 or step 2, as before.
 // From that the server sets 0x380 (first run), 0x381/0x384/0x385 (Dragon: Iron man, Haste), 0x382/0x386/0x387/0x3A0
 // (De Rol Le: Bare, Hungry, payout win), 0x383/0x3A1 + the second kit of the class's archetype (0x388 HU, 0x389 RA,
 // 0x38A FO) for a deathless win, and 0x3A2 on a new best time; it delivers them at once and names what is new.
@@ -36,11 +43,12 @@ constexpr uint16_t SPIRE_META_FLAG_PAY_WIN = 0x03A0;
 constexpr uint16_t SPIRE_META_FLAG_PAY_DEATHLESS = 0x03A1;
 constexpr uint16_t SPIRE_META_FLAG_PAY_RECORD = 0x03A2;
 
-constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits
+constexpr uint32_t SPIRE_META_FINISH_EXAMS_SHIFT = 16; // 2 bits: the unlock steps, at most 2 (balans-4)
 constexpr uint32_t SPIRE_META_FINISH_DEATHLESS = 1 << 18;
 // Route B F2: the pacts the run carried, bits 19-21 of 'F' (the quest adds pacts << 19 before its score_keep jump, so a
-// lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 22 is unused and bit 23
-// is the won bit; a quest that does not send pacts sends 0.
+// lost run carries them too); more than SPIRE_META_FINISH_PACTS_MAX counts as the maximum. Bit 23 is the won bit; a
+// quest that does not send pacts sends 0. Bit 22 (kwaliteit-3 1, SPIRE_FINISH_FROM_START in SpireFlagBridge.hh): the
+// quest counted its rooms and exams from the run's first room; a quest from before sends 0.
 constexpr uint32_t SPIRE_META_FINISH_PACTS_SHIFT = 19; // 3 bits
 constexpr uint8_t SPIRE_META_FINISH_PACTS_MAX = 4;
 
@@ -296,6 +304,13 @@ const char* spire_meta_boss_name(uint8_t k);
 // won run beat. Pure.
 bool spire_meta_boss_room_before(uint32_t k);
 uint8_t spire_meta_final_boss_room(uint8_t episode);
+// kwaliteit-3 1: the first room of an episode's run: k1 in Episode 1, the room after Dark Falz (k16) in Episode 2.
+uint8_t spire_meta_episode_first_room(uint8_t episode);
+// kwaliteit-3 1: the exams a run passed as the server saw it: the boss rooms b of the run's episode from the run's
+// first room on that the run left behind (start_room <= b < reached_room: it started the room after the boss, B-AF-1),
+// and for a won run every boss room from its first room on (a win beat the episode's last boss; the rooms are one
+// line). A run that never left its first room passed none, whatever its room number is. Pure.
+uint8_t spire_meta_exams_passed(uint8_t episode, uint8_t start_room, uint8_t reached_room, bool won);
 // B-AF-1: the ticker line for a BUY refused because the next level waits for boss room k ("" for k 0).
 std::string spire_shop_boss_needed_text(const SpireShopCatalogue& cat, size_t index,
     const std::map<std::string, uint32_t>& upgrades, uint8_t k);
@@ -343,6 +358,26 @@ uint32_t spire_start_level_char_level(uint32_t base_char_level, uint32_t bonus);
 // In a decompressed GC/v3 quest .bin: the rule block's "arg_pushl base_char_level; ba_set_char_level" (49 <u32 LE>
 // F8 71). Returns how many there are and replaces the level with new_char_level only if there is exactly one.
 size_t spire_start_level_patch_bin(std::string& decompressed_bin, uint32_t base_char_level, uint32_t new_char_level);
+
+// B-REGIE-20-5 (kwaliteit-3 measurement 128): the level floor of the trailing player. The GC client computes EXP itself
+// and the server cannot give any, so the second player of a co-op run hardly grows along. At every quest load (run
+// start, room quest, resume) a client that is not the quest's leader gets at least the leader's level for that quest
+// load minus SPIRE_LEVEL_FLOOR_GAP in the quest .bin it is sent, and never less than its own; the leader and a solo
+// player keep their own. The quest's leader is SpireFollowLeader's LeaderClient (else lobby client 0), as the quest and
+// the resume take it; not the game's leader (l->leader_id), which can be another client after a lobby visit.
+// Levels are 0-based, as ba_set_char_level; the floor is at most SPIRE_START_LEVEL_LEVEL_CAP.
+// The floor is not a start_level bonus: the run's bonus (P, heat, the run mag's start floors) stays the bought one.
+constexpr uint32_t SPIRE_LEVEL_FLOOR_GAP = 2;
+// A client's own level for a quest load, before the floor: the saved level of a resume (SpireSavestate::level), never
+// below the quest's own level, else the quest's level plus its start_level bonus; at most SPIRE_START_LEVEL_LEVEL_CAP.
+uint32_t spire_quest_load_char_level(uint32_t base_char_level, uint32_t bonus, std::optional<uint32_t> resume_level);
+// The level the client's quest .bin carries: own_level for the leader (a solo player is its own leader), else the
+// higher of own_level and leader_level - SPIRE_LEVEL_FLOOR_GAP (0 if that is below Lv1).
+uint32_t spire_level_floor_char_level(uint32_t own_level, uint32_t leader_level, bool is_leader);
+// B-BAL-21: the fixed level floor of a room, 0-based, for every player at the load of a room quest (start or resume):
+// Episode 1 k1 Lv1, k2 Lv4, k3 Lv6, k4 Lv8, k5 Lv10, k6 Lv11, k7 Lv12, k8 Lv13; 0 (none) for any other room or episode.
+// The .bin carries the higher of this and spire_level_floor_char_level.
+uint32_t spire_room_level_floor(uint8_t episode, uint8_t k);
 
 // v53 (B-BASIS-54): the heat steps server-side. A Spire quest built with the heat steps carries the override rows of H 0
 // in a layout that is the same for every step H 0..HeatMax, and a sidecar SPIRE_HEAT_PATCH_DIR/q<N>.json (pso-roguelike

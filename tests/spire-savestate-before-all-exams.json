@@ -1,0 +1,16 @@
+{
+  "RestRooms": 5,
+  "RunId": 2235497425,
+  "Episode": 2,
+  "Equipped": [],
+  "StartRoom": 16,
+  "Quest": 922,
+  "Practice": false,
+  "Level": 0,
+  "Room": 20,
+  "Values": [20, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "Items": ["0001000000000000000000000000010000000000"],
+  "GlassIndex": -1,
+  "SerialNumber": 5200,
+  "Time": 1794405147991074
+}
