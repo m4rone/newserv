@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "Channel.hh"
+#include "ChatCommands.hh"
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
 #include "GameServer.hh"
@@ -10343,6 +10344,47 @@ void run_static_tests() {
         throw std::runtime_error("the Dragon's event chained behind a counted wave was counted and the room cleared while the boss lives: the server did not mark the chained event as a boss event (is_boss)");
       }
       l->map_state.reset(); // the watch of room 1 looks again later and then stops (no map state)
+    });
+
+    // veilig-2 (10r2-M1): a chat command's usage line goes to the client as a text message (send_text_message, not the
+    // ticker), so it holds no angle bracket. Played through on_chat_command, as on_06 hands a "$" chat over.
+    e2e_case("the usage lines of $lv and $kitlobby reach the client without an angle bracket (10r2-M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      for (const char* text : {"$lv", "$lv x", "$kitlobby 0", "$kitlobby 201"}) {
+        p.ch->inbox.clear();
+        std::exception_ptr failed;
+        bool done = false;
+        asio::co_spawn(*w.s->io_context, on_chat_command(p.c, text, false), [&](std::exception_ptr e) {
+          failed = e;
+          done = true;
+        });
+        w.s->io_context->restart();
+        w.s->io_context->poll();
+        if (failed) {
+          std::rethrow_exception(failed);
+        }
+        must(done, "the chat command did not finish");
+        size_t usage_lines = 0;
+        for (const auto& raw : p.ch->inbox) {
+          if ((raw.size() < sizeof(PSOCommandHeaderDCV3)) || (static_cast<uint8_t>(raw[0]) != 0xB0)) {
+            continue;
+          }
+          std::string body = raw.substr(sizeof(PSOCommandHeaderDCV3));
+          if (body.find("Gebruik") == std::string::npos) {
+            continue;
+          }
+          usage_lines++;
+          if ((body.find('<') != std::string::npos) || (body.find('>') != std::string::npos)) {
+            throw std::runtime_error(std::format("the usage line of \"{}\" holds an angle bracket", text));
+          }
+        }
+        if (usage_lines != 1) {
+          throw std::runtime_error(std::format("\"{}\" sent {} usage line(s) instead of one", text, usage_lines));
+        }
+      }
     });
 
     expect_eq(0u, e2e_failed);
