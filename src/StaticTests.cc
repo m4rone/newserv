@@ -13430,6 +13430,190 @@ void run_static_tests() {
       expect(!world(0xCC100003));
     });
 
+    // ---- balans v1, systeemcritic: five mutants that stayed green (M1 at the login, M2 through the 6x5D handler, M2
+    // for a split stack and for Meseta with another player's part, M3 in what $restore says)
+    auto kb_pmt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    // what the 6x29 handler (stack limits) and the handlers' log lines and $restore (item names) read
+    auto kb_tables = [&](K3World& w) {
+      auto limits = std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+      w.s->data->item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = kb_pmt;
+      w.s->data->item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] = limits;
+      w.s->data->item_name_indexes[static_cast<size_t>(Version::GC_V3)] =
+          std::make_shared<ItemNameIndex>(kb_pmt, limits, std::vector<std::string>());
+    };
+    // One 60 command through the server's own subcommand handlers (on_subcommand_multi), then the end of the command
+    auto kb_sub = [&](KbTwo& g, KbLive& who, std::string data) {
+      Channel::Message msg{.command = 0x60, .flag = 0, .data = std::move(data)};
+      bool done = false;
+      std::exception_ptr failed;
+      g.w.s->io_context->restart();
+      asio::co_spawn(*g.w.s->io_context, on_subcommand_multi(who.p.c, msg), [&](std::exception_ptr e) {
+        failed = e;
+        done = true;
+      });
+      for (size_t z = 0; !done && (z < 1000); z++) {
+        g.w.s->io_context->poll_one();
+      }
+      expect(done);
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+      inventory_backup_after_command(who.p.c);
+    };
+    // 6x5D (a part of a stack, or Meseta, onto the floor; the inventory is untouched), then the 6x29 that takes it out
+    auto kb_split = [&](KbTwo& g, KbLive& who, uint32_t stack_id, uint32_t amount, uint32_t floor_id) {
+      G_DropStackedItem_PC_V3_BB_6x5D cmd;
+      cmd.header.subcommand = 0x5D;
+      cmd.header.size = sizeof(cmd) / 4;
+      cmd.header.client_id = who.p.c->lobby_client_id;
+      cmd.floor = 1;
+      if (stack_id == 0xFFFFFFFF) {
+        cmd.item_data.data1[0] = 0x04;
+        cmd.item_data.data2d = amount;
+      } else {
+        for (size_t z = 0; z < who.ch->inventory.num_items; z++) {
+          if (who.ch->inventory.items[z].data.id == stack_id) {
+            cmd.item_data = who.ch->inventory.items[z].data;
+          }
+        }
+        cmd.item_data.data1[5] = amount;
+      }
+      cmd.item_data.id = floor_id;
+      kb_sub(g, who, std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd)));
+      G_DeleteInventoryItem_6x29 cmd29;
+      cmd29.header.subcommand = 0x29;
+      cmd29.header.size = sizeof(cmd29) / 4;
+      cmd29.header.client_id = who.p.c->lobby_client_id;
+      cmd29.item_id = stack_id;
+      cmd29.amount = amount;
+      kb_sub(g, who, std::string(reinterpret_cast<const char*>(&cmd29), sizeof(cmd29)));
+    };
+    auto kb_units_of = [](const PlayerInventory& inv, uint32_t id) {
+      uint32_t ret = 0;
+      for (size_t z = 0; z < inv.num_items; z++) {
+        if (inv.items[z].data.id == id) {
+          ret += inv.items[z].data.data1[5];
+        }
+      }
+      return ret;
+    };
+
+    k3_case("backup bal M2a: the 6x5D handler itself notes his own split: Meseta and a split stack through 6x5D and 6x29 are his again", [&]() {
+      K3TempCwd temp_cwd("backup-bal-m2a");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      kb_tables(g.w);
+      kb_split(g, g.a, 0xFFFFFFFF, 300, 0x00010010);
+      expect_eq(200u, g.a.ch->disp.stats.meseta.load()); // the 6x29 handler took it out
+      expect(g.l->find_item(1, 0x00010010) != nullptr); // the 6x5D handler put it on the floor
+      kb_pick_up(g, g.a, 0x00010010);
+      kb_split(g, g.a, 0x00010002, 1, 0x00010020);
+      expect_eq(2u, kb_units_of(g.a.ch->inventory, 0x00010002));
+      kb_pick_up(g, g.a, 0x00010020, 0x00010002);
+      kb_bundle(g.a);
+      auto from_a = inventory_backup_restore_source(kb_load(g.a.path), kb_next_boot);
+      // without the handler's inventory_backup_note_dropped_partial: 200 Meseta and two Monomates
+      expect_eq(500u, from_a.meseta);
+      expect_eq(3u, kb_units_of(from_a.inventory, 0x00010002));
+    });
+
+    k3_case("backup bal M2b: a split from a stack that is partly another's counts only his own units", [&]() {
+      K3TempCwd temp_cwd("backup-bal-m2b");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      kb_tables(g.w);
+      // five Monomates of unknown origin go onto his own three: 3 of the 8 are proven his
+      ItemData five = kb_floor(g, KB_MONOMATE_3, 0x00010030);
+      g.l->find_item(1, 0x00010030)->data.data1[5] = 5;
+      kb_pick_up(g, g.a, 0x00010030, 0x00010002);
+      expect_eq(8u, kb_units_of(g.a.ch->inventory, 0x00010002));
+      // he splits five off and picks them up again: still 3 of the 8 are his, never 5
+      kb_split(g, g.a, 0x00010002, 5, 0x00010031);
+      kb_pick_up(g, g.a, 0x00010031, 0x00010002);
+      expect_eq(8u, kb_units_of(g.a.ch->inventory, 0x00010002));
+      kb_bundle(g.a);
+      auto from_a = inventory_backup_restore_source(kb_load(g.a.path), kb_next_boot);
+      expect_eq(3u, kb_units_of(from_a.inventory, 0x00010002));
+      (void)five;
+    });
+
+    k3_case("backup bal M2c: dropped Meseta that is partly another's counts only his own part", [&]() {
+      K3TempCwd temp_cwd("backup-bal-m2c");
+      KbTwo g;
+      kb_two(g, 500, 0);
+      kb_tables(g.w);
+      kb_floor(g, 0, 0x00010040, 600); // 600 Meseta of unknown origin: 500 of his 1100 are proven his
+      kb_pick_up(g, g.a, 0x00010040);
+      expect_eq(1100u, g.a.ch->disp.stats.meseta.load());
+      kb_split(g, g.a, 0xFFFFFFFF, 800, 0x00010041);
+      expect_eq(300u, g.a.ch->disp.stats.meseta.load());
+      kb_pick_up(g, g.a, 0x00010041);
+      kb_bundle(g.a);
+      auto from_a = inventory_backup_restore_source(kb_load(g.a.path), kb_next_boot);
+      expect_eq(500u, from_a.meseta); // never 800
+    });
+
+    // B's game of "backup M4" (an Exit) or the same game ended by a hard stop (its interim state, an older process)
+    auto kb_b_lost = [&](KbTwo& g, bool hard_stop) {
+      kb_two(g, 500, 100);
+      kb_tables(g.w);
+      kb_drop(g, g.a, 0x00010000);
+      kb_pick_up(g, g.b, 0x00010000);
+      ItemData dropped = kb_floor(g, 0, 0x00010010, 300);
+      g.a.ch->disp.stats.meseta = 200;
+      inventory_backup_note_removed(g.a.p.c, dropped);
+      kb_done(g.a);
+      kb_pick_up(g, g.b, 0x00010010);
+      kb_floor(g, KB_FOUND, 0xCC000000);
+      inventory_backup_note_floor_world(g.l, 1, 0xCC000000);
+      kb_pick_up(g, g.b, 0xCC000000);
+      if (hard_stop) {
+        kb_bundle(g.b);
+        auto b = kb_load(g.b.path);
+        b.interim_boot = kb_old_boot;
+        inventory_backup_write_file(g.b.path, b);
+      } else {
+        inventory_backup_on_game_end(g.b.p.c, g.l, false);
+      }
+      g.b.p.c->inventory_backup_current.clear(); // its process or its connection is gone
+      // his card kept what he had at the join
+      g.b.ch->inventory = kb_b_inv;
+      g.b.ch->disp.stats.meseta = 0;
+    };
+
+    k3_case("backup bal M1: the login check counts only what $restore gives back, also for Meseta in the backup", [&]() {
+      for (bool hard_stop : {true, false}) {
+        K3TempCwd temp_cwd(hard_stop ? "backup-bal-m1-stop" : "backup-bal-m1-exit");
+        KbTwo g;
+        kb_b_lost(g, hard_stop);
+        auto b = kb_load(g.b.path);
+        auto from = inventory_backup_restore_source(b, inventory_backup_boot_id());
+        expect_eq(static_cast<int>(hard_stop ? KbKind::INTERIM : KbKind::EXIT), static_cast<int>(from.kind));
+        expect(from.meseta > 0); // the backup holds Meseta of his own
+        g.b.p.c->lobby.reset();
+        inventory_backup_on_login(g.b.p.c);
+        // the enemy's item is missing, so he is told; the Meseta $restore never gives back is not in it
+        expect(g.b.p.c->inventory_loss_told);
+        auto marked = kb_load(g.b.path);
+        expect(marked.loss_time_usecs != 0);
+        expect_eq(1u, static_cast<size_t>(marked.loss_items));
+        expect_eq(0u, static_cast<uint32_t>(marked.loss_meseta));
+      }
+    });
+
+    k3_case("backup bal M3: what $restore says after a hard stop or an Exit holds the line on what it leaves out", [&]() {
+      for (bool hard_stop : {true, false}) {
+        K3TempCwd temp_cwd(hard_stop ? "backup-bal-m3-stop" : "backup-bal-m3-exit");
+        KbTwo g;
+        kb_b_lost(g, hard_stop);
+        auto lines = inventory_restore_command(g.b.p.c, true); // $restore check: nothing dropped
+        auto texts = inventory_restore_texts(static_cast<int>(hard_stop ? KbKind::INTERIM : KbKind::EXIT));
+        expect(texts.own_only != nullptr);
+        expect(std::find(lines.begin(), lines.end(), std::string("Zou terugleggen:")) != lines.end());
+        expect(std::find(lines.begin(), lines.end(), std::string(texts.own_only)) != lines.end());
+      }
+    });
+
     k3_case("backup M2: a game whose end got lost inside a living server process is set aside; only a process that died leaves a hard stop", [&]() {
       K3TempCwd temp_cwd("backup-m2");
       K3World w;
