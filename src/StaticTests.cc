@@ -2958,7 +2958,27 @@ void run_static_tests() {
       expect(text.find('\n') == std::string::npos);
     }
     expect_eq(std::string("Waiting for your partner..."), spire_bridge_message_text(0x50000000));
-    expect_eq(std::string("Run over. Rooms cleared: 0, 163 s."), spire_bridge_message_text(0x580000A3)); // v49: both outcomes
+    expect_eq(std::string("Run over: 0 rooms in 2:43."), spire_bridge_message_text(0x580000A3)); // v49: both outcomes; ux-2: m:ss
+    // ux-2: the won and practice forms, minutes unbounded, and the longest line inside one ticker line
+    expect_eq(std::string("Run won: 15 rooms in 41:40."), spire_run_over_text(0x580F09C4, true, false));
+    expect_eq(std::string("Practice run over: 4 rooms in 3:20."), spire_run_over_text(0x580400C8, true, true));
+    expect_eq(std::string("Run over: 7 rooms in 102:03."), spire_run_over_text(0x580717EB, false, false));
+    expect_eq(std::string("Run over: 1 room in 0:59."), spire_bridge_message_text(0x5801003B));
+    {
+      std::string longest = spire_run_over_text(0x58FFFFFF, false, true);
+      expect_eq(std::string("Practice run over: 255 rooms in 1092:15."), longest);
+      expect((longest.size() <= SPIRE_BRIDGE_TEXT_MAX) && (longest == spire_ticker_line(longest)) && spire_client_text_safe(longest));
+    }
+    for (uint32_t code = 1; code <= 4; code++) {
+      for (bool to_writer : {false, true}) {
+        for (size_t clients : {1u, 2u}) {
+          std::string text = spire_team_end_text(code, to_writer, clients);
+          expect(!text.empty() && (text.size() <= SPIRE_BRIDGE_TEXT_MAX) && (text == spire_ticker_line(text)) &&
+              spire_client_text_safe(text));
+        }
+      }
+    }
+    expect(spire_team_end_text(0, true, 2).empty() && spire_team_end_text(5, true, 2).empty());
     expect(spire_bridge_message_text(0x53504952).empty()); // 'SPIR' is no message
     // v36: the quest's codes from spike/stadstart b29f310 (kind << 24 | a << 8 | b)
     expect_eq(std::string("Reward taken. Quest Board: Shop (optional) or Continue = leave room."), spire_bridge_message_text(0x47000000));
@@ -10753,6 +10773,361 @@ void run_static_tests() {
     for (auto& lc : l->clients) {
       lc = nullptr;
     }
+  }
+
+  phosg::log_info_f("-- Spire ux-2: the server says why the run ended (r218) and the run's stand in the 'X' line");
+  {
+    // The quest's team end r218 (make_spire.py team_end: 1/2 everyone is down, 3/4 gave up, odd = the leader wrote it)
+    // reaches the server as a client's 6x77; it goes in here through on_subcommand_multi, as GameServer hands a
+    // received 60 over. Every case runs, a failed one is logged, and the section fails at its end if any did.
+    using namespace std::chrono;
+    constexpr uint32_t QUEST = 987659;
+    constexpr uint8_t TEAM_END = 218;
+    size_t ux2_failed = 0;
+    auto ux2_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   UX2 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        ux2_failed++;
+        phosg::log_error_f("   UX2 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // 'B', 'F' and 'S' read and write by relative paths (system/spire-bridge): a temp directory
+    struct TempCwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-ux2-{}", getpid());
+      TempCwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~TempCwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    } temp_cwd;
+    struct CaptureChannel : Channel {
+      std::vector<std::string> sent;
+      CaptureChannel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      size_t count(const std::string& text) const {
+        size_t ret = 0;
+        for (const auto& data : this->sent) {
+          ret += (data.find(text) != std::string::npos) ? 1 : 0;
+        }
+        return ret;
+      }
+      // the 6x77 writes of this register the client was sent, by value
+      std::vector<uint32_t> register_writes(uint16_t register_number) const {
+        std::vector<uint32_t> ret;
+        for (const auto& raw : this->sent) {
+          const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+          if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (raw[sizeof(header)] == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+            if (reg.register_number == register_number) {
+              ret.emplace_back(reg.value.as_int);
+            }
+          }
+        }
+        return ret;
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->io_context = std::make_shared<asio::io_context>(1);
+    s->data->spire_bridge_quest_numbers.emplace(QUEST);
+    auto server = std::make_shared<GameServer>(s);
+    auto vq = std::make_shared<VersionedQuest>();
+    vq->meta.quest_number = QUEST;
+    struct Game {
+      std::shared_ptr<Lobby> l;
+      std::vector<std::shared_ptr<CaptureChannel>> ch;
+      std::vector<std::shared_ptr<Client>> c;
+    };
+    // a game of n GC clients in the bridged quest; the leader is client 0. Each case has its own game id, and the quest
+    // start (spire_checkpoint_run_started) forgets anything an earlier test left for that id.
+    auto game = [&](uint32_t lobby_id, size_t n) {
+      Game g;
+      g.l = std::make_shared<Lobby>(s, lobby_id, true);
+      g.l->episode = Episode::EP1;
+      g.l->mode = GameMode::BATTLE;
+      g.l->quest = std::make_shared<Quest>(vq);
+      for (size_t z = 0; z < n; z++) {
+        auto ch = std::make_shared<CaptureChannel>();
+        auto c = std::make_shared<Client>(server, ch, ServerBehavior::GAME_SERVER);
+        auto login = std::make_shared<Login>();
+        login->account = std::make_shared<Account>();
+        login->gc_license = std::make_shared<GCLicense>();
+        login->gc_license->serial_number = 4400 + z;
+        c->login = login;
+        c->character_file(true, false); // a GC client's character data: an empty file, nothing is read
+        c->lobby_client_id = z;
+        c->lobby = g.l;
+        c->floor = 1;
+        g.l->clients[z] = c;
+        g.ch.emplace_back(ch);
+        g.c.emplace_back(c);
+      }
+      for (const auto& c : g.c) {
+        spire_checkpoint_run_started(c);
+      }
+      return g;
+    };
+    auto drop = [&](Game& g) {
+      for (auto& lc : g.l->clients) {
+        lc = nullptr;
+      }
+    };
+    // the client writes a quest register (6x77), as the quest's sync_register2 sends it
+    auto client_sync = [&](Game& g, size_t z, uint8_t register_number, uint32_t value) {
+      G_SyncQuestRegister_6x77 cmd;
+      cmd.header.subcommand = 0x77;
+      cmd.header.size = sizeof(cmd) / 4;
+      cmd.header.unused = 0;
+      cmd.register_number = register_number;
+      cmd.value.as_int = value;
+      Channel::Message msg{.command = 0x60, .flag = 0, .data = std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd))};
+      bool done = false;
+      std::exception_ptr failed;
+      asio::co_spawn(*s->io_context, on_subcommand_multi(g.c[z], msg), [&](std::exception_ptr e) {
+        failed = e;
+        done = true;
+      });
+      s->io_context->restart();
+      s->io_context->poll();
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
+      expect(done);
+    };
+    // the quest's r248 request (taken by the bridge, as on_sync_quest_register hands it over)
+    auto request = [&](Game& g, size_t z, uint32_t value) {
+      expect(spire_bridge_handle_register(g.c[z], g.l, SPIRE_BRIDGE_REQUEST_REGISTER, value));
+      s->io_context->restart();
+      s->io_context->poll();
+    };
+    auto run_over = [](uint32_t rooms, uint32_t seconds) {
+      return (static_cast<uint32_t>(SPIRE_BRIDGE_MSG_RUN_OVER) << 24) | (rooms << 16) | seconds;
+    };
+    const std::string BOTH_DOWN = "Run over: you are both down.";
+    const std::string DOWN = "Run over: you are down.";
+    const std::string GAVE_UP = "Run over: you gave up.";
+    const std::string PARTNER_GAVE_UP = "Run over: your partner gave up.";
+    auto reason_lines = [&](const Game& g, size_t z) {
+      return g.ch[z]->count(BOTH_DOWN) + g.ch[z]->count(DOWN) + g.ch[z]->count(GAVE_UP) + g.ch[z]->count(PARTNER_GAVE_UP);
+    };
+
+    ux2_case("code 1 (the leader saw everyone down) with two players: both read it, once", [&]() {
+      auto g = game(0x7D01, 2);
+      client_sync(g, 0, TEAM_END, 1);
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g.ch[z]->count(BOTH_DOWN));
+        expect_eq(1u, reason_lines(g, z));
+      }
+      // the quest resends r218 on every poll of its end wait, and the partner's own code may follow: nothing more
+      client_sync(g, 0, TEAM_END, 1);
+      client_sync(g, 1, TEAM_END, 2);
+      client_sync(g, 1, TEAM_END, 4);
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, reason_lines(g, z));
+      }
+      drop(g);
+    });
+
+    ux2_case("code 2 (the follower saw everyone down): the same line for both", [&]() {
+      auto g = game(0x7D02, 2);
+      client_sync(g, 1, TEAM_END, 2);
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g.ch[z]->count(BOTH_DOWN));
+        expect_eq(1u, reason_lines(g, z));
+      }
+      drop(g);
+    });
+
+    ux2_case("code 3 (the leader gave up): 'you gave up' to the leader, 'your partner gave up' to the follower", [&]() {
+      auto g = game(0x7D03, 2);
+      auto before = steady_clock::now();
+      client_sync(g, 0, TEAM_END, 3);
+      expect_eq(1u, g.ch[0]->count(GAVE_UP));
+      expect_eq(1u, g.ch[1]->count(PARTNER_GAVE_UP));
+      expect_eq(1u, reason_lines(g, 0));
+      expect_eq(1u, reason_lines(g, 1));
+      // the ticker holds for the line on both clients (spire_ticker_hold): a waiting line planned after it keeps its gap
+      for (size_t z : {0, 1}) {
+        expect(g.c[z]->spire_ticker_held_until >= before + SPIRE_PACK_LINE_GAP);
+        expect(g.c[z]->spire_pack_line_free >= before + SPIRE_PACK_LINE_GAP);
+      }
+      drop(g);
+    });
+
+    ux2_case("code 4 (the follower gave up): 'you gave up' to the follower, 'your partner gave up' to the leader", [&]() {
+      auto g = game(0x7D04, 2);
+      client_sync(g, 1, TEAM_END, 4);
+      expect_eq(1u, g.ch[1]->count(GAVE_UP));
+      expect_eq(1u, g.ch[0]->count(PARTNER_GAVE_UP));
+      expect_eq(1u, reason_lines(g, 0));
+      expect_eq(1u, reason_lines(g, 1));
+      drop(g);
+    });
+
+    ux2_case("a solo run: 'you are down' for code 1, 'you gave up' for code 3", [&]() {
+      auto g = game(0x7D05, 1);
+      client_sync(g, 0, TEAM_END, 1);
+      expect_eq(1u, g.ch[0]->count(DOWN));
+      expect_eq(0u, g.ch[0]->count(BOTH_DOWN));
+      drop(g);
+      auto g2 = game(0x7D06, 1);
+      client_sync(g2, 0, TEAM_END, 3);
+      expect_eq(1u, g2.ch[0]->count(GAVE_UP));
+      expect_eq(1u, reason_lines(g2, 0));
+      drop(g2);
+    });
+
+    ux2_case("once per run: a new run in the same game (quest start, run timer start) says it again", [&]() {
+      auto g = game(0x7D07, 2);
+      client_sync(g, 1, TEAM_END, 4);
+      client_sync(g, 1, TEAM_END, 4);
+      expect_eq(1u, g.ch[0]->count(PARTNER_GAVE_UP));
+      // a new quest start in this game: a new run
+      for (const auto& c : g.c) {
+        spire_checkpoint_run_started(c);
+      }
+      client_sync(g, 1, TEAM_END, 4);
+      expect_eq(2u, g.ch[0]->count(PARTNER_GAVE_UP));
+      expect_eq(2u, g.ch[1]->count(GAVE_UP));
+      // the run timer's 'S' of the next run: once more
+      request(g, 0, (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_START) << 24) | (5 << 16) | 3600);
+      client_sync(g, 1, TEAM_END, 4);
+      client_sync(g, 1, TEAM_END, 4);
+      expect_eq(3u, g.ch[0]->count(PARTNER_GAVE_UP));
+      expect_eq(3u, g.ch[1]->count(GAVE_UP));
+      drop(g);
+    });
+
+    ux2_case("a server-to-client replay of r218 says nothing; only a client's own write does", [&]() {
+      s->data->spire_replay_registers = {TEAM_END};
+      auto g = game(0x7D08, 2);
+      // the replay store holds the leader's 3 (written without a 6x77), and the follower's floor load replays it
+      spire_replay_note_register(g.c[0], g.l, TEAM_END, 3);
+      spire_replay_after_floor_load(g.c[1], g.l);
+      s->io_context->restart();
+      s->io_context->run_for(SPIRE_REPLAY_DELAY + milliseconds(300));
+      auto replayed = g.ch[1]->register_writes(TEAM_END);
+      expect(!replayed.empty());
+      expect_eq(3u, replayed.at(0));
+      expect_eq(0u, reason_lines(g, 0));
+      expect_eq(0u, reason_lines(g, 1));
+      // the leader's own 6x77 says it once, and the replay after it to a floor load says nothing more
+      client_sync(g, 0, TEAM_END, 3);
+      expect_eq(1u, g.ch[0]->count(GAVE_UP));
+      expect_eq(1u, g.ch[1]->count(PARTNER_GAVE_UP));
+      spire_replay_after_floor_load(g.c[1], g.l);
+      s->io_context->restart();
+      s->io_context->run_for(SPIRE_REPLAY_DELAY + milliseconds(300));
+      expect_eq(1u, reason_lines(g, 0));
+      expect_eq(1u, reason_lines(g, 1));
+      s->data->spire_replay_registers.clear();
+      drop(g);
+    });
+
+    ux2_case("the reason line stops the run timer: a giver who leaves before 'X' ends nothing for the partner", [&]() {
+      auto g = game(0x7D09, 2);
+      request(g, 0, (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_START) << 24) | (5 << 16) | 3600);
+      client_sync(g, 1, TEAM_END, 4);
+      g.l->clients[1] = nullptr; // the giver leaves the game before its 'X'
+      g.c[1]->lobby.reset();
+      s->io_context->restart();
+      s->io_context->run_for(SPIRE_BRIDGE_TIMER_TICK + milliseconds(600));
+      expect_eq(0u, g.ch[0]->count("The second player left"));
+      expect(g.ch[0]->register_writes(SPIRE_BRIDGE_TIMER_REGISTER).empty());
+      expect_eq(1u, g.ch[0]->count(PARTNER_GAVE_UP));
+      drop(g);
+    });
+
+    ux2_case("after the run end (time up, or 'X') a team end says nothing", [&]() {
+      auto g = game(0x7D0A, 2);
+      spire_run_timer_record_end(g.l, (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) |
+          (SPIRE_BRIDGE_TIMER_TIME_UP << 16) | 3600, SPIRE_BRIDGE_TIMER_TIME_UP);
+      client_sync(g, 0, TEAM_END, 3);
+      expect_eq(0u, reason_lines(g, 0));
+      expect_eq(0u, reason_lines(g, 1));
+      drop(g);
+      auto g2 = game(0x7D0F, 2);
+      request(g2, 0, run_over(2, 90));
+      client_sync(g2, 1, TEAM_END, 4);
+      expect_eq(0u, reason_lines(g2, 0));
+      expect_eq(0u, reason_lines(g2, 1));
+      expect_eq(1u, g2.ch[0]->count("Run over: 2 rooms in 1:30."));
+      drop(g2);
+    });
+
+    ux2_case("the 'X' line: rooms and m:ss, minutes past 60 unbounded", [&]() {
+      auto g = game(0x7D0B, 2);
+      request(g, 0, run_over(3, 125));
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g.ch[z]->count("Run over: 3 rooms in 2:05."));
+        expect_eq(0u, g.ch[z]->count("Rooms cleared"));
+      }
+      drop(g);
+      auto g2 = game(0x7D0C, 2);
+      request(g2, 1, run_over(7, 6123));
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g2.ch[z]->count("Run over: 7 rooms in 102:03."));
+      }
+      drop(g2);
+    });
+
+    ux2_case("the 'X' line of a won run: the first won 'F' of the run, also when another client wrote it", [&]() {
+      auto g = game(0x7D0D, 2);
+      // the follower's 'F' with the won bit comes first; the leader's 'X' follows before its own 'F'
+      request(g, 1, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | (1u << 23) | 2500);
+      request(g, 0, run_over(15, 2500));
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g.ch[z]->count("Run won: 15 rooms in 41:40."));
+        expect_eq(0u, g.ch[z]->count("Run over: 15 rooms"));
+      }
+      drop(g);
+      // a lost run's 'F' (no won bit) keeps "Run over"; and a won flag never reaches the next run of the game
+      auto g2 = game(0x7D0D, 2);
+      request(g2, 0, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_FINISH) << 24) | 400);
+      request(g2, 0, run_over(2, 400));
+      expect_eq(1u, g2.ch[0]->count("Run over: 2 rooms in 6:40."));
+      expect_eq(1u, g2.ch[1]->count("Run over: 2 rooms in 6:40."));
+      drop(g2);
+    });
+
+    ux2_case("the 'X' line of a practice run", [&]() {
+      auto g = game(0x7D0E, 2);
+      // 'B' with start room 5 and the run's first room 1: a practice run (spire_run_is_practice)
+      request(g, 0, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (1 << 8) | 5);
+      request(g, 0, run_over(4, 200));
+      for (size_t z : {0, 1}) {
+        expect_eq(1u, g.ch[z]->count("Practice run over: 4 rooms in 3:20."));
+      }
+      drop(g);
+    });
+
+    expect_eq(0u, ux2_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");

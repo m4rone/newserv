@@ -3347,6 +3347,9 @@ static void on_sync_quest_register(std::shared_ptr<Client> c, SubcommandMessage&
 
   spire_replay_note_register(c, l, cmd.register_number, cmd.value.as_int);
   spire_follow_note_register(c, l, cmd.register_number, cmd.value.as_int);
+  // ux-2: the team end r218 of a Spire run; here, where a client's own 6x77 comes in (a value the server sends a
+  // client never passes this handler), and not in spire_replay_note_register, which takes only SpireReplayRegisters
+  spire_run_note_team_end(c, l, cmd.register_number, cmd.value.as_int);
   bool should_forward = true;
   // Spire meta registers (quests in SpireBridgeQuests, GC V3 only) are stored per serial and never forwarded; see SpireFlagBridge.hh
   if (spire_bridge_handle_register(c, l, cmd.register_number, cmd.value.as_int)) {

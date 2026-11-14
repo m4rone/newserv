@@ -57,6 +57,9 @@
 //   (6x73): the writer SPIRE_RUN_OVER_LOBBY_DELAY after its own 'X', a partner after its own 'X' too or at the latest
 //   SPIRE_RUN_OVER_PARTNER_DELAY after the first. Never to Pioneer 2 (B-E01-41); the 98 and the lobby join run the
 //   guard's restore as for a Quit.
+// - Why the run ended (ux-2): a client's own write of the team end r218 (SPIRE_TEAM_END_REGISTER) to 1..4 in a run that
+//   has not ended sends every client of the game one line, once per run (spire_run_note_team_end); the 'X' line gives
+//   the run's stand (spire_run_over_text).
 
 // F6: the 12 data1 bytes of this run's Spire Mag as the run mag ledger last mirrored them (SpireMag.hh); std::nullopt
 // while no ledger exists.
@@ -1103,6 +1106,25 @@ std::string spire_ticker_line(const std::string& text);
 bool spire_client_text_safe(const std::string& text);
 // v35: the text for a short-message code (SPIRE_BRIDGE_MSG_*), one line each; "" for any other value.
 std::string spire_bridge_message_text(uint32_t value);
+// ux-2: the 'X' line, value as the 'X' code (rooms << 16 | seconds, the writer's numbers): "Run over: n rooms in
+// m:ss." ("1 room") with unbounded minutes (102:03), "Run won: ..." when a 'F' of the run carried the won bit (a team
+// fact: the first won 'F' of any client counts), "Practice run over: ..." for the writer's practice run ('B'). At most
+// 40 characters.
+std::string spire_run_over_text(uint32_t value, bool won, bool practice);
+// ux-2: the quest's team end (make_spire.py team_end): 1/2 everyone is down (the leader / the follower saw it), 3/4
+// gave up (the leader / the follower gave up). Only the quest writes it, 0 at the quest load and the run reset; the
+// giver's own client writes 3/4 (the partner never echoes a code it was sent).
+constexpr uint8_t SPIRE_TEAM_END_REGISTER = 218;
+// The reason line for a team end code, per recipient: to_writer = the recipient wrote the code (for 3/4 the one who gave
+// up), clients = the clients in the game. "" for any other code.
+std::string spire_team_end_text(uint32_t code, bool to_writer, size_t clients);
+// Called from the 6x77 handler for every quest register a client writes, so never for a value the server sends a client
+// (the replay, the run timer's r252). For r218 = 1..4 in a bridged quest whose run has not ended: once per run (forgotten
+// with the run end, spire_run_forget_end) every client of the game gets its reason line, the ticker holds for it
+// (spire_ticker_hold) and the run timer stops (the run ends, so a giver who leaves before its 'X' is no "player left").
+// The run is not marked ended here: 'O' still waits for 'F' or 'X'. Never throws.
+void spire_run_note_team_end(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t register_number, uint32_t value);
 // v62 (B-REGIE-16-13): what a bundle 8 text needs besides the code. The overload above is this with an empty context
 // (no names known, no overview kept).
 struct SpireDrawTable;

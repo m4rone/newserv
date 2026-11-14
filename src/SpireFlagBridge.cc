@@ -1514,7 +1514,24 @@ static SpireRunEnd& spire_run_mark_ended(std::shared_ptr<const Lobby> l, const c
   return it->second;
 }
 
+// ux-2: what the end of the run tells the players, per game like the run end and forgotten with it
+// (spire_run_forget_end), so a game's next run ('I' and its 'B', a new quest start) says it again. It is kept apart
+// from SpireRunEnd because the reason line comes before the run is marked ended.
+struct SpireRunClosing {
+  bool reason_told = false; // the reason line of the team end r218 went to every client (spire_run_note_team_end)
+  bool won = false; // a 'F' of this run carried the won bit (the 'X' line, spire_run_over)
+};
+static std::unordered_map<uint32_t, SpireRunClosing> spire_run_closings;
+
+static SpireRunClosing& spire_run_closing_for(std::shared_ptr<const Lobby> l) {
+  if (spire_run_closings.size() > 4096) {
+    spire_run_closings.clear();
+  }
+  return spire_run_closings[l->lobby_id];
+}
+
 static void spire_run_forget_end(uint32_t lobby_id, const char* why, const phosg::PrefixedLogger& log) {
+  spire_run_closings.erase(lobby_id);
   if (spire_run_ends.erase(lobby_id)) {
     log.info_f("Spire bridge: new run in this game ({}); room clears count again", why);
   }
@@ -1765,7 +1782,12 @@ static void spire_run_over(std::shared_ptr<Client> c, std::shared_ptr<const Lobb
   auto l = std::const_pointer_cast<Lobby>(cl);
   spire_run_timer_stop(l.get()); // v19: the run is over, so the timer must not end it again
   auto& end = spire_run_mark_ended(l, "run over");
-  std::string msg = spire_bridge_message_text(value);
+  // ux-2: the run's stand; won is the team's (any client's won 'F'), practice and the numbers are the writer's
+  auto closing = spire_run_closings.find(l->lobby_id);
+  bool won = (closing != spire_run_closings.end()) && closing->second.won;
+  const auto* cr = spire_client_run_for(c, l, false);
+  bool practice = cr && cr->began && cr->practice;
+  std::string msg = spire_run_over_text(value, won, practice);
   auto s = c->require_server_state();
   size_t told = 0;
   if (!end.over_announced) {
@@ -1801,6 +1823,45 @@ static uint64_t spire_run_timer_next_generation = 1;
 
 static void spire_run_timer_stop(const Lobby* l) {
   spire_run_timers.erase(l);
+}
+
+void spire_run_note_team_end(
+    std::shared_ptr<Client> c, std::shared_ptr<const Lobby> cl, uint8_t register_number, uint32_t value) {
+  if ((register_number != SPIRE_TEAM_END_REGISTER) || (value < 1) || (value > 4)) {
+    return;
+  }
+  try {
+    if (!cl->is_game() || !cl->quest || !spire_bridge_quest_is_bridged(c, cl->quest->meta.quest_number)) {
+      return;
+    }
+    if (const auto* end = spire_run_end_for(cl)) {
+      c->log.info_f("Spire bridge: team end r{} = {} after the run end ({}); no reason line", register_number, value,
+          end->why);
+      return;
+    }
+    auto& closing = spire_run_closing_for(cl);
+    if (closing.reason_told) {
+      return; // the quest resends r218 on every poll of its end wait
+    }
+    closing.reason_told = true;
+    spire_run_timer_stop(cl.get()); // the run ends now: a giver who leaves before its 'X' must not be "player left"
+    size_t clients = cl->count_clients();
+    auto now = std::chrono::steady_clock::now();
+    size_t told = 0;
+    for (const auto& lc : cl->clients) {
+      if (!lc) {
+        continue;
+      }
+      spire_send_ticker(lc, spire_team_end_text(value, lc == c, clients));
+      // a B0 line sent right after this one would push it aside: the waiting lines planned after it keep their gap
+      spire_ticker_hold(lc->spire_pack_line_free, lc->spire_ticker_held_until, now);
+      told++;
+    }
+    c->log.info_f("Spire bridge: team end r{} = {} from client {} ({}); reason line to {} client(s), run timer stopped",
+        register_number, value, c->lobby_client_id, (value <= 2) ? "everyone down" : "gave up", told);
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire bridge: failed to tell the team end r{} = {}: {}", register_number, value, e.what());
+  }
 }
 
 // B-AF-55 (veilig-1): the run timer's end r252 is kept for the game next to its room clears (SpireReplayState), so a
@@ -2537,8 +2598,9 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
     case SPIRE_BRIDGE_MSG_PARTNER:
       return b ? "Your partner is ready. Walk to choose your reward." : "Waiting for your partner..."; // v62
     case SPIRE_BRIDGE_MSG_RUN_OVER:
-      // v49 (B-BASIS-12): true for both outcomes, the return to base ('O' OK) and the 6x73 to the lobby
-      return std::format("Run over. Rooms cleared: {}, {} s.", (value >> 16) & 0xFF, value & 0xFFFF);
+      // v49 (B-BASIS-12): true for both outcomes, the return to base ('O' OK) and the 6x73 to the lobby. ux-2: the
+      // form of a run that is neither won nor practice; spire_run_over says which one it is
+      return spire_run_over_text(value, false, false);
     case SPIRE_BRIDGE_MSG_PAUSE_B:
       return b ? "Reward taken. Quest Board: Shop (optional) or Ready = leave room."
                : "Reward taken. Quest Board: Shop (optional) or Continue = leave room.";
@@ -2618,6 +2680,22 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
     default:
       return "";
   }
+}
+
+std::string spire_run_over_text(uint32_t value, bool won, bool practice) {
+  uint32_t rooms = (value >> 16) & 0xFF, seconds = value & 0xFFFF;
+  const char* what = practice ? "Practice run over" : (won ? "Run won" : "Run over");
+  return std::format("{}: {} {} in {}:{:02}.", what, rooms, (rooms == 1) ? "room" : "rooms", seconds / 60, seconds % 60);
+}
+
+std::string spire_team_end_text(uint32_t code, bool to_writer, size_t clients) {
+  if ((code == 1) || (code == 2)) {
+    return (clients >= 2) ? "Run over: you are both down." : "Run over: you are down.";
+  }
+  if ((code == 3) || (code == 4)) {
+    return to_writer ? "Run over: you gave up." : "Run over: your partner gave up.";
+  }
+  return "";
 }
 
 bool spire_gift_last_clear(uint8_t episode, uint32_t room_k) {
@@ -3172,6 +3250,9 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
   // 'F': the run's score ('K' before it) and time against the records
   bool is_won = spire_meta_decode_finish(value).won;
+  if (is_won) {
+    spire_run_closing_for(l).won = true; // ux-2: a team fact for the 'X' line, also when another client writes the 'X'
+  }
   // B-AF-1 (critic S1): the last boss of the episode has no room after it; a won run of a real run is its kill
   // kwaliteit-1 r2 (critic B-6): the won 'F' of Episode 1 stores k15 for this client itself first (idempotent: a known
   // room stays as it is), so "Spire Run II" and its unlock never depend on the Dark Falz flag having stored it before
