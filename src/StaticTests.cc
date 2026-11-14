@@ -9782,6 +9782,7 @@ void run_static_tests() {
       expect_eq(1u, p2.ch->card_writes.size());
       expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 that follows a dropped connection");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       // 8-B2 (was no_marker): the restore at login leaves AwaitingSave, since the 97 goes out only after it
       expect(awaiting_only(snap));
@@ -9838,6 +9839,7 @@ void run_static_tests() {
       expect_eq(1u, p2.ch->card_writes.size());
       expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 whose card still held the run copy");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       expect(awaiting_only(snap)); // 8-B2 (was no_marker): the login restore awaits the save too
       expect(snapshot_is(snap, *r.server_real));
@@ -9870,6 +9872,7 @@ void run_static_tests() {
       expect_eq(1u, p2.ch->card_writes.size());
       expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 that follows a refused game exit restore");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       expect(awaiting_only(snapshot_on_disk(p2))); // 8-B2 (was no_marker): the login restore awaits the save too
       restored_at_login(p2, *r.server_real);
       p2.ch->open = false;
@@ -9879,7 +9882,7 @@ void run_static_tests() {
     // Gap B2 (output/systeem-8-itemveiligheid-critic.md B2): a login restore closes the marker before the 97, so a
     // connection that drops in between leaves the run copy on the card with no marker for it. The invariant: whatever
     // the card holds after that, the next login gives the real character back. Red on code that still has gap B2.
-    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = true; // on spike/veilig: 8-B2 closes it
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = true; // on spike/veilig: 8-B2 closes it (B-REGIE-21-8)
     if (SPIRE_E2E_KNOWN_GAP_B2) {
       e2e_case("the login restore, then the connection drops before the 97: the card kept the run copy, the next login restores the real character (known gap B2)", [&]() {
         TempCwd temp_cwd;
