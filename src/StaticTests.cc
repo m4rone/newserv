@@ -14167,12 +14167,12 @@ void run_static_tests() {
     expect_eq(bin_at(29), prs_decompress(*spire_start_level_quest_bin(fresh, cl, raised_bin)));
     expect_eq(bin_at(30), prs_decompress(*spire_start_level_quest_bin(strong, cl, raised_bin)));
     rules->char_level = 0;
-    s->data->spire_room_quests.clear();
     // the run again ('I') with both savestates stored: the leader counts at its bought +14 only, never at its saved
-    // Lv31, so fresh keeps the floor Lv13, not Lv29 (19c4082)
+    // Lv31, so fresh keeps the floor Lv13 (above room 5's Lv11), not Lv29 (19c4082)
     fresh->delete_overlay();
     expect(spire_create_battle_overlay(fresh, cl, true));
     expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
+    s->data->spire_room_quests.clear();
 
     for (const auto& c : {strong, fresh, third}) {
       spire_static_test_forget(c, cl);

@@ -14,4 +14,14 @@ Mutanten: dezelfde vervangingen als systeemcritic (mut/run-mutants.py), per muta
 Eindstand zonder mutant: `run-static-tests` exit 0 ("All static tests passed"), `git status --short src` leeg.
 Geen productiefout gevonden: alle vijf tests waren groen op de huidige code, dus geen fix (B-REGIE-22-7 niet nodig).
 
-Wat dit dekt: dat de statische tests deze vijf mutanten vangen. Wat het niet dekt: hoe de back-up zich op de Wii gedraagt; dat is niet gemeten.
+## Ronde 2 (gaten van systeemcritic 13:53)
+
+| Gat | Test | Mutant | Rood (met mutant) | Groen (zonder) |
+|---|---|---|---|---|
+| a | backup bal 7805 (64 baasdrops door spire_drops_filter, Saber uitgerust in de inventaris) | 7805-uitgerust-niet-gelezen (SpireDrops.cc:504 `0 *`) | exit 1, StaticTests.cc:13665 `!(strength > carried)` | exit 0 |
+| b | level floor, run again ('I') met savestates van beide spelers (eind van "Spire level floor ... two clients") | 19c4-leider-hervat (SpireFlagBridge.cc:4921) | exit 1, StaticTests.cc:14174 `12u != ...disp.stats.level` | exit 0 |
+
+Bij (b) gaf de eerste versie (na het wissen van spire_room_quests) ook met de mutant exit 0: zonder kamerquest leest spire_resume_level_for_client geen savestate. De controle staat nu vóór het wissen; de kamervloer van kamer 5 (Lv11) ligt onder de verwachte Lv13.
+Ook hier geen productiefout: beide tests waren groen zonder mutant.
+
+Wat dit dekt: dat de statische tests deze vijf mutanten vangen. Wat het niet dekt: hoe de back-up, het baaswapen en de levelvloer zich op de Wii gedragen; dat is niet gemeten.
