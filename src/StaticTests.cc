@@ -10526,5 +10526,97 @@ void run_static_tests() {
     expect(!replayed_end(0, 0x05));
   }
 
+  phosg::log_info_f("-- Spire 1-B (B-REGIE-21-21): a floor load before the game has any replay state still gets its replay");
+  {
+    // System 1 critic round 2 B1: the leader's floor load comes in before any client synced a replay register (a fresh
+    // quest, or again after 'I'); the follower's r229 and r212 come after it, while the leader still loads, and are
+    // lost there. The replay of that floor load must bring them, so room 1 opens.
+    using namespace std::chrono;
+    constexpr uint32_t QUEST = 987657;
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    struct CaptureChannel : Channel {
+      std::vector<std::string> sent;
+      CaptureChannel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      // the 6x77 writes of this register the client was sent, by value
+      std::vector<uint32_t> register_writes(uint16_t register_number) const {
+        std::vector<uint32_t> ret;
+        for (const auto& raw : this->sent) {
+          const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+          if ((header.command == 0x60) && (raw.size() >= sizeof(header) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (raw[sizeof(header)] == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(header));
+            if (reg.register_number == register_number) {
+              ret.emplace_back(reg.value.as_int);
+            }
+          }
+        }
+        return ret;
+      }
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->io_context = std::make_shared<asio::io_context>(1);
+    s->data->spire_bridge_quest_numbers.emplace(QUEST);
+    s->data->spire_replay_registers = {212, 229};
+    auto server = std::make_shared<GameServer>(s);
+    auto vq = std::make_shared<VersionedQuest>();
+    vq->meta.quest_number = QUEST;
+    auto l = std::make_shared<Lobby>(s, 0x7C02, true);
+    l->episode = Episode::EP1;
+    l->mode = GameMode::BATTLE;
+    l->quest = std::make_shared<Quest>(vq);
+    std::shared_ptr<CaptureChannel> ch[2];
+    std::shared_ptr<Client> c[2];
+    for (size_t z = 0; z < 2; z++) {
+      ch[z] = std::make_shared<CaptureChannel>();
+      c[z] = std::make_shared<Client>(server, ch[z], ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = 4300 + z;
+      c[z]->login = login;
+      c[z]->lobby_client_id = z;
+      c[z]->lobby = l;
+      c[z]->floor = 1; // Forest 1: the follower stands there already, the leader has just arrived through the Ragol warp
+      l->clients[z] = c[z];
+    }
+    auto& leader = c[0];
+    auto& follower = c[1];
+    expect(spire_replay_values(l, 0, 1).empty()); // no state yet: the leader's floor load comes first
+    spire_replay_after_floor_load(leader, l);
+    spire_replay_note_register(follower, l, 229, 1); // the follower's Ready, while the leader still loads
+    spire_replay_note_register(follower, l, 212, 1);
+    s->io_context->restart();
+    s->io_context->run_for(SPIRE_REPLAY_DELAY + milliseconds(100));
+    auto r212 = ch[0]->register_writes(212);
+    auto r229 = ch[0]->register_writes(229);
+    expect_eq(1u, r212.size());
+    expect_eq(1u, r212.at(0));
+    expect_eq(1u, r229.size());
+    expect_eq(1u, r229.at(0));
+    expect(ch[1]->register_writes(212).empty()); // the follower has its own value; it did not load a floor
+    for (auto& lc : l->clients) {
+      lc = nullptr;
+    }
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }

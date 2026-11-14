@@ -8310,9 +8310,9 @@ void spire_replay_after_floor_load(std::shared_ptr<Client> c, std::shared_ptr<Lo
         spire_checkpoint_store(l, just_c, arrival_k);
       }
     }
-    if (!spire_replay_state_for(l, false)) {
-      return;
-    }
+    // B-REGIE-21-21 (system 1 critic round 2 B1): planned also before the game has replay state. A partner's 6x77 that
+    // comes during this load makes the state and is lost on this client; spire_replay_send reads the state only when it
+    // sends (an empty one sends nothing)
     auto s = c->require_server_state();
     asio::co_spawn(*s->io_context, spire_replay_send(c, l, c->floor, 0), asio::detached);
   } catch (const std::exception& e) {
