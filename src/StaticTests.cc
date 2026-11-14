@@ -11130,5 +11130,276 @@ void run_static_tests() {
     expect_eq(0u, ux2_failed);
   }
 
+  phosg::log_info_f("-- Spire ux-1 resume equip: the order of the sends, the frame wait and the unit slot, as sent");
+  {
+    // spire_resume_equip through its real path: the savestate on disk, the quest's 'J' start answer and item loop
+    // through spire_bridge_handle_register, newserv's copy after the item loop (new ids, nothing worn), then every
+    // SpireEquipItem function call (B2) the client is sent, read back by its item_id and equip_slot labels. The client
+    // answers each call (B3) and, where the case says so, its 6x25 marks the item worn in newserv's copy.
+    using namespace std::chrono;
+    constexpr uint32_t QUEST = 987661;
+    size_t re_failed = 0;
+    auto re_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   RE ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        re_failed++;
+        phosg::log_error_f("   RE ({}) FAILED: {}", name, e.what());
+      }
+    };
+    // the function index is read from the tree (system/client-functions) before the temp directory
+    auto functions = std::make_shared<ClientFunctionIndex>("system/client-functions", true);
+    auto equip_fn = functions->get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);
+    const size_t id_at = equip_fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL);
+    const size_t slot_at = equip_fn->label_offsets.at(SPIRE_EQUIP_SLOT_LABEL);
+    struct TempCwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-reequip-{}", getpid());
+      TempCwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~TempCwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    } temp_cwd;
+    struct CaptureChannel : Channel {
+      std::vector<std::string> sent;
+      CaptureChannel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      size_t count(const std::string& text) const {
+        size_t ret = 0;
+        for (const auto& data : this->sent) {
+          ret += (data.find(text) != std::string::npos) ? 1 : 0;
+        }
+        return ret;
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    auto s = std::make_shared<TestState>();
+    s->data = std::make_shared<DataIndex>();
+    s->io_context = std::make_shared<asio::io_context>(1);
+    s->data->spire_bridge_quest_numbers.emplace(QUEST);
+    s->data->client_functions = functions;
+    auto server = std::make_shared<GameServer>(s);
+    auto vq = std::make_shared<VersionedQuest>();
+    vq->meta.quest_number = QUEST;
+
+    // a saved item: data1[0..2], and data1[4] (a worn unit's slot - 9)
+    auto item = [](uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b4 = 0) {
+      ItemData ret;
+      ret.data1[0] = b0;
+      ret.data1[1] = b1;
+      ret.data1[2] = b2;
+      ret.data1[4] = b4;
+      return ret;
+    };
+    const ItemData WEAPON = item(0x00, 0x01, 0x00); // Saber
+    const ItemData FRAME = item(0x01, 0x01, 0x00);
+    const ItemData BARRIER = item(0x01, 0x02, 0x00);
+    const ItemData UNIT_SLOT_9 = item(0x01, 0x03, 0x00, 0); // worn in unit slot 9
+    const ItemData UNIT_SLOT_11 = item(0x01, 0x03, 0x04, 2); // worn in unit slot 11
+    const ItemData UNIT_SLOT_10 = item(0x01, 0x03, 0x08, 1);
+    const ItemData MAG = item(0x02, 0x00, 0x05);
+    constexpr uint32_t FIRST_ID = 0x00040000; // newserv's copy after the item loop: item z has id FIRST_ID + z
+
+    struct Rig {
+      std::shared_ptr<Lobby> l;
+      std::shared_ptr<CaptureChannel> ch;
+      std::shared_ptr<Client> c;
+      size_t seen = 0;
+    };
+    // one GC client (3OP0, function calls that run code) in the bridged quest with a resume of these items, all worn at
+    // the 'V'; the resume's 'J' start answer and every item of the loop are asked, and newserv's copy then holds the
+    // items as the quest's item_create2 made them: new ids, nothing worn, a unit without its slot byte
+    auto resume = [&](uint32_t lobby_id, uint32_t serial, const std::vector<ItemData>& items) {
+      Rig r;
+      r.l = std::make_shared<Lobby>(s, lobby_id, true);
+      r.l->episode = Episode::EP1;
+      r.l->mode = GameMode::BATTLE;
+      r.l->quest = std::make_shared<Quest>(vq);
+      r.ch = std::make_shared<CaptureChannel>();
+      r.c = std::make_shared<Client>(server, r.ch, ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = serial;
+      r.c->login = login;
+      r.c->specific_version = SPIRE_EQUIP_ITEM_SPECIFIC_VERSION;
+      r.c->set_flag(Client::Flag::HAS_SEND_FUNCTION_CALL);
+      r.c->set_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE);
+      r.c->set_flag(Client::Flag::SEND_FUNCTION_CALL_NO_CACHE_PATCH);
+      r.c->clear_flag(Client::Flag::ENCRYPTED_SEND_FUNCTION_CALL);
+      r.c->character_file(true, false); // a GC client's character data: an empty file, nothing is read
+      r.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
+      r.c->lobby_client_id = 0; // the leader: the game's run is its savestate
+      r.c->lobby = r.l;
+      r.c->floor = 1;
+      r.l->clients[0] = r.c;
+      spire_checkpoint_run_started(r.c);
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = 0xE100 + serial;
+      ss.episode = static_cast<uint8_t>(r.l->episode);
+      ss.quest_number = QUEST;
+      ss.start_room = 1;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = 5;
+      ss.values[SPIRE_SS_LIVES] = 2;
+      ss.items = items;
+      std::vector<uint32_t> worn;
+      for (size_t z = 0; z < items.size(); z++) {
+        worn.emplace_back(z);
+      }
+      ss.equipped = worn;
+      std::string stem = std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, serial,
+          spire_guard_character_id(r.c->character_file(false, false)->disp));
+      phosg::save_file(spire_savestate_rung_filename(stem, spire_meta_ladder_quest_rung(QUEST)),
+          spire_savestate_to_json(ss, serial));
+      auto ask = [&](uint32_t value) {
+        expect(spire_bridge_handle_register(r.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, value));
+      };
+      ask((static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | 5); // start answer: room 5, variant 0
+      for (size_t z = 0; z < items.size(); z++) {
+        ask((static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (1 << 16) | z);
+      }
+      auto& inv = r.c->character_file(false, true)->inventory;
+      inv = PlayerInventory();
+      inv.num_items = items.size();
+      for (size_t z = 0; z < items.size(); z++) {
+        inv.items[z].data = items[z];
+        inv.items[z].data.id = FIRST_ID + z;
+        inv.items[z].flags = 0;
+        if ((items[z].data1[0] == 0x01) && (items[z].data1[1] == 0x03)) {
+          inv.items[z].data.data1[4] = 0x00;
+        }
+      }
+      return r;
+    };
+    struct Sent {
+      uint32_t item_id;
+      uint32_t slot;
+    };
+    // runs the server; every SpireEquipItem call is noted, answered, and its item marked worn when wears(item id) says
+    // so (the 6x25 that follows a call the game took); returns when finished() has held for `settle`, or at `limit`
+    auto drive = [&](Rig& r, const std::function<bool(uint32_t)>& wears, const std::function<bool(const std::vector<Sent>&)>& finished,
+                     milliseconds limit, milliseconds settle) {
+      std::vector<Sent> ret;
+      auto be32 = [](const std::string& data, size_t at) {
+        return (static_cast<uint32_t>(static_cast<uint8_t>(data[at])) << 24) |
+            (static_cast<uint32_t>(static_cast<uint8_t>(data[at + 1])) << 16) |
+            (static_cast<uint32_t>(static_cast<uint8_t>(data[at + 2])) << 8) | static_cast<uint8_t>(data[at + 3]);
+      };
+      auto deadline = steady_clock::now() + limit;
+      std::optional<steady_clock::time_point> done_at;
+      while (steady_clock::now() < deadline) {
+        s->io_context->restart();
+        s->io_context->run_for(milliseconds(20));
+        for (; r.seen < r.ch->sent.size(); r.seen++) {
+          const auto& raw = r.ch->sent[r.seen];
+          const auto& header = check_size_t<PSOCommandHeaderDCV3>(raw, 0xFFFF);
+          if (header.command != 0xB2) {
+            continue;
+          }
+          std::string code = raw.substr(sizeof(header) + sizeof(S_ExecuteCode_B2));
+          if ((code.size() < equip_fn->code.size()) || (code.compare(0, id_at, equip_fn->code, 0, id_at) != 0)) {
+            throw std::runtime_error("the server sent a function call other than SpireEquipItem");
+          }
+          Sent sent{be32(code, id_at), be32(code, slot_at)};
+          ret.emplace_back(sent);
+          if (wears(sent.item_id)) {
+            auto& inv = r.c->character_file(false, true)->inventory;
+            for (size_t z = 0; z < inv.num_items; z++) {
+              if (inv.items[z].data.id == sent.item_id) {
+                inv.items[z].flags = 0x00000008;
+              }
+            }
+          }
+          expect(!r.c->function_call_response_queue.empty());
+          auto promise = r.c->function_call_response_queue.front();
+          r.c->function_call_response_queue.pop_front();
+          promise->set_value(C_ExecuteCodeResult_B3{});
+        }
+        if (!done_at && finished(ret)) {
+          done_at = steady_clock::now();
+        }
+        if (done_at && (steady_clock::now() >= *done_at + settle)) {
+          break;
+        }
+      }
+      return ret;
+    };
+    auto describe = [](const std::vector<Sent>& sent) {
+      std::string ret;
+      for (const auto& x : sent) {
+        ret += std::format("{}{:08X}/{}", ret.empty() ? "" : " ", x.item_id, x.slot);
+      }
+      return ret.empty() ? std::string("nothing") : ret;
+    };
+    auto must_send = [&](const std::vector<Sent>& sent, const std::vector<Sent>& want) {
+      bool same = sent.size() == want.size();
+      for (size_t z = 0; same && (z < want.size()); z++) {
+        same = (sent[z].item_id == want[z].item_id) && (sent[z].slot == want[z].slot);
+      }
+      if (!same) {
+        throw std::runtime_error(std::format("sent {}, expected {}", describe(sent), describe(want)));
+      }
+    };
+    auto wears_all = [](uint32_t) { return true; };
+
+    re_case("the frame before any unit, each unit with its slot 9..12 (data1[4] + 9), weapon first", [&]() {
+      // in the inventory a unit comes first, the frame last
+      auto r = resume(0x7E01, 4501, {UNIT_SLOT_11, BARRIER, WEAPON, UNIT_SLOT_9, FRAME});
+      auto sent = drive(r, wears_all, [](const auto& x) { return x.size() >= 5; }, seconds(15), milliseconds(1500));
+      must_send(sent, {{FIRST_ID + 2, 0}, {FIRST_ID + 4, 0}, {FIRST_ID + 1, 0}, {FIRST_ID + 3, 9}, {FIRST_ID + 0, 11}});
+      expect_eq(0u, r.ch->count(SPIRE_EQUIP_UNITS_MISSING_TEXT));
+      r.l->clients[0] = nullptr;
+    });
+
+    re_case("no worn frame in newserv's copy: no unit is sent, one units line", [&]() {
+      auto r = resume(0x7E02, 4502, {UNIT_SLOT_11, BARRIER, WEAPON, UNIT_SLOT_9, FRAME});
+      // the frame's call goes out, but no 6x25 comes for it: the frame stays unworn
+      auto sent = drive(r, [&](uint32_t id) { return id != FIRST_ID + 4; },
+          [&](const auto&) { return r.ch->count(SPIRE_EQUIP_UNITS_MISSING_TEXT) > 0; }, seconds(20), milliseconds(1500));
+      must_send(sent, {{FIRST_ID + 2, 0}, {FIRST_ID + 4, 0}, {FIRST_ID + 1, 0}});
+      expect_eq(1u, r.ch->count(SPIRE_EQUIP_UNITS_MISSING_TEXT));
+      r.l->clients[0] = nullptr;
+    });
+
+    re_case("the mag last, after weapon, armor, shield and units, wherever it is in the inventory", [&]() {
+      auto r = resume(0x7E03, 4503, {MAG, UNIT_SLOT_10, BARRIER, FRAME, WEAPON});
+      auto sent = drive(r, wears_all, [](const auto& x) { return x.size() >= 5; }, seconds(15), milliseconds(1500));
+      must_send(sent, {{FIRST_ID + 4, 0}, {FIRST_ID + 3, 0}, {FIRST_ID + 2, 0}, {FIRST_ID + 1, 10}, {FIRST_ID + 0, 0}});
+      r.l->clients[0] = nullptr;
+      auto r2 = resume(0x7E04, 4504, {WEAPON, MAG, FRAME, UNIT_SLOT_9, BARRIER, UNIT_SLOT_11});
+      auto sent2 = drive(r2, wears_all, [](const auto& x) { return x.size() >= 6; }, seconds(15), milliseconds(1500));
+      must_send(sent2, {{FIRST_ID + 0, 0}, {FIRST_ID + 2, 0}, {FIRST_ID + 4, 0}, {FIRST_ID + 3, 9}, {FIRST_ID + 5, 11},
+                           {FIRST_ID + 1, 0}});
+      r2.l->clients[0] = nullptr;
+    });
+
+    expect_eq(0u, re_failed);
+  }
+
   phosg::log_info_f("-- All static tests passed");
 }
