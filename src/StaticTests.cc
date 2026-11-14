@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "Channel.hh"
+#include "ChatCommands.hh"
 #include "Compression.hh"
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
@@ -2755,7 +2756,7 @@ void run_static_tests() {
       auto name = (dir / "0000000042.json").string();
       auto before = awaiting(a_real);
       auto snap = awaiting(a_memory);
-      spire_guard_base_before_apply(snap, before, false);
+      spire_guard_base_before_apply(snap, before);
       expect(snap.has_base_before && (snap.base_before_meseta == 1000));
       expect(!memcmp(&snap.base_before_inventory, &a_real.first, sizeof(a_real.first)));
       spire_guard_save(name, 42, snap);
@@ -2774,11 +2775,13 @@ void run_static_tests() {
       expect(!loaded.has_base_before && loaded.awaiting_save && loaded.has_character);
       std::filesystem::remove_all(dir);
 
-      // a shared base game keeps no record (and drops an older one); so does a floor hand-over, a run start, the 98 of
-      // a normal game and a login that confirms the snapshot
-      auto shared = snap;
-      spire_guard_base_before_apply(shared, before, true);
-      expect(!shared.has_base_before);
+      // a floor hand-over, a trade's execution, a run start, the 98 of a normal game and a login that confirms the
+      // snapshot drop the record (B-REGIE-21-24: a shared base game keeps one, see the e2e cases)
+      auto traded = snap;
+      SpireGuardTradeSide traded_side;
+      traded_side.items = {traded.inventory.items[0].data};
+      expect_eq(1u, spire_guard_trade_take_rest(&traded, traded_side, limits));
+      expect(!traded.has_base_before);
       auto handed = snap;
       expect_eq(1u, spire_guard_snapshot_take_drop(handed, handed.inventory.items[0].data, limits));
       expect(!handed.has_base_before);
@@ -2815,7 +2818,7 @@ void run_static_tests() {
       auto mono_before = with_stack(a_real, 0x00, 0x00, 10);
       auto mono_now = with_stack(with_stack(a_real, 0x00, 0x00, 6), 0x10, 0x00, 10);
       auto st = awaiting(mono_now);
-      spire_guard_base_before_apply(st, awaiting(mono_before), false);
+      spire_guard_base_before_apply(st, awaiting(mono_before));
       PlayerBank200 bank;
       bank.num_items = 2;
       bank.items[0].data = mono_before.first.items[mono_before.first.num_items - 1].data;
@@ -2839,12 +2842,183 @@ void run_static_tests() {
       Character full_before = full;
       full_before.first.items[29].data.data1[1] = 0x7E; // another item in the last slot before the base
       auto fs = awaiting(full);
-      spire_guard_base_before_apply(fs, awaiting(full_before), false);
+      spire_guard_base_before_apply(fs, awaiting(full_before));
       fs.disp.stats.meseta = 400;
       r = spire_guard_base_reconcile(fs, PlayerBank200(), limits);
       expect_eq(0u, r.returned_items);
       expect_eq(600u, r.returned_meseta);
       expect_eq(1000u, fs.disp.stats.meseta.load());
+    }
+
+    // Veilig-2: the trade window, a sale, a bank deposit, a fed mag. On V3 a trade is each side's D0 list, each side's
+    // own 6x29 of what it gives (before its D2), and the execution when both D2s are in; the others are a 6x29 alone.
+    // Only what moves between players moves the snapshot: a traded item exists once after the logins, never twice.
+    phosg::log_info_f("-- Spire guard: a trade through the trade window, a sale, a deposit or a feed, then a Wii drops without a 98 (Veilig-2)");
+    {
+      ItemData shield = b_real.first.items[1].data; // what B gives back (game item ID 0x00010001 in B's inventory)
+      auto b_after_trade = pick_into(drop_from(b_real, shield), sword);
+      auto a_after_trade = pick_into(a_memory, shield);
+      // the trade as the server follows it: the 6x29s of both sides change nothing, the execution takes each side's D0
+      // list and gives each the other's entries with at most that entry's credit
+      auto a_snap = awaiting(a_real);
+      auto b_snap = awaiting(b_real);
+      SpireGuardTradeSide a_side, b_side;
+      a_side.items = {sword};
+      b_side.items = {shield};
+      spire_guard_delete_apply(&a_snap, &a_side, std::nullopt, sword.id, sword, limits);
+      spire_guard_delete_apply(&b_snap, &b_side, std::nullopt, shield.id, shield, limits);
+      spire_guard_trade_take_rest(&a_snap, a_side, limits);
+      spire_guard_trade_take_rest(&b_snap, b_side, limits);
+      expect_eq(1u, spire_guard_trade_give(&b_snap, a_side, limits));
+      expect_eq(1u, spire_guard_trade_give(&a_snap, b_side, limits));
+      expect(spire_guard_same_inventory(a_snap.inventory, a_snap.disp.stats.meseta.load(), a_after_trade.first, 1000));
+      expect(spire_guard_same_inventory(b_snap.inventory, b_snap.disp.stats.meseta.load(), b_after_trade.first, 500));
+
+      // (a) A's Wii drops after the trade, B keeps the sword: A's card holds the state before the trade, the run copy,
+      // or the state it saved after its 6x29 (V3 saves before its D2). After A's login the sword exists once: with B.
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        auto a_after = after_login(a_snap, card);
+        expect_eq(0u, count(a_after, sword));
+        expect_eq(1u, count(a_after, sword) + count(b_after_trade, sword));
+        expect_eq(1u, count(a_after, shield) + count(drop_from(b_real, shield), shield)); // and the shield once
+      }
+      // (b) B's Wii drops after the trade: B's restore keeps the sword, and with A's restore too it is not doubled
+      for (const auto& card : {b_real, run_copy, b_after_trade, drop_from(b_real, shield)}) {
+        auto b_after = after_login(b_snap, card);
+        expect_eq(1u, count(b_after, sword));
+        for (const auto& a_card : {a_real, run_copy, a_memory}) {
+          expect_eq(1u, count(b_after, sword) + count(after_login(a_snap, a_card), sword));
+          expect_eq(1u, count(b_after, shield) + count(after_login(a_snap, a_card), shield));
+        }
+      }
+    }
+    // (c) A sells the sword (a 6x29 alone) and A's Wii drops: the sword comes back as before Veilig-2 (the card was not
+    // written either; nobody else has it), the sale's meseta does not
+    {
+      auto snap = awaiting(a_real);
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, sword.id, sword, limits));
+      auto sold = a_memory;
+      sold.second.stats.meseta = 1000 + 750; // what the shop paid, if the card was written after all
+      for (const auto& card : {a_real, run_copy, sold}) {
+        auto a_after = after_login(snap, card);
+        expect_eq(1u, count(a_after, sword));
+        expect_eq(1000u, a_after.second.stats.meseta.load());
+      }
+    }
+    // (e) A deposits the sword and 300 meseta in the bank (6x29s alone) and A's Wii drops: both come back
+    {
+      auto snap = awaiting(a_real);
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 300;
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, sword.id, sword, limits));
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, 0xFFFFFFFF, meseta, limits));
+      auto deposited = drop_from(drop_from(a_real, sword), meseta);
+      for (const auto& card : {a_real, run_copy, deposited}) {
+        auto a_after = after_login(snap, card);
+        expect_eq(1u, count(a_after, sword));
+        expect_eq(1000u, a_after.second.stats.meseta.load());
+      }
+    }
+    // (f) a trade cancelled (D4) after A's own 6x29, and A's Wii drops: A keeps his sword, nobody gains it
+    {
+      auto snap = awaiting(a_real);
+      SpireGuardTradeSide a_side;
+      a_side.items = {sword};
+      expect_eq(0u, spire_guard_delete_apply(&snap, &a_side, std::nullopt, sword.id, sword, limits));
+      for (const auto& card : {a_real, run_copy, a_memory}) {
+        expect_eq(1u, count(after_login(snap, card), sword));
+      }
+    }
+    // (g) A feeds a Monomate to his mag (6x28, then a 6x29 of the fed item) and A's Wii drops: the Monomate comes back
+    {
+      auto snap = awaiting(a_real);
+      auto& stack = snap.inventory.items[snap.inventory.num_items++];
+      stack.state = 1;
+      stack.data.data1[0] = 0x03;
+      stack.data.data1[5] = 4;
+      stack.data.id = 0x00010010;
+      ItemData one = stack.data;
+      one.data1[5] = 1;
+      auto before = snap;
+      expect_eq(0u, spire_guard_delete_apply(&snap, nullptr, std::nullopt, one.id, one, limits));
+      expect(spire_guard_same_state(snap.inventory, snap.disp, before.inventory, before.disp));
+      expect_eq(4u, static_cast<uint32_t>(snap.inventory.items[snap.inventory.num_items - 1].data.data1[5]));
+    }
+    // meseta through the trade window: the partner gains at most what the giver's snapshot held (the minimum)
+    {
+      ItemData meseta;
+      meseta.data1[0] = 0x04;
+      meseta.data2d = 1500; // more than A's snapshot holds
+      meseta.id = 0xFFFFFFFF;
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      SpireGuardTradeSide a_side, b_side;
+      a_side.items = {meseta};
+      spire_guard_delete_apply(&a, &a_side, std::nullopt, 0xFFFFFFFF, meseta, limits);
+      spire_guard_trade_take_rest(&a, a_side, limits);
+      spire_guard_trade_take_rest(&b, b_side, limits);
+      expect_eq(1u, spire_guard_trade_give(&b, a_side, limits));
+      expect_eq(0u, a.disp.stats.meseta.load());
+      expect_eq(1500u, b.disp.stats.meseta.load()); // 500 + 1000, never 500 + 1500
+      expect_eq(1500u, after_login(a, a_real).second.stats.meseta.load() + after_login(b, b_real).second.stats.meseta.load());
+    }
+    // the execution takes exactly the D0 entry: a second sword of the same kind stays, also after a late 6x29
+    {
+      auto a = awaiting(a_real);
+      auto b = awaiting(b_real);
+      ItemData twin = sword;
+      twin.data1[3] = 0x05;
+      a.inventory.items[a.inventory.num_items].state = 1;
+      a.inventory.items[a.inventory.num_items++].data = twin;
+      SpireGuardTradeSide a_side, b_side;
+      a_side.items = {sword};
+      expect_eq(1u, spire_guard_trade_take_rest(&a, a_side, limits));
+      spire_guard_trade_take_rest(&b, b_side, limits);
+      expect_eq(1u, spire_guard_trade_give(&b, a_side, limits));
+      expect_eq(0u, spire_guard_delete_apply(&a, &a_side, std::nullopt, sword.id, sword, limits));
+      expect_eq(1u, count(as_character(a), twin));
+      expect_eq(0u, count(as_character(a), sword));
+      expect_eq(1u, count(as_character(b), sword));
+    }
+    // a traded item the giver's snapshot does not hold (bought in the base): no credit, the partner gains nothing; a
+    // stack: the partner gains at most what the giver's snapshot lost; a taker whose snapshot does not follow gains
+    // nothing while the giver still loses it (the only place where stricter is allowed)
+    {
+      ItemData bought;
+      bought.data1[0] = 0x01;
+      bought.data1[1] = 0x02;
+      bought.data1[2] = 0x30;
+      bought.id = 0x00810000;
+      auto a = awaiting(a_real);
+      auto& stack = a.inventory.items[a.inventory.num_items++];
+      stack.state = 1;
+      stack.data.data1[0] = 0x03;
+      stack.data.data1[5] = 2;
+      ItemData five = stack.data;
+      five.data1[5] = 5;
+      five.id = 0x00810001;
+      auto b = awaiting(b_real);
+      SpireGuardTradeSide a_side, b_side;
+      a_side.items = {bought, five};
+      expect_eq(2u, spire_guard_trade_take_rest(&a, a_side, limits));
+      spire_guard_trade_take_rest(&b, b_side, limits);
+      expect_eq(1u, spire_guard_trade_give(&b, a_side, limits));
+      expect_eq(5u, b.inventory.num_items);
+      expect_eq(2u, static_cast<uint32_t>(b.inventory.items[4].data.data1[5]));
+      expect_eq(0u, count(as_character(b), bought));
+      auto a2 = awaiting(a_real);
+      SpireGuardTradeSide c_side;
+      c_side.items = {sword};
+      expect_eq(1u, spire_guard_trade_take_rest(&a2, c_side, limits));
+      expect_eq(0u, spire_guard_trade_give(nullptr, c_side, limits));
+      expect_eq(0u, count(as_character(a2), sword));
+      SpireGuardTradeSide d_side;
+      d_side.items = {sword};
+      expect_eq(0u, spire_guard_trade_take_rest(nullptr, d_side, limits)); // a giver that does not follow
+      auto b2 = awaiting(b_real);
+      expect_eq(0u, spire_guard_trade_give(&b2, d_side, limits));
+      expect(spire_guard_same_state(b2.inventory, b2.disp, b_real.first, b_real.second));
     }
   }
 
@@ -3092,6 +3266,9 @@ void run_static_tests() {
     expect_eq(std::string("Partner is in the shop. The warp waits for him."), spire_bridge_message_text(0x43000802));
     expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000901)); // leader
     expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000900)); // follower
+    // ux-1 (observaties 172): the pipe guard's two texts as ticker lines, no quest-board text to close
+    expect_eq(std::string("Clear the room first."), spire_bridge_message_text(0x43001101));
+    expect_eq(std::string("The warps open once both of you took a reward."), spire_bridge_message_text(0x43001102));
     for (uint32_t value : {0x43000302u, 0x43000402u, 0x43000502u}) {
       expect(spire_bridge_message_text(value).empty());
     }
@@ -3318,11 +3495,22 @@ void run_static_tests() {
     ene(2)->total_damage = 40;
     expect(!spire_wave_held_only_by_unhit(wave(3)));
 
-    // the second net: an event whose only living enemy is a Chaos Sorcerer hit through a Bee has a living enemy
+    // 2r2-M1: a Bee is an enemy of its own, not a part of the Chaos Sorcerer: a hit on it leaves the Sorcerer never hit,
+    // so both nets still count a Sorcerer gone out of reach; only the Pan Arms' parts reach their parent
+    expect(spire_child_hit_is_parent_hit(EnemyType::PAN_ARMS));
+    expect(!spire_child_hit_is_parent_hit(EnemyType::CHAOS_SORCERER));
+    expect(!spire_child_hit_is_parent_hit(EnemyType::CANANE));
     ene(8)->set_flags |= 8;
     expect_eq(2u, wave(4).size());
+    expect(spire_wave_held_only_by_unhit(wave(4)));
     expect(spire_event_without_living_enemy(wave(4)));
+    ene(7)->set_last_hit_by_client_id(0);
     ene(7)->game_flags = 0x00000200;
+    expect(spire_wave_held_only_by_unhit(wave(4)));
+    expect(spire_event_without_living_enemy(wave(4)));
+    // a hit on the Sorcerer itself still makes it a living enemy
+    ene(5)->set_last_hit_by_client_id(0);
+    expect(!spire_wave_held_only_by_unhit(wave(4)));
     expect(!spire_event_without_living_enemy(wave(4)));
     // a child's hit reaches its own parent only: without Migium's damage the Pan Arms wave is held again
     ene(2)->reset();
@@ -6795,6 +6983,17 @@ void run_static_tests() {
     expect(!spire_savestate_is_of_run(read, 0x9999)); // a savestate of another run is not this game's to delete
     expect(!spire_savestate_is_of_run(read, 0));
     expect(!spire_savestate_is_of_run(SpireSavestate(), 0x1234));
+    // 7r2-M1: a real savestate of the game's run goes only if a client really played that run; practice as before
+    {
+      SpireSavestate real_ss = read;
+      real_ss.practice = false;
+      SpireSavestate practice_ss = read;
+      practice_ss.practice = true;
+      expect(spire_savestate_end_deletes_file(real_ss, 0x1234, true));
+      expect(!spire_savestate_end_deletes_file(real_ss, 0x1234, false)); // only practice in its id: it stays parked
+      expect(spire_savestate_end_deletes_file(practice_ss, 0x1234, false));
+      expect(!spire_savestate_end_deletes_file(real_ss, 0x9999, true));
+    }
     if (spire_savestate_end_deletes(false) && spire_savestate_is_of_run(read, 0x1234)) {
       std::filesystem::remove(file);
     }
@@ -7025,7 +7224,7 @@ void run_static_tests() {
         expect(kept.exists && !kept.practice);
         expect_eq(0xD1u, kept.run_id);
         expect_eq(real_bytes, phosg::load_file(real_file));
-        expect_eq(std::string("Practice is not saved: your run at room 9 stays parked."),
+        expect_eq(std::string("Practice is not saved: your run waits in Spire room 9."),
             spire_savestate_practice_kept_text(kept));
       }
       // the practice run ends (dead, time up, Give up, won): the run end deletes only files of its own run id
@@ -7111,7 +7310,7 @@ void run_static_tests() {
         expect_eq(std::string(), spire_savestate_store_v(stem, 0, practice, 42, nullptr, &kept));
         expect(!kept.exists);
         expect_eq(std::string("{not json"), phosg::load_file(real_file));
-        expect_eq(std::string("Practice is not saved: a saved run is parked here."),
+        expect_eq(std::string("Practice is not saved: the saved run here cannot be read."),
             spire_savestate_practice_kept_text(kept));
         expect_eq(real_file, spire_savestate_store_v(stem, 0, real, 42));
         expect_eq(0xD1u, spire_savestate_load_rung(stem, 0).run_id);
@@ -7217,9 +7416,8 @@ void run_static_tests() {
       SpireSavestate before = rs; // a file from before this change: no "Equipped"
       before.equipped.reset();
       expect(!spire_savestate_from_json(spire_savestate_to_json(before, 1234567890)).equipped.has_value());
-      // the start line: the frame is the player's, the Saber newserv's
-      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your armor."),
-          spire_run_start_ticker(true, false, &rs, true));
+      // the start line: ux-1 (observaties 291), the Saber and the frame are both newserv's, so it asks for nothing
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &rs, true));
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
           spire_run_start_ticker(true, false, &rs, false)); // r143 = 0: all by hand, as before
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
@@ -7229,9 +7427,13 @@ void run_static_tests() {
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &weapon_only, true));
       SpireSavestate all_kinds = rs;
       all_kinds.equipped = std::vector<uint32_t>{0, 3, 4};
-      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your armor and units."),
+      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min."),
+          spire_run_start_ticker(true, true, &all_kinds, true)); // ux-1: the unit (slot byte 0) is newserv's too
+      all_kinds.items[4].data1[4] = 0x07; // ux-1: a unit whose slot byte names no unit slot stays the player's
+      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your units."),
           spire_run_start_ticker(true, true, &all_kinds, true));
-      // after the quest's item loop newserv's copy holds the items again, new ids, none equipped: the Saber is the target
+      // after the quest's item loop newserv's copy holds the items again, new ids, none equipped: the Saber and (ux-1)
+      // the frame are the targets
       PlayerInventory after;
       after.num_items = saved.size();
       for (size_t z = 0; z < saved.size(); z++) {
@@ -7240,13 +7442,21 @@ void run_static_tests() {
       }
       size_t expected = 99;
       auto ids = spire_resume_equip_targets(rs, after, &expected);
-      expect_eq(1u, expected); // the frame is not SpireEquipItem's (it answers 3)
-      expect_eq(1u, ids.size());
+      expect_eq(2u, expected); // ux-1: the frame is SpireEquipItem's now
+      expect_eq(2u, ids.size());
       expect_eq(0x00010000u, ids[0]);
+      expect_eq(0x00010003u, ids[1]);
       expect_eq(std::string(SPIRE_EQUIP_WEAPON_MISSING_TEXT),
           spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).value_or(""));
+      expect_eq(std::string(SPIRE_EQUIP_ARMOR_MISSING_TEXT),
+          spire_equip_missing_text(SPIRE_EQUIP_RESUME_ARMOR, ids[1], after).value_or(""));
       after.items[0].flags = 0x00000008; // the 6x25 came
       expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).has_value());
+      ids = spire_resume_equip_targets(rs, after, &expected);
+      expect_eq(1u, expected); // the frame is left
+      expect_eq(1u, ids.size());
+      expect_eq(0x00010003u, ids[0]);
+      after.items[3].flags = 0x00000008; // its 6x25 came too
       expect(spire_resume_equip_targets(rs, after, &expected).empty()); // already equipped: nothing to send
       expect_eq(0u, expected); // kwaliteit-1 r2 (critic B-3a): and nothing left to equip, so no "Equip your gear" line
       {
@@ -7261,7 +7471,113 @@ void run_static_tests() {
       }
       PlayerInventory not_yet; // the item_create2 6x2Bs not in yet
       expect(spire_resume_equip_targets(rs, not_yet, &expected).empty());
-      expect_eq(1u, expected);
+      expect_eq(2u, expected); // the Saber and (ux-1) the frame
+      {
+        // ux-1 (observaties 291): a resume puts on the frame, the barrier and the units again too. Units go to the slot
+        // they were in (data1[4] + 9, as Sega's Equip menu passes it), after the frame; the weapon first, the mag last.
+        PlayerInventory gear;
+        gear.num_items = 8;
+        auto put = [&](size_t z, std::array<uint8_t, 12> d1, uint32_t id, bool on) {
+          for (size_t i = 0; i < 12; i++) {
+            gear.items[z].data.data1[i] = d1[i];
+          }
+          gear.items[z].data.id = id;
+          gear.items[z].flags = on ? 0x00000008 : 0;
+        };
+        put(0, {0x01, 0x03, 0x05, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0}, 0x00820000, true); // a unit in slot 11
+        put(1, {0x01, 0x02, 0x04, 0x00, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00820001, true); // a barrier
+        put(2, {0x00, 0x01, 0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00820002, true); // a Saber +3
+        put(3, {0x01, 0x03, 0x01, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0}, 0x00820003, true); // a unit in slot 9
+        put(4, {0x01, 0x01, 0x05, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00820004, true); // a frame, 4 slots
+        put(5, {0x01, 0x03, 0x05, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0}, 0x00820005, false); // the same unit kind, not worn
+        put(6, {0x03, 0x00, 0x00, 0x00, 0x00, 0x02, 0, 0, 0, 0, 0, 0}, 0x00820006, false); // Monomate x2
+        put(7, {0x01, 0x01, 0x06, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}, 0x00820007, false); // a spare frame
+        for (uint8_t kind : {0x01, 0x02, 0x03}) {
+          ItemData x;
+          x.data1[0] = 0x01;
+          x.data1[1] = kind;
+          expect(spire_resume_equip_by_server(x));
+        }
+        ItemData bad_unit;
+        bad_unit.data1[0] = 0x01;
+        bad_unit.data1[1] = 0x03;
+        bad_unit.data1[4] = 0x04; // no unit slot 13
+        expect(!spire_resume_equip_by_server(bad_unit));
+        std::vector<uint32_t> worn_idx;
+        int32_t gi = 0;
+        SpireSavestate gs = rs;
+        gs.items = spire_savestate_items(gear, 0, &gi, std::nullopt, &worn_idx);
+        gs.equipped = worn_idx;
+        expect_eq(5u, worn_idx.size());
+        expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &gs, true));
+        // back from the quest's item loop: new ids, nothing worn, and the client keeps no slot byte on a new unit
+        PlayerInventory back_in;
+        back_in.num_items = gs.items.size();
+        for (size_t z = 0; z < gs.items.size(); z++) {
+          back_in.items[z].data = gs.items[z];
+          back_in.items[z].data.id = 0x00030000 + z;
+          if ((gs.items[z].data1[0] == 0x01) && (gs.items[z].data1[1] == 0x03)) {
+            back_in.items[z].data.data1[4] = 0x00;
+          }
+        }
+        size_t want = 0;
+        std::vector<uint32_t> at;
+        auto gids = spire_resume_equip_targets(gs, back_in, &want, &at);
+        expect_eq(5u, want);
+        expect_eq(5u, gids.size());
+        expect_eq(gids.size(), at.size());
+        auto plan = spire_resume_equip_plan(gs, gids, at);
+        expect_eq(5u, plan.size());
+        expect_eq(0x00030002u, plan[0].item_id); // the Saber
+        expect_eq(SPIRE_EQUIP_RESUME_WEAPON, plan[0].point);
+        expect_eq(0u, plan[0].slot);
+        expect_eq(0x00030004u, plan[1].item_id); // the frame, before every unit
+        expect_eq(SPIRE_EQUIP_RESUME_ARMOR, plan[1].point);
+        expect_eq(0u, plan[1].slot);
+        expect_eq(0x00030001u, plan[2].item_id); // the barrier
+        expect_eq(SPIRE_EQUIP_RESUME_SHIELD, plan[2].point);
+        expect_eq(0u, plan[2].slot);
+        expect_eq(0x00030003u, plan[3].item_id); // the unit of slot 9
+        expect(plan[3].unit);
+        expect_eq(9u, plan[3].slot);
+        expect_eq(SPIRE_EQUIP_RESUME_UNIT, plan[3].point);
+        expect_eq(0x00030000u, plan[4].item_id); // the unit of slot 11, never the unworn one of the same kind
+        expect_eq(11u, plan[4].slot);
+        expect_eq(std::string(SPIRE_EQUIP_UNITS_MISSING_TEXT),
+            spire_equip_missing_text(SPIRE_EQUIP_RESUME_UNIT, plan[4].item_id, back_in).value_or(""));
+        expect_eq(std::string(SPIRE_EQUIP_SHIELD_MISSING_TEXT),
+            spire_equip_missing_text(SPIRE_EQUIP_RESUME_SHIELD, plan[2].item_id, back_in).value_or(""));
+        // a unit waits for a worn frame in newserv's copy: none worn yet, then the resumed frame's 6x25 came
+        expect_eq(8u, gs.items.size()); // every item of the pack is saved (no mag, no Scape Doll here)
+        expect(!spire_resume_frame_equipped(back_in));
+        for (size_t z = 0; z < back_in.num_items; z++) {
+          if (back_in.items[z].data.id == plan[1].item_id) {
+            back_in.items[z].flags = 0x00000008;
+          }
+        }
+        expect(spire_resume_frame_equipped(back_in));
+        // a unit worn in another slot by the player himself counts as done (B-3a), slot byte apart
+        for (size_t z = 0; z < back_in.num_items; z++) {
+          if (back_in.items[z].data.id == plan[3].item_id) {
+            back_in.items[z].flags = 0x00000008;
+            back_in.items[z].data.data1[4] = 0x03;
+          }
+        }
+        size_t left_now = 0;
+        auto rest = spire_resume_equip_targets(gs, back_in, &left_now);
+        expect_eq(3u, left_now); // Saber, barrier, the unit of slot 11
+        expect_eq(3u, rest.size());
+        // an older save point: a unit whose bytes differ beyond the slot byte is another unit
+        ItemData other_unit = gs.items[0]; // the unit of slot 11
+        other_unit.data1[2] ^= 0x01;
+        expect(!spire_resume_equip_same(gs.items[0], other_unit));
+        ItemData slot_moved = gs.items[0];
+        slot_moved.data1[4] = 0x01;
+        expect(spire_resume_equip_same(gs.items[0], slot_moved));
+        ItemData frame_moved = gs.items[4]; // the frame
+        frame_moved.data1[4] = 0x01; // only a unit's byte 4 is its slot
+        expect(!spire_resume_equip_same(gs.items[4], frame_moved));
+      }
       // kwaliteit-1 r2 (critic B-3b): equipping starts at the last item's ack, or after SPIRE_RESUME_EQUIP_FALLBACK_MS
       // without a 'J' item request when that ack never comes; once, only with "Equipped" and r143 = 1
       expect(spire_resume_equip_start_due(true, 0, false, true, true, 1));
@@ -8066,6 +8382,23 @@ void run_static_tests() {
       expect(fn->label_offsets.count(SPIRE_EQUIP_ITEM_ID_LABEL) == 1);
       expect(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4 <= fn->code.size());
       expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}}).empty());
+      // ux-1 (observaties 291): the slot label sits right after item_id, and a unit only goes with a slot 9..12 that
+      // the 6x25 then carries (cmplwi r27, 9 / cmplwi r27, 12 / mr r5, r27), as Sega's Equip menu routine 0x80277584
+      expect(fn->label_offsets.count(SPIRE_EQUIP_SLOT_LABEL) == 1);
+      expect_eq(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4, fn->label_offsets.at(SPIRE_EQUIP_SLOT_LABEL));
+      expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}, {SPIRE_EQUIP_SLOT_LABEL, 11}}).empty());
+      auto has_word = [&](uint32_t w) {
+        std::string be;
+        be.push_back((w >> 24) & 0xFF);
+        be.push_back((w >> 16) & 0xFF);
+        be.push_back((w >> 8) & 0xFF);
+        be.push_back(w & 0xFF);
+        return fn->code.find(be) != std::string::npos;
+      };
+      expect(has_word(0x281B0009)); // cmplwi r27, 9
+      expect(has_word(0x281B000C)); // cmplwi r27, 12
+      expect(has_word(0x7F65DB78)); // mr r5, r27: the 6x25's equip_slot
+      expect(!has_word(0x38A00000)); // no li r5, 0 any more (every 6x25 carries the label's slot)
       // the game functions it calls are the six of ROUTEB9-NEWSERV-F2-REPORT.md, each loaded as lis r0 / ori r0
       auto has_call_to = [&](uint32_t addr) {
         uint32_t lis = 0x3C000000 | (addr >> 16);
@@ -8915,9 +9248,13 @@ void run_static_tests() {
     auto level_table = std::make_shared<JSONLevelTable>(
         phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
     auto functions = std::make_shared<ClientFunctionIndex>("system/client-functions", true);
+    auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
     auto get_fn = functions->get("GetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
     auto set_fn = functions->get("SetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
     expect(get_fn && set_fn && (get_fn->code != set_fn->code));
+    // the login sends it before the guard's login restore (enable_save_if_needed, on by default as on the pc)
+    auto bba_fn = functions->get(SPIRE_BBA_TX_GUARD_FUNCTION_NAME, SPECIFIC_VERSION_GC_V3_EU);
+    expect(bba_fn && (bba_fn->code != set_fn->code) && (bba_fn->code != get_fn->code));
 
     // The guard reads and writes by relative paths (system/spire-bridge): a case runs in a temp directory, so no file of
     // the server is touched
@@ -8943,6 +9280,9 @@ void run_static_tests() {
       std::vector<std::string> inbox; // what the server sent and the client has not handled yet
       size_t pushes = 0;
       bool open = true;
+      // false: a push never reaches the save buffer (SetExtendedPlayerInfo is answered, nothing changes)
+      bool pushes_land = true;
+      size_t pushes_lost = 0;
       // The live player, for a case that plays it apart from `memory` (the save buffer, which a push writes): at a floor
       // change the client copies the live player's items and stats back over the save buffer
       std::optional<GCCharacter> live;
@@ -9059,10 +9399,16 @@ void run_static_tests() {
         // the code follows the 4-byte header and S_ExecuteCode_B2; SetExtendedPlayerInfo carries the character behind it
         std::string code = raw.substr(sizeof(header) + sizeof(S_ExecuteCode_B2));
         if ((code.size() >= set_fn->code.size() + sizeof(GCCharacter)) && code.starts_with(set_fn->code)) {
-          memcpy(static_cast<void*>(&p.ch->memory), code.data() + set_fn->code.size(), sizeof(GCCharacter));
-          p.ch->pushes++;
+          if (p.ch->pushes_land) {
+            memcpy(static_cast<void*>(&p.ch->memory), code.data() + set_fn->code.size(), sizeof(GCCharacter));
+            p.ch->pushes++;
+          } else {
+            p.ch->pushes_lost++;
+          }
         } else if (code.starts_with(get_fn->code)) {
           answer(w, p, 0x30, std::string(reinterpret_cast<const char*>(&p.ch->memory), sizeof(GCCharacter)));
+        } else if (code.starts_with(bba_fn->code)) {
+          // the BBA TX guard patch: the client runs it, the character is not part of it
         } else {
           throw std::logic_error("the server sent a function call this test client does not know");
         }
@@ -9070,6 +9416,7 @@ void run_static_tests() {
         answer(w, p, 0xB3, std::string(reinterpret_cast<const char*>(&result), sizeof(result)));
       } else if ((header.command == 0x97) && (header.flag == 0x01)) {
         p.ch->card_writes.emplace_back(p.ch->memory); // the client saves what it holds
+        answer(w, p, 0x99, ""); // and says so, which lets enable_save_if_needed go on
       }
     };
     // runs the server until `finished`, letting the client answer what it was sent; it never waits for the clock
@@ -9122,6 +9469,26 @@ void run_static_tests() {
     };
     auto client_sends = [&](World& w, Session& p, uint8_t command, std::string data) {
       run_void(w, p, on_command(p.c, std::make_unique<Channel::Message>(Channel::Message{.command = command, .flag = 0, .data = std::move(data)})));
+    };
+
+    // The login as the server plays it after a 96: the main menu's "go to lobby" runs enable_save_if_needed
+    // (ReceiveCommands.cc), which runs the guard's login restore and sends the 97 only if that returned true; the client
+    // writes its card at the 97. A refused restore drops the login without 97 and throws here.
+    auto login_to_lobby = [&](World& w, Session& p) {
+      // the lobby join after the 97 reads the item tables and logs the inventory by item name (no names are needed)
+      auto& data = *w.s->data;
+      auto& names = data.item_name_indexes[static_cast<size_t>(Version::GC_V3)];
+      if (!names) {
+        auto limits = std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+        data.item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = pmt_v3;
+        data.item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] = limits;
+        names = std::make_shared<ItemNameIndex>(pmt_v3, limits, std::vector<std::string>());
+      }
+      p.c->set_flag(Client::Flag::SHOULD_SEND_ENABLE_SAVE);
+      C_MenuSelectionBase_10 cmd;
+      cmd.menu_id = MenuID::MAIN;
+      cmd.item_id = MainMenuItemID::GO_TO_LOBBY;
+      client_sends(w, p, 0x10, std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd)));
     };
 
     // The real character: six items (weapon, frame, barrier and mag equipped), material counters, a level, EXP and
@@ -9218,7 +9585,20 @@ void run_static_tests() {
     // the server's own character data (never the overlay) against a copy taken before the run
     auto server_holds = [&](const Session& p, const PSOBBCharacterFile& before) {
       auto now = p.c->character_file(false, false);
-      return now && !memcmp(&now->inventory, &before.inventory, sizeof(now->inventory)) &&
+      if (!now) {
+        return false;
+      }
+      // a lobby join (login_to_lobby) gives the items the lobby's IDs: there the slots are compared without their IDs
+      auto inventory = now->inventory;
+      auto inventory_before = before.inventory;
+      auto l = p.c->lobby.lock();
+      if (l && !l->is_game()) {
+        for (size_t z = 0; z < inventory.items.size(); z++) {
+          inventory.items[z].data.id = 0;
+          inventory_before.items[z].data.id = 0;
+        }
+      }
+      return !memcmp(&inventory, &inventory_before, sizeof(inventory)) &&
           !memcmp(&now->disp.stats, &before.disp.stats, sizeof(now->disp.stats)) &&
           spire_guard_same_state(now->inventory, now->disp, before.inventory, before.disp);
     };
@@ -9307,6 +9687,41 @@ void run_static_tests() {
     auto awaiting_only = [](const SpireGuardSnapshot& snap) {
       return !snap.run_in_progress && !snap.restore_pending && snap.awaiting_save;
     };
+    // Right after a verified login restore: no run and no restore open, the snapshot still the real character. Whether
+    // the marker is already closed or waits for the card (AwaitingSave) is not asked: that is the order of gap B2, and
+    // the invariant is what the next login gives back (next_login_is_real).
+    auto restored_at_login = [&](const Session& p, const PSOBBCharacterFile& server_real) {
+      auto snap = snapshot_on_disk(p);
+      if (snap.run_in_progress || snap.restore_pending) {
+        throw std::runtime_error("after a verified login restore a run or a restore is still open");
+      }
+      if (!snapshot_is(snap, server_real)) {
+        throw std::runtime_error("after a verified login restore the snapshot is not the real character");
+      }
+      if (!spire_guard_game_join_allowed(p.c, false)) {
+        throw std::runtime_error("after a verified login restore a game join is refused");
+      }
+    };
+    // The login of a console whose card holds `card`: the client and the server hold the real character after it, and
+    // the marker is closed (`closes`; a card that still holds a run copy may keep it open until the card is written)
+    auto next_login_is_real = [&](World& w, const GCCharacter& card, const GCCharacter& real,
+                                  const PSOBBCharacterFile& server_real, const std::string& when, bool closes = true) {
+      auto p = connect(w, card);
+      client_sends(w, p, 0x61, p.ch->as_61());
+      login_to_lobby(w, p);
+      expect_real(p.ch->memory, real, when);
+      if (p.ch->card_writes.size() != 1) {
+        throw std::runtime_error(when + ": the login did not end in one 97");
+      }
+      expect_real(p.ch->card_writes[0], real, when + ", on the memory card after the login 97");
+      if (!server_holds(p, server_real)) {
+        throw std::runtime_error(when + ": the server's character data is not the real character");
+      }
+      if (closes && !no_marker(snapshot_on_disk(p))) {
+        throw std::runtime_error(when + ": the marker is still open");
+      }
+      return p;
+    };
     e2e_case("start, run copy, game exit: the 98, the restore before the lobby join, the next login", [&]() {
       TempCwd temp_cwd;
       auto w = make_world();
@@ -9349,7 +9764,7 @@ void run_static_tests() {
       expect(no_marker(snapshot_on_disk(p2)));
       expect(server_holds(p2, *r.server_real));
     });
-    e2e_case("the connection drops mid-run: no 98, the next login restores the real character", [&]() {
+    e2e_case("the connection drops mid-run: no 98, the next login restores the real character; after a card write that did not arrive, the login after that restores it again", [&]() {
       TempCwd temp_cwd;
       auto w = make_world();
       const GCCharacter real = real_character();
@@ -9371,24 +9786,34 @@ void run_static_tests() {
       expect(!spire_guard_game_join_allowed(p2.c, false)); // a run that never got its 98 counts too
       // RunInProgress turns into RestorePending and the restore runs before any 97 (enable_save_if_needed sends the 97
       // only after this returns true)
-      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      login_to_lobby(w, p2);
       expect_real(p2.ch->memory, real, "after the login that follows a dropped connection");
       expect_eq(1u, p2.ch->pushes);
-      expect_eq(0u, p2.ch->card_writes.size());
+      // the one 97 came after the verified push: the card holds the real character
+      expect_eq(1u, p2.ch->card_writes.size());
+      expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 that follows a dropped connection");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       // 8-B2 (was no_marker): the restore at login leaves AwaitingSave, since the 97 goes out only after it
       expect(awaiting_only(snap));
       expect(snapshot_is(snap, *r.server_real));
       expect(spire_guard_game_join_allowed(p2.c, false));
+      restored_at_login(p2, *r.server_real);
 
-      // 8-B2: the client drops before it wrote its card, so the card still holds the run copy. The login after that
-      // finds the marker open and pushes the real character again (with the marker closed it restored nothing)
+      // A card write that did not arrive: the login 97 wrote the real character (card_writes[0]), but the console goes
+      // off before that write reached the card, so the card still holds the run copy. That stand does not arise by
+      // itself in this test client (it always writes at the 97), so the card is set up here. 8-B2: the login after
+      // that finds the marker open and pushes the real character again (with the marker closed it restored nothing)
       p2.ch->open = false;
-      auto p3 = connect(w, r.run_copy);
+      const GCCharacter card_write_not_arrived = r.run_copy;
+      if (!memcmp(&card_write_not_arrived, &p2.ch->card_writes[0], sizeof(GCCharacter))) {
+        throw std::runtime_error("the card whose write did not arrive is the card the login 97 wrote");
+      }
+      auto p3 = connect(w, card_write_not_arrived);
       client_sends(w, p3, 0x61, p3.ch->as_61());
       expect(run_bool(w, p3, spire_guard_restore_if_needed(p3.c)));
-      expect_real(p3.ch->memory, real, "after the second login, the card still held the run copy");
+      expect_real(p3.ch->memory, real, "after the second login, the card write had not arrived and the card still held the run copy");
       expect_eq(1u, p3.ch->pushes);
       expect(awaiting_only(snapshot_on_disk(p3)));
       // this time the card is written. The next login's 61 equals the snapshot: the marker closes, nothing is pushed
@@ -9400,6 +9825,9 @@ void run_static_tests() {
       expect_real(p4.ch->memory, real, "after the login whose card held the real character");
       expect(no_marker(snapshot_on_disk(p4)));
       expect(server_holds(p4, *r.server_real));
+      // intern: the login after that shows the card the login 97 wrote, the real one, and the marker stays closed
+      p4.ch->open = false;
+      next_login_is_real(w, p2.ch->card_writes[0], real, *r.server_real, "after the login whose card the login 97 wrote");
     });
     e2e_case("game exit, but the card kept the run copy: the next login pushes the real character again", [&]() {
       TempCwd temp_cwd;
@@ -9416,13 +9844,19 @@ void run_static_tests() {
       p.ch->open = false;
       auto p2 = connect(w, r.run_copy);
       client_sends(w, p2, 0x61, p2.ch->as_61());
-      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      login_to_lobby(w, p2);
       expect_real(p2.ch->memory, real, "after the login whose card still held the run copy");
       expect_eq(1u, p2.ch->pushes);
+      expect_eq(1u, p2.ch->card_writes.size());
+      expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 whose card still held the run copy");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       snap = snapshot_on_disk(p2);
       expect(awaiting_only(snap)); // 8-B2 (was no_marker): the login restore awaits the save too
       expect(snapshot_is(snap, *r.server_real));
+      restored_at_login(p2, *r.server_real);
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->card_writes[0], real, *r.server_real, "after the login whose card the second login 97 wrote");
     });
 
     e2e_case("game exit, the client is gone before the restore: refused, the marker stays, the next login restores", [&]() {
@@ -9443,12 +9877,48 @@ void run_static_tests() {
       auto p2 = connect(w, r.run_copy);
       client_sends(w, p2, 0x61, p2.ch->as_61());
       expect(!spire_guard_game_join_allowed(p2.c, false));
-      expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+      login_to_lobby(w, p2);
       expect_real(p2.ch->memory, real, "after the login that follows a refused game exit restore");
       expect_eq(1u, p2.ch->pushes);
+      expect_eq(1u, p2.ch->card_writes.size());
+      expect_real(p2.ch->card_writes[0], real, "on the memory card after the login 97 that follows a refused game exit restore");
       expect(server_holds(p2, *r.server_real));
+      restored_at_login(p2, *r.server_real);
       expect(awaiting_only(snapshot_on_disk(p2))); // 8-B2 (was no_marker): the login restore awaits the save too
+      restored_at_login(p2, *r.server_real);
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->card_writes[0], real, *r.server_real, "after the login whose card the login 97 after a refused game exit wrote");
     });
+
+    // Gap B2 (output/systeem-8-itemveiligheid-critic.md B2): a login restore closes the marker before the 97, so a
+    // connection that drops in between leaves the run copy on the card with no marker for it. The invariant: whatever
+    // the card holds after that, the next login gives the real character back. Red on code that still has gap B2.
+    constexpr bool SPIRE_E2E_KNOWN_GAP_B2 = true; // on spike/veilig: 8-B2 closes it (B-REGIE-21-8)
+    if (SPIRE_E2E_KNOWN_GAP_B2) {
+      e2e_case("the login restore, then the connection drops before the 97: the card kept the run copy, the next login restores the real character (known gap B2)", [&]() {
+        TempCwd temp_cwd;
+        auto w = make_world();
+        const GCCharacter real = real_character();
+        auto r = start_run(w, real);
+        r.p.ch->open = false;
+        run_void(w, r.p, on_disconnect(r.p.c));
+        r.p.c.reset();
+        // the login restore pushes the real character into the save buffer; the console goes off before any 97
+        auto p2 = connect(w, r.run_copy);
+        client_sends(w, p2, 0x61, p2.ch->as_61());
+        expect(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)));
+        expect_real(p2.ch->memory, real, "in the save buffer after the login restore");
+        expect_eq(0u, p2.ch->card_writes.size());
+        restored_at_login(p2, *r.server_real);
+        p2.ch->open = false;
+        // the card was never written: the next login's 61 is the run copy again
+        auto p3 = next_login_is_real(w, r.run_copy, real, *r.server_real,
+            "after the login whose card still held the run copy because the connection dropped before the 97", false);
+        restored_at_login(p3, *r.server_real);
+        p3.ch->open = false;
+        next_login_is_real(w, p3.ch->card_writes[0], real, *r.server_real, "after the login whose card that login's 97 wrote");
+      });
+    }
 
     // The return to base ('O') and the run again ('I'). The quest's write to register 248 goes in through
     // spire_bridge_handle_register, as on_sync_quest_register hands a 6x77 over. The registers the server writes back
@@ -9597,6 +10067,92 @@ void run_static_tests() {
       expect_eq(0u, p2.ch->pushes);
       expect_real(p2.ch->memory, at_base, "after the login that follows the base");
       expect(no_marker(snapshot_on_disk(p2)));
+    });
+
+    // A push that never arrives: the client answers SetExtendedPlayerInfo, but its save buffer keeps the run copy, and
+    // the live player is the run copy as well. Every push is then refused, nothing is saved, and the real character
+    // stays in the snapshot until a push lands.
+    e2e_case("the run ends, the 'O' push never reaches the save buffer: refused; the game exit push is lost too; the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1; // a field floor
+      spire_checkpoint_run_started(p.c); // see the 'O' OK case: the cases reuse one game ID
+      p.ch->live = r.run_copy;
+      p.ch->pushes_land = false;
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::PUSH_NOT_VERIFIED),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' whose push never arrived"));
+      must(p.ch->pushes_lost >= 1, "the 'O' sent no push");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      must(!memcmp(&p.ch->memory, &r.run_copy, sizeof(r.run_copy)), "the save buffer changed without a push");
+      must(server_holds(p, *r.server_real), "the server's real character changed at an 'O' whose push never arrived");
+      auto snap = snapshot_on_disk(p);
+      must(snap.run_in_progress && !snap.restore_pending && !snap.awaiting_save, "the marker after a refused 'O' is not RunInProgress alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a refused 'O' is not the real character");
+
+      // the game exit: the 98 carries the run copy, the restore's push is lost too: refused (on_84 drops the client)
+      client_sends(w, p, 0x98, p.ch->as_61());
+      p.ch->live.reset(); // no player walks around outside a game
+      size_t lost = p.ch->pushes_lost;
+      must(!run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "a game exit restore whose push never arrived was verified");
+      must(p.ch->pushes_lost > lost, "the game exit restore sent no push");
+      expect_eq(0u, p.ch->pushes);
+      expect_eq(0u, p.ch->card_writes.size());
+      snap = snapshot_on_disk(p);
+      must(!snap.run_in_progress && snap.restore_pending && !snap.awaiting_save, "the marker after a refused game exit restore is not RestorePending alone");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a refused game exit restore is not the real character");
+      p.ch->open = false;
+
+      // the next login: the card was never written (the run copy), and this time the push lands
+      auto p2 = connect(w, r.run_copy);
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(!spire_guard_game_join_allowed(p2.c, false), "a game join was allowed before the login restore");
+      login_to_lobby(w, p2);
+      expect_real(p2.ch->memory, real, "after the login that follows two pushes that never arrived");
+      expect_eq(1u, p2.ch->pushes);
+      expect_eq(1u, p2.ch->card_writes.size());
+      expect_real(p2.ch->card_writes[0], real, "on the memory card after the login that follows two pushes that never arrived");
+      must(server_holds(p2, *r.server_real), "the server's character data after that login is not the real character");
+      restored_at_login(p2, *r.server_real);
+      p2.ch->open = false;
+      next_login_is_real(w, p2.ch->card_writes[0], real, *r.server_real, "after the login whose card the restoring login wrote");
+    });
+    e2e_case("the login restore's push never reaches the save buffer: the login is dropped without 97, the marker stays; the next login restores the real character", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      r.p.ch->open = false;
+      run_void(w, r.p, on_disconnect(r.p.c));
+      r.p.c.reset();
+      auto p2 = connect(w, r.run_copy);
+      p2.ch->pushes_land = false;
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      std::string dropped;
+      try {
+        login_to_lobby(w, p2);
+      } catch (const std::exception& e) {
+        dropped = e.what();
+      }
+      must(dropped.find("without 97") != std::string::npos, "a login whose restore push never arrived was not dropped without 97");
+      must(!p2.ch->open, "a login whose restore push never arrived is still connected");
+      must(p2.ch->pushes_lost >= 1, "the login restore sent no push");
+      expect_eq(0u, p2.ch->pushes);
+      expect_eq(0u, p2.ch->card_writes.size());
+      auto snap = snapshot_on_disk(p2);
+      must(!snap.run_in_progress && snap.restore_pending, "the marker after a dropped login is not RestorePending");
+      must(snapshot_is(snap, *r.server_real), "the snapshot after a dropped login is not the real character");
+
+      // the next login: still the run copy on the card; the push lands now
+      auto p3 = next_login_is_real(w, r.run_copy, real, *r.server_real, "after the login that follows a dropped login", false);
+      restored_at_login(p3, *r.server_real);
+      p3.ch->open = false;
+      next_login_is_real(w, p3.ch->card_writes[0], real, *r.server_real, "after the login whose card the restoring login wrote");
     });
 
     e2e_case("run again: 'I' at the base takes the second snapshot of the real character, the new run copy is fresh, run 2's game exit restores the real character", [&]() {
@@ -9916,7 +10472,6 @@ void run_static_tests() {
     // A game that a client leaves while another stays makes its item creator again for the new leader
     // (Lobby::reassign_leader_on_client_departure), from the tables a server always has; read before a case changes
     // the working directory
-    auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
     auto common_v3 = std::make_shared<JSONCommonItemSet>(phosg::JSON::parse(phosg::load_file("system/tables/common-table-v3-v4.json")));
     auto armor_set = std::make_shared<ArmorShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/armor-shop-random-set.json")));
     auto tool_set = std::make_shared<ToolShopRandomSet>(phosg::JSON::parse(phosg::load_file("system/tables/tool-shop-random-set.json")));
@@ -10438,6 +10993,7 @@ void run_static_tests() {
       bool floor_handover = false; // A drops inventory item 5, the partner picks it up (6x2A, 6x59 as the server sees them)
       bool payout = false; // the quartermaster's collect: its clear of the payout flag, as on_set_quest_flag records it
       bool card_written = false; // the 84 after the base game and its 97 come through
+      bool trade = false; // A gives inventory item 5 to the partner through the trade window (D0, D2 as the server sees them)
     };
     constexpr uint8_t PHOTON_DROP[3] = {0x03, 0x10, 0x00};
     auto base_fall = [&](const BaseFallSetup& setup, const std::function<void(GCCharacter&)>& in_base,
@@ -10514,6 +11070,31 @@ void run_static_tests() {
         for (size_t z = 0; z < snap.inventory.num_items; z++) {
           must(memcmp(snap.inventory.items[z].data.data1.data(), dropped.data1.data(), 12) != 0,
               "the dropper's snapshot still holds the item the partner picked up (K7b)");
+        }
+      }
+      if (setup.trade) {
+        // the trade window: each side's D0 (A gives item 5, the partner nothing), then both D2s; the server executes
+        // it at the second D2 (spire_guard_note_trade_executed)
+        must(setup.partner != BasePartner::NONE, "a trade needs a partner");
+        auto d0 = [&](uint16_t target, const std::vector<ItemData>& items) {
+          SC_TradeItems_D0_D3 cmd;
+          cmd.target_client_id = target;
+          cmd.item_count = items.size();
+          for (size_t z = 0; z < items.size(); z++) {
+            cmd.item_datas[z] = items[z];
+          }
+          return std::string(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        };
+        const ItemData given = p.c->character_file(false, false)->inventory.items[5].data;
+        seat_sends(w, seats, seat, 0xD0, d0(1, {given}));
+        seat_sends(w, seats, partner, 0xD0, d0(0, {}));
+        seat_sends(w, seats, seat, 0xD2, "");
+        seat_sends(w, seats, partner, 0xD2, "");
+        must(!p.c->pending_item_trade && !partner.p.c->pending_item_trade, "the trade was not executed");
+        auto snap = snapshot_on_disk(p);
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          must(memcmp(snap.inventory.items[z].data.data1.data(), given.data1.data(), 12) != 0,
+              "the giver's snapshot still holds the traded item (Veilig-2)");
         }
       }
       GCCharacter at_base = real;
@@ -10640,7 +11221,7 @@ void run_static_tests() {
       });
     }
     // (e): what went to another player in the base never comes back to the first: a floor hand-over (K7b), and the
-    // trade window, which the server does not follow (the item leaves the inventory without a server step, as a deposit)
+    // trade window (Veilig-2: the execution takes the D0 list from the giver's snapshot)
     e2e_case("B-REGIE-21-20 (e) the base game with a partner, a floor hand-over to him, the client drops before the card write: the item does not come back", [&]() {
       base_fall({.partner = BasePartner::STAYS, .floor_handover = true}, [&](GCCharacter& ch) {
         ch.inventory.items[5] = ch.inventory.items[29];
@@ -10652,7 +11233,7 @@ void run_static_tests() {
     for (BasePartner partner : {BasePartner::STAYS, BasePartner::LEFT_BEFORE}) {
       e2e_case(std::format("B-REGIE-21-20 (e) the base game with a partner who {}, a trade to him, the client drops before the card write: the item does not come back",
                    (partner == BasePartner::STAYS) ? "stays" : "left before").c_str(), [&]() {
-        base_fall({.partner = partner}, [&](GCCharacter& ch) {
+        base_fall({.partner = partner, .trade = true}, [&](GCCharacter& ch) {
           ch.inventory.items[5] = ch.inventory.items[29];
           ch.inventory.num_items = 5;
         }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
@@ -10660,6 +11241,316 @@ void run_static_tests() {
         });
       });
     }
+    // B-REGIE-21-24 (f): a base game shared with another player is reconciled too, now that the server follows the
+    // trade window: a deposit and a withdrawal exist once, and a traded item still never comes back
+    for (BasePartner partner : {BasePartner::STAYS, BasePartner::LEFT_BEFORE}) {
+      const char* who = (partner == BasePartner::STAYS) ? "stays" : "left before";
+      e2e_case(std::format("B-REGIE-21-24 (f) the base game with a partner who {}, a deposit on the bank, the client drops before the card write: the item exists once", who).c_str(), [&]() {
+        base_fall({.partner = partner}, deposit, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 1, std::format("the deposited item is there {} times after the login", held(p2.ch->memory, rare)).c_str());
+        });
+      });
+      e2e_case(std::format("B-REGIE-21-24 (f) the base game with a partner who {}, a trade to him and a withdrawal from the bank, the client drops before the card write: the withdrawn item once, the traded one gone", who).c_str(), [&]() {
+        base_fall({.partner = partner, .trade = true}, [&](GCCharacter& ch) {
+          withdraw(ch); // bank item 0 into slot 6
+          ch.inventory.items[5] = ch.inventory.items[6]; // item 5 traded away: the withdrawn item moves up
+          ch.inventory.items[6] = ch.inventory.items[29];
+          ch.inventory.num_items = 6;
+        }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 0, "the item traded to the partner came back to the first player");
+          must(held(p2.ch->memory, banked) == 1, std::format("the withdrawn item is there {} times after the login", held(p2.ch->memory, banked)).c_str());
+        });
+      });
+    }
+    // veilig-2 (second measurement of bundle 1, section 3): the tests of M1, K7 and K1 call the decision itself; the cases
+    // below play what a client sends through the server's own handlers, so they fail when a handler stops calling the
+    // fix or calls it with the wrong side
+    e2e_case("a player hit or killed by an enemy (6x4A, 6x4B, 6x4C, 6x4D through on_command) moves the floor clock, never the enemies' side clock (M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      auto l = new_game(w);
+      l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = l;
+      constexpr uint8_t FLOOR = 0x03;
+      p.c->floor = FLOOR;
+      for (uint8_t sub : {0x4A, 0x4B, 0x4C, 0x4D}) {
+        // both clocks of the floor 400 s old: the clock a hit on the player makes young again shows which side it set
+        spire_fight_note(l->lobby_id, FLOOR, std::chrono::steady_clock::now() - std::chrono::seconds(400), true);
+        std::string data;
+        if (sub == 0x4D) {
+          G_PlayerDied_6x4D cmd;
+          cmd.header = {0x4D, sizeof(G_PlayerDied_6x4D) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        } else {
+          G_ClientIDHeader cmd{sub, sizeof(G_ClientIDHeader) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        }
+        client_sends(w, p, 0x60, data);
+        auto now = std::chrono::steady_clock::now();
+        if (spire_fight_quiet(l->lobby_id, FLOOR, now) >= std::chrono::seconds(5)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player did not reach the floor clock (spire_bridge_note_fight not called)", sub));
+        }
+        if (spire_enemy_quiet(l->lobby_id, FLOOR, now) < std::chrono::seconds(390)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player counted as a sign from the enemies' side: an enemy out of reach that shoots keeps the room shut", sub));
+        }
+      }
+    });
+
+    e2e_case("a floor hand-over in a Normal game through the real 6x2A and 6x5A: the dropper's snapshot loses the item, the picker's gains it (K7)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      give_item_tables(w);
+      // the handlers name the item in their log lines: an index without names (no text tables in a static test)
+      w.s->data->item_name_indexes[static_cast<size_t>(Version::GC_V3)] = std::make_shared<ItemNameIndex>(
+          pmt_v3, w.s->data->item_stack_limits(Version::GC_V3), std::vector<std::string>());
+      Session a = connect_as(w, real_character(), SERIAL);
+      Session b = connect_as(w, second_character(), SERIAL_2);
+      client_sends(w, a, 0x61, a.ch->as_61());
+      client_sends(w, b, 0x61, b.ch->as_61());
+      // both under AwaitingSave with their real character, as after a verified restore: the snapshot follows the floor
+      auto awaiting_snapshot = [&](Session& p, uint32_t serial) {
+        auto ch = p.c->character_file(false, false);
+        must(ch != nullptr, "a player has no character data after its 61");
+        SpireGuardSnapshot snap;
+        snap.awaiting_save = true;
+        snap.has_character = true;
+        snap.quest_number = QUEST;
+        snap.inventory = ch->inventory;
+        snap.disp = ch->disp;
+        std::string filename = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial, spire_guard_character_id(ch->disp));
+        spire_guard_save(filename, serial, snap);
+        must(spire_guard_floor_follows(spire_guard_load(filename), true), "the snapshot of this case does not follow a Normal game");
+        return filename;
+      };
+      std::string a_file = awaiting_snapshot(a, SERIAL);
+      std::string b_file = awaiting_snapshot(b, SERIAL_2);
+      must(a_file != b_file, "the two players share a snapshot file name");
+
+      auto base = std::make_shared<Lobby>(w.s, 0x7B21, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->leader_id = 0;
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      while (base->floor_item_managers.size() < 0x12) { // as create_game_generic gives every game
+        base->floor_item_managers.emplace_back(base->lobby_id, base->floor_item_managers.size());
+      }
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      Session* players[2] = {&a, &b};
+      for (size_t z = 0; z < 2; z++) {
+        base->clients[z] = players[z]->c;
+        players[z]->c->lobby_client_id = z;
+        players[z]->c->lobby = base;
+        players[z]->c->floor = 0;
+      }
+
+      // A drops its unequipped rare weapon (inventory item 5), B picks it up
+      const ItemData sword = a.c->character_file(false, false)->inventory.items[5].data;
+      auto in_snapshot = [&](const std::string& filename) {
+        auto snap = spire_guard_load(filename);
+        size_t found = 0;
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          found += !memcmp(snap.inventory.items[z].data.data1.data(), sword.data1.data(), 12);
+        }
+        return found;
+      };
+      expect_eq(1u, in_snapshot(a_file));
+      expect_eq(0u, in_snapshot(b_file));
+      G_DropItem_6x2A drop;
+      drop.header = {0x2A, sizeof(G_DropItem_6x2A) / 4, 0};
+      drop.amount = 1;
+      drop.floor = 0;
+      drop.item_id = sword.id;
+      client_sends(w, a, 0x60, std::string(reinterpret_cast<const char*>(&drop), sizeof(drop)));
+      must(base->item_exists(0, sword.id), "the 6x2A did not put the item on the floor");
+      G_PickUpItemRequest_6x5A pick;
+      pick.header = {0x5A, sizeof(G_PickUpItemRequest_6x5A) / 4, 1};
+      pick.item_id = sword.id;
+      pick.floor = 0;
+      client_sends(w, b, 0x60, std::string(reinterpret_cast<const char*>(&pick), sizeof(pick)));
+      must(!base->item_exists(0, sword.id), "the 6x5A did not take the item from the floor");
+      // the item exists once in the snapshots, with the one who holds it now
+      if (in_snapshot(a_file) != 0) {
+        throw std::runtime_error("the dropper's snapshot still holds the item another player picked up: the floor drop was not followed (spire_guard_note_floor_drop)");
+      }
+      if (in_snapshot(b_file) != 1) {
+        throw std::runtime_error("the picker's snapshot did not gain the item from a followed drop");
+      }
+    });
+
+    // K1 r2: the chain the dead-event net builds behind a counted wave leaves a boss event out. Played through the
+    // server's room check and its watch (one look, SPIRE_UNHIT_ENEMY_SECONDS of real time): room 1 chains a Dragon wave
+    // behind a wave without a living enemy, room 2 a normal wave (the control: the look ran and counted its chain)
+    e2e_case("the dead-event watch counts the chain behind a wave without a living enemy, never a chained boss event (K1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      constexpr uint8_t FLOOR = 0x0B;
+      using ESE = MapFile::EnemySetEntry;
+      auto make_set = [&](uint16_t base_type, uint16_t room, uint16_t wave_number) {
+        ESE e;
+        e.base_type = base_type;
+        e.floor = FLOOR;
+        e.room = room;
+        e.wave_number = wave_number;
+        return e;
+      };
+      // room 1: a Booma (wave 1), the Dragon (wave 2); room 2: a Booma in wave 1 and one in wave 2
+      std::vector<ESE> sets{make_set(0x0044, 1, 1), make_set(0x00C0, 1, 2), make_set(0x0044, 2, 1), make_set(0x0044, 2, 2)};
+      using EV = MapFile::Event1Entry;
+      auto make_event = [](uint32_t event_id, uint16_t room, uint16_t wave_number, uint32_t action_stream_offset) {
+        EV e;
+        e.event_id = event_id;
+        e.room = room;
+        e.wave_number = wave_number;
+        e.action_stream_offset = action_stream_offset;
+        return e;
+      };
+      // 101 -> 102 (the Dragon's wave) in room 1, 201 -> 202 in room 2; post-wave actions 0C <event id> 01, as make_map
+      // writes them
+      std::vector<EV> events{make_event(101, 1, 1, 0), make_event(102, 1, 2, 6), make_event(201, 2, 1, 7), make_event(202, 2, 2, 13)};
+      const uint8_t actions[16] = {0x0C, 0x66, 0x00, 0x00, 0x00, 0x01, 0x01, 0x0C, 0xCA, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00};
+      auto dat = std::make_shared<std::string>();
+      auto add_section = [&](MapFile::SectionHeader::Type type, const std::string& data) {
+        MapFile::SectionHeader h;
+        h.le_type = static_cast<uint32_t>(type);
+        h.data_size = data.size();
+        h.section_size = sizeof(h) + h.data_size;
+        h.floor = FLOOR;
+        dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+        dat->append(data);
+      };
+      add_section(MapFile::SectionHeader::Type::ENEMY_SETS, std::string(reinterpret_cast<const char*>(sets.data()), sets.size() * sizeof(ESE)));
+      MapFile::EventsSectionHeader ev_h;
+      ev_h.entries_offset = sizeof(ev_h);
+      ev_h.entry_count = events.size();
+      ev_h.action_stream_offset = sizeof(ev_h) + events.size() * sizeof(EV);
+      ev_h.format = 0;
+      std::string ev_data(reinterpret_cast<const char*>(&ev_h), sizeof(ev_h));
+      ev_data.append(reinterpret_cast<const char*>(events.data()), events.size() * sizeof(EV));
+      ev_data.append(reinterpret_cast<const char*>(actions), sizeof(actions));
+      add_section(MapFile::SectionHeader::Type::EVENTS, ev_data);
+      MapFile::SectionHeader end_h;
+      end_h.le_type = 0;
+      end_h.section_size = 0;
+      end_h.floor = 0;
+      end_h.data_size = 0;
+      dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+      std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+      map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+      auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+      auto map_state = std::make_shared<MapState>(
+          0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+      auto ene = [&](uint16_t room, uint16_t wave_number) {
+        auto ene_sts = map_state->enemy_states_for_floor_room_wave(Version::GC_V3, FLOOR, room, wave_number);
+        must(ene_sts.size() == 1, "a wave of this case does not have exactly one enemy");
+        return ene_sts.at(0);
+      };
+      auto ev = [&](uint32_t event_id) -> std::shared_ptr<MapState::EventState> {
+        for (const auto& ev_st : map_state->event_states_for_floor(Version::GC_V3, FLOOR)) {
+          if (ev_st->super_ev->version(Version::GC_V3).set_entry->event_id == event_id) {
+            return ev_st;
+          }
+        }
+        throw std::runtime_error(std::format("event {} is not in the map state", event_id));
+      };
+      expect_eq(EnemyType::BOOMA, ene(1, 1)->super_ene->type);
+      expect_eq(EnemyType::DRAGON, ene(1, 2)->super_ene->type);
+      expect_eq(EnemyType::BOOMA, ene(2, 2)->super_ene->type);
+      // waves 1 started, their Booma never hit; waves 2 never started (the clients send no 6x67 behind a counted wave)
+      ev(101)->flags |= 0x04;
+      ev(201)->flags |= 0x04;
+
+      auto l = std::make_shared<Lobby>(w.s, 0x7B31, true);
+      l->episode = Episode::EP1;
+      l->mode = GameMode::BATTLE;
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      l->quest = std::make_shared<Quest>(vq);
+      l->map_state = map_state;
+      w.s->id_to_lobby.emplace(l->lobby_id, l);
+      l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = l;
+      p.c->floor = FLOOR; // a client on the floor: the look may count
+      // the floor quiet for 200 s: the first look may count (SPIRE_UNHIT_QUIET_SECONDS)
+      spire_fight_note(l->lobby_id, FLOOR, std::chrono::steady_clock::now() - std::chrono::seconds(200), true);
+      p.ch->inbox.clear();
+      spire_bridge_check_room_clear(p.c, l, FLOOR, 1, 1);
+      spire_bridge_check_room_clear(p.c, l, FLOOR, 2, 1);
+      auto cleared = [&](uint16_t room) {
+        uint32_t value = SPIRE_BRIDGE_ROOM_CLEARED_TAG | (static_cast<uint32_t>(FLOOR) << 8) | room;
+        for (const auto& raw : p.ch->inbox) {
+          if ((raw.size() >= sizeof(PSOCommandHeaderDCV3) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (static_cast<uint8_t>(raw[0]) == 0x60) && (static_cast<uint8_t>(raw[sizeof(PSOCommandHeaderDCV3)]) == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(PSOCommandHeaderDCV3));
+            if ((reg.register_number.load() == SPIRE_BRIDGE_ROOM_CLEARED_REGISTER) && (reg.value.as_int.load() == value)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      must(!cleared(1) && !cleared(2), "a room cleared before the watch looked");
+      auto deadline = std::chrono::steady_clock::now() + SPIRE_UNHIT_ENEMY_SECONDS + std::chrono::seconds(10);
+      while (!cleared(2) && (std::chrono::steady_clock::now() < deadline)) {
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(250));
+      }
+      // room 1's watch started first, so its look ran before room 2's
+      w.s->io_context->restart();
+      w.s->io_context->poll();
+      must(cleared(2), "the control room did not clear within one look: the chain behind the wave without a living enemy was not counted");
+      must((ev(202)->flags & 0x08) && (ene(2, 2)->set_flags & 8), "the control room's chained normal wave was not counted as finished");
+      if ((ene(1, 2)->set_flags & 8) || (ev(102)->flags & 0x08) || cleared(1)) {
+        throw std::runtime_error("the Dragon's event chained behind a counted wave was counted and the room cleared while the boss lives: the server did not mark the chained event as a boss event (is_boss)");
+      }
+      l->map_state.reset(); // the watch of room 1 looks again later and then stops (no map state)
+    });
+
+    // veilig-2 (10r2-M1): a chat command's usage line goes to the client as a text message (send_text_message, not the
+    // ticker), so it holds no angle bracket. Played through on_chat_command, as on_06 hands a "$" chat over.
+    e2e_case("the usage lines of $lv and $kitlobby reach the client without an angle bracket (10r2-M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      for (const char* text : {"$lv", "$lv x", "$kitlobby 0", "$kitlobby 201"}) {
+        p.ch->inbox.clear();
+        std::exception_ptr failed;
+        bool done = false;
+        asio::co_spawn(*w.s->io_context, on_chat_command(p.c, text, false), [&](std::exception_ptr e) {
+          failed = e;
+          done = true;
+        });
+        w.s->io_context->restart();
+        w.s->io_context->poll();
+        if (failed) {
+          std::rethrow_exception(failed);
+        }
+        must(done, "the chat command did not finish");
+        size_t usage_lines = 0;
+        for (const auto& raw : p.ch->inbox) {
+          if ((raw.size() < sizeof(PSOCommandHeaderDCV3)) || (static_cast<uint8_t>(raw[0]) != 0xB0)) {
+            continue;
+          }
+          std::string body = raw.substr(sizeof(PSOCommandHeaderDCV3));
+          if (body.find("Gebruik") == std::string::npos) {
+            continue;
+          }
+          usage_lines++;
+          if ((body.find('<') != std::string::npos) || (body.find('>') != std::string::npos)) {
+            throw std::runtime_error(std::format("the usage line of \"{}\" holds an angle bracket", text));
+          }
+        }
+        if (usage_lines != 1) {
+          throw std::runtime_error(std::format("\"{}\" sent {} usage line(s) instead of one", text, usage_lines));
+        }
+      }
+    });
 
     expect_eq(0u, e2e_failed);
 
@@ -10846,6 +11737,428 @@ void run_static_tests() {
     for (auto& lc : l->clients) {
       lc = nullptr;
     }
+  }
+
+  phosg::log_info_f("-- Spire veilig-r2: the parked run through the bridge ('J', 'B', 'V', 'X', time up), as the quest sends it");
+  {
+    // Every case plays the quest's requests through spire_bridge_handle_register, as on_sync_quest_register hands a 6x77
+    // over, and looks at the savestate files the server leaves on disk
+    constexpr uint32_t QUEST = 987656; // a bridged quest on Normal (spire_meta_ladder_quest_rung 0)
+    size_t r2_failed = 0;
+    auto r2_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   R2 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        r2_failed++;
+        phosg::log_error_f("   R2 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    struct R2Cwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-r2-{}", getpid());
+      R2Cwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~R2Cwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    };
+    // what a client is sent
+    struct R2Channel : Channel {
+      std::vector<std::string> sent;
+      R2Channel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      size_t count(const std::string& text) const {
+        return std::count_if(this->sent.begin(), this->sent.end(),
+            [&](const std::string& data) { return data.find(text) != std::string::npos; });
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    struct R2Player {
+      std::shared_ptr<R2Channel> ch;
+      std::shared_ptr<Client> c;
+      std::string stem; // spire_savestate_stem of its character
+    };
+    struct R2World {
+      std::shared_ptr<TestState> s;
+      std::shared_ptr<GameServer> server;
+      std::shared_ptr<Lobby> l;
+      size_t next_slot = 0;
+    };
+    auto r2_world = [&](uint32_t lobby_id, Episode episode) {
+      R2World w;
+      w.s = std::make_shared<TestState>();
+      w.s->data = std::make_shared<DataIndex>();
+      w.s->io_context = std::make_shared<asio::io_context>(1);
+      w.s->data->spire_bridge_quest_numbers.emplace(QUEST);
+      w.server = std::make_shared<GameServer>(w.s);
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      w.l = std::make_shared<Lobby>(w.s, lobby_id, true);
+      w.l->episode = episode;
+      w.l->mode = GameMode::BATTLE;
+      w.l->quest = std::make_shared<Quest>(vq);
+      return w;
+    };
+    // a GC client in the game with a run copy; serial 4600 + its slot
+    auto r2_join = [&](R2World& w) {
+      R2Player p;
+      p.ch = std::make_shared<R2Channel>();
+      p.c = std::make_shared<Client>(w.server, p.ch, ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = 4600 + w.next_slot;
+      p.c->login = login;
+      p.c->character_file(true, false);
+      p.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
+      p.c->lobby_client_id = w.next_slot;
+      w.l->clients[w.next_slot++] = p.c;
+      p.c->lobby = w.l;
+      p.stem = std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, login->gc_license->serial_number,
+          spire_guard_character_id(p.c->character_file(false, false)->disp));
+      return p;
+    };
+    auto r2_reg = [&](R2World& w, R2Player& p, uint16_t register_number, uint32_t value) {
+      expect(spire_bridge_handle_register(p.c, w.l, register_number, value)); // taken by the bridge
+    };
+    auto r2_request = [&](R2World& w, R2Player& p, uint8_t kind, uint32_t low) {
+      r2_reg(w, p, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(kind) << 24) | low);
+    };
+    // 'J' for room k (variant 0), and 'B' with its start room, K0 and resume bit
+    auto r2_ask = [&](R2World& w, R2Player& p, uint32_t k) { r2_request(w, p, SPIRE_BRIDGE_RESUME, k); };
+    auto r2_begin = [&](R2World& w, R2Player& p, uint32_t start_k, uint32_t first_k, bool resumed) {
+      r2_request(w, p, SPIRE_BRIDGE_REC_BEGIN, ((resumed ? 1 : 0) << 16) | (first_k << 8) | start_k);
+    };
+    // the quest's room start: SPIRE_SAVESTATE_NUM_VALUES values (the room first), then 'V' << 24 | count
+    auto r2_v = [&](R2World& w, R2Player& p, uint32_t room) {
+      for (uint32_t z = 0; z < SPIRE_SAVESTATE_NUM_VALUES; z++) {
+        r2_reg(w, p, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == SPIRE_SS_K) ? room : ((z == SPIRE_SS_LIVES) ? 3 : 0));
+      }
+      r2_request(w, p, SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_SAVESTATE_NUM_VALUES);
+    };
+    // a real run parked at room k on Normal, written as a 'V' writes it
+    auto r2_parked = [&](const R2Player& p, uint32_t run_id, uint8_t episode, uint32_t quest_number, uint32_t k) {
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = run_id;
+      ss.episode = episode;
+      ss.quest_number = quest_number;
+      ss.start_room = (episode == static_cast<uint8_t>(Episode::EP2)) ? 16 : 1;
+      ss.practice = false;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = k;
+      ss.values[SPIRE_SS_LIVES] = 2;
+      std::string filename = spire_savestate_store_v(p.stem, 0, ss, 4600);
+      expect(!filename.empty());
+      return filename;
+    };
+
+    r2_case("7r2-M1: a resume answer that came too late makes a practice run in the parked run's id; its 'X' keeps the run", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D01, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 9); // the game takes run D1 and answers resume
+      r2_begin(w, p, 9, 1, false); // the answer came too late: the quest went on fresh, a practice run in run D1
+      r2_v(w, p, 9); // not stored: the run stays parked
+      r2_request(w, p, SPIRE_BRIDGE_MSG_RUN_OVER, 0); // dead
+      expect(std::filesystem::is_regular_file(file));
+      expect_eq(bytes, phosg::load_file(file));
+      expect_eq(0xD1u, spire_savestate_from_json(phosg::load_file(file)).run_id);
+    });
+    r2_case("7r2-M1: the same practice run in the parked run's id ends by time up; the run stays", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D02, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 9);
+      r2_begin(w, p, 9, 1, false);
+      r2_v(w, p, 9);
+      spire_run_timer_record_end(w.l, (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) |
+          (SPIRE_BRIDGE_TIMER_TIME_UP << 16) | 240, SPIRE_BRIDGE_TIMER_TIME_UP);
+      expect(std::filesystem::is_regular_file(file));
+      expect_eq(bytes, phosg::load_file(file));
+    });
+    r2_case("7r2-M1: the parked run resumed and played to its end: its savestate goes, as before", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D03, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      r2_ask(w, p, 9);
+      r2_begin(w, p, 9, 1, true); // resumed: the real run D1 is played
+      r2_request(w, p, SPIRE_BRIDGE_MSG_RUN_OVER, 0);
+      expect(!std::filesystem::exists(file));
+    });
+
+    r2_case("7r2-M2: one parked run per difficulty per episode, replaced from the new run's second room, files of before read per episode", [&]() {
+      // B-REGIE-21-22
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_LIVES] = 2;
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-episodes-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::string stem = (dir / "0000000042.abc").string();
+      const uint8_t EP1 = static_cast<uint8_t>(Episode::EP1), EP2 = static_cast<uint8_t>(Episode::EP2);
+      expect_eq(stem + ".savestate.normal.json", spire_savestate_slot_filename(stem, EP1, 0));
+      expect_eq(stem + ".savestate.ep2.hard.json", spire_savestate_slot_filename(stem, EP2, 1));
+      SpireSavestate ep1 = ss; // a real Episode 1 run parked at room 9 on Normal
+      ep1.practice = false;
+      ep1.run_id = 0xD1;
+      ep1.episode = EP1;
+      ep1.quest_number = 920;
+      ep1.start_room = 1;
+      ep1.values[SPIRE_SS_K] = 9;
+      ep1.values[SPIRE_SS_VARIANT] = 0;
+      std::string ep1_file = spire_savestate_store_v(stem, 0, ep1, 42);
+      expect_eq(spire_savestate_rung_filename(stem, 0), ep1_file);
+      std::string ep1_bytes = phosg::load_file(ep1_file);
+      // a real Episode 2 run on Normal (Spire Run II): its own file, the Episode 1 run stays byte for byte
+      SpireSavestate ep2 = ep1;
+      ep2.run_id = 0xD5;
+      ep2.episode = EP2;
+      ep2.quest_number = 922;
+      ep2.start_room = 16;
+      ep2.values[SPIRE_SS_K] = 17;
+      expect_eq(0u, static_cast<uint32_t>(spire_meta_ladder_quest_rung(ep2.quest_number)));
+      std::string ep2_file = spire_savestate_store_v(stem, 0, ep2, 42);
+      expect_eq(spire_savestate_slot_filename(stem, EP2, 0), ep2_file);
+      expect_eq(ep1_bytes, phosg::load_file(ep1_file));
+      expect(spire_savestate_matches(spire_savestate_load_slot(stem, EP1, 0), EP1, 9, 0, 0));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      // the join notice and the elsewhere line stay within the game's episode
+      {
+        std::string name;
+        expect_eq(0xD1u, spire_savestate_notice_pick(stem, 0, &name, EP1).run_id);
+        expect_eq(0xD5u, spire_savestate_notice_pick(stem, 0, &name, EP2).run_id);
+        expect(spire_savestate_notice_elsewhere(stem, 1, EP1) == std::optional<uint8_t>(0));
+        expect(spire_savestate_notice_elsewhere(stem, 1, EP2) == std::optional<uint8_t>(0));
+      }
+      // a new real Episode 1 run from room 1 ("Spire room 1", Spire Run): its first room's 'V' leaves the parked run,
+      // its next room's 'V' replaces it
+      SpireSavestate fresh = ep1;
+      fresh.run_id = 0xD6;
+      fresh.quest_number = 940;
+      fresh.values[SPIRE_SS_K] = 1;
+      expect(spire_savestate_is_first_room_v(fresh));
+      {
+        SpireSavestate kept;
+        expect_eq(std::string(), spire_savestate_store_v(stem, 0, fresh, 42, nullptr, &kept));
+        expect_eq(0xD1u, kept.run_id);
+        expect_eq(ep1_bytes, phosg::load_file(ep1_file));
+        expect_eq(std::string("Your saved run (room 9, Normal) is replaced when the next room starts."),
+            spire_savestate_replace_text(kept));
+      }
+      fresh.values[SPIRE_SS_K] = 2;
+      expect(!spire_savestate_is_first_room_v(fresh));
+      expect_eq(ep1_file, spire_savestate_store_v(stem, 0, fresh, 42));
+      expect_eq(0xD6u, spire_savestate_load_slot(stem, EP1, 0).run_id);
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id); // Episode 2's run is not touched
+      // its own savestate at its first room (a resume there, the same run id) replaces as before
+      fresh.values[SPIRE_SS_K] = 1;
+      expect_eq(ep1_file, spire_savestate_store_v(stem, 0, fresh, 42));
+      // the decision itself
+      expect(!spire_savestate_may_replace(ep1, false, true, 0xD6)); // another run parked, the new run's first room
+      expect(spire_savestate_may_replace(ep1, false, true, 0xD1)); // its own run
+      expect(spire_savestate_may_replace(ep1, false, false, 0xD6)); // the new run's second room
+      expect(spire_savestate_may_replace(SpireSavestate(), false, true, 0xD6)); // nothing parked
+      std::filesystem::remove(ep1_file);
+      std::filesystem::remove(ep2_file);
+      // a rung file of before that holds an Episode 2 run: Episode 2's, not Episode 1's
+      std::string rung_file = spire_savestate_rung_filename(stem, 0);
+      spire_bridge_write_durable(rung_file, spire_savestate_to_json(ep2, 42));
+      std::string ep2_bytes = phosg::load_file(rung_file);
+      {
+        std::string from;
+        expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0, &from).run_id);
+        expect_eq(rung_file, from);
+        expect(!spire_savestate_load_slot(stem, EP1, 0, &from).exists);
+        expect(from.empty());
+      }
+      // Episode 1 writes its Normal file: the Episode 2 run of before moves to Episode 2's own file first
+      ep1.values[SPIRE_SS_K] = 4;
+      expect_eq(rung_file, spire_savestate_store_v(stem, 0, ep1, 42));
+      expect_eq(ep2_bytes, phosg::load_file(spire_savestate_slot_filename(stem, EP2, 0)));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      expect_eq(0xD1u, spire_savestate_load_slot(stem, EP1, 0).run_id);
+      // and Episode 2's own write replaces only its own run of before in the rung file
+      std::filesystem::remove(spire_savestate_slot_filename(stem, EP2, 0));
+      spire_bridge_write_durable(rung_file, ep2_bytes);
+      ep2.values[SPIRE_SS_K] = 18;
+      expect_eq(spire_savestate_slot_filename(stem, EP2, 0), spire_savestate_store_v(stem, 0, ep2, 42));
+      expect(!std::filesystem::exists(rung_file));
+      expect_eq(18u, spire_savestate_load_slot(stem, EP2, 0).values[SPIRE_SS_K]);
+      // a rung file that cannot be read is Episode 1's by its name: Episode 2 leaves it and does not throw
+      spire_bridge_write_durable(rung_file, "{not json");
+      expect_eq(18u, spire_savestate_load_slot(stem, EP2, 0).values[SPIRE_SS_K]);
+      std::filesystem::remove(spire_savestate_slot_filename(stem, EP2, 0));
+      expect(!spire_savestate_load_slot(stem, EP2, 0).exists);
+      expect_raises(std::runtime_error, [&]() { spire_savestate_load_slot(stem, EP1, 0); });
+      expect_eq(std::string("{not json"), phosg::load_file(rung_file));
+      // the file of before (one for every difficulty) that holds an Episode 2 run counts for Episode 2 only, and an
+      // Episode 1 write on that rung leaves it
+      std::filesystem::remove(rung_file);
+      std::string old_file = spire_savestate_old_filename(stem);
+      spire_bridge_write_durable(old_file, ep2_bytes);
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      expect(!spire_savestate_load_slot(stem, EP1, 0).exists);
+      bool replaced = true;
+      spire_savestate_store_rung(stem, 0, spire_savestate_to_json(ep1, 42), &replaced);
+      expect(!replaced);
+      expect_eq(ep2_bytes, phosg::load_file(old_file));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      // critic r2 K-2: the practice line names the room quest, its variant and its difficulty
+      {
+        SpireSavestate elite = ep1;
+        elite.values[SPIRE_SS_K] = 5;
+        elite.values[SPIRE_SS_VARIANT] = 1;
+        elite.quest_number = 1946;
+        expect_eq(std::string("Practice is not saved: your run waits in Spire room 5 elite Hard."),
+            spire_savestate_practice_kept_text(elite));
+        expect_eq(std::string("Your saved run (room 5 elite, Hard) is replaced when the next room starts."),
+            spire_savestate_replace_text(elite));
+      }
+      std::filesystem::remove_all(dir);
+    });
+    r2_case("7r2-M2: \"Spire room 1\" next to a parked run: one line at the 'B', the first room's 'V' leaves it, room 2 replaces it", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D11, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 1); // nothing parked at room 1: a new run
+      r2_begin(w, p, 1, 1, false); // a real run from the first room
+      expect_eq(1u, p.ch->count("Your saved run (room 9, Normal) is replaced when the next room starts."));
+      r2_v(w, p, 1);
+      expect_eq(bytes, phosg::load_file(file)); // the run parked at room 9 stays
+      r2_v(w, p, 2);
+      auto now = spire_savestate_from_json(phosg::load_file(file));
+      expect(now.run_id != 0xD1u);
+      expect_eq(2u, now.values[SPIRE_SS_K]);
+    });
+    r2_case("7r2-M2: the first room of Episode 2 next to a parked Episode 1 run: its own file, no line, the Episode 1 run stays", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D12, Episode::EP2);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 16);
+      r2_begin(w, p, 16, 16, false);
+      expect_eq(0u, p.ch->count("is replaced when the next room starts"));
+      r2_v(w, p, 16);
+      r2_v(w, p, 17);
+      expect_eq(bytes, phosg::load_file(file));
+      auto ep2 = spire_savestate_load_slot(p.stem, static_cast<uint8_t>(Episode::EP2), 0);
+      expect(ep2.exists && (ep2.run_id != 0xD1u));
+      expect_eq(17u, ep2.values[SPIRE_SS_K]);
+    });
+    r2_case("critic r2 K-1: a practice run's 'V' through spire_savestate_write leaves the parked run and names its room quest", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D13, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 3);
+      r2_begin(w, p, 3, 1, false); // "Spire room 3" opened loose: a practice run
+      r2_v(w, p, 3);
+      r2_v(w, p, 4);
+      expect_eq(bytes, phosg::load_file(file));
+      expect_eq(1u, p.ch->count("Practice is not saved: your run waits in Spire room 9."));
+    });
+
+    r2_case("2r2-M2: after a net counted a non-last wave, the room mark alone starts the chain behind it (the look of spire_dead_event_wait)", [&]() {
+      // k2 (Forest 1, room 10): 111 -> 112 -> 113. A net counted wave 2 (112 on 0x18 on the server only); at the next look
+      // no started event is dead any more (seen and now empty), so only the room's net mark (spire_net_rooms) brings
+      // 113, which the clients never start, into the count
+      using EV = MapFile::Event1Entry;
+      auto ev = [](uint32_t event_id, uint16_t wave_number, uint32_t offset) {
+        EV e;
+        e.event_id = event_id;
+        e.room = 10;
+        e.wave_number = wave_number;
+        e.action_stream_offset = offset;
+        return e;
+      };
+      // the post-wave actions as make_map writes them: 111 triggers 112, 112 triggers 113, 113 stops
+      const uint8_t stream[] = {0x0C, 0x70, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x71, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00};
+      std::vector<EV> evs{ev(111, 1, 0), ev(112, 2, 6), ev(113, 3, 12)};
+      MapFile::EventsSectionHeader eh;
+      eh.entries_offset = sizeof(eh);
+      eh.entry_count = evs.size();
+      eh.action_stream_offset = sizeof(eh) + evs.size() * sizeof(EV);
+      eh.format = 0;
+      auto dat = std::make_shared<std::string>();
+      MapFile::SectionHeader h;
+      h.le_type = static_cast<uint32_t>(MapFile::SectionHeader::Type::EVENTS);
+      h.data_size = sizeof(eh) + evs.size() * sizeof(EV) + sizeof(stream);
+      h.section_size = sizeof(h) + h.data_size;
+      h.floor = 0x01;
+      dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+      dat->append(reinterpret_cast<const char*>(&eh), sizeof(eh));
+      dat->append(reinterpret_cast<const char*>(evs.data()), evs.size() * sizeof(EV));
+      dat->append(reinterpret_cast<const char*>(stream), sizeof(stream));
+      MapFile::SectionHeader end_h;
+      end_h.le_type = 0;
+      end_h.section_size = 0;
+      end_h.floor = 0;
+      end_h.data_size = 0;
+      dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+      std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+      map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+      auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+      auto w = r2_world(0x7D21, Episode::EP1);
+      w.l->map_state = std::make_shared<MapState>(
+          0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+      std::map<uint32_t, std::shared_ptr<MapState::EventState>> by_id;
+      for (const auto& ev_st : w.l->map_state->event_states_for_floor(Version::GC_V3, 0x01)) {
+        by_id[ev_st->super_ev->version(Version::GC_V3).set_entry->event_id] = ev_st;
+      }
+      expect_eq(3u, by_id.size());
+      by_id[111]->flags = 0x18; // done on the client
+      by_id[112]->flags = 0x18; // counted by the net (server's map state only)
+      by_id[113]->flags = 0x00; // never started: the clients send no 6x67 for it
+      const std::unordered_set<size_t> none;
+      // no net counted in this room and nothing dead: this look counts nothing
+      spire_static_test_note_net_room(w.l, 0x01, 10, false);
+      expect(spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 10, none, none).empty());
+      // the net counted wave 2 here: the look counts 113, though no event is dead at it
+      spire_static_test_note_net_room(w.l, 0x01, 10, true);
+      std::unordered_set<size_t> both{12345};
+      auto counted = spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 10, none, none, &both);
+      expect(both.empty());
+      expect_eq(1u, counted.size());
+      expect(counted.count(by_id[113]->w_id));
+      // the mark is per room: room 11 on the same floor counts nothing
+      expect(spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 11, none, none).empty());
+      spire_static_test_note_net_room(w.l, 0x01, 10, false);
+    });
+
+    expect_eq(0u, r2_failed);
   }
 
   phosg::log_info_f("-- Spire kwaliteit-3 (samenspel en robuustheid): the server counts, keeps and unlocks only what was played");
@@ -11311,7 +12624,8 @@ void run_static_tests() {
       k3_reg(p, l1, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (16 << 8) | 16);
       k3_v_write(p, l1, 17, 0);
       k3_v_write(p, l1, 20, 2 | (5 << SPIRE_SS_REST_SHIFT));
-      std::string file = p.stem() + ".savestate.normal.json";
+      // 7r2-M2 (veilig-r2): an Episode 2 run parks in Episode 2's own file
+      std::string file = spire_savestate_slot_filename(p.stem(), static_cast<uint8_t>(Episode::EP2), 0);
       auto ss = spire_savestate_from_json(phosg::load_file(file));
       expect_eq(16, ss.start_room);
       expect_eq(5, ss.rest_rooms);
@@ -11365,8 +12679,8 @@ void run_static_tests() {
       const uint32_t REQ = SPIRE_BRIDGE_REQUEST_REGISTER;
       const uint32_t BEGIN = static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24;
       const uint32_t J_K20_REST = (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (2 << 8) | 20;
-      auto file_of = [](const K3Player& p) {
-        return p.stem() + ".savestate.normal.json";
+      auto file_of = [](const K3Player& p) { // 7r2-M2 (veilig-r2): Spire Run II parks in Episode 2's own file
+        return spire_savestate_slot_filename(p.stem(), static_cast<uint8_t>(Episode::EP2), 0);
       };
       auto answer_of = [](const K3Player& p) {
         return p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER).back();

@@ -549,7 +549,69 @@ std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, ui
 }
 
 bool spire_resume_equip_by_server(const ItemData& item) {
-  return (item.data1[0] == 0x00) || (item.data1[0] == 0x02);
+  if ((item.data1[0] == 0x00) || (item.data1[0] == 0x02)) {
+    return true;
+  }
+  if (item.data1[0] != 0x01) {
+    return false;
+  }
+  return (item.data1[1] == 0x01) || (item.data1[1] == 0x02) || ((item.data1[1] == 0x03) && (item.data1[4] <= 3));
+}
+
+bool spire_resume_equip_same(const ItemData& saved, const ItemData& item) {
+  bool unit = (saved.data1[0] == 0x01) && (saved.data1[1] == 0x03);
+  for (size_t i = 0; i < 12; i++) {
+    if ((saved.data1[i] != item.data1[i]) && !(unit && (i == 4))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<SpireResumeEquipSend> spire_resume_equip_plan(
+    const SpireSavestate& ss, const std::vector<uint32_t>& ids, const std::vector<uint32_t>& saved_indices) {
+  std::vector<std::pair<uint32_t, SpireResumeEquipSend>> ranked; // rank, send
+  for (size_t z = 0; (z < ids.size()) && (z < saved_indices.size()); z++) {
+    if (saved_indices[z] >= ss.items.size()) {
+      continue;
+    }
+    const auto& item = ss.items[saved_indices[z]];
+    SpireResumeEquipSend send;
+    send.item_id = ids[z];
+    uint32_t rank;
+    if (item.data1[0] == 0x00) {
+      rank = 0, send.point = SPIRE_EQUIP_RESUME_WEAPON, send.what = "resumed weapon";
+    } else if (item.data1[0] == 0x02) {
+      rank = 20, send.point = SPIRE_PROMPT_RUN_MAG_REPLACED, send.what = "resumed mag";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x01)) {
+      rank = 1, send.point = SPIRE_EQUIP_RESUME_ARMOR, send.what = "resumed armor";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x02)) {
+      rank = 2, send.point = SPIRE_EQUIP_RESUME_SHIELD, send.what = "resumed shield";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x03) && (item.data1[4] <= 3)) {
+      rank = 10 + item.data1[4], send.point = SPIRE_EQUIP_RESUME_UNIT, send.what = "resumed unit";
+      send.unit = true;
+      send.slot = SPIRE_EQUIP_UNIT_SLOT_FIRST + item.data1[4];
+    } else {
+      continue;
+    }
+    ranked.emplace_back(rank, send);
+  }
+  std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<SpireResumeEquipSend> ret;
+  for (const auto& [rank, send] : ranked) {
+    ret.emplace_back(send);
+  }
+  return ret;
+}
+
+bool spire_resume_frame_equipped(const PlayerInventory& inventory) {
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (!item.data.empty() && (item.data.data1[0] == 0x01) && (item.data.data1[1] == 0x01) && item.is_equipped()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string spire_resume_equip_hint(const SpireSavestate& ss, bool server_equips) {
@@ -592,9 +654,12 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
       [&](uint32_t index) { return (index < ss.items.size()) && (ss.items[index].data1[0] == 0x02); });
 }
 
-std::vector<uint32_t> spire_resume_equip_targets(
-    const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected) {
+std::vector<uint32_t> spire_resume_equip_targets(const SpireSavestate& ss, const PlayerInventory& inventory,
+    size_t* expected, std::vector<uint32_t>* saved_indices) {
   std::vector<uint32_t> ret;
+  if (saved_indices) {
+    saved_indices->clear();
+  }
   std::set<size_t> taken;
   size_t count = 0;
   if (ss.equipped) {
@@ -609,7 +674,7 @@ std::vector<uint32_t> spire_resume_equip_targets(
         for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
           const auto& item = inventory.items[z];
           if (!item.data.empty() && (item.is_equipped() == equipped) && !taken.count(z) &&
-              !memcmp(item.data.data1.data(), ss.items[index].data1.data(), 12)) {
+              spire_resume_equip_same(ss.items[index], item.data)) {
             return z;
           }
         }
@@ -621,6 +686,9 @@ std::vector<uint32_t> spire_resume_equip_targets(
       } else if (auto z = find(false)) {
         taken.emplace(*z);
         ret.emplace_back(inventory.items[*z].data.id.load());
+        if (saved_indices) {
+          saved_indices->emplace_back(index);
+        }
       }
     }
   }
@@ -700,9 +768,27 @@ bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
   return ss.exists && run_id && (ss.run_id == run_id);
 }
 
-std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
+bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id, bool real_played) {
+  return spire_savestate_is_of_run(ss, run_id) && (ss.practice || real_played);
+}
+
+static const char* spire_savestate_rung_name(uint8_t rung) {
   static const char* names[SPIRE_SAVESTATE_RUNGS] = {"normal", "hard", "vhard", "ultimate"};
-  return std::format("{}.savestate.{}.json", stem, names[rung % SPIRE_SAVESTATE_RUNGS]);
+  return names[rung % SPIRE_SAVESTATE_RUNGS];
+}
+
+// 7r2-M2: Episode 2 has files of its own; every other episode is Episode 1's (SpireFlagBridge.hh)
+static bool spire_savestate_is_ep2(uint8_t episode) {
+  return episode == static_cast<uint8_t>(Episode::EP2);
+}
+
+std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
+  return std::format("{}.savestate.{}.json", stem, spire_savestate_rung_name(rung));
+}
+
+std::string spire_savestate_slot_filename(const std::string& stem, uint8_t episode, uint8_t rung) {
+  return spire_savestate_is_ep2(episode) ? std::format("{}.savestate.ep2.{}.json", stem, spire_savestate_rung_name(rung))
+                                         : spire_savestate_rung_filename(stem, rung);
 }
 
 std::string spire_savestate_old_filename(const std::string& stem) {
@@ -992,17 +1078,18 @@ std::string spire_savestate_room_quest_name(const SpireSavestate& ss) {
       rung ? spire_meta_difficulty_name(rung) : "");
 }
 
-SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name) {
-  SpireSavestate ss = spire_savestate_load_rung(stem, difficulty & 3);
+SpireSavestate spire_savestate_notice_pick(
+    const std::string& stem, uint8_t difficulty, std::string* quest_name, uint8_t episode) {
+  SpireSavestate ss = spire_savestate_load_slot(stem, episode, difficulty & 3);
   if (quest_name) {
     *quest_name = spire_savestate_room_quest_name(ss);
   }
   return ss;
 }
 
-std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty) {
+std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty, uint8_t episode) {
   for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-    if ((rung != (difficulty & 3)) && spire_savestate_load_rung(stem, rung).exists) {
+    if ((rung != (difficulty & 3)) && spire_savestate_load_slot(stem, episode, rung).exists) {
       return rung;
     }
   }
@@ -1062,6 +1149,7 @@ struct SpireGameRun {
   uint32_t elapsed = 0; // the leader's saved seconds (resumed only)
   size_t max_clients = 0; // the most clients the game had during the run
   std::set<std::string> savestate_files; // written ('V') or answered from ('J') in this run, also of a client gone since
+  bool real_played = false; // 7r2-M1: a client's 'B' in this run was no practice run (spire_savestate_end_deletes_file)
 };
 static std::unordered_map<uint32_t, SpireGameRun> spire_game_runs;
 
@@ -1180,44 +1268,98 @@ static SpireSavestate spire_savestate_load(const std::string& filename) {
   return spire_savestate_from_json(phosg::load_file(filename));
 }
 
-SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename) {
+SpireSavestate spire_savestate_load_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, std::string* filename) {
   if (filename) {
     filename->clear();
   }
   if (stem.empty()) {
     return SpireSavestate();
   }
-  std::string own = spire_savestate_rung_filename(stem, rung);
-  bool own_exists = std::filesystem::is_regular_file(own);
-  if (own_exists) {
+  auto from = [&](const std::string& name, SpireSavestate ss) {
     if (filename) {
-      *filename = own;
+      *filename = name;
     }
-    return spire_savestate_load(own);
+    return ss;
+  };
+  bool ep2 = spire_savestate_is_ep2(episode);
+  std::string rung_file = spire_savestate_rung_filename(stem, rung);
+  if (ep2) {
+    std::string own = spire_savestate_slot_filename(stem, episode, rung);
+    if (std::filesystem::is_regular_file(own)) {
+      return from(own, spire_savestate_load(own));
+    }
+    // 7r2-M2: the rung file of before holds an Episode 2 run until Episode 2 writes its own; one that cannot be read
+    // is Episode 1's by its name
+    if (std::filesystem::is_regular_file(rung_file)) {
+      SpireSavestate there;
+      try {
+        there = spire_savestate_load(rung_file);
+      } catch (const std::exception&) {
+      }
+      if (there.exists && spire_savestate_is_ep2(there.episode)) {
+        return from(rung_file, std::move(there));
+      }
+    }
+  } else if (std::filesystem::is_regular_file(rung_file)) {
+    SpireSavestate there = spire_savestate_load(rung_file);
+    if (!spire_savestate_is_ep2(there.episode)) {
+      return from(rung_file, std::move(there));
+    }
+    // 7r2-M2: an Episode 2 run of before is not Episode 1's
   }
+  // the file of before counts while this episode's rung has no file of its own (none came above), if it records both
   std::string old = spire_savestate_old_filename(stem);
   SpireSavestate old_ss = spire_savestate_load(old);
-  if (!spire_savestate_old_counts(own_exists, old_ss, rung)) {
+  if (!spire_savestate_old_counts(false, old_ss, rung) || (spire_savestate_is_ep2(old_ss.episode) != ep2)) {
     return SpireSavestate();
   }
-  if (filename) {
-    *filename = old;
-  }
-  return old_ss;
+  return from(old, std::move(old_ss));
 }
 
-std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old) {
-  std::string filename = spire_savestate_rung_filename(stem, rung);
-  spire_bridge_write_durable(filename, data);
+SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename) {
+  return spire_savestate_load_slot(stem, static_cast<uint8_t>(Episode::EP1), rung, filename);
+}
+
+std::string spire_savestate_store_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, const std::string& data, bool* replaced_old) {
+  bool ep2 = spire_savestate_is_ep2(episode);
+  std::string filename = spire_savestate_slot_filename(stem, episode, rung);
+  std::string rung_file = spire_savestate_rung_filename(stem, rung);
   if (replaced_old) {
     *replaced_old = false;
   }
-  // the file of before goes once this rung has its own file, if it held this rung's run (a new start on a difficulty
-  // replaces the run parked there); a run of another rung in it stays, and so does a file that cannot be read
+  // 7r2-M2: the rung file of before that records Episode 2 holds Episode 2's run; Episode 1 writing over it copies it to
+  // Episode 2's own file first, if that has none (with one, that file is Episode 2's run and this one is outdated)
+  if (!ep2) {
+    try {
+      SpireSavestate there = spire_savestate_load(rung_file);
+      std::string ep2_file = spire_savestate_slot_filename(stem, static_cast<uint8_t>(Episode::EP2), rung);
+      if (there.exists && spire_savestate_is_ep2(there.episode) && !std::filesystem::is_regular_file(ep2_file)) {
+        spire_bridge_write_durable(ep2_file, phosg::load_file(rung_file));
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  spire_bridge_write_durable(filename, data);
+  // Episode 2's first own write replaces its run in the rung file of before
+  if (ep2) {
+    try {
+      SpireSavestate there = spire_savestate_load(rung_file);
+      if (there.exists && spire_savestate_is_ep2(there.episode)) {
+        std::filesystem::remove(rung_file);
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  // the file of before goes once this episode's rung has its own file, if it held this rung's run of this episode (a
+  // new start replaces the run parked there); a run of another rung or episode in it stays, and so does a file that
+  // cannot be read
   std::string old = spire_savestate_old_filename(stem);
   try {
     SpireSavestate old_ss = spire_savestate_load(old);
-    if (old_ss.exists && (spire_meta_ladder_quest_rung(old_ss.quest_number) == rung)) {
+    if (old_ss.exists && (spire_meta_ladder_quest_rung(old_ss.quest_number) == rung) &&
+        (spire_savestate_is_ep2(old_ss.episode) == ep2)) {
       std::filesystem::remove(old);
       if (replaced_old) {
         *replaced_old = true;
@@ -1228,9 +1370,20 @@ std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, co
   return filename;
 }
 
-// 7-M2: see SpireFlagBridge.hh
-bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice) {
-  return !(practice && parked.exists && !parked.practice);
+std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old) {
+  return spire_savestate_store_slot(stem, static_cast<uint8_t>(Episode::EP1), rung, data, replaced_old);
+}
+
+// 7-M2, 7r2-M2: see SpireFlagBridge.hh
+bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice, bool run_first_room, uint32_t run_id) {
+  if (practice) {
+    return !(parked.exists && !parked.practice);
+  }
+  return !(run_first_room && parked.exists && (parked.run_id != run_id));
+}
+
+bool spire_savestate_is_first_room_v(const SpireSavestate& ss) {
+  return ss.start_room && (ss.values.size() > SPIRE_SS_K) && (ss.values[SPIRE_SS_K] == ss.start_room);
 }
 
 std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
@@ -1241,37 +1394,53 @@ std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const
   if (kept) {
     *kept = SpireSavestate();
   }
-  if (ss.practice) {
-    // only a practice run looks first; a real run writes as before, also over a file that cannot be read
+  // a practice run and a run at its first room look first (7r2-M2); a real run's later 'V' writes as before, also over a
+  // file that cannot be read
+  bool first_room = spire_savestate_is_first_room_v(ss);
+  if (ss.practice || first_room) {
     SpireSavestate parked;
     bool readable = true;
     try {
-      parked = spire_savestate_load_rung(stem, rung);
+      parked = spire_savestate_load_slot(stem, ss.episode, rung);
     } catch (const std::exception&) {
       readable = false;
     }
-    if (!readable || !spire_savestate_may_replace(parked, true)) {
+    if (!readable || !spire_savestate_may_replace(parked, ss.practice, first_room, ss.run_id)) {
       if (kept && readable) {
         *kept = std::move(parked);
       }
       return "";
     }
   }
-  return spire_savestate_store_rung(stem, rung, spire_savestate_to_json(ss, serial_number), replaced_old);
+  return spire_savestate_store_slot(stem, ss.episode, rung, spire_savestate_to_json(ss, serial_number), replaced_old);
 }
 
 std::string spire_savestate_practice_kept_text(const SpireSavestate& kept) {
+  // critic r2 K-2: the room quest that resumes it, with its variant and difficulty
+  std::string quest_name = kept.exists ? spire_savestate_room_quest_name(kept) : "";
+  if (!quest_name.empty()) {
+    return std::format("Practice is not saved: your run waits in {}.", quest_name);
+  }
   if (kept.exists && (kept.values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
     return std::format("Practice is not saved: your run at room {} stays parked.", kept.values[SPIRE_SS_K]);
   }
-  return "Practice is not saved: a saved run is parked here.";
+  return "Practice is not saved: the saved run here cannot be read."; // critic r2 K-3
 }
 
-// The client's savestate on this rung (spire_savestate_load_rung), and its file in *filename ("" without one)
-static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c, uint8_t rung,
+std::string spire_savestate_replace_text(const SpireSavestate& parked) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = parked.values;
+  uint32_t variant = (v.size() > SPIRE_SS_VARIANT) ? v[SPIRE_SS_VARIANT] : 0;
+  return std::format("Your saved run (room {}{}, {}) is replaced when the next room starts.",
+      (v.size() > SPIRE_SS_K) ? v[SPIRE_SS_K] : 0, (variant < 3) ? variants[variant] : "",
+      spire_meta_difficulty_name(spire_meta_ladder_quest_rung(parked.quest_number)));
+}
+
+// The client's savestate of this episode and rung (spire_savestate_load_slot), and its file in *filename ("" without one)
+static SpireSavestate spire_savestate_load_logged_slot(std::shared_ptr<const Client> c, uint8_t episode, uint8_t rung,
     std::string* filename = nullptr) {
   try {
-    return spire_savestate_load_rung(spire_savestate_stem(c), rung, filename);
+    return spire_savestate_load_slot(spire_savestate_stem(c), episode, rung, filename);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
     if (filename) {
@@ -1279,6 +1448,14 @@ static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> 
     }
     return SpireSavestate();
   }
+}
+
+// The same on the episode of the client's game (7r2-M2; Episode 1 outside a game)
+static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c, uint8_t rung,
+    std::string* filename = nullptr) {
+  auto l = c->lobby.lock();
+  return spire_savestate_load_logged_slot(
+      c, l ? static_cast<uint8_t>(l->episode) : static_cast<uint8_t>(Episode::EP1), rung, filename);
 }
 
 static std::string spire_savestate_describe(const SpireSavestate& ss) {
@@ -1328,8 +1505,9 @@ static SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client>
   auto it = store.runs.find(run_id);
   if (it == store.runs.end()) {
     SpireSavestate ss; // B-REGIE-18-6: the run is in the savestate of one rung (a run id is never reused)
-    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-      ss = spire_savestate_load_logged(c, rung);
+    for (uint8_t z = 0; z < 2 * SPIRE_SAVESTATE_RUNGS; z++) { // 7r2-M2: and of one episode
+      uint8_t episode = static_cast<uint8_t>((z < SPIRE_SAVESTATE_RUNGS) ? Episode::EP1 : Episode::EP2);
+      ss = spire_savestate_load_logged_slot(c, episode, z % SPIRE_SAVESTATE_RUNGS);
       if (ss.exists && ss.run_mag && (ss.run_mag->run_id == run_id)) {
         break;
       }
@@ -1430,6 +1608,7 @@ static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const cha
       if (!stem.empty()) {
         for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
           present.emplace_back(spire_savestate_rung_filename(stem, rung));
+          present.emplace_back(spire_savestate_slot_filename(stem, static_cast<uint8_t>(Episode::EP2), rung)); // 7r2-M2
         }
         present.emplace_back(spire_savestate_old_filename(stem));
       }
@@ -1443,6 +1622,11 @@ static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const cha
         continue;
       }
       if (!spire_savestate_is_of_run(ss, run->run_id)) {
+        continue;
+      }
+      if (!spire_savestate_end_deletes_file(ss, run->run_id, run->real_played)) {
+        l->log.info_f("Spire savestate: run over ({}); {} kept: the real run {} was not played in this game, only "
+            "practice in its run id (7r2-M1)", why, filename, spire_savestate_describe(ss));
         continue;
       }
       std::filesystem::remove(filename);
@@ -2064,11 +2248,20 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     ss.time_usecs = phosg::now();
     // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
     // 7-M2: a practice run never writes over a real run parked on its own rung (spire_savestate_store_v)
+    // 7r2-M2: and the file of the game's episode; a new run replaces the parked one only from its second room's 'V'
     bool replaced_old = false;
     SpireSavestate kept;
     std::string filename = spire_savestate_store_v(
         stem, spire_meta_ladder_quest_rung(quest_number), ss, serial_number, &replaced_old, &kept);
-    if (filename.empty()) {
+    if (filename.empty() && !ss.practice) {
+      // 7r2-M2: the first room of a new run: the run parked on this episode and difficulty goes at the next 'V' (the
+      // 'B' said so, spire_savestate_replace_text)
+      c->log.info_f("Spire savestate: 'V' of run {:08X} for serial {:010} in q{} room {} (its first room) not stored: {} "
+          "on {} stays until its next room starts (7r2-M2)", ss.run_id, serial_number, quest_number, room_k,
+          kept.exists ? std::format("the run parked ({})", spire_savestate_describe(kept))
+                      : std::string("a parked file that cannot be read"),
+          spire_meta_difficulty_name(spire_meta_ladder_quest_rung(quest_number)));
+    } else if (filename.empty()) {
       c->log.info_f("Spire savestate: 'V' of practice run {:08X} for serial {:010} in q{} room {} not stored: {} on {} stays (7-M2); this practice run cannot be resumed",
           ss.run_id, serial_number, quest_number, room_k,
           kept.exists ? std::format("the real run parked ({})", spire_savestate_describe(kept))
@@ -2602,6 +2795,9 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return name.empty() ? std::string("Your waiting exam reward is now in your pack.")
                               : std::format("{} is now in your pack.", name);
         }
+        case 17: // ux-1 (observaties 172): the pipe guard put this player back (make_spire.py guard_say); the low byte
+          // 1 = the room still runs, 2 = a reward is still to take (pause A/B). The quest showed these as board texts.
+          return (b == 2) ? "The warps open once both of you took a reward." : "Clear the room first.";
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
@@ -3136,6 +3332,20 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     cr->resumed = start_k && ((value >> 16) & 1) && cr->answered_resume;
     cr->practice = spire_run_is_practice(start_k, first_k, cr->resumed, cr->savestate.practice);
     cr->start_room = cr->resumed ? cr->savestate.start_room : start_k;
+    if (!cr->practice) {
+      run->real_played = true; // 7r2-M1: the run end may delete this run's real savestates
+    }
+    // 7r2-M2 (B-REGIE-21-22): a new real run on an episode and difficulty where another run is parked says so in one
+    // line: that run stays until this run's next room starts, its first own save point (spire_savestate_store_v)
+    if (start_k && !cr->practice && !cr->resumed) {
+      SpireSavestate parked = spire_savestate_load_logged(c, spire_meta_ladder_quest_rung(quest_number));
+      if (parked.exists && (parked.run_id != run->run_id)) {
+        std::string line = spire_savestate_replace_text(parked);
+        spire_send_ticker(c, line);
+        c->log.info_f("Spire savestate: new run {:08X} next to the parked {}; sent \"{}\"", run->run_id,
+            spire_savestate_describe(parked), line);
+      }
+    }
     if (spire_run_counts_as_new(start_k, cr->resumed, cr->practice)) {
       rec.runs++;
       spire_records_save(filename, serial_number, rec);
@@ -3582,13 +3792,14 @@ asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std:
 // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only, in the game weak_l
 // (the game the client is in when the equip is asked). Never throws; the client's B3 answer is logged.
 static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
-    uint32_t item_id, std::string what, uint8_t point) {
+    uint32_t item_id, std::string what, uint8_t point, uint32_t slot = 0) {
   try {
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
     co_await prepare_client_for_patches(c);
-    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
-    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
+    // ux-1: the slot label too (0, or a unit's 9..12), so the function never keeps a slot of an earlier call
+    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}, {SPIRE_EQUIP_SLOT_LABEL, slot}});
+    c->log.info_f("Spire equip: {} {:08X} (slot {}); client answered {}", what, item_id, slot, result.return_value.load());
   } catch (const std::exception& e) {
     c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
         e.what());
@@ -3600,7 +3811,7 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, st
 
 // kwaliteit-1 (observaties 209/216): after the last resume item, SpireEquipItem for each weapon and mag that was
 // equipped at the 'V' (spire_resume_equip_targets), one after the other, each with spire_equip_item_send's check and
-// line. It waits up to SPIRE_RESUME_EQUIP_POLLS x SPIRE_RESUME_EQUIP_POLL_DELAY for the quest's item_create2 6x2Bs to
+// line. ux-1 (observaties 291): also the frame, barrier and units, in spire_resume_equip_plan's order. It waits up to SPIRE_RESUME_EQUIP_POLLS x SPIRE_RESUME_EQUIP_POLL_DELAY for the quest's item_create2 6x2Bs to
 // reach newserv's copy; an item still not there gets SPIRE_RESUME_EQUIP_MISSING_TEXT. Holds neither the client nor its
 // game while it waits. Never throws.
 static constexpr auto SPIRE_RESUME_EQUIP_POLL_DELAY = std::chrono::milliseconds(500);
@@ -3611,7 +3822,7 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
     std::weak_ptr<Client> weak_c = c;
     std::weak_ptr<Lobby> weak_l = c->lobby;
     c.reset();
-    std::vector<uint32_t> ids;
+    std::vector<uint32_t> ids, saved_indices; // ux-1: saved_indices[z] = the position in ss.items of ids[z]
     size_t expected = 0;
     for (size_t tries = 0; tries < SPIRE_RESUME_EQUIP_POLLS; tries++) {
       co_await async_sleep(SPIRE_RESUME_EQUIP_POLL_DELAY);
@@ -3621,7 +3832,7 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
         co_return;
       }
       if (auto character = c->character_file(false, true)) {
-        ids = spire_resume_equip_targets(ss, character->inventory, &expected);
+        ids = spire_resume_equip_targets(ss, character->inventory, &expected, &saved_indices);
       }
       if (ids.size() >= expected) {
         break;
@@ -3650,28 +3861,44 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
           ids.size(), expected, SPIRE_RESUME_EQUIP_POLLS * SPIRE_RESUME_EQUIP_POLL_DELAY.count(),
           SPIRE_RESUME_EQUIP_MISSING_TEXT, delay.count());
     }
-    std::vector<std::pair<uint32_t, bool>> sends; // item id, is a mag
+    // ux-1 (observaties 291): weapon, frame, barrier, units and mag, in the order spire_resume_equip_plan gives, each
+    // id still in newserv's copy
+    std::vector<SpireResumeEquipSend> sends;
     if (auto character = c->character_file(false, true)) {
-      for (uint32_t id : ids) {
+      for (const auto& send : spire_resume_equip_plan(ss, ids, saved_indices)) {
         for (size_t z = 0; (z < character->inventory.num_items) && (z < character->inventory.items.size()); z++) {
-          if (character->inventory.items[z].data.id == id) {
-            sends.emplace_back(id, character->inventory.items[z].data.data1[0] == 0x02);
+          if (character->inventory.items[z].data.id == send.item_id) {
+            sends.emplace_back(send);
             break;
           }
         }
       }
     }
     c.reset();
-    for (const auto& [id, is_mag] : sends) {
+    bool units_skipped = false;
+    for (const auto& send : sends) {
       auto l = weak_l.lock();
       c = weak_c.lock();
       if (!c || !l || (c->lobby.lock() != l)) {
         co_return;
       }
-      c->log.info_f("Spire equip: resume; sending {} for the {} {:08X}", SPIRE_EQUIP_FUNCTION_NAME,
-          is_mag ? "mag" : "weapon", id);
-      co_await spire_equip_item_send(std::move(c), l, id, is_mag ? "resumed mag" : "resumed weapon",
-          is_mag ? SPIRE_PROMPT_RUN_MAG_REPLACED : SPIRE_EQUIP_RESUME_WEAPON);
+      if (send.unit) {
+        // ux-1: a unit only on an equipped frame (the frame went before it and its check waited for its 6x25); without
+        // one the units stay the player's, with one line
+        auto character = c->character_file(false, true);
+        if (units_skipped || !character || !spire_resume_frame_equipped(character->inventory)) {
+          if (!units_skipped) {
+            units_skipped = true;
+            c->log.info_f("Spire equip: resume; no frame equipped in the inventory copy, so no unit is sent");
+            spire_equip_missing_line_in_turn(c, l, SPIRE_EQUIP_RESUME_UNIT, send.item_id);
+          }
+          c.reset();
+          continue;
+        }
+      }
+      c->log.info_f("Spire equip: resume; sending {} for the {} {:08X} (slot {})", SPIRE_EQUIP_FUNCTION_NAME,
+          send.what, send.item_id, send.slot);
+      co_await spire_equip_item_send(std::move(c), l, send.item_id, send.what, send.point, send.slot);
     }
   } catch (const std::exception& e) {
     if (auto c2 = c) {
@@ -5299,40 +5526,6 @@ static std::unordered_set<const Client*> spire_guard_base_follow_pending;
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 
-// B-REGIE-21-20: the clients whose current game had another player in it at some moment (a trade, which the server
-// does not follow, could have moved an item to him). Set by every leave of a game with others in it
-// (spire_guard_note_floor_leave, for the leaver and every client still in it), read and removed at the client's 98
-// (spire_guard_after_98). The weak pointer makes a reused address count as not marked.
-static std::unordered_map<const Client*, std::weak_ptr<const Client>> spire_guard_shared_game;
-
-static void spire_guard_note_shared_game(std::shared_ptr<Client> c, bool others_remain) {
-  if (!others_remain) {
-    return;
-  }
-  std::erase_if(spire_guard_shared_game, [](const auto& it) { return it.second.expired(); });
-  spire_guard_shared_game[c.get()] = c;
-  auto l = c->lobby.lock();
-  if (l && l->is_game() && (c->lobby_client_id < l->clients.size()) && (l->clients[c->lobby_client_id] == c)) {
-    for (const auto& lc : l->clients) {
-      if (lc) {
-        spire_guard_shared_game[lc.get()] = lc;
-      }
-    }
-  } else {
-    c->log.warning_f("Spire guard: a game leave with others in it, but the client's lobby is not that game; the others are not marked as sharing it (B-REGIE-21-20)");
-  }
-}
-
-static bool spire_guard_take_shared_game(std::shared_ptr<const Client> c) {
-  auto it = spire_guard_shared_game.find(c.get());
-  if (it == spire_guard_shared_game.end()) {
-    return false;
-  }
-  bool ret = (it->second.lock() == c);
-  spire_guard_shared_game.erase(it);
-  return ret;
-}
-
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
@@ -5400,7 +5593,6 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 }
 
 void spire_guard_after_98(std::shared_ptr<Client> c) {
-  bool shared_game = spire_guard_take_shared_game(c); // B-REGIE-21-20: the game this 98 leaves
   if (spire_guard_base_exit_pending.erase(c.get())) {
     // v51: the game exit after a verified 'O'; the 98 is the real character with what the base changed
     try {
@@ -5454,7 +5646,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
             before.inventory.num_items);
         return;
       }
-      spire_guard_base_before_apply(snapshot, before, shared_game);
+      spire_guard_base_before_apply(snapshot, before);
       spire_guard_save(filename, serial_number, snapshot);
       spire_guard_floor_settle_dropper(c); // K7b: what he left on the floor is no longer in it
       bool same = spire_guard_same_state(snapshot.inventory, snapshot.disp, before.inventory, before.disp);
@@ -5462,8 +5654,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
           serial_number, same ? ", equal to the one before" : std::format(", changed in the base (was {}, {} items)",
               spire_guard_describe(before), before.inventory.num_items),
           spire_guard_describe(snapshot), snapshot.inventory.num_items);
-      c->log.info_f("Spire guard: the base game for serial {:010} {}; {} (B-REGIE-21-20)", serial_number,
-          shared_game ? "had another player in it" : "was the player's own",
+      c->log.info_f("Spire guard: the base game for serial {:010}: {} (B-REGIE-21-20, B-REGIE-21-24)", serial_number,
           snapshot.has_base_before ? "the inventory of before it is kept for a login push to reconcile with the card's bank"
                                    : "no record of before it: a login push sends the snapshot as it is");
     } catch (const std::exception& e) {
@@ -5634,8 +5825,8 @@ uint32_t spire_guard_snapshot_give_pickup(
 }
 
 // B-REGIE-21-20: see SpireFlagBridge.hh
-void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared) {
-  snapshot.has_base_before = !shared && before.has_character;
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before) {
+  snapshot.has_base_before = before.has_character;
   if (snapshot.has_base_before) {
     snapshot.base_before_inventory = before.inventory;
     snapshot.base_before_meseta = before.disp.stats.meseta;
@@ -5898,7 +6089,6 @@ void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c) {
 
 void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain) {
   try {
-    spire_guard_note_shared_game(c, others_remain); // B-REGIE-21-20
     std::erase_if(spire_guard_floor_credits, [](const auto& it) { return it.second.item.expired(); });
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     std::string filename = serial_number ? spire_guard_filename_for(c, serial_number) : std::string();
@@ -5939,6 +6129,97 @@ void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain)
         open.front()->dropper_serial, open.size(), total);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire guard: failed to follow a game leave with floor items: {} (K7b)", e.what());
+  }
+}
+
+// Veilig-2: see SpireFlagBridge.hh
+uint32_t spire_guard_delete_apply(SpireGuardSnapshot* snapshot, SpireGuardTradeSide* side,
+    const std::optional<ItemData>& partial_drop, uint32_t item_id, const ItemData& deleted,
+    const ItemData::StackLimits& limits) {
+  // a 6x29 never moves an item to another player (a sale, a bank deposit, a fed mag, the tekker, or a trade's own
+  // delete before its execution): the snapshot stays, as before Veilig-2
+  (void)snapshot;
+  (void)side;
+  (void)partial_drop;
+  (void)item_id;
+  (void)deleted;
+  (void)limits;
+  return 0;
+}
+
+uint32_t spire_guard_trade_take_rest(
+    SpireGuardSnapshot* giver, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  side.credit.assign(side.items.size(), 0);
+  uint32_t total = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    uint32_t taken = giver ? spire_guard_snapshot_take_drop(*giver, side.items[z], limits) : 0;
+    side.credit[z] = taken;
+    total += taken;
+  }
+  return total;
+}
+
+size_t spire_guard_trade_give(SpireGuardSnapshot* taker, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  size_t ret = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    uint32_t credit = (z < side.credit.size()) ? side.credit[z] : 0;
+    if (taker && credit && spire_guard_snapshot_give_pickup(*taker, side.items[z], credit, limits)) {
+      ret++;
+    }
+  }
+  side.items.clear();
+  side.credit.clear();
+  return ret;
+}
+
+void spire_guard_note_delete(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t item_id, const ItemData& deleted) {
+  try {
+    auto followed = spire_guard_floor_snapshot(c, l);
+    if (!followed) {
+      return;
+    }
+    auto& snapshot = std::get<0>(*followed);
+    auto s = c->require_server_state();
+    const auto& limits = *s->data->item_stack_limits(c->version());
+    if (spire_guard_delete_apply(&snapshot, nullptr, std::nullopt, item_id, deleted, limits)) {
+      spire_guard_save(std::get<1>(*followed), std::get<2>(*followed), snapshot);
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to look at a delete: {}; the snapshot stays (Veilig-2)", e.what());
+  }
+}
+
+void spire_guard_note_trade_executed(std::shared_ptr<Client> a, std::shared_ptr<Client> b, std::shared_ptr<Lobby> l) {
+  try {
+    SpireGuardTradeSide a_side, b_side;
+    a_side.items = a->pending_item_trade->items; // exactly what the server sends b in its D3
+    b_side.items = b->pending_item_trade->items;
+    auto fa = spire_guard_floor_snapshot(a, l);
+    auto fb = spire_guard_floor_snapshot(b, l);
+    SpireGuardSnapshot* sa = fa ? &std::get<0>(*fa) : nullptr;
+    SpireGuardSnapshot* sb = fb ? &std::get<0>(*fb) : nullptr;
+    auto s = a->require_server_state();
+    const auto& limits_a = *s->data->item_stack_limits(a->version());
+    const auto& limits_b = *s->data->item_stack_limits(b->version());
+    size_t a_gives = a_side.items.size();
+    size_t b_gives = b_side.items.size();
+    // all takes before any give: a give never lands in a snapshot before that snapshot's own entries are taken
+    uint32_t a_taken = spire_guard_trade_take_rest(sa, a_side, limits_a);
+    uint32_t b_taken = spire_guard_trade_take_rest(sb, b_side, limits_b);
+    size_t b_gained = spire_guard_trade_give(sb, a_side, limits_b);
+    size_t a_gained = spire_guard_trade_give(sa, b_side, limits_a);
+    if (fa && (a_taken || a_gained)) {
+      spire_guard_save(std::get<1>(*fa), std::get<2>(*fa), *sa);
+    }
+    if (fb && (b_taken || b_gained)) {
+      spire_guard_save(std::get<1>(*fb), std::get<2>(*fb), *sb);
+    }
+    a->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken, followed {}), gained {} entries (Veilig-2)",
+        b->lobby_client_id, a_gives, a_taken, fa ? "yes" : "no", a_gained);
+    b->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken, followed {}), gained {} entries (Veilig-2)",
+        a->lobby_client_id, b_gives, b_taken, fb ? "yes" : "no", b_gained);
+  } catch (const std::exception& e) {
+    a->log.warning_f("Spire guard: failed to follow a trade execution: {}; nothing gained (Veilig-2)", e.what());
   }
 }
 
@@ -7494,20 +7775,27 @@ static bool spire_enemy_ever_hit(const MapState::EnemyState& ene_st) {
   return (ene_st.server_flags & MapState::EnemyState::Flag::ALL_HITS_MASK) || ene_st.total_damage || ene_st.game_flags;
 }
 
+// 2r2-M1: the parents whose children are parts of one body: the Pan Arms (Hidoom and Migium, 2-M2)
+bool spire_child_hit_is_parent_hit(EnemyType parent_type) {
+  return parent_type == EnemyType::PAN_ARMS;
+}
+
 std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
   std::vector<SpireWaveEnemy> ret;
   auto ene_sts = map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number);
-  std::unordered_map<size_t, size_t> parent_index; // the parent's super id -> its entry in ret
+  std::unordered_map<size_t, size_t> parent_index; // the super id of a parent of one body -> its entry in ret
   for (const auto& ene_st : ene_sts) {
     if (ene_st->super_ene->child_index) {
       continue; // as in the wave check: a child counts through its parent
     }
-    parent_index.emplace(ene_st->super_ene->super_id, ret.size());
+    if (spire_child_hit_is_parent_hit(ene_st->super_ene->type)) {
+      parent_index.emplace(ene_st->super_ene->super_id, ret.size());
+    }
     ret.emplace_back(SpireWaveEnemy{.defeated = !!(ene_st->set_flags & 8), .ever_hit = spire_enemy_ever_hit(*ene_st),
         .is_boss = type_definition_for_enemy(ene_st->super_ene->type).is_boss()});
   }
-  // veilig-1: a hit on a child is a hit on its parent (the children follow their parent in the super map)
+  // veilig-1: a hit on a part of one body is a hit on its parent (the children follow their parent in the super map)
   for (const auto& ene_st : ene_sts) {
     size_t child_index = ene_st->super_ene->child_index;
     if (!child_index || !spire_enemy_ever_hit(*ene_st) || (child_index > ene_st->super_ene->super_id)) {
@@ -7822,6 +8110,40 @@ static std::unordered_set<size_t> spire_unstarted_room_chain(
   return ret;
 }
 
+// 2r2-M2 (system critic round 2): one look of the second net, without its clock (SpireFlagBridge.hh)
+std::unordered_set<size_t> spire_dead_event_look_counts(std::shared_ptr<Lobby> l, Version v, uint8_t floor,
+    uint16_t room, const std::unordered_set<size_t>& seen, const std::unordered_set<size_t>& now,
+    std::unordered_set<size_t>* both_out) {
+  auto key = std::make_tuple(l->lobby_id, floor, room);
+  // Only events without a living enemy at the previous look and still now: at least SPIRE_UNHIT_ENEMY_SECONDS long
+  std::unordered_set<size_t> both;
+  for (size_t w_id : now) {
+    if (seen.count(w_id)) {
+      both.emplace(w_id);
+    }
+  }
+  // veilig-1 (2-M1): behind a wave a net counted (in this room before, or `both` at this look) the clients start no
+  // next wave: the never-started events its trigger chain points at are counted with it
+  std::unordered_set<size_t> chain;
+  if (!both.empty() || spire_net_rooms.count(key)) {
+    chain = spire_unstarted_room_chain(l, v, floor, room, both);
+  }
+  std::unordered_set<size_t> counted = both;
+  counted.insert(chain.begin(), chain.end());
+  if (both_out) {
+    *both_out = std::move(both);
+  }
+  return counted;
+}
+
+void spire_static_test_note_net_room(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room, bool noted) {
+  if (noted) {
+    spire_net_rooms.emplace(l->lobby_id, floor, room);
+  } else {
+    spire_net_rooms.erase(std::make_tuple(l->lobby_id, floor, room));
+  }
+}
+
 // Per (game, floor, room): the generation of the running watch; one watch per room
 static std::map<std::tuple<uint32_t, uint8_t, uint16_t>, uint64_t> spire_dead_event_waits;
 static uint64_t spire_dead_event_next_generation = 1;
@@ -7859,22 +8181,10 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
       spire_dead_event_waits.erase(it); // the room cleared by itself: the wave check announced it
       co_return;
     }
-    // Only events without a living enemy at the previous look and still now: at least SPIRE_UNHIT_ENEMY_SECONDS long
+    // what this look counts: the events dead at both looks, and the chain behind them or behind a counted wave
     auto now = spire_dead_room_events(l, v, floor, room);
     std::unordered_set<size_t> both;
-    for (size_t w_id : now) {
-      if (seen.count(w_id)) {
-        both.emplace(w_id);
-      }
-    }
-    // veilig-1 (2-M1): behind a wave a net counted (in this room before, or `both` at this look) the clients start no
-    // next wave: the never-started events its trigger chain points at are counted with it
-    std::unordered_set<size_t> chain;
-    if (!both.empty() || spire_net_rooms.count(key)) {
-      chain = spire_unstarted_room_chain(l, v, floor, room, both);
-    }
-    std::unordered_set<size_t> counted = both;
-    counted.insert(chain.begin(), chain.end());
+    std::unordered_set<size_t> counted = spire_dead_event_look_counts(l, v, floor, room, seen, now, &both);
     if (!counted.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &counted)) {
       // veilig-1 (2-M2): counted only at a look where the floor was quiet long enough with a client on it
       bool player_on_floor = false;
@@ -8565,8 +8875,9 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
     // v44: a savestate names the exact room quest and what the run had at its start; B-REGIE-18-6: one line per
     // difficulty that has one
     std::string lines;
-    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-      auto ss = spire_savestate_load_logged(c, rung);
+    for (uint8_t z = 0; z < 2 * SPIRE_SAVESTATE_RUNGS; z++) { // 7r2-M2: Episode 1's, then Episode 2's
+      uint8_t episode = static_cast<uint8_t>((z < SPIRE_SAVESTATE_RUNGS) ? Episode::EP1 : Episode::EP2);
+      auto ss = spire_savestate_load_logged_slot(c, episode, z % SPIRE_SAVESTATE_RUNGS);
       if (ss.exists) {
         lines += (lines.empty() ? "" : "\n") + spire_savestate_continue_text(ss);
       }
@@ -8595,10 +8906,12 @@ void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_
     uint8_t difficulty = static_cast<uint8_t>(l->difficulty);
     SpireSavestate ss;
     try {
-      ss = spire_savestate_notice_pick(stem, difficulty, &quest_name);
+      uint8_t episode = static_cast<uint8_t>(l->episode); // 7r2-M2: the game's episode
+      ss = spire_savestate_notice_pick(stem, difficulty, &quest_name, episode);
       // critic spel-af-4b S-1: the run waits on another difficulty: say which, once per session
-      auto other = (ss.exists || c->spire_savestate_elsewhere_told) ? std::nullopt
-                                                                    : spire_savestate_notice_elsewhere(stem, difficulty);
+      auto other = (ss.exists || c->spire_savestate_elsewhere_told)
+          ? std::nullopt
+          : spire_savestate_notice_elsewhere(stem, difficulty, episode);
       if (other) {
         c->spire_savestate_elsewhere_told = true;
         spire_send_ticker(c, spire_savestate_elsewhere_text(*other));
