@@ -14185,6 +14185,33 @@ void run_static_tests() {
     expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
     s->data->spire_room_quests.clear();
 
+    phosg::log_info_f("-- Spire level floor: never throws; a game whose server state is gone loads without a floor (01c0cc4)");
+    {
+      // the same pair in a game of its own whose server state is deleted (Lobby::require_server_state throws, as in
+      // spire_quest_leader); the clients keep theirs, so the guard covers them and the floor gets as far as the leader
+      expect_eq(bin_at(12), sent_to(fresh));
+      auto gone = std::make_shared<TestState>();
+      gone->io_context = s->io_context; // the game's idle timer outlives the state on the io_context it shares
+      auto dead_l = std::make_shared<Lobby>(gone, 0x7A04, true);
+      dead_l->episode = Episode::EP1;
+      dead_l->mode = GameMode::BATTLE;
+      dead_l->quest = l->quest;
+      dead_l->leader_id = 0;
+      for (const auto& [c, slot] : {std::pair(strong, size_t(0)), std::pair(fresh, size_t(1))}) {
+        c->lobby_client_id = slot;
+        dead_l->clients[slot] = c;
+        c->lobby = dead_l;
+      }
+      gone.reset();
+      std::shared_ptr<const Lobby> dead_cl = dead_l;
+      // no floor and no throw: fresh keeps the quest's own .bin, strong its bought +14 (the start_level path)
+      expect(spire_start_level_quest_bin(fresh, dead_cl, quest_bin) == quest_bin);
+      expect_eq(bin_at(14), prs_decompress(*spire_start_level_quest_bin(strong, dead_cl, quest_bin)));
+      for (const auto& c : {strong, fresh}) {
+        c->lobby = l;
+      }
+    }
+
     for (const auto& c : {strong, fresh, third}) {
       spire_static_test_forget(c, cl);
       c->lobby.reset();
