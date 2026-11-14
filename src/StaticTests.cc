@@ -6636,6 +6636,17 @@ void run_static_tests() {
     expect(!spire_savestate_is_of_run(read, 0x9999)); // a savestate of another run is not this game's to delete
     expect(!spire_savestate_is_of_run(read, 0));
     expect(!spire_savestate_is_of_run(SpireSavestate(), 0x1234));
+    // 7r2-M1: a real savestate of the game's run goes only if a client really played that run; practice as before
+    {
+      SpireSavestate real_ss = read;
+      real_ss.practice = false;
+      SpireSavestate practice_ss = read;
+      practice_ss.practice = true;
+      expect(spire_savestate_end_deletes_file(real_ss, 0x1234, true));
+      expect(!spire_savestate_end_deletes_file(real_ss, 0x1234, false)); // only practice in its id: it stays parked
+      expect(spire_savestate_end_deletes_file(practice_ss, 0x1234, false));
+      expect(!spire_savestate_end_deletes_file(real_ss, 0x9999, true));
+    }
     if (spire_savestate_end_deletes(false) && spire_savestate_is_of_run(read, 0x1234)) {
       std::filesystem::remove(file);
     }
@@ -10579,6 +10590,184 @@ void run_static_tests() {
     expect_eq(left, *replayed_end(1, 0x05));
     spire_run_timer_forget_end(cl, l->log);
     expect(!replayed_end(0, 0x05));
+  }
+
+  phosg::log_info_f("-- Spire veilig-r2: the parked run through the bridge ('J', 'B', 'V', 'X', time up), as the quest sends it");
+  {
+    // Every case plays the quest's requests through spire_bridge_handle_register, as on_sync_quest_register hands a 6x77
+    // over, and looks at the savestate files the server leaves on disk
+    constexpr uint32_t QUEST = 987656; // a bridged quest on Normal (spire_meta_ladder_quest_rung 0)
+    size_t r2_failed = 0;
+    auto r2_case = [&](const char* name, const std::function<void()>& fn) {
+      phosg::log_info_f("   R2 ({})", name);
+      try {
+        fn();
+      } catch (const std::exception& e) {
+        r2_failed++;
+        phosg::log_error_f("   R2 ({}) FAILED: {}", name, e.what());
+      }
+    };
+    struct R2Cwd {
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      std::filesystem::path dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-r2-{}", getpid());
+      R2Cwd() {
+        std::filesystem::remove_all(this->dir);
+        std::filesystem::create_directories(this->dir / SPIRE_BRIDGE_DIRECTORY);
+        std::filesystem::current_path(this->dir);
+      }
+      ~R2Cwd() {
+        std::filesystem::current_path(this->old_cwd);
+        std::filesystem::remove_all(this->dir);
+      }
+    };
+    // what a client is sent
+    struct R2Channel : Channel {
+      std::vector<std::string> sent;
+      R2Channel()
+          : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END,
+                phosg::TerminalFormat::END, false, false) {}
+      virtual std::string default_name() const {
+        return "static-test";
+      }
+      virtual bool connected() const {
+        return true;
+      }
+      virtual void disconnect() {}
+      virtual void send_raw(std::string&& data) {
+        this->sent.emplace_back(std::move(data));
+      }
+      virtual asio::awaitable<void> recv_raw(void*, size_t) {
+        throw std::logic_error("a static test client sends nothing");
+        co_return;
+      }
+      size_t count(const std::string& text) const {
+        return std::count_if(this->sent.begin(), this->sent.end(),
+            [&](const std::string& data) { return data.find(text) != std::string::npos; });
+      }
+    };
+    struct TestState : ServerState {
+      TestState() = default;
+    };
+    struct R2Player {
+      std::shared_ptr<R2Channel> ch;
+      std::shared_ptr<Client> c;
+      std::string stem; // spire_savestate_stem of its character
+    };
+    struct R2World {
+      std::shared_ptr<TestState> s;
+      std::shared_ptr<GameServer> server;
+      std::shared_ptr<Lobby> l;
+      size_t next_slot = 0;
+    };
+    auto r2_world = [&](uint32_t lobby_id, Episode episode) {
+      R2World w;
+      w.s = std::make_shared<TestState>();
+      w.s->data = std::make_shared<DataIndex>();
+      w.s->io_context = std::make_shared<asio::io_context>(1);
+      w.s->data->spire_bridge_quest_numbers.emplace(QUEST);
+      w.server = std::make_shared<GameServer>(w.s);
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      w.l = std::make_shared<Lobby>(w.s, lobby_id, true);
+      w.l->episode = episode;
+      w.l->mode = GameMode::BATTLE;
+      w.l->quest = std::make_shared<Quest>(vq);
+      return w;
+    };
+    // a GC client in the game with a run copy; serial 4600 + its slot
+    auto r2_join = [&](R2World& w) {
+      R2Player p;
+      p.ch = std::make_shared<R2Channel>();
+      p.c = std::make_shared<Client>(w.server, p.ch, ServerBehavior::GAME_SERVER);
+      auto login = std::make_shared<Login>();
+      login->account = std::make_shared<Account>();
+      login->gc_license = std::make_shared<GCLicense>();
+      login->gc_license->serial_number = 4600 + w.next_slot;
+      p.c->login = login;
+      p.c->character_file(true, false);
+      p.c->create_battle_overlay(std::make_shared<BattleRules>(), nullptr);
+      p.c->lobby_client_id = w.next_slot;
+      w.l->clients[w.next_slot++] = p.c;
+      p.c->lobby = w.l;
+      p.stem = std::format("{}/{:010}.{}", SPIRE_BRIDGE_DIRECTORY, login->gc_license->serial_number,
+          spire_guard_character_id(p.c->character_file(false, false)->disp));
+      return p;
+    };
+    auto r2_reg = [&](R2World& w, R2Player& p, uint16_t register_number, uint32_t value) {
+      expect(spire_bridge_handle_register(p.c, w.l, register_number, value)); // taken by the bridge
+    };
+    auto r2_request = [&](R2World& w, R2Player& p, uint8_t kind, uint32_t low) {
+      r2_reg(w, p, SPIRE_BRIDGE_REQUEST_REGISTER, (static_cast<uint32_t>(kind) << 24) | low);
+    };
+    // 'J' for room k (variant 0), and 'B' with its start room, K0 and resume bit
+    auto r2_ask = [&](R2World& w, R2Player& p, uint32_t k) { r2_request(w, p, SPIRE_BRIDGE_RESUME, k); };
+    auto r2_begin = [&](R2World& w, R2Player& p, uint32_t start_k, uint32_t first_k, bool resumed) {
+      r2_request(w, p, SPIRE_BRIDGE_REC_BEGIN, ((resumed ? 1 : 0) << 16) | (first_k << 8) | start_k);
+    };
+    // the quest's room start: SPIRE_SAVESTATE_NUM_VALUES values (the room first), then 'V' << 24 | count
+    auto r2_v = [&](R2World& w, R2Player& p, uint32_t room) {
+      for (uint32_t z = 0; z < SPIRE_SAVESTATE_NUM_VALUES; z++) {
+        r2_reg(w, p, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == SPIRE_SS_K) ? room : ((z == SPIRE_SS_LIVES) ? 3 : 0));
+      }
+      r2_request(w, p, SPIRE_BRIDGE_SAVESTATE_WRITE, SPIRE_SAVESTATE_NUM_VALUES);
+    };
+    // a real run parked at room k on Normal, written as a 'V' writes it
+    auto r2_parked = [&](const R2Player& p, uint32_t run_id, uint8_t episode, uint32_t quest_number, uint32_t k) {
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.run_id = run_id;
+      ss.episode = episode;
+      ss.quest_number = quest_number;
+      ss.start_room = (episode == static_cast<uint8_t>(Episode::EP2)) ? 16 : 1;
+      ss.practice = false;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_K] = k;
+      ss.values[SPIRE_SS_LIVES] = 2;
+      std::string filename = spire_savestate_store_v(p.stem, 0, ss, 4600);
+      expect(!filename.empty());
+      return filename;
+    };
+
+    r2_case("7r2-M1: a resume answer that came too late makes a practice run in the parked run's id; its 'X' keeps the run", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D01, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 9); // the game takes run D1 and answers resume
+      r2_begin(w, p, 9, 1, false); // the answer came too late: the quest went on fresh, a practice run in run D1
+      r2_v(w, p, 9); // not stored: the run stays parked
+      r2_request(w, p, SPIRE_BRIDGE_MSG_RUN_OVER, 0); // dead
+      expect(std::filesystem::is_regular_file(file));
+      expect_eq(bytes, phosg::load_file(file));
+      expect_eq(0xD1u, spire_savestate_from_json(phosg::load_file(file)).run_id);
+    });
+    r2_case("7r2-M1: the same practice run in the parked run's id ends by time up; the run stays", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D02, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 9);
+      r2_begin(w, p, 9, 1, false);
+      r2_v(w, p, 9);
+      spire_run_timer_record_end(w.l, (static_cast<uint32_t>(SPIRE_BRIDGE_TIMER_END) << 24) |
+          (SPIRE_BRIDGE_TIMER_TIME_UP << 16) | 240, SPIRE_BRIDGE_TIMER_TIME_UP);
+      expect(std::filesystem::is_regular_file(file));
+      expect_eq(bytes, phosg::load_file(file));
+    });
+    r2_case("7r2-M1: the parked run resumed and played to its end: its savestate goes, as before", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D03, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      r2_ask(w, p, 9);
+      r2_begin(w, p, 9, 1, true); // resumed: the real run D1 is played
+      r2_request(w, p, SPIRE_BRIDGE_MSG_RUN_OVER, 0);
+      expect(!std::filesystem::exists(file));
+    });
+
+    expect_eq(0u, r2_failed);
   }
 
   phosg::log_info_f("-- All static tests passed");

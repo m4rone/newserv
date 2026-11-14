@@ -700,6 +700,10 @@ bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id) {
   return ss.exists && run_id && (ss.run_id == run_id);
 }
 
+bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id, bool real_played) {
+  return spire_savestate_is_of_run(ss, run_id) && (ss.practice || real_played);
+}
+
 std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
   static const char* names[SPIRE_SAVESTATE_RUNGS] = {"normal", "hard", "vhard", "ultimate"};
   return std::format("{}.savestate.{}.json", stem, names[rung % SPIRE_SAVESTATE_RUNGS]);
@@ -1029,6 +1033,7 @@ struct SpireGameRun {
   uint32_t elapsed = 0; // the leader's saved seconds (resumed only)
   size_t max_clients = 0; // the most clients the game had during the run
   std::set<std::string> savestate_files; // written ('V') or answered from ('J') in this run, also of a client gone since
+  bool real_played = false; // 7r2-M1: a client's 'B' in this run was no practice run (spire_savestate_end_deletes_file)
 };
 static std::unordered_map<uint32_t, SpireGameRun> spire_game_runs;
 
@@ -1409,6 +1414,11 @@ static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const cha
         continue;
       }
       if (!spire_savestate_is_of_run(ss, run->run_id)) {
+        continue;
+      }
+      if (!spire_savestate_end_deletes_file(ss, run->run_id, run->real_played)) {
+        l->log.info_f("Spire savestate: run over ({}); {} kept: the real run {} was not played in this game, only "
+            "practice in its run id (7r2-M1)", why, filename, spire_savestate_describe(ss));
         continue;
       }
       std::filesystem::remove(filename);
@@ -3061,6 +3071,9 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     cr->resumed = start_k && ((value >> 16) & 1) && cr->answered_resume;
     cr->practice = spire_run_is_practice(start_k, first_k, cr->resumed, cr->savestate.practice);
     cr->start_room = cr->resumed ? cr->savestate.start_room : start_k;
+    if (!cr->practice) {
+      run->real_played = true; // 7r2-M1: the run end may delete this run's real savestates
+    }
     if (spire_run_counts_as_new(start_k, cr->resumed, cr->practice)) {
       rec.runs++;
       spire_records_save(filename, serial_number, rec);

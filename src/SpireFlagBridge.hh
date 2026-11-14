@@ -446,6 +446,12 @@ std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& 
     const std::vector<std::string>& present_files);
 // Whether a run end deletes this savestate: only one of the game's run.
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
+// 7r2-M1 (system critic round 2): whether a true run end deletes this savestate. Only one of the game's run
+// (spire_savestate_is_of_run), and a real one only if a client of the game really played that run (real_played: its
+// 'B' came and it was no practice run, SpireGameRun::real_played); a practice savestate goes as before. A game takes
+// the parked run's id at its first 'J'; a client whose resume answer comes too late starts fresh as a practice run in
+// that game, its 'V' is not stored ("stays parked"), and its end (dead, Give up, won, time up) must not delete the run.
+bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id, bool real_played);
 // Whether a savestate fits a room quest's start: same episode, room and variant, and the same ladder rung (B-AF-9,
 // critic spel-af-3 B2: the rung of the quest that wrote it, spire_meta_ladder_quest_rung, equals the given rung of the
 // quest now; a file from before has no quest number and counts as Normal), so a Hard run never resumes on Normal or
