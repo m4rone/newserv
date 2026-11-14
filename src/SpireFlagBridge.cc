@@ -704,9 +704,23 @@ bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id,
   return spire_savestate_is_of_run(ss, run_id) && (ss.practice || real_played);
 }
 
-std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
+static const char* spire_savestate_rung_name(uint8_t rung) {
   static const char* names[SPIRE_SAVESTATE_RUNGS] = {"normal", "hard", "vhard", "ultimate"};
-  return std::format("{}.savestate.{}.json", stem, names[rung % SPIRE_SAVESTATE_RUNGS]);
+  return names[rung % SPIRE_SAVESTATE_RUNGS];
+}
+
+// 7r2-M2: Episode 2 has files of its own; every other episode is Episode 1's (SpireFlagBridge.hh)
+static bool spire_savestate_is_ep2(uint8_t episode) {
+  return episode == static_cast<uint8_t>(Episode::EP2);
+}
+
+std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung) {
+  return std::format("{}.savestate.{}.json", stem, spire_savestate_rung_name(rung));
+}
+
+std::string spire_savestate_slot_filename(const std::string& stem, uint8_t episode, uint8_t rung) {
+  return spire_savestate_is_ep2(episode) ? std::format("{}.savestate.ep2.{}.json", stem, spire_savestate_rung_name(rung))
+                                         : spire_savestate_rung_filename(stem, rung);
 }
 
 std::string spire_savestate_old_filename(const std::string& stem) {
@@ -963,17 +977,18 @@ std::string spire_savestate_room_quest_name(const SpireSavestate& ss) {
       rung ? spire_meta_difficulty_name(rung) : "");
 }
 
-SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name) {
-  SpireSavestate ss = spire_savestate_load_rung(stem, difficulty & 3);
+SpireSavestate spire_savestate_notice_pick(
+    const std::string& stem, uint8_t difficulty, std::string* quest_name, uint8_t episode) {
+  SpireSavestate ss = spire_savestate_load_slot(stem, episode, difficulty & 3);
   if (quest_name) {
     *quest_name = spire_savestate_room_quest_name(ss);
   }
   return ss;
 }
 
-std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty) {
+std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty, uint8_t episode) {
   for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-    if ((rung != (difficulty & 3)) && spire_savestate_load_rung(stem, rung).exists) {
+    if ((rung != (difficulty & 3)) && spire_savestate_load_slot(stem, episode, rung).exists) {
       return rung;
     }
   }
@@ -1151,44 +1166,98 @@ static SpireSavestate spire_savestate_load(const std::string& filename) {
   return spire_savestate_from_json(phosg::load_file(filename));
 }
 
-SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename) {
+SpireSavestate spire_savestate_load_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, std::string* filename) {
   if (filename) {
     filename->clear();
   }
   if (stem.empty()) {
     return SpireSavestate();
   }
-  std::string own = spire_savestate_rung_filename(stem, rung);
-  bool own_exists = std::filesystem::is_regular_file(own);
-  if (own_exists) {
+  auto from = [&](const std::string& name, SpireSavestate ss) {
     if (filename) {
-      *filename = own;
+      *filename = name;
     }
-    return spire_savestate_load(own);
+    return ss;
+  };
+  bool ep2 = spire_savestate_is_ep2(episode);
+  std::string rung_file = spire_savestate_rung_filename(stem, rung);
+  if (ep2) {
+    std::string own = spire_savestate_slot_filename(stem, episode, rung);
+    if (std::filesystem::is_regular_file(own)) {
+      return from(own, spire_savestate_load(own));
+    }
+    // 7r2-M2: the rung file of before holds an Episode 2 run until Episode 2 writes its own; one that cannot be read
+    // is Episode 1's by its name
+    if (std::filesystem::is_regular_file(rung_file)) {
+      SpireSavestate there;
+      try {
+        there = spire_savestate_load(rung_file);
+      } catch (const std::exception&) {
+      }
+      if (there.exists && spire_savestate_is_ep2(there.episode)) {
+        return from(rung_file, std::move(there));
+      }
+    }
+  } else if (std::filesystem::is_regular_file(rung_file)) {
+    SpireSavestate there = spire_savestate_load(rung_file);
+    if (!spire_savestate_is_ep2(there.episode)) {
+      return from(rung_file, std::move(there));
+    }
+    // 7r2-M2: an Episode 2 run of before is not Episode 1's
   }
+  // the file of before counts while this episode's rung has no file of its own (none came above), if it records both
   std::string old = spire_savestate_old_filename(stem);
   SpireSavestate old_ss = spire_savestate_load(old);
-  if (!spire_savestate_old_counts(own_exists, old_ss, rung)) {
+  if (!spire_savestate_old_counts(false, old_ss, rung) || (spire_savestate_is_ep2(old_ss.episode) != ep2)) {
     return SpireSavestate();
   }
-  if (filename) {
-    *filename = old;
-  }
-  return old_ss;
+  return from(old, std::move(old_ss));
 }
 
-std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old) {
-  std::string filename = spire_savestate_rung_filename(stem, rung);
-  spire_bridge_write_durable(filename, data);
+SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename) {
+  return spire_savestate_load_slot(stem, static_cast<uint8_t>(Episode::EP1), rung, filename);
+}
+
+std::string spire_savestate_store_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, const std::string& data, bool* replaced_old) {
+  bool ep2 = spire_savestate_is_ep2(episode);
+  std::string filename = spire_savestate_slot_filename(stem, episode, rung);
+  std::string rung_file = spire_savestate_rung_filename(stem, rung);
   if (replaced_old) {
     *replaced_old = false;
   }
-  // the file of before goes once this rung has its own file, if it held this rung's run (a new start on a difficulty
-  // replaces the run parked there); a run of another rung in it stays, and so does a file that cannot be read
+  // 7r2-M2: the rung file of before that records Episode 2 holds Episode 2's run; Episode 1 writing over it copies it to
+  // Episode 2's own file first, if that has none (with one, that file is Episode 2's run and this one is outdated)
+  if (!ep2) {
+    try {
+      SpireSavestate there = spire_savestate_load(rung_file);
+      std::string ep2_file = spire_savestate_slot_filename(stem, static_cast<uint8_t>(Episode::EP2), rung);
+      if (there.exists && spire_savestate_is_ep2(there.episode) && !std::filesystem::is_regular_file(ep2_file)) {
+        spire_bridge_write_durable(ep2_file, phosg::load_file(rung_file));
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  spire_bridge_write_durable(filename, data);
+  // Episode 2's first own write replaces its run in the rung file of before
+  if (ep2) {
+    try {
+      SpireSavestate there = spire_savestate_load(rung_file);
+      if (there.exists && spire_savestate_is_ep2(there.episode)) {
+        std::filesystem::remove(rung_file);
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  // the file of before goes once this episode's rung has its own file, if it held this rung's run of this episode (a
+  // new start replaces the run parked there); a run of another rung or episode in it stays, and so does a file that
+  // cannot be read
   std::string old = spire_savestate_old_filename(stem);
   try {
     SpireSavestate old_ss = spire_savestate_load(old);
-    if (old_ss.exists && (spire_meta_ladder_quest_rung(old_ss.quest_number) == rung)) {
+    if (old_ss.exists && (spire_meta_ladder_quest_rung(old_ss.quest_number) == rung) &&
+        (spire_savestate_is_ep2(old_ss.episode) == ep2)) {
       std::filesystem::remove(old);
       if (replaced_old) {
         *replaced_old = true;
@@ -1199,9 +1268,20 @@ std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, co
   return filename;
 }
 
-// 7-M2: see SpireFlagBridge.hh
-bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice) {
-  return !(practice && parked.exists && !parked.practice);
+std::string spire_savestate_store_rung(const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old) {
+  return spire_savestate_store_slot(stem, static_cast<uint8_t>(Episode::EP1), rung, data, replaced_old);
+}
+
+// 7-M2, 7r2-M2: see SpireFlagBridge.hh
+bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice, bool run_first_room, uint32_t run_id) {
+  if (practice) {
+    return !(parked.exists && !parked.practice);
+  }
+  return !(run_first_room && parked.exists && (parked.run_id != run_id));
+}
+
+bool spire_savestate_is_first_room_v(const SpireSavestate& ss) {
+  return ss.start_room && (ss.values.size() > SPIRE_SS_K) && (ss.values[SPIRE_SS_K] == ss.start_room);
 }
 
 std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
@@ -1212,37 +1292,53 @@ std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const
   if (kept) {
     *kept = SpireSavestate();
   }
-  if (ss.practice) {
-    // only a practice run looks first; a real run writes as before, also over a file that cannot be read
+  // a practice run and a run at its first room look first (7r2-M2); a real run's later 'V' writes as before, also over a
+  // file that cannot be read
+  bool first_room = spire_savestate_is_first_room_v(ss);
+  if (ss.practice || first_room) {
     SpireSavestate parked;
     bool readable = true;
     try {
-      parked = spire_savestate_load_rung(stem, rung);
+      parked = spire_savestate_load_slot(stem, ss.episode, rung);
     } catch (const std::exception&) {
       readable = false;
     }
-    if (!readable || !spire_savestate_may_replace(parked, true)) {
+    if (!readable || !spire_savestate_may_replace(parked, ss.practice, first_room, ss.run_id)) {
       if (kept && readable) {
         *kept = std::move(parked);
       }
       return "";
     }
   }
-  return spire_savestate_store_rung(stem, rung, spire_savestate_to_json(ss, serial_number), replaced_old);
+  return spire_savestate_store_slot(stem, ss.episode, rung, spire_savestate_to_json(ss, serial_number), replaced_old);
 }
 
 std::string spire_savestate_practice_kept_text(const SpireSavestate& kept) {
+  // critic r2 K-2: the room quest that resumes it, with its variant and difficulty
+  std::string quest_name = kept.exists ? spire_savestate_room_quest_name(kept) : "";
+  if (!quest_name.empty()) {
+    return std::format("Practice is not saved: your run waits in {}.", quest_name);
+  }
   if (kept.exists && (kept.values.size() == SPIRE_SAVESTATE_NUM_VALUES)) {
     return std::format("Practice is not saved: your run at room {} stays parked.", kept.values[SPIRE_SS_K]);
   }
-  return "Practice is not saved: a saved run is parked here.";
+  return "Practice is not saved: the saved run here cannot be read."; // critic r2 K-3
 }
 
-// The client's savestate on this rung (spire_savestate_load_rung), and its file in *filename ("" without one)
-static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c, uint8_t rung,
+std::string spire_savestate_replace_text(const SpireSavestate& parked) {
+  static const char* variants[] = {"", " elite", " rest"};
+  const auto& v = parked.values;
+  uint32_t variant = (v.size() > SPIRE_SS_VARIANT) ? v[SPIRE_SS_VARIANT] : 0;
+  return std::format("Your saved run (room {}{}, {}) is replaced when the next room starts.",
+      (v.size() > SPIRE_SS_K) ? v[SPIRE_SS_K] : 0, (variant < 3) ? variants[variant] : "",
+      spire_meta_difficulty_name(spire_meta_ladder_quest_rung(parked.quest_number)));
+}
+
+// The client's savestate of this episode and rung (spire_savestate_load_slot), and its file in *filename ("" without one)
+static SpireSavestate spire_savestate_load_logged_slot(std::shared_ptr<const Client> c, uint8_t episode, uint8_t rung,
     std::string* filename = nullptr) {
   try {
-    return spire_savestate_load_rung(spire_savestate_stem(c), rung, filename);
+    return spire_savestate_load_slot(spire_savestate_stem(c), episode, rung, filename);
   } catch (const std::exception& e) {
     c->log.warning_f("Spire savestate: unreadable file: {}; ignored", e.what());
     if (filename) {
@@ -1250,6 +1346,14 @@ static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> 
     }
     return SpireSavestate();
   }
+}
+
+// The same on the episode of the client's game (7r2-M2; Episode 1 outside a game)
+static SpireSavestate spire_savestate_load_logged(std::shared_ptr<const Client> c, uint8_t rung,
+    std::string* filename = nullptr) {
+  auto l = c->lobby.lock();
+  return spire_savestate_load_logged_slot(
+      c, l ? static_cast<uint8_t>(l->episode) : static_cast<uint8_t>(Episode::EP1), rung, filename);
 }
 
 static std::string spire_savestate_describe(const SpireSavestate& ss) {
@@ -1299,8 +1403,9 @@ static SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client>
   auto it = store.runs.find(run_id);
   if (it == store.runs.end()) {
     SpireSavestate ss; // B-REGIE-18-6: the run is in the savestate of one rung (a run id is never reused)
-    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-      ss = spire_savestate_load_logged(c, rung);
+    for (uint8_t z = 0; z < 2 * SPIRE_SAVESTATE_RUNGS; z++) { // 7r2-M2: and of one episode
+      uint8_t episode = static_cast<uint8_t>((z < SPIRE_SAVESTATE_RUNGS) ? Episode::EP1 : Episode::EP2);
+      ss = spire_savestate_load_logged_slot(c, episode, z % SPIRE_SAVESTATE_RUNGS);
       if (ss.exists && ss.run_mag && (ss.run_mag->run_id == run_id)) {
         break;
       }
@@ -1401,6 +1506,7 @@ static void spire_savestate_on_run_end(std::shared_ptr<const Lobby> l, const cha
       if (!stem.empty()) {
         for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
           present.emplace_back(spire_savestate_rung_filename(stem, rung));
+          present.emplace_back(spire_savestate_slot_filename(stem, static_cast<uint8_t>(Episode::EP2), rung)); // 7r2-M2
         }
         present.emplace_back(spire_savestate_old_filename(stem));
       }
@@ -2032,11 +2138,20 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     ss.time_usecs = phosg::now();
     // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
     // 7-M2: a practice run never writes over a real run parked on its own rung (spire_savestate_store_v)
+    // 7r2-M2: and the file of the game's episode; a new run replaces the parked one only from its second room's 'V'
     bool replaced_old = false;
     SpireSavestate kept;
     std::string filename = spire_savestate_store_v(
         stem, spire_meta_ladder_quest_rung(quest_number), ss, serial_number, &replaced_old, &kept);
-    if (filename.empty()) {
+    if (filename.empty() && !ss.practice) {
+      // 7r2-M2: the first room of a new run: the run parked on this episode and difficulty goes at the next 'V' (the
+      // 'B' said so, spire_savestate_replace_text)
+      c->log.info_f("Spire savestate: 'V' of run {:08X} for serial {:010} in q{} room {} (its first room) not stored: {} "
+          "on {} stays until its next room starts (7r2-M2)", ss.run_id, serial_number, quest_number, room_k,
+          kept.exists ? std::format("the run parked ({})", spire_savestate_describe(kept))
+                      : std::string("a parked file that cannot be read"),
+          spire_meta_difficulty_name(spire_meta_ladder_quest_rung(quest_number)));
+    } else if (filename.empty()) {
       c->log.info_f("Spire savestate: 'V' of practice run {:08X} for serial {:010} in q{} room {} not stored: {} on {} stays (7-M2); this practice run cannot be resumed",
           ss.run_id, serial_number, quest_number, room_k,
           kept.exists ? std::format("the real run parked ({})", spire_savestate_describe(kept))
@@ -3073,6 +3188,17 @@ static bool spire_records_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     cr->start_room = cr->resumed ? cr->savestate.start_room : start_k;
     if (!cr->practice) {
       run->real_played = true; // 7r2-M1: the run end may delete this run's real savestates
+    }
+    // 7r2-M2 (B-REGIE-21-22): a new real run on an episode and difficulty where another run is parked says so in one
+    // line: that run stays until this run's next room starts, its first own save point (spire_savestate_store_v)
+    if (start_k && !cr->practice && !cr->resumed) {
+      SpireSavestate parked = spire_savestate_load_logged(c, spire_meta_ladder_quest_rung(quest_number));
+      if (parked.exists && (parked.run_id != run->run_id)) {
+        std::string line = spire_savestate_replace_text(parked);
+        spire_send_ticker(c, line);
+        c->log.info_f("Spire savestate: new run {:08X} next to the parked {}; sent \"{}\"", run->run_id,
+            spire_savestate_describe(parked), line);
+      }
     }
     if (spire_run_counts_as_new(start_k, cr->resumed, cr->practice)) {
       rec.runs++;
@@ -8280,8 +8406,9 @@ std::string spire_checkpoint_command(std::shared_ptr<Client> c, const std::strin
     // v44: a savestate names the exact room quest and what the run had at its start; B-REGIE-18-6: one line per
     // difficulty that has one
     std::string lines;
-    for (uint8_t rung = 0; rung < SPIRE_SAVESTATE_RUNGS; rung++) {
-      auto ss = spire_savestate_load_logged(c, rung);
+    for (uint8_t z = 0; z < 2 * SPIRE_SAVESTATE_RUNGS; z++) { // 7r2-M2: Episode 1's, then Episode 2's
+      uint8_t episode = static_cast<uint8_t>((z < SPIRE_SAVESTATE_RUNGS) ? Episode::EP1 : Episode::EP2);
+      auto ss = spire_savestate_load_logged_slot(c, episode, z % SPIRE_SAVESTATE_RUNGS);
       if (ss.exists) {
         lines += (lines.empty() ? "" : "\n") + spire_savestate_continue_text(ss);
       }
@@ -8310,10 +8437,12 @@ void spire_savestate_notice_on_game_join(std::shared_ptr<Client> c, std::shared_
     uint8_t difficulty = static_cast<uint8_t>(l->difficulty);
     SpireSavestate ss;
     try {
-      ss = spire_savestate_notice_pick(stem, difficulty, &quest_name);
+      uint8_t episode = static_cast<uint8_t>(l->episode); // 7r2-M2: the game's episode
+      ss = spire_savestate_notice_pick(stem, difficulty, &quest_name, episode);
       // critic spel-af-4b S-1: the run waits on another difficulty: say which, once per session
-      auto other = (ss.exists || c->spire_savestate_elsewhere_told) ? std::nullopt
-                                                                    : spire_savestate_notice_elsewhere(stem, difficulty);
+      auto other = (ss.exists || c->spire_savestate_elsewhere_told)
+          ? std::nullopt
+          : spire_savestate_notice_elsewhere(stem, difficulty, episode);
       if (other) {
         c->spire_savestate_elsewhere_told = true;
         spire_send_ticker(c, spire_savestate_elsewhere_text(*other));

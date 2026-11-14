@@ -6877,7 +6877,7 @@ void run_static_tests() {
         expect(kept.exists && !kept.practice);
         expect_eq(0xD1u, kept.run_id);
         expect_eq(real_bytes, phosg::load_file(real_file));
-        expect_eq(std::string("Practice is not saved: your run at room 9 stays parked."),
+        expect_eq(std::string("Practice is not saved: your run waits in Spire room 9."),
             spire_savestate_practice_kept_text(kept));
       }
       // the practice run ends (dead, time up, Give up, won): the run end deletes only files of its own run id
@@ -6963,7 +6963,7 @@ void run_static_tests() {
         expect_eq(std::string(), spire_savestate_store_v(stem, 0, practice, 42, nullptr, &kept));
         expect(!kept.exists);
         expect_eq(std::string("{not json"), phosg::load_file(real_file));
-        expect_eq(std::string("Practice is not saved: a saved run is parked here."),
+        expect_eq(std::string("Practice is not saved: the saved run here cannot be read."),
             spire_savestate_practice_kept_text(kept));
         expect_eq(real_file, spire_savestate_store_v(stem, 0, real, 42));
         expect_eq(0xD1u, spire_savestate_load_rung(stem, 0).run_id);
@@ -10765,6 +10765,183 @@ void run_static_tests() {
       r2_begin(w, p, 9, 1, true); // resumed: the real run D1 is played
       r2_request(w, p, SPIRE_BRIDGE_MSG_RUN_OVER, 0);
       expect(!std::filesystem::exists(file));
+    });
+
+    r2_case("7r2-M2: one parked run per difficulty per episode, replaced from the new run's second room, files of before read per episode", [&]() {
+      // B-REGIE-21-22
+      SpireSavestate ss;
+      ss.exists = true;
+      ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+      ss.values[SPIRE_SS_LIVES] = 2;
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-episodes-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::string stem = (dir / "0000000042.abc").string();
+      const uint8_t EP1 = static_cast<uint8_t>(Episode::EP1), EP2 = static_cast<uint8_t>(Episode::EP2);
+      expect_eq(stem + ".savestate.normal.json", spire_savestate_slot_filename(stem, EP1, 0));
+      expect_eq(stem + ".savestate.ep2.hard.json", spire_savestate_slot_filename(stem, EP2, 1));
+      SpireSavestate ep1 = ss; // a real Episode 1 run parked at room 9 on Normal
+      ep1.practice = false;
+      ep1.run_id = 0xD1;
+      ep1.episode = EP1;
+      ep1.quest_number = 920;
+      ep1.start_room = 1;
+      ep1.values[SPIRE_SS_K] = 9;
+      ep1.values[SPIRE_SS_VARIANT] = 0;
+      std::string ep1_file = spire_savestate_store_v(stem, 0, ep1, 42);
+      expect_eq(spire_savestate_rung_filename(stem, 0), ep1_file);
+      std::string ep1_bytes = phosg::load_file(ep1_file);
+      // a real Episode 2 run on Normal (Spire Run II): its own file, the Episode 1 run stays byte for byte
+      SpireSavestate ep2 = ep1;
+      ep2.run_id = 0xD5;
+      ep2.episode = EP2;
+      ep2.quest_number = 922;
+      ep2.start_room = 16;
+      ep2.values[SPIRE_SS_K] = 17;
+      expect_eq(0u, static_cast<uint32_t>(spire_meta_ladder_quest_rung(ep2.quest_number)));
+      std::string ep2_file = spire_savestate_store_v(stem, 0, ep2, 42);
+      expect_eq(spire_savestate_slot_filename(stem, EP2, 0), ep2_file);
+      expect_eq(ep1_bytes, phosg::load_file(ep1_file));
+      expect(spire_savestate_matches(spire_savestate_load_slot(stem, EP1, 0), EP1, 9, 0, 0));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      // the join notice and the elsewhere line stay within the game's episode
+      {
+        std::string name;
+        expect_eq(0xD1u, spire_savestate_notice_pick(stem, 0, &name, EP1).run_id);
+        expect_eq(0xD5u, spire_savestate_notice_pick(stem, 0, &name, EP2).run_id);
+        expect(spire_savestate_notice_elsewhere(stem, 1, EP1) == std::optional<uint8_t>(0));
+        expect(spire_savestate_notice_elsewhere(stem, 1, EP2) == std::optional<uint8_t>(0));
+      }
+      // a new real Episode 1 run from room 1 ("Spire room 1", Spire Run): its first room's 'V' leaves the parked run,
+      // its next room's 'V' replaces it
+      SpireSavestate fresh = ep1;
+      fresh.run_id = 0xD6;
+      fresh.quest_number = 940;
+      fresh.values[SPIRE_SS_K] = 1;
+      expect(spire_savestate_is_first_room_v(fresh));
+      {
+        SpireSavestate kept;
+        expect_eq(std::string(), spire_savestate_store_v(stem, 0, fresh, 42, nullptr, &kept));
+        expect_eq(0xD1u, kept.run_id);
+        expect_eq(ep1_bytes, phosg::load_file(ep1_file));
+        expect_eq(std::string("Your saved run (room 9, Normal) is replaced when the next room starts."),
+            spire_savestate_replace_text(kept));
+      }
+      fresh.values[SPIRE_SS_K] = 2;
+      expect(!spire_savestate_is_first_room_v(fresh));
+      expect_eq(ep1_file, spire_savestate_store_v(stem, 0, fresh, 42));
+      expect_eq(0xD6u, spire_savestate_load_slot(stem, EP1, 0).run_id);
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id); // Episode 2's run is not touched
+      // its own savestate at its first room (a resume there, the same run id) replaces as before
+      fresh.values[SPIRE_SS_K] = 1;
+      expect_eq(ep1_file, spire_savestate_store_v(stem, 0, fresh, 42));
+      // the decision itself
+      expect(!spire_savestate_may_replace(ep1, false, true, 0xD6)); // another run parked, the new run's first room
+      expect(spire_savestate_may_replace(ep1, false, true, 0xD1)); // its own run
+      expect(spire_savestate_may_replace(ep1, false, false, 0xD6)); // the new run's second room
+      expect(spire_savestate_may_replace(SpireSavestate(), false, true, 0xD6)); // nothing parked
+      std::filesystem::remove(ep1_file);
+      std::filesystem::remove(ep2_file);
+      // a rung file of before that holds an Episode 2 run: Episode 2's, not Episode 1's
+      std::string rung_file = spire_savestate_rung_filename(stem, 0);
+      spire_bridge_write_durable(rung_file, spire_savestate_to_json(ep2, 42));
+      std::string ep2_bytes = phosg::load_file(rung_file);
+      {
+        std::string from;
+        expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0, &from).run_id);
+        expect_eq(rung_file, from);
+        expect(!spire_savestate_load_slot(stem, EP1, 0, &from).exists);
+        expect(from.empty());
+      }
+      // Episode 1 writes its Normal file: the Episode 2 run of before moves to Episode 2's own file first
+      ep1.values[SPIRE_SS_K] = 4;
+      expect_eq(rung_file, spire_savestate_store_v(stem, 0, ep1, 42));
+      expect_eq(ep2_bytes, phosg::load_file(spire_savestate_slot_filename(stem, EP2, 0)));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      expect_eq(0xD1u, spire_savestate_load_slot(stem, EP1, 0).run_id);
+      // and Episode 2's own write replaces only its own run of before in the rung file
+      std::filesystem::remove(spire_savestate_slot_filename(stem, EP2, 0));
+      spire_bridge_write_durable(rung_file, ep2_bytes);
+      ep2.values[SPIRE_SS_K] = 18;
+      expect_eq(spire_savestate_slot_filename(stem, EP2, 0), spire_savestate_store_v(stem, 0, ep2, 42));
+      expect(!std::filesystem::exists(rung_file));
+      expect_eq(18u, spire_savestate_load_slot(stem, EP2, 0).values[SPIRE_SS_K]);
+      // a rung file that cannot be read is Episode 1's by its name: Episode 2 leaves it and does not throw
+      spire_bridge_write_durable(rung_file, "{not json");
+      expect_eq(18u, spire_savestate_load_slot(stem, EP2, 0).values[SPIRE_SS_K]);
+      std::filesystem::remove(spire_savestate_slot_filename(stem, EP2, 0));
+      expect(!spire_savestate_load_slot(stem, EP2, 0).exists);
+      expect_raises(std::runtime_error, [&]() { spire_savestate_load_slot(stem, EP1, 0); });
+      expect_eq(std::string("{not json"), phosg::load_file(rung_file));
+      // the file of before (one for every difficulty) that holds an Episode 2 run counts for Episode 2 only, and an
+      // Episode 1 write on that rung leaves it
+      std::filesystem::remove(rung_file);
+      std::string old_file = spire_savestate_old_filename(stem);
+      spire_bridge_write_durable(old_file, ep2_bytes);
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      expect(!spire_savestate_load_slot(stem, EP1, 0).exists);
+      bool replaced = true;
+      spire_savestate_store_rung(stem, 0, spire_savestate_to_json(ep1, 42), &replaced);
+      expect(!replaced);
+      expect_eq(ep2_bytes, phosg::load_file(old_file));
+      expect_eq(0xD5u, spire_savestate_load_slot(stem, EP2, 0).run_id);
+      // critic r2 K-2: the practice line names the room quest, its variant and its difficulty
+      {
+        SpireSavestate elite = ep1;
+        elite.values[SPIRE_SS_K] = 5;
+        elite.values[SPIRE_SS_VARIANT] = 1;
+        elite.quest_number = 1946;
+        expect_eq(std::string("Practice is not saved: your run waits in Spire room 5 elite Hard."),
+            spire_savestate_practice_kept_text(elite));
+        expect_eq(std::string("Your saved run (room 5 elite, Hard) is replaced when the next room starts."),
+            spire_savestate_replace_text(elite));
+      }
+      std::filesystem::remove_all(dir);
+    });
+    r2_case("7r2-M2: \"Spire room 1\" next to a parked run: one line at the 'B', the first room's 'V' leaves it, room 2 replaces it", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D11, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 1); // nothing parked at room 1: a new run
+      r2_begin(w, p, 1, 1, false); // a real run from the first room
+      expect_eq(1u, p.ch->count("Your saved run (room 9, Normal) is replaced when the next room starts."));
+      r2_v(w, p, 1);
+      expect_eq(bytes, phosg::load_file(file)); // the run parked at room 9 stays
+      r2_v(w, p, 2);
+      auto now = spire_savestate_from_json(phosg::load_file(file));
+      expect(now.run_id != 0xD1u);
+      expect_eq(2u, now.values[SPIRE_SS_K]);
+    });
+    r2_case("7r2-M2: the first room of Episode 2 next to a parked Episode 1 run: its own file, no line, the Episode 1 run stays", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D12, Episode::EP2);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 16);
+      r2_begin(w, p, 16, 16, false);
+      expect_eq(0u, p.ch->count("is replaced when the next room starts"));
+      r2_v(w, p, 16);
+      r2_v(w, p, 17);
+      expect_eq(bytes, phosg::load_file(file));
+      auto ep2 = spire_savestate_load_slot(p.stem, static_cast<uint8_t>(Episode::EP2), 0);
+      expect(ep2.exists && (ep2.run_id != 0xD1u));
+      expect_eq(17u, ep2.values[SPIRE_SS_K]);
+    });
+    r2_case("critic r2 K-1: a practice run's 'V' through spire_savestate_write leaves the parked run and names its room quest", [&]() {
+      R2Cwd cwd;
+      auto w = r2_world(0x7D13, Episode::EP1);
+      auto p = r2_join(w);
+      std::string file = r2_parked(p, 0xD1, static_cast<uint8_t>(Episode::EP1), 920, 9);
+      std::string bytes = phosg::load_file(file);
+      r2_ask(w, p, 3);
+      r2_begin(w, p, 3, 1, false); // "Spire room 3" opened loose: a practice run
+      r2_v(w, p, 3);
+      r2_v(w, p, 4);
+      expect_eq(bytes, phosg::load_file(file));
+      expect_eq(1u, p.ch->count("Practice is not saved: your run waits in Spire room 9."));
     });
 
     expect_eq(0u, r2_failed);
