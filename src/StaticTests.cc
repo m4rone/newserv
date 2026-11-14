@@ -62,14 +62,26 @@ void run_static_tests() {
   phosg::log_info_f("-- Spire guard: Battle game without a quest (v30)");
   {
     using A = SpireNoQuestAction;
-    // arguments: client_in_game, battle_game, has_quest, quest_selection_in_progress, can_run_functions
-    expect_eq(A::EXIT, spire_guard_no_quest_action(true, true, false, false, true));   // stranded: back to the lobby
-    expect_eq(A::TELL, spire_guard_no_quest_action(true, true, false, false, false));  // no functions: text, guard stays
-    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, true, true));    // someone is picking a quest
-    expect_eq(A::NONE, spire_guard_no_quest_action(true, true, true, false, true));    // q920/q921 loaded: leave it
-    expect_eq(A::NONE, spire_guard_no_quest_action(false, true, false, false, true));  // already left the game
-    expect_eq(A::NONE, spire_guard_no_quest_action(true, false, false, false, true));  // normal game: not ours
-    expect_eq(A::NONE, spire_guard_no_quest_action(false, false, true, true, false));
+    // arguments: client_in_game, battle_game, has_quest, quest_selection_in_progress, can_run_functions, alone_seconds,
+    // company_seconds
+    constexpr uint32_t N = SPIRE_GUARD_NO_QUEST_SECONDS, M = SPIRE_GUARD_NO_QUEST_ALONE_SECONDS;
+    expect_eq(A::EXIT, spire_guard_no_quest_action(true, true, false, false, true, 0, N));    // stranded: back to the lobby
+    expect_eq(A::TELL, spire_guard_no_quest_action(true, true, false, false, false, 0, N));   // no functions: text, guard stays
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, true, true, 0, N));     // someone is picking a quest
+    expect_eq(A::NONE, spire_guard_no_quest_action(true, true, true, false, true, 0, N));     // q920/q921 loaded: leave it
+    expect_eq(A::NONE, spire_guard_no_quest_action(false, true, false, false, true, 0, N));   // already left the game
+    expect_eq(A::NONE, spire_guard_no_quest_action(true, false, false, false, true, 0, N));   // normal game: not ours
+    expect_eq(A::NONE, spire_guard_no_quest_action(false, false, true, true, false, 0, N));
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, false, true, 0, N - 30));   // in company, before 180 s
+    // 2026-11-14 19:43 (Marck's run): waiting alone for the partner pauses the 180 s ...
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, false, true, N, 0));        // 180 s alone: no kick
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, false, true, M - 30, 0));   // 9:30 alone: still waits
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, false, true, M - 30, N - 30));   // alone, then partner
+    // ... but 10 minutes alone in a Battle game without a quest send it back, as before (regie, bound)
+    expect_eq(A::EXIT, spire_guard_no_quest_action(true, true, false, false, true, M, 0));
+    expect_eq(A::TELL, spire_guard_no_quest_action(true, true, false, false, false, M, 0));
+    expect_eq(A::WAIT, spire_guard_no_quest_action(true, true, false, true, true, M, 0));          // picking a quest: waits
+    expect_eq(A::NONE, spire_guard_no_quest_action(true, true, true, false, true, M, 0));          // alone with a quest: leave it
   }
 
   phosg::log_info_f("-- Spire PvP: player targets stripped from attacks, support techs untouched (v42)");

@@ -990,7 +990,9 @@ SpireGuardStart spire_guard_start_action(
 bool spire_guard_marker_open(bool protected_character, bool run_in_progress, bool restore_pending, bool awaiting_save);
 
 // v30: a Battle game without a quest. A GC client that joins a Battle game without one is watched: if the game still
-// has no quest SPIRE_GUARD_NO_QUEST_SECONDS later (and nobody is picking one at the counter), the server tells it and
+// has no quest after SPIRE_GUARD_NO_QUEST_SECONDS in company, or after SPIRE_GUARD_NO_QUEST_ALONE_SECONDS alone in it
+// (waiting for the partner pauses the 180 s, up to that bound; 2026-11-14), and nobody is picking one at the counter,
+// the server tells it and
 // sends it back to the lobby (ExitAnywhere, as $exit does). Since regie pso-regie-9 the join takes no snapshot, so
 // nothing is restored afterwards. A client that cannot run functions only gets the text. spire_guard_no_quest_action
 // is the decision, kept free of state for the static tests.
@@ -1210,8 +1212,11 @@ bool spire_guard_same_materials(const PlayerInventory& a, const PlayerInventory&
 std::string spire_guard_materials_str(const PlayerInventory& inv);
 constexpr uint32_t SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS = 30;
 enum class SpireNoQuestAction { NONE, WAIT, EXIT, TELL };
-SpireNoQuestAction spire_guard_no_quest_action(
-    bool client_in_game, bool battle_game, bool has_quest, bool quest_selection_in_progress, bool can_run_functions);
+// alone_seconds / company_seconds: the time the client has been in the game without a quest alone in it / with someone
+// else in it (counted in SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS steps by the watcher)
+constexpr uint32_t SPIRE_GUARD_NO_QUEST_ALONE_SECONDS = 600;
+SpireNoQuestAction spire_guard_no_quest_action(bool client_in_game, bool battle_game, bool has_quest,
+    bool quest_selection_in_progress, bool can_run_functions, uint32_t alone_seconds, uint32_t company_seconds);
 
 // Called from the 98 handler before the client is removed from the game. Turns RunInProgress into RestorePending.
 // Never throws.
