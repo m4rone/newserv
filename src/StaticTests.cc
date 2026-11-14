@@ -14927,6 +14927,61 @@ void run_static_tests() {
       }
     });
 
+    k3_case("backup bal 7805: spire_drops_filter reads the equipped weapon itself, so a boss weapon beats it", [&]() {
+      K3World w;
+      kb_tables(w);
+      w.s->data->level_table_v3 = std::make_shared<JSONLevelTable>(
+          phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
+      w.s->data->spire_drops = SpireDropsConfig::from_json(phosg::JSON::parse("{}"));
+      auto l = w.game(987700, Episode::EP1); // a bridged quest: a Spire game
+      l->rand_crypt = std::make_shared<MT19937Generator>(174);
+      auto p = w.player();
+      p.c->lobby_client_id = 0;
+      l->clients[0] = p.c;
+      p.c->lobby = l;
+      auto ch = p.c->character_file(false, false);
+      ch->disp.visual.sh.char_class = 0; // HUmar with the plan's stats at De Rol Le
+      ch->disp.stats.char_stats = w.s->data->level_table_v3->base_stats_for_class(0);
+      ch->disp.stats.char_stats.atp = 162;
+      ch->disp.stats.char_stats.ata = 128;
+      ch->disp.stats.char_stats.mst = 86;
+      auto boss_drops = [&]() {
+        std::vector<uint32_t> ret;
+        for (size_t z = 0; z < 64; z++) {
+          ItemData item;
+          item.data1[0] = 0x03; // the boss's own drop is no weapon: one he can equip now instead
+          expect(spire_drops_filter(p.c, l, item, true, 0x0B));
+          expect_eq(0x00, item.data1[0]);
+          ret.emplace_back(spire_drops_weapon_strength(*kb_pmt, item));
+        }
+        return ret;
+      };
+      // nothing equipped: every group, as before
+      ch->inventory.num_items = 0;
+      auto before = boss_drops();
+      uint32_t weakest = *std::min_element(before.begin(), before.end());
+      uint32_t strongest = *std::max_element(before.begin(), before.end());
+      // a Saber equipped at the weakest boss weapon's strength (40 + 55 + 4 x grind): only stronger groups are left
+      ItemData saber;
+      saber.data1[0] = 0x00;
+      saber.data1[1] = 0x01;
+      saber.data1[2] = 0x00;
+      saber.data1[3] = (weakest > 95) ? ((weakest - 95 + 3) / 4) : 0;
+      uint32_t carried = spire_drops_weapon_strength(*kb_pmt, saber);
+      expect((carried >= weakest) && (carried < strongest)); // some groups beat it, some do not
+      ch->inventory.num_items = 1;
+      ch->inventory.items[0] = PlayerInventoryItem();
+      ch->inventory.items[0].state = 1;
+      ch->inventory.items[0].flags = 0x00000008; // equipped
+      ch->inventory.items[0].data = saber;
+      for (uint32_t strength : boss_drops()) {
+        expect(strength > carried);
+      }
+      spire_static_test_forget(p.c, l);
+      l->clients.fill(nullptr);
+      p.c->lobby.reset();
+    });
+
     k3_case("backup M2: a game whose end got lost inside a living server process is set aside; only a process that died leaves a hard stop", [&]() {
       K3TempCwd temp_cwd("backup-m2");
       K3World w;
@@ -15425,6 +15480,11 @@ void run_static_tests() {
     expect_eq(bin_at(29), prs_decompress(*spire_start_level_quest_bin(fresh, cl, raised_bin)));
     expect_eq(bin_at(30), prs_decompress(*spire_start_level_quest_bin(strong, cl, raised_bin)));
     rules->char_level = 0;
+    // the run again ('I') with both savestates stored: the leader counts at its bought +14 only, never at its saved
+    // Lv31, so fresh keeps the floor Lv13 (above room 5's Lv11), not Lv29 (19c4082)
+    fresh->delete_overlay();
+    expect(spire_create_battle_overlay(fresh, cl, true));
+    expect_eq(12u, static_cast<uint32_t>(fresh->character_file(false, true)->disp.stats.level));
     s->data->spire_room_quests.clear();
 
     for (const auto& c : {strong, fresh, third}) {
