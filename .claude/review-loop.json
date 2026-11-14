@@ -5,12 +5,16 @@
   "verification": [
     "`mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc) newserv` in de VOORGROND",
     "`build/newserv run-static-tests`",
-    "`sh tests/spire-follow-city.test.sh build/newserv`"
+    "`sh tests/spire-follow-city.test.sh build/newserv`",
+    "quest-build: `D=$(mktemp -d) && ln -s /home/m4rck/code/worktrees/newserv/beloningen-a/build/newserv /home/m4rck/code/worktrees/newserv/beloningen-a/src /home/m4rck/code/worktrees/newserv/beloningen-a/system \"$D\"/ && NEWSERV_DIR=\"$D\" bash /home/m4rck/code/worktrees/pso-roguelike/beloningen-a/quests/spire/build.sh` (alle selftest-gates groen, bytes en labels binnen de grens)",
+    "grid: `cd /home/m4rck/code/worktrees/pso-roguelike/beloningen-a && python3 quests/spire/make_spire_rewards.py --check` (meldt dat het grid klopt met system/spire-rewards.json)"
   ],
   "rules": [
-    "De repo staat in /home/m4rck/code/worktrees/newserv/audit-slice-c (tak fix/audit-slice-c): werk uitsluitend daar, met absolute paden of cd in elk commando.",
-    "Niets op de pc of in het lab uitrollen of herstarten; de draaiende newserv op de laptop niet aanraken.",
+    "De wijziging beslaat twee repos: newserv in /home/m4rck/code/worktrees/newserv/beloningen-a en de quest-repo in /home/m4rck/code/worktrees/pso-roguelike/beloningen-a, beide op tak feature/beloningen. Werk uitsluitend daar, met absolute paden of cd in elk commando. Een fix in de quest-repo krijgt een eigen fix(review)-commit in die repo.",
+    "Niets op de pc of in het lab uitrollen of herstarten; de draaiende newserv op de laptop niet aanraken. Geen ssh pc.",
+    "Nooit een geheugenkaart lezen, kopiëren of wijzigen.",
     "Processen nooit op naam stoppen.",
+    "Niet pushen.",
     "Commentaar in het Engels."
   ]
 }
