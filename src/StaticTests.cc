@@ -31,6 +31,7 @@
 #include "SpireFlagBridge.hh"
 #include "SpireMag.hh"
 #include "SpireMeta.hh"
+#include "SpireRewards.hh"
 #include "SendCommands.hh"
 #include "ServerState.hh"
 
@@ -7676,6 +7677,197 @@ void run_static_tests() {
     expect(a != spire_draw_seed(0xA1, 5, 0, in));
   }
 
+  phosg::log_info_f("-- Spire rewards part A: the grid's item per class, line, W and tier; rule B; the ATA model (fase 1)");
+  {
+    auto rewards = spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE));
+    auto mags = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+    expect(rewards.enabled);
+    expect(rewards.ata_model == SpireAtaModel::SAFE);
+    // one key for the grid and SpireDrops (spire_drops_filter reads spire_ata_model_configured)
+    expect(spire_ata_model_configured() == rewards.ata_model);
+    expect_eq(12u, rewards.classes.size());
+    std::map<uint8_t, uint32_t> first_room_of_w;
+    for (const auto& [room, w] : rewards.room_w) {
+      first_room_of_w.emplace(w, room);
+    }
+    for (uint8_t w = 2; w <= 6; w++) {
+      expect(first_room_of_w.count(w));
+    }
+    // Episode 2 rooms by index (k16 = room 1), past the last room the highest W
+    expect_eq(1u, spire_reward_room_index(16));
+    expect_eq(spire_reward_w(rewards, 5), spire_reward_w(rewards, spire_reward_room_index(20)));
+    expect_eq(6, spire_reward_w(rewards, 40));
+
+    // Every cell: the item the server answers is the grid's (code, grind at most MaxGrind, a special of the cell's
+    // list, Hit), for the line the player holds, at the W of the room, in the tier rolled; its rule B need at the grid's
+    // run copy equals the grid's mag (POW, DEX, MIND); rule B's mag meets it, stays at most 200, and never sinks
+    size_t cells = 0, need_mismatches = 0, rule_b_checked = 0;
+    for (const auto& [char_class, cls] : rewards.classes) {
+      const char* arch = spire_mag_archetype(char_class);
+      const auto& mag_line = mags.classes.at(arch);
+      for (const auto& [line_name, line] : cls.lines) {
+        uint8_t held[12] = {static_cast<uint8_t>(line.kit >> 16), static_cast<uint8_t>(line.kit >> 8),
+            static_cast<uint8_t>(line.kit)};
+        expect_eq(line_name, spire_reward_line_of(rewards, cls, held));
+        for (const auto& [w, wl] : line.w) {
+          uint32_t room = first_room_of_w.at(w);
+          for (size_t t = 0; t < 4; t++) {
+            auto tier = static_cast<SpireRewardTier>(t);
+            const auto& cell = wl.tiers[t];
+            for (size_t pick = 0; pick < std::max<size_t>(cell.specials.size(), 1); pick++) {
+              auto offer = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, held, room, tier,
+                  [pick](uint32_t n) -> uint32_t { return n ? (pick % n) : 0; });
+              cells += (pick == 0);
+              expect_eq(line_name, offer.line);
+              expect_eq(line_name, offer.from_line);
+              expect_eq(w, offer.w);
+              expect_eq(cell.code, static_cast<uint32_t>((offer.item[0] << 16) | (offer.item[1] << 8) | offer.item[2]));
+              expect(offer.item[3] <= offer.info.max_grind);
+              expect_eq(std::min<uint32_t>(cell.grind, offer.info.max_grind), offer.item[3]);
+              if (cell.specials.empty()) {
+                expect_eq(0, offer.item[4]);
+              } else {
+                expect_eq(cell.specials[pick].id, offer.item[4]);
+                expect(offer.item_name.ends_with(cell.specials[pick].name));
+              }
+              expect_eq(cell.hit ? 0x05 : 0x00, offer.item[6]);
+              expect_eq(cell.hit, offer.item[7]);
+              expect(offer.label.starts_with(std::string(spire_reward_tier_label(tier)) + " "));
+            }
+            auto offer = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, held, room, tier,
+                [](uint32_t) -> uint32_t { return 0; });
+            auto need = spire_reward_mag_need(offer.info, wl.run_atp, wl.run_ata, wl.run_mst, SpireAtaModel::SAFE);
+            if ((need.pow != cell.grid_mag[0]) || (need.dex != cell.grid_mag[1]) || (need.mind != cell.grid_mag[2])) {
+              need_mismatches++;
+              phosg::log_error_f("   {} {} W{} {}: need {}/{}/{}, grid {}/{}/{}", cls.name, line_name, w,
+                  spire_reward_tier_name(tier), need.pow, need.dex, need.mind, cell.grid_mag[0], cell.grid_mag[1],
+                  cell.grid_mag[2]);
+            }
+            // rule B against every step of the class's mag line, from no mag and from the last step's mag
+            for (uint32_t step = 0; step < mag_line.steps.size(); step++) {
+              for (bool from_mag : {false, true}) {
+                std::optional<SpireMagBytes> current;
+                if (from_mag) {
+                  current = spire_mag_step_bytes(mag_line, mag_line.steps.size() - 1, 0, std::nullopt);
+                }
+                for (size_t main_stat : {size_t(0), size_t(1), size_t(3)}) {
+                  auto b = spire_mag_rule_b(mag_line, step, 0, current, need, 0, main_stat);
+                  uint32_t sum = 0;
+                  for (size_t z = 0; z < 4; z++) {
+                    sum += spire_mag_stat_word(b, z) / 100;
+                  }
+                  expect(sum <= 200);
+                  expect(spire_mag_level_of(b) <= 200);
+                  if (current) {
+                    expect(spire_mag_level_of(b) >= spire_mag_level_of(*current));
+                  }
+                  if (need.pow + need.dex + need.mind <= 200) {
+                    expect(spire_reward_meets(offer.info, wl.run_atp, wl.run_ata, wl.run_mst, &b, SpireAtaModel::SAFE));
+                  }
+                  rule_b_checked++;
+                }
+              }
+            }
+          }
+        }
+        // the new-line reward: another line of the class, at the same W
+        if (cls.lines.size() > 1) {
+          for (uint32_t r = 0; r < cls.lines.size() + 2; r++) {
+            auto offer = spire_reward_offer(rewards, SpireRewardKind::NEW_LINE, char_class, held, 5,
+                SpireRewardTier::RARE, [r](uint32_t n) -> uint32_t { return n ? (r % n) : 0; });
+            expect(offer.line != line_name);
+            expect(cls.lines.count(offer.line));
+            expect_eq(line_name, offer.from_line);
+            expect_eq(spire_reward_w(rewards, 5), offer.w);
+          }
+        }
+      }
+    }
+    phosg::log_info_f("   rewards: {} cells checked, {} need mismatches, {} rule B mags checked", cells, need_mismatches,
+        rule_b_checked);
+    expect(cells >= 1000);
+    expect_eq(0u, need_mismatches);
+
+    // the mag food reward: the levels by tier, the label starts with the tier word
+    for (size_t t = 0; t < 4; t++) {
+      auto offer = spire_reward_offer(rewards, SpireRewardKind::MAG_FOOD, 0, nullptr, 3, static_cast<SpireRewardTier>(t),
+          [](uint32_t) -> uint32_t { return 0; });
+      expect_eq(rewards.mag_food[t], offer.food_levels);
+      expect(offer.label.starts_with(spire_reward_tier_label(static_cast<SpireRewardTier>(t))));
+    }
+    expect_eq(5u, rewards.mag_food[0]);
+    expect_eq(30u, rewards.mag_food[3]);
+    // the class's first line without a known weapon
+    auto bare = spire_reward_offer(rewards, SpireRewardKind::WEAPON, 0, nullptr, 1, SpireRewardTier::NORMAL,
+        [](uint32_t) -> uint32_t { return 0; });
+    expect_eq(rewards.classes.at(0).line_order.front(), bare.line);
+
+    // KV par. 4: no Legendary before trede 2 (De Rol Le, across runs or in this run), Rare and Epic as the room grows
+    expect_eq(0u, spire_reward_trede(rewards, {}, {}));
+    expect_eq(1u, spire_reward_trede(rewards, {4}, {}));
+    expect_eq(2u, spire_reward_trede(rewards, {4}, {8}));
+    expect_eq(2u, spire_reward_trede(rewards, {4, 8}, {}));
+    auto o1 = spire_reward_odds(rewards, 1, 0, false, 0);
+    expect_eq(0u, o1.legendary);
+    expect_eq(5u, o1.epic);
+    expect_eq(35u, o1.rare);
+    auto o5 = spire_reward_odds(rewards, 5, 2, false, 0);
+    expect_eq(3u, o5.legendary); // t - 1 + 2 from room 5
+    expect_eq(3u + 15u, o5.epic); // 3 + 2k + t
+    auto elite = spire_reward_odds(rewards, 15, 2, true, 40);
+    expect_eq(60u, elite.epic); // L + E at most 60
+    expect(spire_reward_tier_for_roll(o1, 0) == SpireRewardTier::EPIC);
+    expect(spire_reward_tier_for_roll(o1, 34) == SpireRewardTier::RARE);
+    expect(spire_reward_tier_for_roll(o1, 35) == SpireRewardTier::NORMAL);
+    expect(spire_reward_tier_for_roll(o5, 2) == SpireRewardTier::LEGENDARY);
+    for (uint32_t k = 1; k <= 30; k++) {
+      for (uint32_t roll = 0; roll < 100; roll++) {
+        expect(spire_reward_tier_for_roll(spire_reward_odds(rewards, spire_reward_room_index(k), 1, true, 40), roll) !=
+            SpireRewardTier::LEGENDARY);
+      }
+    }
+
+    // The ATA model (design par. 3): a DEX level is 5 table units, or 0.5 on the screen with the weapon's own ATA
+    expect_eq(0u, spire_ata_dex_needed(SpireAtaModel::TABLE, 100, 0, 100));
+    expect_eq(1u, spire_ata_dex_needed(SpireAtaModel::TABLE, 100, 0, 101));
+    expect_eq(2u, spire_ata_dex_needed(SpireAtaModel::TABLE, 100, 0, 110));
+    expect_eq(0u, spire_ata_dex_needed(SpireAtaModel::SCREEN_WEAPON, 100, 40, 110)); // 60 + 10 + 40
+    expect_eq(2u, spire_ata_dex_needed(SpireAtaModel::SCREEN_WEAPON, 100, 40, 111));
+    expect_eq(80u, spire_ata_dex_needed(SpireAtaModel::SCREEN_BARE, 100, 40, 110));
+    expect_eq(2u, spire_ata_dex_needed(SpireAtaModel::SAFE, 100, 40, 110)); // the larger of the two
+    expect(spire_ata_model_for_name("screen_weapon") == SpireAtaModel::SCREEN_WEAPON);
+    expect_eq(std::string("safe"), std::string(spire_ata_model_name(SpireAtaModel::SAFE)));
+
+    // rule B in the ledger: a weapon's need makes the next answer a boost (boost_due), the kind follows Sega's
+    // evolution, and mag food adds its levels on the main stat, the sum at most 200
+    {
+      const auto& hu = mags.classes.at("HU");
+      SpireRunMagLedger led;
+      led.run_id = 0x51;
+      led.issued_step = 1;
+      led.start_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(hu, 1, 0, std::nullopt);
+      led.need = SpireMagNeed{40, 30, 0};
+      led.boost_due = true;
+      auto d = spire_run_mag_decide(led, hu, SPIRE_RUN_MAG_ASK, 2, {}, 0, 1,
+          [](const SpireMagBytes& b, uint8_t) -> uint8_t { return (spire_mag_stat_word(b, 1) >= 4000) ? 0x2A : b[1]; });
+      expect(d.result);
+      expect(spire_mag_stat_word(d.bytes, 1) >= 4000);
+      expect(spire_mag_stat_word(d.bytes, 2) >= 3000);
+      expect(spire_mag_level_of(d.bytes) >= spire_mag_level_of(*led.last_mirrored));
+      expect_eq(0x2A, d.bytes[1]);
+      // mag food +30 on POW of the mirrored mag: POW never sinks, the sum stays at most 200
+      SpireMagBytes big = *led.last_mirrored;
+      auto fed = spire_mag_rule_b(hu, 1, 0, big, SpireMagNeed{}, 30, 1);
+      expect(spire_mag_stat_word(fed, 1) >= spire_mag_stat_word(big, 1));
+      uint32_t sum = 0;
+      for (size_t z = 0; z < 4; z++) {
+        sum += spire_mag_stat_word(fed, z) / 100;
+      }
+      expect(sum <= 200);
+    }
+  }
+
   phosg::log_info_f("-- Spire bundle 8 (ux-pass): draw.json names, overview line, server texts (v62, B-REGIE-16-13)");
   {
     // every case runs, a failed one is logged, and the section fails at its end if any did (so one run shows them all)
@@ -9389,6 +9581,8 @@ void run_static_tests() {
         phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
     auto functions = std::make_shared<ClientFunctionIndex>("system/client-functions", true);
     auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+    auto rewards_e2e = spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE)); // fase 1 part A
+    auto mags_e2e = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
     auto get_fn = functions->get("GetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
     auto set_fn = functions->get("SetExtendedPlayerInfo", SPECIFIC_VERSION_GC_V3_EU);
     expect(get_fn && set_fn && (get_fn->code != set_fn->code));
@@ -9903,6 +10097,64 @@ void run_static_tests() {
       expect_real(p2.ch->memory, real, "after the login that follows the game exit");
       expect(no_marker(snapshot_on_disk(p2)));
       expect(server_holds(p2, *r.server_real));
+    });
+    e2e_case("fase 1 part A: a run with reward weapons and a rule-B mag; the game exit gives back the real character's exact inventory and mag", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      const GCCharacter real = real_character();
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      // what the reward picks leave on the run copy (class 1, the Saber line held): a weapon Epic at room 5, equipped by
+      // SpireEquipItem, a new-line Legendary at room 11 in the pack, the old run weapon unequipped, and the run mag
+      // rule B made for the equipped weapon after 20 levels of mag food
+      auto overlay = p.c->character_file(false, true);
+      auto rnd0 = [](uint32_t) -> uint32_t { return 0; };
+      const uint8_t held[12] = {0x00, 0x01, 0x00};
+      auto weapon = spire_reward_offer(rewards_e2e, SpireRewardKind::WEAPON, 1, held, 5, SpireRewardTier::EPIC, rnd0);
+      auto other = spire_reward_offer(rewards_e2e, SpireRewardKind::NEW_LINE, 1, held, 11, SpireRewardTier::LEGENDARY, rnd0);
+      const auto& stats = overlay->disp.stats.char_stats;
+      auto need = spire_reward_mag_need(weapon.info, stats.atp, stats.ata, stats.mst, SpireAtaModel::SAFE);
+      SpireMagBytes before_mag;
+      memcpy(before_mag.data(), p.ch->memory.inventory.items[1].data.data1.data(), 12);
+      auto mag = spire_mag_rule_b(mags_e2e.classes.at("HU"), 2, 0, before_mag, need, 20, 1);
+      expect(spire_reward_meets(weapon.info, stats.atp, stats.ata, stats.mst, &mag, SpireAtaModel::SAFE) ||
+          (need.pow + need.dex + need.mind > 200));
+      PlayerInventoryBE worn = p.ch->memory.inventory;
+      auto put = [&](size_t z, const SpireMagBytes& data1, uint32_t id, uint32_t flags) {
+        worn.items[z] = PlayerInventoryItemT<true>();
+        for (size_t x = 0; x < 12; x++) {
+          worn.items[z].data.data1[x] = data1[x];
+        }
+        worn.items[z].data.id = id;
+        worn.items[z].flags = flags;
+        worn.items[z].state = 1;
+      };
+      SpireMagBytes old_weapon{0x00, 0x02};
+      put(0, weapon.item, 0x00810010, 0x0000000C);
+      put(1, mag, 0x00810011, 0x0000000C);
+      worn.items[1].data.data2[0] = 0x64;
+      put(2, other.item, 0x00810012, 0x00000004);
+      put(3, old_weapon, 0x00810000, 0x00000004);
+      worn.num_items = 4;
+      overlay->inventory = worn;
+      p.ch->memory.inventory = worn;
+      expect(server_holds(p, *r.server_real));
+
+      client_sends(w, p, 0x98, p.ch->as_61());
+      expect(!p.c->has_overlay());
+      // the server's character data is the run copy with the rewards until the restore
+      const auto& after_98 = p.c->character_file(false, false)->inventory;
+      expect_eq(4u, static_cast<uint32_t>(after_98.num_items));
+      expect(!memcmp(after_98.items[0].data.data1.data(), weapon.item.data(), 12));
+      expect(!memcmp(after_98.items[1].data.data1.data(), mag.data(), 12));
+      expect(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)));
+      expect_real(p.ch->memory, real, "after the game exit restore of a run with rewards");
+      expect_eq(1u, p.ch->card_writes.size());
+      expect_real(p.ch->card_writes[0], real, "on the memory card after a run with rewards");
+      expect(server_holds(p, *r.server_real));
+      p.ch->open = false;
+      auto p2 = next_login_is_real(w, p.ch->card_writes[0], real, *r.server_real, "the login after a run with rewards");
+      p2.ch->open = false;
     });
     e2e_case("the connection drops mid-run: no 98, the next login restores the real character; after a card write that did not arrive, the login after that restores it again", [&]() {
       TempCwd temp_cwd;
