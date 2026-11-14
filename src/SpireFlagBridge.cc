@@ -4123,6 +4123,52 @@ static asio::awaitable<void> spire_run_mag_reminder_later(
   c->log.info_f("Spire run mag: first mag (no 'C' 14 equip); reminder in {} ms: \"{}\"", delay.count(), text);
 }
 
+// The refusal checks of a 'Z' ASK or EXAM (SpireRunMagRefusal, in its order), the mag table and the class's line; fase 1
+// part A: a reward pick ('Z' sub 6) asks the same before it answers anything but the entry's own item
+static SpireRunMagRefusal spire_run_mag_check(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t serial_number, uint32_t quest_number, const std::shared_ptr<PSOBBCharacterFile>& overlay,
+    SpireMagTable& table, const SpireMagLine*& line, std::string& detail) {
+  using R = SpireRunMagRefusal;
+  SpireRunMagState st;
+  R refusal = R::NONE;
+  try {
+    st.gc_v3 = (c->version() == Version::GC_V3);
+    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
+    st.spire_game = (c->lobby.lock() == l) && l->is_game() && (l->mode == GameMode::BATTLE) && l->quest && rules &&
+        rules->replace_char && spire_guard_quest_is_guarded(c, quest_number);
+    st.has_overlay = !!overlay;
+    std::string filename = spire_guard_filename_for(c, serial_number);
+    if (!filename.empty() && std::filesystem::is_regular_file(filename)) {
+      auto snapshot = spire_guard_load(filename);
+      st.restore_pending = snapshot.restore_pending;
+      st.run_in_progress = snapshot.run_in_progress;
+    }
+    st.base_returned = spire_base_returned_has(c, l->lobby_id);
+    st.run_again = spire_run_again_games.count(l->lobby_id);
+    st.refreshed_by_61 = spire_run_mag_overlay_refreshed(c, l);
+    st.enabled = true; // a missing or broken file is NO_TABLE
+    try {
+      table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+      st.enabled = table.enabled;
+      auto character = c->character_file(false, false);
+      const char* arch = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "";
+      auto it = table.classes.find(arch);
+      if (it != table.classes.end()) {
+        line = &it->second;
+      }
+      st.has_table = !!line;
+    } catch (const std::exception& e) {
+      detail = std::format(" ({}: {})", SPIRE_RUN_MAG_FILE, e.what());
+    }
+    st.overlay_mags = overlay ? spire_run_mag_inventory_mags(overlay->inventory).size() : 0;
+    refusal = spire_run_mag_refusal(st);
+  } catch (const std::exception& e) {
+    refusal = R::MARKER;
+    detail = std::format(" ({})", e.what());
+  }
+  return refusal;
+}
+
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t sub = (value >> 16) & 0xFF;
@@ -4220,46 +4266,10 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
   }
 
   using R = SpireRunMagRefusal;
-  SpireRunMagState st;
   SpireMagTable table;
   const SpireMagLine* line = nullptr;
   std::string detail;
-  R refusal = R::NONE;
-  try {
-    st.gc_v3 = (c->version() == Version::GC_V3);
-    const auto& rules = l->quest ? l->quest->meta.battle_rules : nullptr;
-    st.spire_game = (c->lobby.lock() == l) && l->is_game() && (l->mode == GameMode::BATTLE) && l->quest && rules &&
-        rules->replace_char && spire_guard_quest_is_guarded(c, quest_number);
-    st.has_overlay = !!overlay;
-    std::string filename = spire_guard_filename_for(c, serial_number);
-    if (!filename.empty() && std::filesystem::is_regular_file(filename)) {
-      auto snapshot = spire_guard_load(filename);
-      st.restore_pending = snapshot.restore_pending;
-      st.run_in_progress = snapshot.run_in_progress;
-    }
-    st.base_returned = spire_base_returned_has(c, l->lobby_id);
-    st.run_again = spire_run_again_games.count(l->lobby_id);
-    st.refreshed_by_61 = spire_run_mag_overlay_refreshed(c, l);
-    st.enabled = true; // a missing or broken file is NO_TABLE
-    try {
-      table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
-      st.enabled = table.enabled;
-      auto character = c->character_file(false, false);
-      const char* arch = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "";
-      auto it = table.classes.find(arch);
-      if (it != table.classes.end()) {
-        line = &it->second;
-      }
-      st.has_table = !!line;
-    } catch (const std::exception& e) {
-      detail = std::format(" ({}: {})", SPIRE_RUN_MAG_FILE, e.what());
-    }
-    st.overlay_mags = overlay ? spire_run_mag_inventory_mags(overlay->inventory).size() : 0;
-    refusal = spire_run_mag_refusal(st);
-  } catch (const std::exception& e) {
-    refusal = R::MARKER;
-    detail = std::format(" ({})", e.what());
-  }
+  R refusal = spire_run_mag_check(c, l, serial_number, quest_number, overlay, table, line, detail);
 
   SpireRunMagHandled handled; // a refusal answers result 0, old type 0xFF
   SpireRunMagLedger* led = nullptr;

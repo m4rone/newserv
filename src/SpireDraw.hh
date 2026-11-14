@@ -26,6 +26,12 @@ struct SpireDrawEntry {
   // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 1): the display name, the first line of its reward page without tags;
   // "" = no name known (an older draw.json, or a value that is no plain ASCII string of at most 22 characters)
   std::string name;
+  // Fase 1 part A (SpireRewards.hh): 1 Wapen, 2 Nieuwe lijn, 3 Mag-voer: the server picks the item at the draw and
+  // answers it at the pick ('Z' sub 6); 0 = an entry of the quest's own (draw.json "srv"). own_bytes: the entry's own
+  // item (draw.json "bytes"), what a pick gets when the server has no reward to give (disabled, no grid, no run copy).
+  uint8_t srv_kind = 0;
+  bool has_own_bytes = false;
+  std::array<uint8_t, 12> own_bytes{};
 };
 
 // v62 (B-REGIE-16-13): an exam of the quest, keyed by its BOSS room k (draw.json "exams")
@@ -98,7 +104,12 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
 // the tail "Walk to choose.", then the curse tags; still over, "Rewards: <count> ready. Walk to choose.". Empty if
 // nothing was drawn, the archetype is out of range, or a drawn entry has no name.
 constexpr size_t SPIRE_DRAW_OVERVIEW_MAX = 90;
-std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn);
+// Fase 1 part A: slot_names (board slot -> text) replaces a drawn entry's name, the server's offer with its tier
+// ("$C6EPIC Musashi$C7"); a colour code ($C<n>) does not count against SPIRE_DRAW_OVERVIEW_MAX
+// (spire_draw_visible_size).
+std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn,
+    const std::map<uint32_t, std::string>& slot_names = {});
+size_t spire_draw_visible_size(const std::string& line);
 // The short name of a curse code in the overview line: 1 (R12 Cursed Chest) "-1 life", 2 (R13 Jellen Mark) "Jellen",
 // 3 "Glass"; any other code "" (the line then says only "cursed").
 const char* spire_draw_curse_name(uint32_t curse);

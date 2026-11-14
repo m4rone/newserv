@@ -134,6 +134,7 @@ set(SOURCES
     src/SpireFlagBridge.cc
     src/SpireMag.cc
     src/SpireMeta.cc
+    src/SpireRewards.cc
     src/StaticGameData.cc
     src/StaticTests.cc
     src/TeamIndex.cc

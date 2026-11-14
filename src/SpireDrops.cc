@@ -89,8 +89,9 @@ CharacterStats spire_drops_stats_ahead(
   return ret;
 }
 
-static bool spire_drops_stats_meet(const ItemParameterTable::Weapon& w, const CharacterStats& s) {
-  return (s.atp >= w.atp_required) && (s.ata >= w.ata_required) && (s.mst >= w.mst_required);
+static bool spire_drops_stats_meet(const ItemParameterTable::Weapon& w, const CharacterStats& s, SpireAtaModel model) {
+  return (s.atp >= w.atp_required) && !spire_ata_dex_needed(model, s.ata, w.ata, w.ata_required) &&
+      (s.mst >= w.mst_required);
 }
 
 SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemData& item, const SpireDropPlayer& p) {
@@ -103,10 +104,10 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
     if ((w.usability_flags & bits) != bits) {
       return SpireWeaponFit::NO;
     }
-    if (spire_drops_stats_meet(w, p.now)) {
+    if (spire_drops_stats_meet(w, p.now, p.ata_model)) {
       return SpireWeaponFit::NOW;
     }
-    return spire_drops_stats_meet(w, p.ahead) ? SpireWeaponFit::AHEAD : SpireWeaponFit::NO;
+    return spire_drops_stats_meet(w, p.ahead, p.ata_model) ? SpireWeaponFit::AHEAD : SpireWeaponFit::NO;
   } catch (const std::exception&) {
     return SpireWeaponFit::NO; // not in Sega's table: nothing the player can equip
   }
@@ -498,6 +499,7 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
     SpireDropPlayer player;
     player.char_class = p->disp.visual.sh.char_class;
     player.now = p->disp.stats.char_stats;
+    player.ata_model = spire_ata_model_configured(); // fase 1 part A: the reward grid's AtaModel key
     player.ahead = spire_drops_stats_ahead(
         *level_table, player.char_class, p->disp.stats.level, player.now, cfg->levels_ahead);
     try { // BALANS-4 174: the weapon he has equipped, the reference for a boss weapon

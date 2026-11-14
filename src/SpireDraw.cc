@@ -2,6 +2,8 @@
 
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
+#include <phosg/Strings.hh>
+#include <string.h>
 #include <format>
 #include <stdexcept>
 
@@ -75,6 +77,22 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
       e.own_curse_code = e.own_curse ? e_json->get_int("own_curse_code", 0) : 0;
       e.glass_ok = e_json->get_bool("glass_ok");
       e.name = spire_draw_optional_name(spire_draw_optional_key(*e_json, "name"), ENTRY_NAME_MAX); // v62
+      // fase 1 part A: a server reward entry and its own item; a bad value means "no server reward" and never fails
+      // the table (the draw is the part that must always work)
+      try {
+        int64_t srv = e_json->get_int("srv", 0);
+        e.srv_kind = ((srv >= 0) && (srv <= 3)) ? srv : 0;
+        if (e.srv_kind && e_json->contains("bytes")) {
+          auto b = phosg::parse_data_string(e_json->get_string("bytes"));
+          if (b.size() == 12) {
+            memcpy(e.own_bytes.data(), b.data(), 12);
+            e.has_own_bytes = true;
+          }
+        }
+      } catch (const std::exception&) {
+        e.srv_kind = 0;
+        e.has_own_bytes = false;
+      }
       a.entries.emplace_back(e);
     }
     for (const auto& b : a_json->get_list("kbands")) {
@@ -410,7 +428,20 @@ const char* spire_draw_curse_name(uint32_t curse) {
   }
 }
 
-std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn) {
+size_t spire_draw_visible_size(const std::string& line) {
+  size_t ret = 0;
+  for (size_t z = 0; z < line.size(); z++) {
+    if ((line[z] == '$') && (z + 2 < line.size()) && (line[z + 1] == 'C')) {
+      z += 2; // a colour code ($C<n>) shows nothing
+    } else {
+      ret++;
+    }
+  }
+  return ret;
+}
+
+std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn,
+    const std::map<uint32_t, std::string>& slot_names) {
   if (archetype >= table.archetypes.size()) {
     return "";
   }
@@ -426,7 +457,8 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
     if (id == 0) {
       continue;
     }
-    if ((id > entries.size()) || entries[id - 1].name.empty()) {
+    auto named = slot_names.find(slot); // fase 1 part A: the server's own offer in this slot
+    if ((id > entries.size()) || (entries[id - 1].name.empty() && (named == slot_names.end()))) {
       return ""; // a drawn entry without a name: no overview
     }
     // a curse rides only on a rare (rewards.json vloek.pct_van_zeldzaam); the sequential fallback past a rare row keeps
@@ -446,7 +478,8 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
       curse_tag = *curse_name ? std::format("cursed: {}", curse_name) : "cursed";
     }
     std::string full = rare ? (cursed ? " (rare, " + curse_tag + ")" : " (rare)") : (cursed ? " (" + curse_tag + ")" : "");
-    list.emplace_back(Drawn{&e.name, std::move(full), cursed ? " (" + curse_tag + ")" : ""});
+    list.emplace_back(Drawn{(named != slot_names.end()) ? &named->second : &e.name, std::move(full),
+        cursed ? " (" + curse_tag + ")" : ""});
   }
   if (list.empty()) {
     return "";
@@ -464,7 +497,7 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
           ((suffix == Suffix::FULL) ? list[z].full : (suffix == Suffix::CURSE_ONLY) ? list[z].curse_only : "");
     }
     line += tail;
-    if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
+    if (spire_draw_visible_size(line) <= SPIRE_DRAW_OVERVIEW_MAX) {
       return line;
     }
   }

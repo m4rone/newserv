@@ -167,8 +167,73 @@ uint32_t spire_mag_start_step(const SpireMagTable& table, uint8_t k) {
   return std::count_if(table.boss_rooms.begin(), table.boss_rooms.end(), [&](uint8_t b) { return b < k; });
 }
 
-SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
-    const std::optional<SpireMagBytes>& last_mirrored) {
+uint16_t SpireMagNeed::of(size_t which) const {
+  return (which == 1) ? this->pow : (which == 2) ? this->dex : (which == 3) ? this->mind : 0;
+}
+
+size_t spire_mag_main_stat(const std::string& archetype, uint8_t lean) {
+  if (lean == SPIRE_RUN_MAG_LEAN_SHELL) {
+    return 0;
+  }
+  return (archetype == "FO") ? 3 : 1;
+}
+
+uint16_t spire_mag_stat_word(const SpireMagBytes& b, size_t which) {
+  return spire_mag_word(b, which);
+}
+
+SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMagBytes>& current,
+    const SpireMagNeed& need, size_t main_stat) {
+  // the order of the stats not asked: DEF first, then the others in word order, the main stat last
+  std::vector<size_t> order;
+  for (size_t z : {0, 1, 2, 3}) {
+    if (z != main_stat) {
+      order.emplace_back(z);
+    }
+  }
+  order.emplace_back(main_stat);
+  auto cut_to = [&](size_t which, uint32_t lower) {
+    uint32_t level = spire_mag_level_of(bytes);
+    uint16_t w = spire_mag_word(bytes, which);
+    while ((level > 200) && (w > lower)) {
+      uint32_t cut = std::min<uint32_t>((level - 200) * 100, w - lower);
+      w -= cut;
+      spire_mag_set_word(bytes, which, w);
+      w = spire_mag_word(bytes, which); // & 0x7FFE
+      level = spire_mag_level_of(bytes);
+    }
+  };
+  auto now = [&](size_t which) -> uint32_t { return current ? spire_mag_word(*current, which) : 0; };
+  auto asked = [&](size_t which) { return need.of(which) > 0; };
+  for (size_t z : order) { // 1: the rise of the stats not asked
+    if (!asked(z)) {
+      cut_to(z, now(z));
+    }
+  }
+  for (size_t z : order) { // 2: the rise of the asked stats above their need
+    if (asked(z)) {
+      cut_to(z, std::max<uint32_t>(now(z), need.of(z) * 100));
+    }
+  }
+  for (size_t z : order) { // 3: the stats not asked, down to 0
+    if (!asked(z)) {
+      cut_to(z, 0);
+    }
+  }
+  for (size_t z : order) { // 4: the need alone is above 200
+    if (asked(z)) {
+      cut_to(z, std::min<uint32_t>(now(z), need.of(z) * 100));
+    }
+  }
+  for (size_t z : order) {
+    cut_to(z, 0);
+  }
+  bytes[2] = spire_mag_level_of(bytes);
+  return bytes;
+}
+
+SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+    const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, uint16_t feed_levels, size_t main_stat) {
   if (line.steps.empty()) {
     throw std::logic_error("run mag line has no steps");
   }
@@ -190,22 +255,49 @@ SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint
       ret[1] = floor->row.id;
     }
   }
-  if (last_mirrored) {
-    auto merged = ret;
-    for (size_t z = 0; z < 4; z++) {
-      spire_mag_set_word(merged, z, std::max(spire_mag_word(ret, z), spire_mag_word(*last_mirrored, z)));
-    }
-    if (spire_mag_level_of(merged) <= 200) {
-      ret = merged;
-    } else {
-      for (size_t z = 0; z < 4; z++) {
-        spire_mag_set_word(ret, z, spire_mag_word(*last_mirrored, z));
-      }
-    }
+  // the mag the player holds, with the mag food on its main stat (on the step row when there is none yet)
+  std::optional<SpireMagBytes> held = current;
+  if (feed_levels) {
+    SpireMagBytes fed = current ? *current : ret;
+    uint32_t w = spire_mag_word(fed, main_stat) + feed_levels * 100u;
+    spire_mag_set_word(fed, main_stat, std::min<uint32_t>(w, 20000));
+    held = fed;
   }
-  ret[2] = spire_mag_level_of(ret);
+  for (size_t z = 0; z < 4; z++) {
+    uint32_t w = std::max<uint32_t>(spire_mag_word(ret, z), need.of(z) * 100u);
+    if (held) {
+      w = std::max<uint32_t>(w, spire_mag_word(*held, z));
+    }
+    spire_mag_set_word(ret, z, std::min<uint32_t>(w, 20000));
+  }
   ret[3] = 0;
-  return ret;
+  // the cut keeps the mag as the player holds it (current, without the food: food above 200 is what goes first)
+  return spire_mag_fit_200(ret, current, need, main_stat);
+}
+
+SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+    const std::optional<SpireMagBytes>& last_mirrored) {
+  return spire_mag_rule_b(line, step, start_bonus, last_mirrored, SpireMagNeed{}, 0, 1);
+}
+
+uint8_t spire_mag_evolve_id(const SpireMagBytes& bytes, uint8_t from_id, const SpireMagEvolveAt& evolve_at) {
+  uint32_t level = spire_mag_level_of(bytes);
+  auto b = bytes;
+  b[1] = from_id;
+  std::vector<uint8_t> rules;
+  if (level >= 10) {
+    rules.emplace_back(10);
+  }
+  if (level >= 35) {
+    rules.emplace_back(35);
+  }
+  if (level >= 50) {
+    rules.emplace_back(std::min<uint32_t>(level - (level % 5), 200));
+  }
+  for (uint8_t at : rules) {
+    b[1] = evolve_at(b, at);
+  }
+  return b[1];
 }
 
 SpireRunMagRefusal spire_run_mag_refusal(const SpireRunMagState& st) {
@@ -283,7 +375,8 @@ uint32_t spire_run_mag_answer(uint32_t tag, uint8_t old_type, bool result) {
 }
 
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
-    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus) {
+    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus, size_t main_stat,
+    const SpireMagEvolveAt& evolve_at) {
   SpireRunMagDecision ret;
   ledger.boss_rooms.insert(server_boss_rooms.begin(), server_boss_rooms.end());
   bool exam_new_boss = (sub == SPIRE_RUN_MAG_EXAM) && k && !ledger.boss_rooms.count(k);
@@ -292,13 +385,20 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   if ((sub == SPIRE_RUN_MAG_EXAM) && k) {
     ledger.boss_rooms.emplace(k);
   }
-  if (ledger.issued_step < static_cast<int32_t>(ret.expected_step)) {
+  bool new_step = ledger.issued_step < static_cast<int32_t>(ret.expected_step);
+  if (new_step || ledger.boost_due) {
     ret.result = true;
-    ret.bytes = spire_mag_step_bytes(line, ret.expected_step, start_bonus, ledger.last_mirrored);
+    ret.bytes = spire_mag_rule_b(line, std::max<int64_t>(ret.expected_step, ledger.issued_step), start_bonus,
+        ledger.last_mirrored, ledger.need, ledger.feed_levels, main_stat);
+    if (ledger.boost_due && evolve_at) {
+      uint8_t from = ledger.last_mirrored ? (*ledger.last_mirrored)[1] : ret.bytes[1];
+      ret.bytes[1] = spire_mag_evolve_id(ret.bytes, from, evolve_at);
+    }
+    ledger.offered_boost = ledger.boost_due;
     // B-REGIE-14-10: the answer issues the step; a RESULT 0 gives it back. An earlier offer whose RESULT never came
     // stays issued (the client holds that mag), so it is what a RESULT 0 of this answer returns to.
     ledger.step_before_offer = ledger.issued_step;
-    ledger.issued_step = ret.expected_step;
+    ledger.issued_step = std::max<int32_t>(ret.expected_step, ledger.issued_step);
     ledger.offered_step = ret.expected_step;
     ledger.offered = ret.bytes;
   }
@@ -343,7 +443,7 @@ const char* spire_run_mag_lean_store_name(SpireRunMagLeanStore r) {
 
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus, uint8_t lean_bits) {
+    uint32_t start_bonus, uint8_t lean_bits, const std::string& archetype, const SpireMagEvolveAt& evolve_at) {
   SpireRunMagHandled ret;
   if (ledger.issued_step < 0 && ledger.boss_rooms.empty() && !ledger.offered) {
     ledger.start_step = spire_mag_start_step(table, k);
@@ -356,7 +456,8 @@ SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMa
   auto column = spire_mag_column(line, ledger.lean);
   ret.shell = column.shell;
   ret.shell_fell_back = column.fell_back;
-  ret.decision = spire_run_mag_decide(ledger, column.line, sub, k, server_boss_rooms, start_bonus);
+  ret.decision = spire_run_mag_decide(ledger, column.line, sub, k, server_boss_rooms, start_bonus,
+      spire_mag_main_stat(archetype, ledger.lean), evolve_at);
   if (ret.decision.result) {
     ledger.offered_shell = column.shell;
   }
@@ -375,9 +476,14 @@ bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
   }
   if (created) {
     ledger.last_mirrored = ledger.offered;
+    if (ledger.offered_boost) { // rule B: the boost is on the client now
+      ledger.boost_due = false;
+      ledger.feed_levels = 0;
+    }
   } else {
     ledger.issued_step = ledger.step_before_offer;
   }
+  ledger.offered_boost = false;
   ledger.offered.reset();
   ledger.offered_shell = false;
   ledger.offered_step = -1;
@@ -427,6 +533,11 @@ bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<Sp
   if ((overlay_mags.size() == 1) && ledger.offered && (overlay_mags[0] == *ledger.offered)) {
     // the offered mag was created and its RESULT lost: confirmed as by a RESULT 1
     ledger.last_mirrored = ledger.offered;
+    if (ledger.offered_boost) {
+      ledger.boost_due = false;
+      ledger.feed_levels = 0;
+    }
+    ledger.offered_boost = false;
     ledger.offered.reset();
     ledger.offered_shell = false;
     ledger.offered_step = -1;

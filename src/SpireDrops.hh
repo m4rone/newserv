@@ -9,6 +9,7 @@
 
 #include "EnemyType.hh"
 #include "ItemData.hh"
+#include "SpireRewards.hh"
 #include "ItemParameterTable.hh"
 #include "LevelTable.hh"
 #include "PlayerSubordinates.hh"
@@ -67,6 +68,9 @@ struct SpireDropPlayer {
   CharacterStats now; // the player's stats now
   CharacterStats ahead; // his stats levels_ahead levels later (Sega's level table)
   uint32_t carried = 0; // spire_drops_weapon_strength of the weapon he has equipped (0 = none or unknown)
+  // Fase 1 part A: which ATA meets a weapon's ATA requirement, the one AtaModel key of system/spire-rewards.json
+  // (SpireRewards.hh spire_ata_model_configured; spire_drops_filter fills it), the same model the reward grid uses
+  SpireAtaModel ata_model = SpireAtaModel::SAFE;
 };
 // The stats of a character of this class at level (0-based) + levels_ahead, from his stats now (level capped at 199)
 CharacterStats spire_drops_stats_ahead(

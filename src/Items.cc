@@ -342,6 +342,18 @@ void apply_mag_feed_result(
 
   uint8_t mag_level = mag_item.compute_mag_level();
   mag_item.data1[2] = mag_level;
+  apply_mag_evolution(mag_item, item_parameter_table, mag_metadata_table, char_class, section_id,
+      version_has_rare_mags, mag_level);
+}
+
+void apply_mag_evolution(
+    ItemData& mag_item,
+    std::shared_ptr<const ItemParameterTable> item_parameter_table,
+    std::shared_ptr<const MagMetadataTable> mag_metadata_table,
+    uint8_t char_class,
+    uint8_t section_id,
+    bool version_has_rare_mags,
+    uint8_t mag_level) {
   uint8_t evolution_number = mag_metadata_table->get_evolution_number(mag_item.data1[1]);
   uint8_t mag_number = mag_item.data1[1];
 

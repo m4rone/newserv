@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -105,10 +106,42 @@ uint32_t spire_mag_start_step(const SpireMagTable& table, uint8_t k);
 
 // The bytes of step `step` for a line: the step row, merged per stat with the highest floor the start bonus reaches and
 // with the mag the ledger last mirrored (so fed progress is never lost). The kind is the step row's, or the floor's
-// when the floor's level is above the step's. LL is recomputed as the sum; if the merge would pass 200, the mirrored
-// mag's stats stay (it is a valid mag already) under the step's kind.
+// when the floor's level is above the step's. LL is recomputed as the sum; a merge past 200 is cut back by
+// spire_mag_fit_200 without a need (rule B: the rise over the mirrored mag goes first, DEF first, main stat POW last).
 SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
     const std::optional<SpireMagBytes>& last_mirrored);
+
+// Fase 1 part A, rule B (pso-roguelike new-features/roguelike/design/beloningen-per-klasse.md par. 3): the mag levels a
+// reward weapon asks so the run copy can wear it (SpireRewards.hh spire_reward_mag_need). Words: 0 DEF, 1 POW, 2 DEX,
+// 3 MIND, as in data1.
+struct SpireMagNeed {
+  uint16_t pow = 0;
+  uint16_t dex = 0;
+  uint16_t mind = 0;
+  bool operator==(const SpireMagNeed&) const = default;
+  uint16_t of(size_t which) const; // the need of word `which` (DEF never: 0)
+};
+// The word of the lean's stat: DEF for Shell (lean 2), else POW for HU and RA, MIND for FO
+size_t spire_mag_main_stat(const std::string& archetype, uint8_t lean);
+// The data1 word `which` (0 DEF, 1 POW, 2 DEX, 3 MIND) in hundredths
+uint16_t spire_mag_stat_word(const SpireMagBytes& b, size_t which);
+// Rule B's cut (design par. 3: "komt de som boven 200, dan kort de server eerst de stats in die het wapen niet vraagt"):
+// bytes above level 200 are cut back to 200, keeping as much of `current` (the mag the player holds) as it can. First the
+// rise over current of the stats the need does not ask (DEF, then the others, the main stat last), then the rise of the
+// asked stats above their need, then the current value of the stats not asked (same order), and the asked stats only if
+// the need alone is above 200. The level never ends below current's when current is at most 200. LL is recomputed.
+SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMagBytes>& current,
+    const SpireMagNeed& need, size_t main_stat);
+// Rule B: per stat the highest of the mag the player holds (current, with feed_levels added on the main stat), the step
+// row, the start floor of the bought start level and what the weapon asks; then spire_mag_fit_200. The kind is the step
+// row's (or the floor's, as spire_mag_step_bytes); the caller renames it with Sega's evolution (spire_mag_evolve_id).
+SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+    const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, uint16_t feed_levels, size_t main_stat);
+// The mag kind Sega's own evolution gives a mag with these stats (Items.cc apply_mag_evolution): from `from_id`, the
+// rules of the levels a fed mag passes on its way up (10, 35, then the highest multiple of 5 from 50 on), each with the
+// final stats. evolve_at(bytes with data1[1] = the kind so far, level) returns the kind after that level's rule.
+using SpireMagEvolveAt = std::function<uint8_t(const SpireMagBytes&, uint8_t)>;
+uint8_t spire_mag_evolve_id(const SpireMagBytes& bytes, uint8_t from_id, const SpireMagEvolveAt& evolve_at);
 
 // The ledger of one run mag: per (serial, character id, run id), kept by run id and step, never by item id (item ids
 // change per game). Persisted in the savestate file ("RunMag").
@@ -125,6 +158,13 @@ struct SpireRunMagLedger {
   std::optional<SpireMagBytes> offered; // the mag of the last answer with result 1, until its RESULT
   bool offered_shell = false; // F10: the offered mag came from the Shell column (the evolve text says so; in memory only)
   uint8_t lean = 0; // 0 none (default Fang/Mind), 1 Fang/Mind, 2 Shell
+  // Fase 1 part A, rule B (persisted "Need", "BoostDue", "Feed"): what the reward weapon taken last asks; whether a
+  // reward weapon or mag food changed what the mag should be (the next ASK answers it, also without a new step); the
+  // mag food levels owed on the main stat. A RESULT 1 settles both, a RESULT 0 leaves them owed.
+  SpireMagNeed need;
+  bool boost_due = false;
+  uint16_t feed_levels = 0;
+  bool offered_boost = false; // the offered mag is a boost (its kind follows Sega's evolution; in memory only)
 };
 
 // F10: the lean bits of an ASK or EXAM word (bits 8-15)
@@ -188,8 +228,12 @@ struct SpireRunMagDecision {
   uint32_t expected_step = 0;
   SpireMagBytes bytes{};
 };
+// Rule B: every answer is spire_mag_rule_b of the ledger's need and feed (both 0 without a reward); a boost_due answers
+// even without a new step, and its kind follows evolve_at (spire_mag_evolve_id) when one is given. main_stat:
+// spire_mag_main_stat of the class and the ledger's lean.
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
-    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus);
+    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus, size_t main_stat = 1,
+    const SpireMagEvolveAt& evolve_at = nullptr);
 // The ledger step of an ASK or EXAM that no refusal stopped (the 'Z' handler in SpireFlagBridge.cc): the start step
 // from the asking room (only while the ledger has issued, counted and offered nothing, so a later ASK never moves it),
 // the ledger following the fed mag (spire_run_mag_follow_mirror), the old type the quest deletes (data1[1] of the one
@@ -209,7 +253,7 @@ struct SpireRunMagHandled {
 };
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus, uint8_t lean_bits);
+    uint32_t start_bonus, uint8_t lean_bits, const std::string& archetype = "HU", const SpireMagEvolveAt& evolve_at = nullptr);
 // The ledger step of a 'V' (savestate write): the ledger follows the overlay's fed mag (spire_run_mag_follow_mirror)
 // unless an in-game 61 refreshed the overlay in this game (amendment 3: it may hold the real mag then). False without
 // a ledger or when it did not follow.
