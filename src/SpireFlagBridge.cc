@@ -5446,37 +5446,47 @@ void spire_guard_battle_join(std::shared_ptr<Client> c, std::shared_ptr<const Lo
   }
 }
 
-SpireNoQuestAction spire_guard_no_quest_action(
-    bool client_in_game, bool battle_game, bool has_quest, bool quest_selection_in_progress, bool can_run_functions) {
+SpireNoQuestAction spire_guard_no_quest_action(bool client_in_game, bool battle_game, bool has_quest,
+    bool quest_selection_in_progress, bool can_run_functions, uint32_t alone_seconds, uint32_t company_seconds) {
   if (!client_in_game || !battle_game || has_quest) {
     return SpireNoQuestAction::NONE;
   }
   if (quest_selection_in_progress) {
     return SpireNoQuestAction::WAIT;
   }
+  // waiting alone for the partner pauses the clock, but never for more than SPIRE_GUARD_NO_QUEST_ALONE_SECONDS
+  if ((company_seconds < SPIRE_GUARD_NO_QUEST_SECONDS) && (alone_seconds < SPIRE_GUARD_NO_QUEST_ALONE_SECONDS)) {
+    return SpireNoQuestAction::WAIT;
+  }
   return can_run_functions ? SpireNoQuestAction::EXIT : SpireNoQuestAction::TELL;
 }
 
+// Marck's run 2026-11-14 19:43: the game's maker waited alone for the second player and was sent back after 180 s.
+// In steps of SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS the watcher counts time alone in the game and time with someone
+// else in it apart: the 180 s count only while in company, and SPIRE_GUARD_NO_QUEST_ALONE_SECONDS alone in all at
+// most (regie, 2026-11-14); then the client goes back to the lobby as before.
 static asio::awaitable<void> spire_guard_watch_no_quest(std::weak_ptr<Client> weak_c, std::weak_ptr<Lobby> weak_l) {
-  co_await async_sleep(std::chrono::seconds(SPIRE_GUARD_NO_QUEST_SECONDS));
+  uint32_t alone_seconds = 0, company_seconds = 0;
   for (;;) {
+    co_await async_sleep(std::chrono::seconds(SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS));
     auto c = weak_c.lock();
     auto l = weak_l.lock();
     if (!c || !l) {
       co_return;
     }
+    ((l->count_clients() <= 1) ? alone_seconds : company_seconds) += SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS;
     auto action = spire_guard_no_quest_action(
         c->lobby.lock() == l, l->is_game() && (l->mode == GameMode::BATTLE), !!l->quest,
         l->check_flag(Lobby::Flag::QUEST_SELECTION_IN_PROGRESS),
-        c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE));
+        c->check_flag(Client::Flag::HAS_SEND_FUNCTION_CALL) && c->check_flag(Client::Flag::SEND_FUNCTION_CALL_ACTUALLY_RUNS_CODE),
+        alone_seconds, company_seconds);
     if (action == SpireNoQuestAction::NONE) {
       co_return;
     }
     if (action == SpireNoQuestAction::WAIT) {
-      co_await async_sleep(std::chrono::seconds(SPIRE_GUARD_NO_QUEST_RECHECK_SECONDS));
       continue;
     }
-    c->log.warning_f("Spire guard: Battle game without a quest for {} s; {}", SPIRE_GUARD_NO_QUEST_SECONDS,
+    c->log.warning_f("Spire guard: Battle game without a quest for {} s ({} s alone); {}", alone_seconds + company_seconds, alone_seconds,
         (action == SpireNoQuestAction::EXIT) ? "sending the client back to the lobby" : "client cannot run functions, told to leave");
     send_text_message(c, "$C6Spire: no quest was\nloaded. Back to the\nlobby.");
     if (action == SpireNoQuestAction::EXIT) {
