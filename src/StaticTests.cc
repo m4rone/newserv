@@ -10096,6 +10096,43 @@ void run_static_tests() {
       });
     }
 
+    // veilig-2 (second measurement of bundle 1, section 3): the tests of M1, K7 and K1 call the decision itself; the cases
+    // below play what a client sends through the server's own handlers, so they fail when a handler stops calling the
+    // fix or calls it with the wrong side
+    e2e_case("a player hit or killed by an enemy (6x4A, 6x4B, 6x4C, 6x4D through on_command) moves the floor clock, never the enemies' side clock (M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      auto l = new_game(w);
+      l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = l;
+      constexpr uint8_t FLOOR = 0x03;
+      p.c->floor = FLOOR;
+      for (uint8_t sub : {0x4A, 0x4B, 0x4C, 0x4D}) {
+        // both clocks of the floor 400 s old: the clock a hit on the player makes young again shows which side it set
+        spire_fight_note(l->lobby_id, FLOOR, std::chrono::steady_clock::now() - std::chrono::seconds(400), true);
+        std::string data;
+        if (sub == 0x4D) {
+          G_PlayerDied_6x4D cmd;
+          cmd.header = {0x4D, sizeof(G_PlayerDied_6x4D) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        } else {
+          G_ClientIDHeader cmd{sub, sizeof(G_ClientIDHeader) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        }
+        client_sends(w, p, 0x60, data);
+        auto now = std::chrono::steady_clock::now();
+        if (spire_fight_quiet(l->lobby_id, FLOOR, now) >= std::chrono::seconds(5)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player did not reach the floor clock (spire_bridge_note_fight not called)", sub));
+        }
+        if (spire_enemy_quiet(l->lobby_id, FLOOR, now) < std::chrono::seconds(390)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player counted as a sign from the enemies' side: an enemy out of reach that shoots keeps the room shut", sub));
+        }
+      }
+    });
+
     expect_eq(0u, e2e_failed);
 
     // Bank (regie): a restore never reads the bank back, so its log line may not read as if it did, and the push may
