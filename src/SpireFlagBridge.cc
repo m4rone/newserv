@@ -4284,6 +4284,17 @@ SpireGuardSnapshot spire_guard_load(const std::string& filename) {
     spire_guard_hex_decode(json.get_string("Disp"), &ret.disp, sizeof(ret.disp));
     ret.has_character = true;
   }
+  if (json.contains("BaseBefore")) { // B-REGIE-21-20; a bad record reads as none, and the push is the one of before
+    try {
+      const auto& base_before = json.at("BaseBefore");
+      spire_guard_hex_decode(base_before.get_string("Inventory"), &ret.base_before_inventory, sizeof(ret.base_before_inventory));
+      ret.base_before_meseta = base_before.get_int("Meseta");
+      ret.has_base_before = true;
+    } catch (const std::exception& e) {
+      ret.has_base_before = false;
+      player_data_log.warning_f("Spire guard: {}: BaseBefore unreadable ({}); read as none", filename, e.what());
+    }
+  }
   return ret;
 }
 
@@ -4320,6 +4331,12 @@ void spire_guard_save(const std::string& filename, uint32_t serial_number, const
     json.emplace("Meseta", snapshot.disp.stats.meseta.load());
     json.emplace("Inventory", spire_guard_hex_encode(&snapshot.inventory, sizeof(snapshot.inventory)));
     json.emplace("Disp", spire_guard_hex_encode(&snapshot.disp, sizeof(snapshot.disp)));
+  }
+  if (snapshot.has_base_before) { // B-REGIE-21-20
+    json.emplace("BaseBefore", phosg::JSON::dict({
+        {"Inventory", spire_guard_hex_encode(&snapshot.base_before_inventory, sizeof(snapshot.base_before_inventory))},
+        {"Meseta", snapshot.base_before_meseta},
+    }));
   }
   std::string data = json.serialize(phosg::JSON::SerializeOption::FORMAT);
 
@@ -4531,6 +4548,7 @@ SpireGuardRunStart spire_guard_run_start_apply(SpireGuardSnapshot& snapshot, con
   bool awaiting_save = snapshot.awaiting_save;
   snapshot.awaiting_save = false;
   snapshot.run_in_progress = true;
+  snapshot.has_base_before = false; // B-REGIE-21-20: the run's own snapshot from here on
   snapshot.quest_number = quest_number;
   snapshot.run_copy_print = SpireRunCopyPrint(); // F1: a print belongs to one run; this run's 'O' stores its own
   if (awaiting_save && snapshot.has_character &&
@@ -4549,6 +4567,7 @@ bool spire_guard_awaiting_save_login_apply(
   snapshot.awaiting_save = false;
   if (spire_guard_same_state(inventory, disp, snapshot.inventory, snapshot.disp)) {
     snapshot.has_overlay = false;
+    snapshot.has_base_before = false; // B-REGIE-21-20: the card holds the snapshot
     return true;
   }
   snapshot.restore_pending = true;
@@ -4574,6 +4593,7 @@ bool spire_guard_follow_real_progress(
   // v40: the client writes its card when it leaves the game, so the card holds the real character from now on
   snapshot.awaiting_save = false;
   snapshot.has_overlay = false;
+  snapshot.has_base_before = false; // B-REGIE-21-20
   return true;
 }
 
@@ -5120,6 +5140,40 @@ static std::unordered_set<const Client*> spire_guard_base_follow_pending;
 // address and never dereferenced; spire_guard_after_98 removes the entry in the same 98 handler.
 static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 
+// B-REGIE-21-20: the clients whose current game had another player in it at some moment (a trade, which the server
+// does not follow, could have moved an item to him). Set by every leave of a game with others in it
+// (spire_guard_note_floor_leave, for the leaver and every client still in it), read and removed at the client's 98
+// (spire_guard_after_98). The weak pointer makes a reused address count as not marked.
+static std::unordered_map<const Client*, std::weak_ptr<const Client>> spire_guard_shared_game;
+
+static void spire_guard_note_shared_game(std::shared_ptr<Client> c, bool others_remain) {
+  if (!others_remain) {
+    return;
+  }
+  std::erase_if(spire_guard_shared_game, [](const auto& it) { return it.second.expired(); });
+  spire_guard_shared_game[c.get()] = c;
+  auto l = c->lobby.lock();
+  if (l && l->is_game() && (c->lobby_client_id < l->clients.size()) && (l->clients[c->lobby_client_id] == c)) {
+    for (const auto& lc : l->clients) {
+      if (lc) {
+        spire_guard_shared_game[lc.get()] = lc;
+      }
+    }
+  } else {
+    c->log.warning_f("Spire guard: a game leave with others in it, but the client's lobby is not that game; the others are not marked as sharing it (B-REGIE-21-20)");
+  }
+}
+
+static bool spire_guard_take_shared_game(std::shared_ptr<const Client> c) {
+  auto it = spire_guard_shared_game.find(c.get());
+  if (it == spire_guard_shared_game.end()) {
+    return false;
+  }
+  bool ret = (it->second.lock() == c);
+  spire_guard_shared_game.erase(it);
+  return ret;
+}
+
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
@@ -5187,6 +5241,7 @@ void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby>
 }
 
 void spire_guard_after_98(std::shared_ptr<Client> c) {
+  bool shared_game = spire_guard_take_shared_game(c); // B-REGIE-21-20: the game this 98 leaves
   if (spire_guard_base_exit_pending.erase(c.get())) {
     // v51: the game exit after a verified 'O'; the 98 is the real character with what the base changed
     try {
@@ -5240,6 +5295,7 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
             before.inventory.num_items);
         return;
       }
+      spire_guard_base_before_apply(snapshot, before, shared_game);
       spire_guard_save(filename, serial_number, snapshot);
       spire_guard_floor_settle_dropper(c); // K7b: what he left on the floor is no longer in it
       bool same = spire_guard_same_state(snapshot.inventory, snapshot.disp, before.inventory, before.disp);
@@ -5247,6 +5303,10 @@ void spire_guard_after_98(std::shared_ptr<Client> c) {
           serial_number, same ? ", equal to the one before" : std::format(", changed in the base (was {}, {} items)",
               spire_guard_describe(before), before.inventory.num_items),
           spire_guard_describe(snapshot), snapshot.inventory.num_items);
+      c->log.info_f("Spire guard: the base game for serial {:010} {}; {} (B-REGIE-21-20)", serial_number,
+          shared_game ? "had another player in it" : "was the player's own",
+          snapshot.has_base_before ? "the inventory of before it is kept for a login push to reconcile with the card's bank"
+                                   : "no record of before it: a login push sends the snapshot as it is");
     } catch (const std::exception& e) {
       c->log.warning_f("Spire guard: failed to follow the real character after the base game: {}; the snapshot of before stays", e.what());
     }
@@ -5316,6 +5376,7 @@ uint32_t spire_guard_snapshot_take_drop(
   if (!snapshot.has_character) {
     return 0;
   }
+  snapshot.has_base_before = false; // B-REGIE-21-20: a hand-over with another player; no reconciling after it
   auto& inv = snapshot.inventory;
   uint32_t pi = dropped.primary_identifier();
   if (pi == 0x04000000) {
@@ -5363,6 +5424,7 @@ uint32_t spire_guard_snapshot_give_pickup(
   if (!credit || !snapshot.has_character) {
     return 0;
   }
+  snapshot.has_base_before = false; // B-REGIE-21-20: as in spire_guard_snapshot_take_drop
   auto& inv = snapshot.inventory;
   uint32_t pi = picked.primary_identifier();
   if (pi == 0x04000000) {
@@ -5410,6 +5472,96 @@ uint32_t spire_guard_snapshot_give_pickup(
   }
   inv.num_items = n + 1;
   return amount;
+}
+
+// B-REGIE-21-20: see SpireFlagBridge.hh
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared) {
+  snapshot.has_base_before = !shared && before.has_character;
+  if (snapshot.has_base_before) {
+    snapshot.base_before_inventory = before.inventory;
+    snapshot.base_before_meseta = before.disp.stats.meseta;
+  }
+}
+
+SpireGuardBaseReconcile spire_guard_base_reconcile(
+    SpireGuardSnapshot& snapshot, const PlayerBank200& card_bank, const ItemData::StackLimits& limits) {
+  SpireGuardBaseReconcile ret;
+  bool has = snapshot.has_base_before && snapshot.has_character;
+  snapshot.has_base_before = false;
+  if (!has) {
+    return ret;
+  }
+  const PlayerInventory before = snapshot.base_before_inventory;
+  const PlayerInventory now = snapshot.inventory;
+  auto same = [](const ItemData& a, const ItemData& b) {
+    return !memcmp(a.data1.data(), b.data1.data(), 12) && !memcmp(a.data2.data(), b.data2.data(), 4);
+  };
+  size_t num_before = std::min<size_t>(before.num_items, before.items.size());
+  size_t num_now = std::min<size_t>(now.num_items, now.items.size());
+  size_t num_bank = std::min<size_t>(card_bank.num_items, card_bank.items.size());
+  std::vector<bool> now_matched(num_now, false), bank_matched(num_bank, false);
+  // the card's bank holds it (a slot not counted yet)
+  auto take_from_bank = [&](const ItemData& item) {
+    for (size_t z = 0; z < num_bank; z++) {
+      if (!bank_matched[z] && same(card_bank.items[z].data, item)) {
+        bank_matched[z] = true;
+        return true;
+      }
+    }
+    return false;
+  };
+  std::vector<ItemData> to_return;
+  std::map<uint32_t, std::pair<ItemData, int64_t>> stacks; // primary identifier -> (the stack of before, before - now)
+  for (size_t z = 0; z < num_before; z++) {
+    const auto& item = before.items[z].data;
+    if (item.max_stack_size(limits) > 1) {
+      auto& st = stacks.emplace(item.primary_identifier(), std::make_pair(item, 0)).first->second;
+      st.second += std::max<uint32_t>(item.data1[5], 1);
+      continue;
+    }
+    bool kept = false;
+    for (size_t x = 0; (x < num_now) && !kept; x++) {
+      if (!now_matched[x] && (now.items[x].data.max_stack_size(limits) <= 1) && same(now.items[x].data, item)) {
+        now_matched[x] = true;
+        kept = true;
+      }
+    }
+    if (!kept && !take_from_bank(item)) {
+      to_return.emplace_back(item);
+    }
+  }
+  std::vector<size_t> to_remove;
+  for (size_t x = 0; x < num_now; x++) {
+    const auto& item = now.items[x].data;
+    if (item.max_stack_size(limits) > 1) {
+      auto it = stacks.find(item.primary_identifier());
+      if (it != stacks.end()) {
+        it->second.second -= std::max<uint32_t>(item.data1[5], 1);
+      }
+    } else if (!now_matched[x] && take_from_bank(item)) {
+      to_remove.emplace_back(x);
+    }
+  }
+  for (auto it = to_remove.rbegin(); it != to_remove.rend(); it++) {
+    spire_guard_snapshot_remove_index(snapshot.inventory, *it);
+    ret.removed_items++;
+  }
+  for (const auto& item : to_return) {
+    ret.returned_items += spire_guard_snapshot_give_pickup(snapshot, item, 1, limits);
+  }
+  for (const auto& [_, st] : stacks) {
+    if (st.second > 0) {
+      ItemData item = st.first;
+      item.data1[5] = std::min<int64_t>(st.second, 0xFF);
+      ret.returned_items += spire_guard_snapshot_give_pickup(snapshot, item, item.data1[5], limits);
+    }
+  }
+  if (snapshot.disp.stats.meseta < snapshot.base_before_meseta) {
+    ret.returned_meseta = snapshot.base_before_meseta - snapshot.disp.stats.meseta;
+    snapshot.disp.stats.meseta = snapshot.base_before_meseta;
+  }
+  snapshot.has_base_before = false;
+  return ret;
 }
 
 // K7b: see SpireFlagBridge.hh
@@ -5587,6 +5739,7 @@ void spire_guard_floor_settle_dropper(std::shared_ptr<const Client> c) {
 
 void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain) {
   try {
+    spire_guard_note_shared_game(c, others_remain); // B-REGIE-21-20
     std::erase_if(spire_guard_floor_credits, [](const auto& it) { return it.second.item.expired(); });
     uint32_t serial_number = spire_bridge_serial_for_client(c);
     std::string filename = serial_number ? spire_guard_filename_for(c, serial_number) : std::string();
@@ -5849,6 +6002,20 @@ static asio::awaitable<bool> spire_guard_run_restore(std::shared_ptr<Client> c, 
     snapshot.overlay_exp = info.character->disp.stats.exp;
     snapshot.overlay_meseta = info.character->disp.stats.meseta;
     snapshot.overlay_num_items = info.character->inventory.num_items;
+    if (!strcmp(where, "login") && snapshot.has_base_before) {
+      // B-REGIE-21-20: the snapshot followed a base game the card may not have seen; reconciled with the card's bank
+      try {
+        auto r = spire_guard_base_reconcile(snapshot, info.character->bank,
+            *c->require_server_state()->data->item_stack_limits(c->version()));
+        c->log.info_f("Spire guard: the base game for serial {:010} reconciled with the card's bank ({} items, meseta {}): {} item(s) back, {} taken out (still in the bank), meseta +{}; pushing {} with {} items (B-REGIE-21-20)",
+            serial_number, info.character->bank.num_items.load(), info.character->bank.meseta.load(), r.returned_items,
+            r.removed_items, r.returned_meseta, spire_guard_describe(snapshot), snapshot.inventory.num_items);
+      } catch (const std::exception& e) {
+        snapshot.has_base_before = false;
+        c->log.warning_f("Spire guard: failed to reconcile the base game with the card's bank for serial {:010}: {}; pushing the snapshot as it is (B-REGIE-21-20)",
+            serial_number, e.what());
+      }
+    }
     // Bank: the character as the client sent it, in the client's own form, before anything is changed
     PSOGCCharacterFile::Character received = *info.character;
     auto merged = info.character;

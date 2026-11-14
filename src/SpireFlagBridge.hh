@@ -893,6 +893,12 @@ struct SpireGuardSnapshot {
   PlayerDispDataV4 disp;
   // F1: stored at 'O' (spire_base_return), cleared at a run start that sets the marker (spire_guard_run_start_apply)
   SpireRunCopyPrint run_copy_print;
+  // B-REGIE-21-20: the inventory and meseta of before a base game the player had to himself, stored by its 98
+  // (spire_guard_base_before_apply) and used once, by the login push (spire_guard_base_reconcile). In the file as
+  // "BaseBefore"; a file without it, or with an unreadable one, reads as none: the push is the one of before.
+  bool has_base_before = false;
+  PlayerInventory base_before_inventory;
+  uint32_t base_before_meseta = 0;
 };
 
 // v39 (regie, kracht-voorbij-normaal.md section 6): how the guard tells the real character from a run copy. Never by
@@ -1351,6 +1357,34 @@ bool spire_guard_98_base_follows(bool awaiting_save, bool normal_or_solo, bool b
 // the snapshot's. Otherwise the snapshot takes the inventory and disp; every marker and the overlay fingerprint stay.
 bool spire_guard_base_game_follow(
     SpireGuardSnapshot& snapshot, const PlayerInventory& inventory, const PlayerDispDataV4& disp);
+// B-REGIE-21-20 (system 8 critic round 2, B1 and B2): the inventory and the bank belong together, but a 98 carries
+// only the inventory. After the base game the snapshot holds the inventory of after the base, while a client that
+// drops before its card is written logs in with the bank of before (a deposit was gone, a withdrawal doubled). So the
+// 98 of the base game keeps the inventory and meseta of before it next to the snapshot, and the login push reconciles
+// the snapshot with the bank of the card (the 30), once. On V3 the server sees a deposit as a 6x29, like a sale, a mag
+// feed, the tekker or a tool used, and it does not see the trade window at all: so only a base game the player had to
+// himself gets the record (shared false); in a game shared with another player any item that left the inventory may be
+// with him (B-AF-53: never doubled between players before nothing lost), and the push stays the one of before.
+// before is the snapshot right before spire_guard_base_game_follow took the 98 (with every floor hand-over of K7b).
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared);
+// The login push's step on a snapshot with that record, given the bank of the card. Items by their data (item IDs
+// ignored), a stack by its kind and amount:
+// - a non-stackable item of before that the inventory no longer holds and the card's bank does not hold comes back
+//   (a deposit the card never saw; a sale, a feed or the tekker comes back too: doubled for this player, never lost);
+// - a stack of before that holds less now gets the difference back (a stack in the card's bank says nothing: the
+//   amount it had before the base is not known);
+// - a non-stackable item the inventory gained that the card's bank holds is taken out (a withdrawal: it is still in
+//   the bank); a stack is never taken out (the quartermaster's Photon Drops may share a kind with a banked stack);
+// - meseta below the meseta of before is raised to it (a deposit; a purchase comes back too); more meseta stays (a
+//   withdrawal cannot be told from a sale, the base's floor or the exchange).
+// The record is used up (has_base_before false). An item that does not fit in a full inventory is not added.
+struct SpireGuardBaseReconcile {
+  uint32_t returned_items = 0; // items and stack amounts given back
+  uint32_t removed_items = 0;
+  uint32_t returned_meseta = 0;
+};
+SpireGuardBaseReconcile spire_guard_base_reconcile(
+    SpireGuardSnapshot& snapshot, const PlayerBank200& card_bank, const ItemData::StackLimits& limits);
 
 // v48 (plan-basis-metawinkel 2026-10-26, B-BASIS-1): the return to base. At its run end the quest may ask the server
 // to put the real character back in the client's memory before it warps the player to Pioneer 2 (floor 0), whose

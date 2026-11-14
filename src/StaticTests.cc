@@ -2628,6 +2628,107 @@ void run_static_tests() {
       expect(!spire_guard_floor_follows(empty, true));
       expect_eq(0u, spire_guard_snapshot_take_drop(empty, sword, limits));
     }
+
+    // B-REGIE-21-20: the record of before the base game: its file field, when it is made and when it goes, and the
+    // reconcile steps the e2e cases do not reach (stacks, a full inventory)
+    {
+      auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-basebefore-{}", getpid());
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      auto name = (dir / "0000000042.json").string();
+      auto before = awaiting(a_real);
+      auto snap = awaiting(a_memory);
+      spire_guard_base_before_apply(snap, before, false);
+      expect(snap.has_base_before && (snap.base_before_meseta == 1000));
+      expect(!memcmp(&snap.base_before_inventory, &a_real.first, sizeof(a_real.first)));
+      spire_guard_save(name, 42, snap);
+      auto loaded = spire_guard_load(name);
+      expect(loaded.has_base_before && (loaded.base_before_meseta == 1000));
+      expect(!memcmp(&loaded.base_before_inventory, &a_real.first, sizeof(a_real.first)));
+      // a file of before this field reads as none, and a bad field reads as none while the rest loads
+      auto json = phosg::JSON::parse(phosg::load_file(name));
+      json.as_dict().erase("BaseBefore");
+      phosg::save_file(name, json.serialize());
+      loaded = spire_guard_load(name);
+      expect(!loaded.has_base_before && loaded.awaiting_save && loaded.has_character);
+      json.emplace("BaseBefore", phosg::JSON::parse("{\"Inventory\": \"XYZ\", \"Meseta\": 5}"));
+      phosg::save_file(name, json.serialize());
+      loaded = spire_guard_load(name);
+      expect(!loaded.has_base_before && loaded.awaiting_save && loaded.has_character);
+      std::filesystem::remove_all(dir);
+
+      // a shared base game keeps no record (and drops an older one); so does a floor hand-over, a run start, the 98 of
+      // a normal game and a login that confirms the snapshot
+      auto shared = snap;
+      spire_guard_base_before_apply(shared, before, true);
+      expect(!shared.has_base_before);
+      auto handed = snap;
+      expect_eq(1u, spire_guard_snapshot_take_drop(handed, handed.inventory.items[0].data, limits));
+      expect(!handed.has_base_before);
+      auto given = snap;
+      expect_eq(1u, spire_guard_snapshot_give_pickup(given, sword, 1, limits));
+      expect(!given.has_base_before);
+      auto started = snap;
+      spire_guard_run_start_apply(started, a_memory.first, a_memory.second, 921, 1);
+      expect(!started.has_base_before);
+      auto normal = snap;
+      expect(spire_guard_follow_real_progress(normal, a_memory.first, a_memory.second));
+      expect(!normal.has_base_before);
+      auto confirmed = snap;
+      expect(spire_guard_awaiting_save_login_apply(confirmed, a_memory.first, a_memory.second));
+      expect(!confirmed.has_base_before);
+      auto pushed = snap;
+      expect(!spire_guard_awaiting_save_login_apply(pushed, a_real.first, a_real.second));
+      expect(pushed.has_base_before); // the login that pushes keeps it for the push
+
+      // stacks: ten Monomates before, six now (four on the bank, or used): four come back, even with Monomates in the
+      // card's bank; Photon Drops gained in the base stay, even with Photon Drops in the card's bank
+      auto with_stack = [&](Character ch, uint8_t d1, uint8_t d2, uint8_t amount) {
+        auto& slot = ch.first.items[ch.first.num_items];
+        slot.state = 1;
+        slot.data = ItemData();
+        slot.data.data1[0] = 0x03;
+        slot.data.data1[1] = d1;
+        slot.data.data1[2] = d2;
+        slot.data.data1[5] = amount;
+        slot.data.id = 0x00010030 + ch.first.num_items;
+        ch.first.num_items++;
+        return ch;
+      };
+      auto mono_before = with_stack(a_real, 0x00, 0x00, 10);
+      auto mono_now = with_stack(with_stack(a_real, 0x00, 0x00, 6), 0x10, 0x00, 10);
+      auto st = awaiting(mono_now);
+      spire_guard_base_before_apply(st, awaiting(mono_before), false);
+      PlayerBank200 bank;
+      bank.num_items = 2;
+      bank.items[0].data = mono_before.first.items[mono_before.first.num_items - 1].data;
+      bank.items[0].data.data1[5] = 3;
+      bank.items[1].data = mono_now.first.items[mono_now.first.num_items - 1].data;
+      bank.items[1].data.data1[5] = 7;
+      auto r = spire_guard_base_reconcile(st, bank, limits);
+      expect_eq(4u, r.returned_items);
+      expect_eq(0u, r.removed_items);
+      expect(!st.has_base_before);
+      expect_eq(mono_now.first.num_items, st.inventory.num_items);
+      expect_eq(10u, static_cast<uint32_t>(st.inventory.items[mono_now.first.num_items - 2].data.data1[5]));
+      expect_eq(10u, static_cast<uint32_t>(st.inventory.items[mono_now.first.num_items - 1].data.data1[5]));
+      // used up: a second reconcile changes nothing
+      auto again = st;
+      r = spire_guard_base_reconcile(again, bank, limits);
+      expect_eq(0u, r.returned_items + r.removed_items + r.returned_meseta);
+      expect(!memcmp(&again.inventory, &st.inventory, sizeof(st.inventory)));
+      // a full inventory: what does not fit is not added (the rest is still done)
+      Character full = make(30, 0x02, 51, 370758, 1000);
+      Character full_before = full;
+      full_before.first.items[29].data.data1[1] = 0x7E; // another item in the last slot before the base
+      auto fs = awaiting(full);
+      spire_guard_base_before_apply(fs, awaiting(full_before), false);
+      fs.disp.stats.meseta = 400;
+      r = spire_guard_base_reconcile(fs, PlayerBank200(), limits);
+      expect_eq(0u, r.returned_items);
+      expect_eq(600u, r.returned_meseta);
+      expect_eq(1000u, fs.disp.stats.meseta.load());
+    }
   }
 
   phosg::log_info_f("-- Spire guard: the restore check finds a different item count or material counter (v32, v38, v39)");
@@ -10093,6 +10194,240 @@ void run_static_tests() {
         must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game was refused");
         must(has_taken(p2.ch->memory), "after the login that follows the base game the item taken from the bank is in neither the inventory nor the bank");
         expect_real(p2.ch->memory, at_base, "after the login that follows the base game");
+      });
+    }
+
+    // B-REGIE-21-20 (system 8 critic round 2, B1 and B2): the base game, then the client drops before its card is
+    // written (no 84, no 97; the card keeps the bank of before the base) or the card write comes through; then the next
+    // login. What the base moved between the inventory and the bank exists once, the quartermaster's payout is never
+    // there twice (Photon Drops with the payout flag still open as the next base game reads it), and what went to
+    // another player never comes back. The base game as spire_base_game_join and spire_base_game_start leave it.
+    enum class BasePartner { NONE, STAYS, LEFT_BEFORE };
+    struct BaseFallSetup {
+      BasePartner partner = BasePartner::NONE;
+      bool floor_handover = false; // A drops inventory item 5, the partner picks it up (6x2A, 6x59 as the server sees them)
+      bool payout = false; // the quartermaster's collect: its clear of the payout flag, as on_set_quest_flag records it
+      bool card_written = false; // the 84 after the base game and its 97 come through
+    };
+    constexpr uint8_t PHOTON_DROP[3] = {0x03, 0x10, 0x00};
+    auto base_fall = [&](const BaseFallSetup& setup, const std::function<void(GCCharacter&)>& in_base,
+                         const std::function<void(const GCCharacter& real, const GCCharacter& at_base, Session& p2, bool payout_open)>& check) {
+      TempCwd temp_cwd;
+      constexpr uint32_t BASE_QUEST = 987656;
+      auto w = make_world();
+      give_item_tables(w);
+      auto index = std::make_shared<QuestIndex>(nullptr, "no-quests-here", std::make_shared<QuestCategoryIndex>(phosg::JSON::list()), false);
+      auto base_vq = std::make_shared<VersionedQuest>();
+      base_vq->meta.quest_number = BASE_QUEST;
+      base_vq->meta.episode = Episode::EP1;
+      base_vq->meta.version = Version::GC_V3;
+      base_vq->meta.language = Language::ENGLISH;
+      auto base_quest = std::make_shared<Quest>(base_vq);
+      index->quests_by_number[BASE_QUEST] = base_quest;
+      w.s->data->quest_index = index;
+      w.s->data->spire_base_quest_number = BASE_QUEST;
+      w.s->data->spire_meta_quest_numbers.emplace(BASE_QUEST); // the base quest is the payout quest (q925 in both keys)
+
+      GCCharacter real = real_character();
+      real.quest_flags.set(Difficulty::NORMAL, SPIRE_META_FLAG_PAY_WIN); // the run was won: the payout is open on the card
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      r.l->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      p.c->floor = 1;
+      spire_checkpoint_run_started(p.c);
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, run_over_request), "the bridge did not take the 'X'");
+      expect_eq(spire_base_return_answer(SpireBaseReturnRefusal::BASE_GAME),
+          quest_asks(w, r, seen, SPIRE_BASE_RETURN_TAG, "the answer to 'O' with a base quest"));
+      client_sends(w, p, 0x98, p.ch->as_61());
+      must(run_bool(w, p, spire_guard_restore_at_game_exit(p.c)), "the game exit restore on the way to the base game was refused");
+      expect_real(p.ch->memory, real, "after the game exit on the way to the base game");
+      must(!p.ch->card_writes.empty(), "no card write on the way to the base game");
+
+      auto base = std::make_shared<Lobby>(w.s, 0x7B02, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->quest = base_quest;
+      base->leader_id = 0;
+      base->set_flag(Lobby::Flag::QUEST_IN_PROGRESS);
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      base->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = base;
+      p.c->floor = 0;
+
+      Seat seat;
+      seat.p = p;
+      Seat partner;
+      std::vector<Seat*> seats{&seat};
+      if (setup.partner != BasePartner::NONE) {
+        partner.p = connect_as(w, second_character(), SERIAL_2);
+        std::vector<Seat*> alone{&partner};
+        seat_sends(w, alone, partner, 0x61, partner.p.ch->as_61());
+        base->clients[1] = partner.p.c;
+        partner.p.c->lobby_client_id = 1;
+        partner.p.c->lobby = base;
+        partner.p.c->floor = 0;
+        seats.emplace_back(&partner);
+      }
+      if (setup.floor_handover) {
+        must(setup.partner != BasePartner::NONE, "a floor hand-over needs a partner");
+        base->floor_item_managers.emplace_back(base->lobby_id, 0); // Pioneer 2's, as create_game_generic makes it
+        const ItemData dropped = p.c->character_file(false, false)->inventory.items[5].data;
+        base->add_item(0, dropped, VectorXZF(), nullptr, nullptr, 0x00F);
+        spire_guard_note_floor_drop(p.c, base, 0, dropped.id);
+        auto fi = base->remove_item(0, dropped.id, 1);
+        must(fi != nullptr, "the dropped item is not on the floor");
+        spire_guard_note_floor_pickup(partner.p.c, base, fi);
+        auto snap = snapshot_on_disk(p);
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          must(memcmp(snap.inventory.items[z].data.data1.data(), dropped.data1.data(), 12) != 0,
+              "the dropper's snapshot still holds the item the partner picked up (K7b)");
+        }
+      }
+      GCCharacter at_base = real;
+      in_base(at_base);
+      if (setup.payout) {
+        at_base.quest_flags.clear(Difficulty::NORMAL, SPIRE_META_FLAG_PAY_WIN); // the quest's gclear in the client
+        spire_bridge_record_flag(p.c, base, Difficulty::NORMAL, SPIRE_META_FLAG_PAY_WIN, false);
+      }
+      p.ch->memory = at_base;
+      if (setup.partner == BasePartner::LEFT_BEFORE) {
+        seat_sends(w, seats, partner, 0x98, partner.p.ch->as_61());
+        must(!partner.p.c->lobby.lock(), "the partner's 98 left him in the base game");
+        seats.pop_back();
+      }
+
+      // the base game exit: its 98; then the 84 and its 97, or the client drops before them
+      seat_sends(w, seats, seat, 0x98, p.ch->as_61());
+      must(!p.c->lobby.lock(), "the 98 left the client in the base game");
+      if (setup.card_written) {
+        must(seats_bool(w, seats, spire_guard_restore_at_game_exit(p.c), "the base game exit"), "the base game exit was refused");
+        expect_real(p.ch->card_writes.back(), at_base, "on the memory card after the base game exit");
+      }
+      p.ch->open = false;
+
+      // the next login, with what the card holds
+      auto p2 = connect(w, p.ch->card_writes.back());
+      client_sends(w, p2, 0x61, p2.ch->as_61());
+      must(run_bool(w, p2, spire_guard_restore_if_needed(p2.c)), "the login after the base game was refused");
+      // the payout flag as the next base game's quest reads it: what the server delivers at its load
+      // (spire_meta_deliver_flags), else what the client holds
+      bool payout_open = p2.ch->memory.quest_flags.get(Difficulty::NORMAL, SPIRE_META_FLAG_PAY_WIN);
+      auto server_char = p2.c->character_file(false, false);
+      must(server_char != nullptr, "no character data after the login");
+      auto meta = spire_meta_load_file(spire_meta_filename_for(SERIAL, &server_char->disp));
+      for (const auto& d : spire_meta_delivery_entries(meta, 0, false)) {
+        if ((d.difficulty == 0) && (d.flag == SPIRE_META_FLAG_PAY_WIN)) {
+          payout_open = d.set;
+        }
+      }
+      check(real, at_base, p2, payout_open);
+    };
+    // how often an item (by its data, item IDs ignored) is in the inventory and the bank together
+    auto held = [](const GCCharacter& ch, const ItemData& item) {
+      size_t ret = 0;
+      auto same = [&](const ItemData& d) {
+        return !memcmp(d.data1.data(), item.data1.data(), 12) && !memcmp(d.data2.data(), item.data2.data(), 4);
+      };
+      for (size_t z = 0; z < std::min<size_t>(ch.inventory.num_items, ch.inventory.items.size()); z++) {
+        ret += same(ch.inventory.items[z].data);
+      }
+      for (size_t z = 0; z < std::min<size_t>(ch.bank.num_items, ch.bank.items.size()); z++) {
+        ret += same(ch.bank.items[z].data);
+      }
+      return ret;
+    };
+    auto drops_held = [&](const GCCharacter& ch) {
+      uint32_t ret = 0;
+      for (size_t z = 0; z < std::min<size_t>(ch.inventory.num_items, ch.inventory.items.size()); z++) {
+        const auto& d = ch.inventory.items[z].data;
+        ret += !memcmp(d.data1.data(), PHOTON_DROP, 3) ? d.data1[5] : 0;
+      }
+      return ret;
+    };
+    // what the base does: the rare weapon (inventory item 5) onto the bank, bank item 0 into the inventory, the payout
+    auto deposit = [&](GCCharacter& ch) {
+      const auto item = ch.inventory.items[5];
+      ch.inventory.items[5] = ch.inventory.items[29];
+      ch.inventory.num_items = 5;
+      ch.bank.items[3].data = item.data;
+      ch.bank.items[3].amount = 1;
+      ch.bank.items[3].present = 1;
+      ch.bank.num_items = 4;
+    };
+    auto withdraw = [&](GCCharacter& ch) {
+      const auto banked = ch.bank.items[0];
+      ch.inventory.items[6].data = banked.data;
+      ch.inventory.items[6].flags = 0;
+      ch.inventory.num_items = 7;
+      for (size_t z = 0; z + 1 < ch.bank.items.size(); z++) {
+        ch.bank.items[z] = ch.bank.items[z + 1];
+      }
+      ch.bank.num_items = 2;
+    };
+    auto collect = [&](GCCharacter& ch) {
+      auto& slot = ch.inventory.items[ch.inventory.num_items];
+      slot.data = ItemData();
+      for (size_t x = 0; x < 3; x++) {
+        slot.data.data1[x] = PHOTON_DROP[x];
+      }
+      slot.data.data1[5] = 10;
+      slot.data.id = 0x00010040;
+      slot.flags = 0;
+      ch.inventory.num_items = ch.inventory.num_items + 1;
+    };
+    const ItemData rare = real_character().inventory.items[5].data;
+    const ItemData banked = real_character().bank.items[0].data;
+    for (bool written : {false, true}) {
+      const char* when = written ? "the card write after the base comes through" : "the client drops before the card write";
+      e2e_case(std::format("B-REGIE-21-20 ({}) the base game, a deposit on the bank, {}: the item exists once", written ? "d" : "a", when).c_str(), [&]() {
+        base_fall({.card_written = written}, deposit, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 1, std::format("the deposited item is there {} times after the login", held(p2.ch->memory, rare)).c_str());
+        });
+      });
+      e2e_case(std::format("B-REGIE-21-20 ({}) the base game, a withdrawal from the bank, {}: the item exists once", written ? "d" : "b", when).c_str(), [&]() {
+        base_fall({.card_written = written}, withdraw, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, banked) == 1, std::format("the withdrawn item is there {} times after the login", held(p2.ch->memory, banked)).c_str());
+        });
+      });
+      e2e_case(std::format("B-REGIE-21-20 ({}) the base game, the quartermaster's payout, {}: Photon Drops and the flag closed, or neither", written ? "d" : "c", when).c_str(), [&]() {
+        base_fall({.payout = true, .card_written = written}, collect, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool payout_open) {
+          uint32_t drops = drops_held(p2.ch->memory);
+          must((drops == 10) != payout_open, std::format("after the login {} Photon Drops with the payout flag {}", drops, payout_open ? "open" : "closed").c_str());
+        });
+      });
+      e2e_case(std::format("B-REGIE-21-20 (meseta) the base game, a meseta deposit on the bank, {}: no meseta lost", when).c_str(), [&]() {
+        base_fall({.card_written = written}, [&](GCCharacter& ch) {
+          ch.disp.stats.meseta = ch.disp.stats.meseta.load() - 4321;
+          ch.bank.meseta = ch.bank.meseta.load() + 4321;
+        }, [&](const GCCharacter& real, const GCCharacter&, Session& p2, bool) {
+          uint64_t before = uint64_t(real.disp.stats.meseta.load()) + real.bank.meseta.load();
+          uint64_t after = uint64_t(p2.ch->memory.disp.stats.meseta.load()) + p2.ch->memory.bank.meseta.load();
+          must(after == before, std::format("meseta and bank meseta are {} after the login, {} before the base", after, before).c_str());
+        });
+      });
+    }
+    // (e): what went to another player in the base never comes back to the first: a floor hand-over (K7b), and the
+    // trade window, which the server does not follow (the item leaves the inventory without a server step, as a deposit)
+    e2e_case("B-REGIE-21-20 (e) the base game with a partner, a floor hand-over to him, the client drops before the card write: the item does not come back", [&]() {
+      base_fall({.partner = BasePartner::STAYS, .floor_handover = true}, [&](GCCharacter& ch) {
+        ch.inventory.items[5] = ch.inventory.items[29];
+        ch.inventory.num_items = 5;
+      }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+        must(held(p2.ch->memory, rare) == 0, "the item the partner picked up came back to the first player");
+      });
+    });
+    for (BasePartner partner : {BasePartner::STAYS, BasePartner::LEFT_BEFORE}) {
+      e2e_case(std::format("B-REGIE-21-20 (e) the base game with a partner who {}, a trade to him, the client drops before the card write: the item does not come back",
+                   (partner == BasePartner::STAYS) ? "stays" : "left before").c_str(), [&]() {
+        base_fall({.partner = partner}, [&](GCCharacter& ch) {
+          ch.inventory.items[5] = ch.inventory.items[29];
+          ch.inventory.num_items = 5;
+        }, [&](const GCCharacter&, const GCCharacter&, Session& p2, bool) {
+          must(held(p2.ch->memory, rare) == 0, "the item traded to the partner came back to the first player");
+        });
       });
     }
 
