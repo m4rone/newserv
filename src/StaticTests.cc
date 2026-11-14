@@ -12613,7 +12613,8 @@ void run_static_tests() {
       k3_reg(p, l1, REQ, (static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24) | (16 << 8) | 16);
       k3_v_write(p, l1, 17, 0);
       k3_v_write(p, l1, 20, 2 | (5 << SPIRE_SS_REST_SHIFT));
-      std::string file = p.stem() + ".savestate.normal.json";
+      // 7r2-M2 (veilig-r2): an Episode 2 run parks in Episode 2's own file
+      std::string file = spire_savestate_slot_filename(p.stem(), static_cast<uint8_t>(Episode::EP2), 0);
       auto ss = spire_savestate_from_json(phosg::load_file(file));
       expect_eq(16, ss.start_room);
       expect_eq(5, ss.rest_rooms);
@@ -12667,8 +12668,8 @@ void run_static_tests() {
       const uint32_t REQ = SPIRE_BRIDGE_REQUEST_REGISTER;
       const uint32_t BEGIN = static_cast<uint32_t>(SPIRE_BRIDGE_REC_BEGIN) << 24;
       const uint32_t J_K20_REST = (static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24) | (2 << 8) | 20;
-      auto file_of = [](const K3Player& p) {
-        return p.stem() + ".savestate.normal.json";
+      auto file_of = [](const K3Player& p) { // 7r2-M2 (veilig-r2): Spire Run II parks in Episode 2's own file
+        return spire_savestate_slot_filename(p.stem(), static_cast<uint8_t>(Episode::EP2), 0);
       };
       auto answer_of = [](const K3Player& p) {
         return p.ch->register_values(SPIRE_RESUME_ANSWER_REGISTER).back();
