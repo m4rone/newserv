@@ -970,7 +970,8 @@ void spire_guard_after_98(std::shared_ptr<Client> c);
 // another picker only, never to him. Is he the last player, the game ends with its floor items and his snapshot keeps
 // them. The narrow loss this accepts: he leaves with another present and nobody picks the item up. A floor item without a credit (from a box or an enemy, from a player whose
 // snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
-// What the server cannot see (shop, tekker, trade window, a 6x29 on its own) changes no snapshot: the 98 still does.
+// What the server cannot see (shop, tekker) changes no snapshot: the 98 still does. Neither does a 6x29 on its own (a
+// sale, a bank deposit, a fed mag); the trade window is followed at its execution since Veilig-2 (below).
 bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo);
 // The drop step on a snapshot: removes the dropped item (by its data, item IDs ignored; a stack by its kind, at most
 // what the stack holds; a non-stackable item without an exact match by its kind) or the dropped meseta (at most what
@@ -1013,6 +1014,41 @@ void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobb
 // Called from the pickup after the server moved the floor item into c's inventory. Never throws.
 void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l,
     std::shared_ptr<const Lobby::FloorItem> fi);
+
+// Veilig-2 (trade window), corrected: the snapshot follows only what moves between players. On V3 the trade window
+// is not a drop and a pickup. The server sees each side's D0 (the items it gives, with the client's item IDs), then
+// each side deletes those items itself with a 6x29 (before its D2), and when both D2s are in the server executes the
+// trade (D3 to each side with the other's D0 list). A sale, a bank deposit, a fed mag (and possibly the tekker) are a
+// 6x29 alone, with no second player.
+// - A 6x29 never changes the snapshot (spire_guard_delete_apply): no second player, so no doubling; after a drop-out
+//   without a 98 the item comes back, consistent with the card that was not written either. Sale meseta never counts.
+// - Only at the execution (both D2s, D3 sent) does each side's snapshot lose exactly the items and meseta of its D0
+//   list (as far as it holds them: the credit), and the other side's snapshot gains each entry with at most its
+//   credit. Before the execution, or when the trade is cancelled (D4), nothing changes.
+// - If the taker's snapshot does not follow (or the taker cannot take it), the giver still loses it: the only place
+//   where stricter is allowed.
+struct SpireGuardTradeSide {
+  std::vector<ItemData> items; // what this player gives (its D0 list)
+  std::vector<uint32_t> credit; // per entry: what this player's snapshot lost of it at the execution
+};
+// The 6x29 step: a 6x29 is never a move between players, so the snapshot stays; returns the amount taken (always 0).
+// The parameters describe the 6x29 (snapshot null if it does not follow, side the pending trade or null, partial_drop
+// a 6x5D just before it); they are kept so the rule for each case is stated in one tested place.
+uint32_t spire_guard_delete_apply(SpireGuardSnapshot* snapshot, SpireGuardTradeSide* side,
+    const std::optional<ItemData>& partial_drop, uint32_t item_id, const ItemData& deleted,
+    const ItemData::StackLimits& limits);
+// The execution step, giver side: takes each entry of side from the giver's snapshot (null: nothing taken) and stores
+// what was taken as that entry's credit. Call it for both sides before spire_guard_trade_give. Returns the amount taken.
+uint32_t spire_guard_trade_take_rest(
+    SpireGuardSnapshot* giver, SpireGuardTradeSide& side, const ItemData::StackLimits& limits);
+// The execution step, taker side: gives each entry of the other side to the taker's snapshot (null: nothing), with at
+// most that entry's credit, then clears the entries. Returns the number of entries that gained anything.
+size_t spire_guard_trade_give(SpireGuardSnapshot* taker, SpireGuardTradeSide& side, const ItemData::StackLimits& limits);
+// Called from 6x29 after the server removed `deleted` from c's inventory (spire_guard_delete_apply). Never throws.
+void spire_guard_note_delete(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t item_id, const ItemData& deleted);
+// Called from D2 when both sides have confirmed, before the trade is executed and the pending trades are reset.
+// Never throws.
+void spire_guard_note_trade_executed(std::shared_ptr<Client> a, std::shared_ptr<Client> b, std::shared_ptr<Lobby> l);
 
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
 // The login confirmation of a lobby restore requires this (spire_guard_same_state, v39).

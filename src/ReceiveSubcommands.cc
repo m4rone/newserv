@@ -4629,6 +4629,7 @@ static void on_destroy_inventory_item(std::shared_ptr<Client> c, SubcommandMessa
   auto [item, _] = p->remove_item(cmd.item_id, cmd.amount, *s->data->item_stack_limits(c->version()));
   // V3 sends this after a sale, a trade, a partial stack drop (also meseta) and a mag feed: not missing for $restore
   inventory_backup_note_removed(c, item);
+  spire_guard_note_delete(c, l, cmd.item_id, item); // Veilig-2: a 6x29 alone never changes the snapshot
 
   if (l->log.should_log(phosg::LogLevel::L_INFO)) {
     auto name = s->data->describe_item(c->version(), item);

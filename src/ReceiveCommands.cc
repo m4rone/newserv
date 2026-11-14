@@ -5368,6 +5368,7 @@ static asio::awaitable<void> on_D2_V3_BB(std::shared_ptr<Client> c, Channel::Mes
 
   c->pending_item_trade->confirmed = true;
   if (target_c->pending_item_trade->confirmed) {
+    spire_guard_note_trade_executed(c, target_c, l); // Veilig-2: the partner gains at most what the giver lost
     complete_trade_for_side(c, target_c);
     complete_trade_for_side(target_c, c);
     c->pending_item_trade.reset();

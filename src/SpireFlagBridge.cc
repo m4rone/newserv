@@ -5783,6 +5783,97 @@ void spire_guard_note_floor_leave(std::shared_ptr<Client> c, bool others_remain)
   }
 }
 
+// Veilig-2: see SpireFlagBridge.hh
+uint32_t spire_guard_delete_apply(SpireGuardSnapshot* snapshot, SpireGuardTradeSide* side,
+    const std::optional<ItemData>& partial_drop, uint32_t item_id, const ItemData& deleted,
+    const ItemData::StackLimits& limits) {
+  // a 6x29 never moves an item to another player (a sale, a bank deposit, a fed mag, the tekker, or a trade's own
+  // delete before its execution): the snapshot stays, as before Veilig-2
+  (void)snapshot;
+  (void)side;
+  (void)partial_drop;
+  (void)item_id;
+  (void)deleted;
+  (void)limits;
+  return 0;
+}
+
+uint32_t spire_guard_trade_take_rest(
+    SpireGuardSnapshot* giver, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  side.credit.assign(side.items.size(), 0);
+  uint32_t total = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    uint32_t taken = giver ? spire_guard_snapshot_take_drop(*giver, side.items[z], limits) : 0;
+    side.credit[z] = taken;
+    total += taken;
+  }
+  return total;
+}
+
+size_t spire_guard_trade_give(SpireGuardSnapshot* taker, SpireGuardTradeSide& side, const ItemData::StackLimits& limits) {
+  size_t ret = 0;
+  for (size_t z = 0; z < side.items.size(); z++) {
+    uint32_t credit = (z < side.credit.size()) ? side.credit[z] : 0;
+    if (taker && credit && spire_guard_snapshot_give_pickup(*taker, side.items[z], credit, limits)) {
+      ret++;
+    }
+  }
+  side.items.clear();
+  side.credit.clear();
+  return ret;
+}
+
+void spire_guard_note_delete(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t item_id, const ItemData& deleted) {
+  try {
+    auto followed = spire_guard_floor_snapshot(c, l);
+    if (!followed) {
+      return;
+    }
+    auto& snapshot = std::get<0>(*followed);
+    auto s = c->require_server_state();
+    const auto& limits = *s->data->item_stack_limits(c->version());
+    if (spire_guard_delete_apply(&snapshot, nullptr, std::nullopt, item_id, deleted, limits)) {
+      spire_guard_save(std::get<1>(*followed), std::get<2>(*followed), snapshot);
+    }
+  } catch (const std::exception& e) {
+    c->log.warning_f("Spire guard: failed to look at a delete: {}; the snapshot stays (Veilig-2)", e.what());
+  }
+}
+
+void spire_guard_note_trade_executed(std::shared_ptr<Client> a, std::shared_ptr<Client> b, std::shared_ptr<Lobby> l) {
+  try {
+    SpireGuardTradeSide a_side, b_side;
+    a_side.items = a->pending_item_trade->items; // exactly what the server sends b in its D3
+    b_side.items = b->pending_item_trade->items;
+    auto fa = spire_guard_floor_snapshot(a, l);
+    auto fb = spire_guard_floor_snapshot(b, l);
+    SpireGuardSnapshot* sa = fa ? &std::get<0>(*fa) : nullptr;
+    SpireGuardSnapshot* sb = fb ? &std::get<0>(*fb) : nullptr;
+    auto s = a->require_server_state();
+    const auto& limits_a = *s->data->item_stack_limits(a->version());
+    const auto& limits_b = *s->data->item_stack_limits(b->version());
+    size_t a_gives = a_side.items.size();
+    size_t b_gives = b_side.items.size();
+    // all takes before any give: a give never lands in a snapshot before that snapshot's own entries are taken
+    uint32_t a_taken = spire_guard_trade_take_rest(sa, a_side, limits_a);
+    uint32_t b_taken = spire_guard_trade_take_rest(sb, b_side, limits_b);
+    size_t b_gained = spire_guard_trade_give(sb, a_side, limits_b);
+    size_t a_gained = spire_guard_trade_give(sa, b_side, limits_a);
+    if (fa && (a_taken || a_gained)) {
+      spire_guard_save(std::get<1>(*fa), std::get<2>(*fa), *sa);
+    }
+    if (fb && (b_taken || b_gained)) {
+      spire_guard_save(std::get<1>(*fb), std::get<2>(*fb), *sb);
+    }
+    a->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken, followed {}), gained {} entries (Veilig-2)",
+        b->lobby_client_id, a_gives, a_taken, fa ? "yes" : "no", a_gained);
+    b->log.info_f("Spire guard: trade executed with client {}: gives {} entries ({} taken, followed {}), gained {} entries (Veilig-2)",
+        a->lobby_client_id, b_gives, b_taken, fb ? "yes" : "no", b_gained);
+  } catch (const std::exception& e) {
+    a->log.warning_f("Spire guard: failed to follow a trade execution: {}; nothing gained (Veilig-2)", e.what());
+  }
+}
+
 // How long the guard waits for each client answer during a restore (30, the B3 of SetExtendedPlayerInfo, and the
 // verifying 61). Each answer is at most about 10 KB on a LAN and normally arrives within a second; 15 seconds leaves
 // room for a slow Wii without letting a stuck login sit forever.
