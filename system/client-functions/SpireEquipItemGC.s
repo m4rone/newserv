@@ -1,10 +1,10 @@
 .meta key="SpireEquipItem"
 .meta name="Spire equip item"
-.meta description="Equips one weapon or\nmag through the game's\nown equip path"
+.meta description="Equips one item through\nthe game's own equip path"
 .meta visibility="hidden"
 
 # Spire (route B bundle 9, ROUTEB9-PROTOCOL.md § 3): newserv sends this function with one item id (label item_id) after
-# 'C' 13 (the kit weapon) or 'C' 14 (the run mag). It finds that item in the local player's own pack and equips it the
+# 'C' 13 (the kit weapon) or 'C' 14 (the run mag), and on a resume for each item that was equipped at the save point. It finds that item in the local player's own pack and equips it the
 # way Sega's menu sites do (e.g. 0x8021A008-0x8021A05C): the item's own slot, a 6x26 for the item that is in that slot
 # now, then the 6x25 sender. The 6x25 sender sends the subcommand and its send path runs the 6x25 handler locally,
 # which equips through TObjPlayer_equip_item (0x801BA3FC, not called here). So the client sends its own 6x25 and 6x26
@@ -17,7 +17,16 @@
 #   0 = nothing done: no local TObjPlayer, no pack, or the item id is not in the local player's pack
 #   1 = 6x25 sent through the game's sender (that sender can still decline silently, F2 § 6)
 #   2 = nothing done: the item is already equipped in its slot
-#   3 = nothing done: the item is neither a weapon nor a mag
+#   3 = nothing done: the item is no weapon, frame, barrier, unit or mag, or the slot does not fit it
+#
+# ux-1 (observaties 291, 2026-11-14): also frames, barriers and units, for the resume (newserv spire_resume_equip). A
+# frame or a barrier takes the path of a weapon: its own slot from vtable[0x84], the Item Pack's equip_slot 0, and
+# TObjPlayer_equip_item puts it in that slot again (F2 § 2). A unit has four slots (9-12), and TObjPlayer_equip_item
+# clamps an equip_slot outside 9..12 to 9 (801BA428-801BA438 on PsoV3.dol of GPOP8P, ux-1 static read), so the Item
+# Pack's 0 would always push out the unit in slot 9. newserv therefore writes the unit's slot (label equip_slot, 9..12)
+# and the function does what Sega's Equip menu routine 0x80277584 does with its explicit slot (80277584-80277628): a
+# 6x26 for the item in that slot now, then the 6x25 with that slot. equip_slot 0 for a unit, or a slot for anything
+# else, is refused with 3, so a unit never lands in slot 9 by default.
 
 .versions 3OP0
 
@@ -35,14 +44,17 @@ start:
   stwu     [r1 - 0x20], r1
   mflr     r0
   stw      [r1 + 0x24], r0
-  stmw     [r1 + 0x10], r28              # r28 = item, r29 = item_id, r30 = player, r31 = slot
+  stmw     [r1 + 0x0C], r27              # r27 = equip_slot, r28 = item, r29 = item_id, r30 = player, r31 = slot
 
-  bl       get_item_id
+  bl       get_args
 item_id:
   .data    0                             # written by newserv (SPIRE_EQUIP_ITEM_ID_LABEL)
-get_item_id:
+equip_slot:
+  .data    0                             # written by newserv (SPIRE_EQUIP_SLOT_LABEL): 0, or 9..12 for a unit
+get_args:
   mflr     r3
   lwz      r29, [r3]
+  lwz      r27, [r3 + 4]
 
   # player = TObjPlayer_for_client_id(local_client_id)
   lwz      r3, [r13 - 0x5220]            # local_client_id: F2 § 3 (144 call sites, e.g. 80026F48) and ExtendedItemInfo.s:174 (3OP0)
@@ -72,15 +84,36 @@ get_item_id:
   mr.      r28, r3
   beq      return_0
 
-  # Weapons and mags only: TItem + 0xEC is data1[0] (ExtendedItemInfo.s:137 for 3OP0; the unit check 0x80178614 that
-  # F2 § 2 names in TObjPlayer_equip_item reads lbz +0xEC == 1 and lbz +0xED == 3). 0 = weapon, 2 = mag.
+  # The kind: TItem + 0xEC is data1[0], + 0xED data1[1] (ExtendedItemInfo.s:137 for 3OP0; the unit check 0x80178614
+  # that F2 § 2 names in TObjPlayer_equip_item reads lbz +0xEC == 1 and lbz +0xED == 3). 0 = weapon, 2 = mag,
+  # 1 with 1 = frame, 2 = barrier, 3 = unit.
   lbz      r0, [r28 + 0xEC]
   cmplwi   r0, 0
-  beq      type_ok
+  beq      own_slot_kind
   cmplwi   r0, 2
+  beq      own_slot_kind
+  cmplwi   r0, 1
   bne      return_3
-type_ok:
+  lbz      r0, [r28 + 0xED]
+  cmplwi   r0, 1
+  beq      own_slot_kind
+  cmplwi   r0, 2
+  beq      own_slot_kind
+  cmplwi   r0, 3
+  bne      return_3
 
+  # A unit: only with a unit slot from newserv, as Sega's Equip menu passes it (0x80277584)
+  cmplwi   r27, 9
+  blt      return_3
+  cmplwi   r27, 12
+  bgt      return_3
+  mr       r31, r27
+  b        have_slot
+
+own_slot_kind:
+  # A weapon, frame, barrier or mag: no slot from newserv (the Item Pack's equip_slot 0)
+  cmplwi   r27, 0
+  bne      return_3
   # slot = item->vtable[0x84]() (extsb): F2 § 2, menu site 8021A01C-8021A02C and TObjPlayer_equip_item 801BA45C-801BA46C
   mr       r3, r28
   lwz      r12, [r28 + 0x18]             # TItem vtable at +0x18: F2 § 2 (8021A01C)
@@ -88,6 +121,8 @@ type_ok:
   mtctr    r12
   bctrl
   extsb    r31, r3
+
+have_slot:
 
   # old = equip_slots_get(player + 0xD04, slot): F2 § 4 (callers pass addi r3, player, 0xD04)
   addi     r3, r30, 0xD04
@@ -110,10 +145,11 @@ type_ok:
   bctrl
 
 send_equip:
-  # send_equip_item_6x25(player, item_id, 0): equip_slot 0 = UNKNOWN, as the menu sites pass (8021A054, F2 § 2)
+  # send_equip_item_6x25(player, item_id, equip_slot): 0 = UNKNOWN, as the Item Pack sites pass (8021A054, F2 § 2); a
+  # unit's slot 9..12, as the Equip menu routine passes it (80277624 mr r5, r28)
   mr       r3, r30
   mr       r4, r29
-  li       r5, 0
+  mr       r5, r27
   lis      r0, high_word(send_equip_item_6x25)
   ori      r0, r0, low_word(send_equip_item_6x25)
   mtctr    r0
@@ -130,7 +166,7 @@ return_2:
 return_3:
   li       r3, 3
 return:
-  lmw      r28, [r1 + 0x10]
+  lmw      r27, [r1 + 0x0C]
   lwz      r0, [r1 + 0x24]
   addi     r1, r1, 0x20
   mtlr     r0
