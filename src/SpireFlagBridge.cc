@@ -3791,22 +3791,48 @@ asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std:
 
 // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only, in the game weak_l
 // (the game the client is in when the equip is asked). Never throws; the client's B3 answer is logged.
+// B-REGIE-22-34: the run mag (point 'C' 14, also a resume's mag) gets no line; SPIRE_EQUIP_CHECK_DELAY after each send
+// newserv looks at its copy and sends SpireEquipItem again while the mag is still unequipped
+// (spire_run_mag_equip_again), up to SPIRE_RUN_MAG_EQUIP_SENDS sends.
 static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
     uint32_t item_id, std::string what, uint8_t point, uint32_t slot = 0) {
-  try {
-    auto s = c->require_server_state();
-    auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
-    co_await prepare_client_for_patches(c);
-    // ux-1: the slot label too (0, or a unit's 9..12), so the function never keeps a slot of an earlier call
-    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}, {SPIRE_EQUIP_SLOT_LABEL, slot}});
-    c->log.info_f("Spire equip: {} {:08X} (slot {}); client answered {}", what, item_id, slot, result.return_value.load());
-  } catch (const std::exception& e) {
-    c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
-        e.what());
+  for (uint32_t sends = 1;; sends++) {
+    try {
+      auto s = c->require_server_state();
+      auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
+      co_await prepare_client_for_patches(c);
+      // ux-1: the slot label too (0, or a unit's 9..12), so the function never keeps a slot of an earlier call
+      auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}, {SPIRE_EQUIP_SLOT_LABEL, slot}});
+      c->log.info_f("Spire equip: {} {:08X} (slot {}{}); client answered {}", what, item_id, slot,
+          (sends > 1) ? std::format(", send {} of {}", sends, SPIRE_RUN_MAG_EQUIP_SENDS) : "", result.return_value.load());
+    } catch (const std::exception& e) {
+      c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
+          e.what());
+    }
+    std::weak_ptr<Client> weak_c = c;
+    c.reset(); // the check's wait holds neither the client nor its game
+    if (point != SPIRE_PROMPT_RUN_MAG_REPLACED) {
+      co_await spire_equip_check_later(weak_c, weak_l, item_id, std::move(what), point);
+      co_return;
+    }
+    co_await async_sleep(SPIRE_EQUIP_CHECK_DELAY);
+    auto l = weak_l.lock();
+    c = weak_c.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    auto character = c->character_file(false, true);
+    bool unequipped = character && spire_equip_item_unequipped(item_id, character->inventory);
+    bool again = spire_run_mag_equip_again(point, sends, unequipped);
+    c->log.info_f("Spire equip: {} {:08X} {}", what, item_id,
+        !unequipped ? std::string("equipped (or gone): done")
+        : again     ? std::format("not equipped after {} ms; {} again", SPIRE_EQUIP_CHECK_DELAY.count(), SPIRE_EQUIP_FUNCTION_NAME)
+                    : std::format("still not equipped after {} sends; no line (the game refuses a mag to the player under the Spire's mag rule)",
+                          sends));
+    if (!again) {
+      co_return;
+    }
   }
-  std::weak_ptr<Client> weak_c = c;
-  c.reset(); // the check's wait holds neither the client nor its game
-  co_await spire_equip_check_later(weak_c, weak_l, item_id, std::move(what), point);
 }
 
 // kwaliteit-1 (observaties 209/216): after the last resume item, SpireEquipItem for each weapon and mag that was
@@ -4039,14 +4065,27 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
           led ? spire_run_mag_lean_store_name(stored) : "no run: not stored");
     } else if (sub == SPIRE_RUN_MAG_NO_MAG) {
       bool issued = led && (led->issued_step >= 0);
-      std::chrono::milliseconds delay(0);
-      if (issued) {
+      // B-REGIE-22-34: the game refuses a mag to the player under the Spire's mag rule, so newserv equips the run mag
+      // itself (as at 'C' 14); only a client without SpireEquipItem (r143 = 0) keeps the old reminder
+      bool available = spire_equip_item_available_for(c);
+      auto target = overlay ? spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, available, overlay->inventory)
+                            : std::nullopt;
+      auto action = spire_run_mag_no_mag_action(issued, available, target);
+      std::string detail;
+      if (action == SpireNoMagAction::EQUIP) {
+        asio::co_spawn(*c->require_server_state()->io_context,
+            spire_equip_item_send(c, l, *target, "run mag", SPIRE_PROMPT_RUN_MAG_REPLACED), asio::detached);
+        detail = std::format("; sending {} for the run mag {:08X}", SPIRE_EQUIP_FUNCTION_NAME, *target);
+      } else if (action == SpireNoMagAction::REMIND) {
         // kwaliteit-2 145: after the boss door line of this room start ('V', spire_savestate_write), not on top of it
         // kwaliteit-2 r2 (critic K3): looked at again when it goes; a mag equipped by then gets no "equip it"
-        delay = spire_run_mag_reminder_in_turn(c, l, SPIRE_RUN_MAG_REMINDER_TEXT);
+        auto delay = spire_run_mag_reminder_in_turn(c, l, SPIRE_RUN_MAG_REMINDER_TEXT);
+        detail = std::format("; r{} = 0 for this client, reminder in {} ms", SPIRE_EQUIP_REGISTER, delay.count());
+      } else {
+        detail = issued ? std::string("; no unequipped run mag in the run copy, nothing sent")
+                        : std::string("; no mag issued in this run, no text");
       }
-      c->log.info_f("Spire run mag: NO_MAG at room {} for serial {:010} in q{}{}", k, serial_number, quest_number,
-          issued ? std::format("; reminder in {} ms", delay.count()) : std::string("; no mag issued in this run, no text"));
+      c->log.info_f("Spire run mag: NO_MAG at room {} for serial {:010} in q{}{}", k, serial_number, quest_number, detail);
     } else {
       bool created = value & 1;
       // B-REGIE-14-10: the answer issued the step already; before = the step issued before that answer

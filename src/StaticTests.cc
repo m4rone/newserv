@@ -8431,6 +8431,70 @@ void run_static_tests() {
       }
     });
 
+    // B-REGIE-22-34 (Marck's run 2026-11-14, "mag doesnt equip"): ba_set_forbid_mags 0 makes the game refuse every mag
+    // in the may-equip check 0x801B0F4C of its 6x25 sender 0x801BA5AC, also from the Item Pack. SpireEquipItem sends a
+    // mag's 6x25 through that sender's own later steps (constructor 0x801C19A8, client id 0x80019628, send 0x801C19CC,
+    // the player + 0x324 check 0x800193B4 kept) and never calls the may-equip check; other kinds keep the sender.
+    b9_case("B-REGIE-22-34: SpireEquipItem sends a mag's 6x25 past the game's mag rule, every other kind as before", [&]() {
+      ClientFunctionIndex index("system/client-functions", true);
+      auto fn = index.get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);
+      expect(fn != nullptr);
+      auto count_word = [&](uint32_t w) {
+        std::string be{static_cast<char>(w >> 24), static_cast<char>(w >> 16), static_cast<char>(w >> 8), static_cast<char>(w)};
+        size_t n = 0;
+        for (size_t at = fn->code.find(be); at != std::string::npos; at = fn->code.find(be, at + 1)) {
+          n += ((at & 3) == 0);
+        }
+        return n;
+      };
+      auto calls = [&](uint32_t addr) { // lis r0, high / ori r0, r0, low, as every call in the function
+        return (count_word(0x3C000000 | (addr >> 16)) > 0) && (count_word(0x60000000 | (addr & 0xFFFF)) == 1);
+      };
+      expect(calls(0x800193B4)); // player + 0x324 == 2: no 6x25, as the game's sender (801BA5E0)
+      expect(calls(0x801C19A8)); // 6x25 constructor (801BA5F0)
+      expect(calls(0x80019628)); // the player's client id (801BA5F8)
+      expect(calls(0x801C19CC)); // byteswap and send (801BA60C)
+      expect(calls(0x801BA5AC)); // the game's sender stays for weapons, frames, barriers and units
+      expect_eq(0u, count_word(0x60000F4C)); // the may-equip check 0x801B0F4C is never called
+      expect_eq(1u, count_word(0xB061000A)); // sth r3, 0xA(r1): header.client_id
+      expect_eq(1u, count_word(0x93A1000C)); // stw r29, 0xC(r1): item_id
+      expect_eq(1u, count_word(0x93610010)); // stw r27, 0x10(r1): equip_slot
+      // the 12-byte buffer at r1 + 8 lies below the saved r27..r31 (stmw at r1 + 0x1C) in a 0x30 frame
+      expect_eq(1u, count_word(0x9421FFD0)); // stwu r1, -0x30(r1)
+      expect_eq(1u, count_word(0xBF61001C)); // stmw r27, 0x1C(r1)
+      expect_eq(1u, count_word(0xBB61001C)); // lmw r27, 0x1C(r1)
+      expect_eq(1u, count_word(0x90010034)); // stw r0, 0x34(r1)
+      expect_eq(1u, count_word(0x80010034)); // lwz r0, 0x34(r1)
+      expect_eq(1u, count_word(0x38210030)); // addi r1, r1, 0x30
+      expect_eq(0u, count_word(0x9421FFE0)); // no frame of the old size is left
+      // newserv: the run mag gets no line and is sent again while it is still unequipped, at most 3 sends
+      auto mag = b9_inventory({{0x0200050000000000ULL, 0x00010018, false}});
+      auto worn = b9_inventory({{0x0200050000000000ULL, 0x00010018, true}});
+      expect(spire_equip_item_unequipped(0x00010018, mag));
+      expect(!spire_equip_item_unequipped(0x00010018, worn));
+      expect(!spire_equip_item_unequipped(0x00010019, mag)); // gone
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010018, mag).has_value());
+      expect_eq(3u, SPIRE_RUN_MAG_EQUIP_SENDS);
+      expect(spire_run_mag_equip_again(SPIRE_PROMPT_RUN_MAG_REPLACED, 1, true));
+      expect(spire_run_mag_equip_again(SPIRE_PROMPT_RUN_MAG_REPLACED, 2, true));
+      expect(!spire_run_mag_equip_again(SPIRE_PROMPT_RUN_MAG_REPLACED, 3, true)); // the third send was the last
+      expect(!spire_run_mag_equip_again(SPIRE_PROMPT_RUN_MAG_REPLACED, 1, false)); // equipped (or gone)
+      expect(!spire_run_mag_equip_again(SPIRE_PROMPT_KIT_GROUND, 1, true)); // the kit weapon keeps its line
+      expect(!spire_run_mag_equip_again(SPIRE_EQUIP_RESUME_WEAPON, 1, true));
+      // NO_MAG at a room start: newserv equips the run mag (r143 = 1); only r143 = 0 keeps the reminder
+      expect(SpireNoMagAction::EQUIP == spire_run_mag_no_mag_action(true, true, 0x00010018u));
+      expect(SpireNoMagAction::NONE == spire_run_mag_no_mag_action(true, true, std::nullopt));
+      expect(SpireNoMagAction::REMIND == spire_run_mag_no_mag_action(true, false, std::nullopt));
+      expect(SpireNoMagAction::NONE == spire_run_mag_no_mag_action(false, true, 0x00010018u));
+      expect(SpireNoMagAction::NONE == spire_run_mag_no_mag_action(false, false, std::nullopt));
+      expect_eq(0x00010018u, spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, mag).value_or(0));
+      // newserv's copy follows the client's 6x25 for a mag (on_equip_item -> equip_item_id), so the next NO_MAG sees it
+      auto followed = mag;
+      followed.equip_item_id(0x00010018, EquipSlot::UNKNOWN);
+      expect(!spire_equip_item_unequipped(0x00010018, followed));
+      expect(!spire_equip_target(SPIRE_PROMPT_RUN_MAG_REPLACED, 0, true, followed).has_value());
+    });
+
     b9_case("'C' 13: the newest unequipped weapon with grind G", [&]() {
       auto inv = b9_inventory({
           {0x0001000A00000000ULL, 0x00210010, false}, // an older unequipped Saber +10
@@ -8495,11 +8559,11 @@ void run_static_tests() {
       expect(!spire_equip_missing_text(SPIRE_PROMPT_KIT_GROUND, 0x00010002, kit_unequipped).has_value()); // item gone
       auto mag_unequipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, false}});
       auto mag_equipped = b9_inventory({{0x0215190700000000ULL, 0x00010003, true}});
-      expect_eq(std::string("Equip your mag: Item Pack, Mag."),
-          spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_unequipped).value_or(""));
+      // B-REGIE-22-34: never a line for the run mag (the game refuses a mag to the player under the Spire's mag rule)
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_unequipped).has_value());
       expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010003, mag_equipped).has_value());
       expect(!spire_equip_missing_text(0x0C, 0x00010003, mag_unequipped).has_value()); // another point
-      for (const char* t : {SPIRE_EQUIP_KIT_MISSING_TEXT, SPIRE_EQUIP_MAG_MISSING_TEXT}) {
+      for (const char* t : {SPIRE_EQUIP_KIT_MISSING_TEXT}) {
         expect((std::string(t).size() <= 90) && (std::string(t) == spire_ticker_line(t)));
       }
     });
@@ -8747,7 +8811,7 @@ void run_static_tests() {
     // veilig-1 (system critic round 3): no server text for the client carries a loose '<' or '>'
     k2_case("no server line for the client carries a loose angle bracket", [&]() {
       for (const std::string& text : {
-               std::string(SPIRE_EQUIP_KIT_MISSING_TEXT), std::string(SPIRE_EQUIP_MAG_MISSING_TEXT),
+               std::string(SPIRE_EQUIP_KIT_MISSING_TEXT),
                std::string(SPIRE_EQUIP_WEAPON_MISSING_TEXT), std::string(SPIRE_RUN_MAG_REMINDER_TEXT),
                std::string(SPIRE_RUN_MAG_REMINDER_SHELL_TEXT), spire_run_mag_reminder_text(true),
                spire_run_mag_reminder_text(false), spire_run_mag_evolve_text("Varuna"),
@@ -8873,8 +8937,8 @@ void run_static_tests() {
       auto inv = k2_inventory({{0x00, false}, {0x02, false}});
       expect_eq(std::string("Equip your weapon: Item Pack, Equip."),
           spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, inv).value_or(""));
-      expect_eq(std::string("Equip your mag: Item Pack, Mag."),
-          spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, inv).value_or(""));
+      // B-REGIE-22-34: the mag gets no line, newserv equips it again (spire_run_mag_equip_again)
+      expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, inv).has_value());
       auto worn = k2_inventory({{0x00, true}, {0x02, true}});
       expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, 0x00010000, worn).has_value());
       expect(!spire_equip_missing_text(SPIRE_PROMPT_RUN_MAG_REPLACED, 0x00010001, worn).has_value());
@@ -9071,7 +9135,7 @@ void run_static_tests() {
       const std::string not_given = "Hoarder: inventory full. This was the last room: the gift is not given.";
       const std::string waits = "Hoarder: inventory full. Make room, it waits.";
       const std::string exam_waits = "Exam reward: 700 meseta. A rare still waits: make room.";
-      const std::string equip_weapon = SPIRE_EQUIP_WEAPON_MISSING_TEXT, equip_mag = SPIRE_EQUIP_MAG_MISSING_TEXT;
+      const std::string equip_weapon = SPIRE_EQUIP_WEAPON_MISSING_TEXT, equip_mag = "Equip your mag: Item Pack, Mag.";
 
       // -- e: the 'V' and the 'C' 12 (critic K7)
       auto e = join();

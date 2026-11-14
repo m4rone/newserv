@@ -15,9 +15,11 @@
 #
 # Returns in r3 (the server logs it from the B3):
 #   0 = nothing done: no local TObjPlayer, no pack, or the item id is not in the local player's pack
-#   1 = 6x25 sent through the game's sender (that sender can still decline silently, F2 § 6)
+#   1 = 6x25 sent: through the game's sender (that sender can still decline silently, F2 § 6), or for a mag through
+#       this function's own copy of that sender's steps (see below)
 #   2 = nothing done: the item is already equipped in its slot
 #   3 = nothing done: the item is no weapon, frame, barrier, unit or mag, or the slot does not fit it
+#   4 = nothing done: a mag while player + 0x324 == 2 (0x800193B4), where the game's own sender sends nothing either
 #
 # ux-1 (observaties 291, 2026-11-14): also frames, barriers and units, for the resume (newserv spire_resume_equip). A
 # frame or a barrier takes the path of a weapon: its own slot from vtable[0x84], the Item Pack's equip_slot 0, and
@@ -27,6 +29,18 @@
 # and the function does what Sega's Equip menu routine 0x80277584 does with its explicit slot (80277584-80277628): a
 # 6x26 for the item in that slot now, then the 6x25 with that slot. equip_slot 0 for a unit, or a slot for anything
 # else, is refused with 3, so a unit never lands in slot 9 by default.
+#
+# Marck's run (2026-11-14, B-REGIE-22-32/34): every Spire rule block carries ba_set_forbid_mags 0, which the game
+# stores as mag rule 1 (FORBID_ALL; rules object 0x8050FA60, byte 3, getter 0x801D7658). The game's 6x25 sender first
+# calls its may-equip check 0x801B0F4C, and under that rule the check returns 0 for every item of kind 2 (801B0FCC-
+# 801B1028), so the sender sends nothing for any mag, also from the Item Pack. For a mag this function therefore does
+# the sender's own steps after that check (801BA5D4-801BA60C): no 6x25 while 0x800193B4 says player + 0x324 == 2, the
+# 6x25 constructor 0x801C19A8 on a 12-byte buffer at r1 + 8, the player's client id (0x80019628) at buffer + 2, the
+# item id at + 4, equip_slot at + 8, and the byteswap-and-send 0x801C19CC, whose send path runs the 6x25 handler
+# 0x801BA51C locally (F2 § 2; that handler and TObjPlayer_equip_item never read the rule). Every other kind keeps the
+# game's sender. The rule itself stays: the game wipes every mag of the pack once when the rules are installed
+# (0x801B1044 -> 0x801D5114 kind 2, in the same pass that clears weapons and armour under weapon rule 1), and the drop
+# generator 0x80106094 makes no mags; those three sites are the only readers of the rule byte.
 
 .versions 3OP0
 
@@ -36,15 +50,19 @@
   .label   equip_slots_get, 0x801C6C18  # F2 § 4: (player + 0xD04, slot) -> equipped TItem* or null, slot 0..12
   .label   send_unequip_item_6x26, 0x801BA398  # F2 § 2 (menu site 8021A04C): (TObjPlayer*, uint32_t item_id)
   .label   send_equip_item_6x25, 0x801BA5AC  # F2 § 2: (TObjPlayer*, uint32_t item_id, uint32_t equip_slot)
+  .label   player_state_is_2, 0x800193B4  # 801BA5E0: (TObjPlayer*) -> (player + 0x324 == 2); nonzero: no 6x25
+  .label   construct_6x25, 0x801C19A8  # 801BA5F0: (buffer) -> 0x25, size 3, item_id -1, equip_slot 0
+  .label   player_client_id, 0x80019628  # 801BA5F8: (TObjPlayer*) -> lhz + 0x1C, the client id
+  .label   send_6x25, 0x801C19CC  # 801BA60C: (buffer) byteswap and send (0x801E4BAC), handled locally too
 
 entry_ptr:
 reloc0:
   .data    start
 start:
-  stwu     [r1 - 0x20], r1
+  stwu     [r1 - 0x30], r1               # r1 + 8 .. r1 + 0x13: a mag's 6x25 (send_mag_6x25), below the saved registers
   mflr     r0
-  stw      [r1 + 0x24], r0
-  stmw     [r1 + 0x0C], r27              # r27 = equip_slot, r28 = item, r29 = item_id, r30 = player, r31 = slot
+  stw      [r1 + 0x34], r0
+  stmw     [r1 + 0x1C], r27              # r27 = equip_slot, r28 = item, r29 = item_id, r30 = player, r31 = slot
 
   bl       get_args
 item_id:
@@ -145,6 +163,10 @@ have_slot:
   bctrl
 
 send_equip:
+  # A mag: past the game's may-equip check, which refuses every mag under the Spire's mag rule (header)
+  lbz      r0, [r28 + 0xEC]
+  cmplwi   r0, 2
+  beq      send_mag_6x25
   # send_equip_item_6x25(player, item_id, equip_slot): 0 = UNKNOWN, as the Item Pack sites pass (8021A054, F2 § 2); a
   # unit's slot 9..12, as the Equip menu routine passes it (80277624 mr r5, r28)
   mr       r3, r30
@@ -152,6 +174,36 @@ send_equip:
   mr       r5, r27
   lis      r0, high_word(send_equip_item_6x25)
   ori      r0, r0, low_word(send_equip_item_6x25)
+  mtctr    r0
+  bctrl
+  li       r3, 1
+  b        return
+
+send_mag_6x25:
+  # The game's sender after its may-equip check, 801BA5DC-801BA60C, step by step
+  mr       r3, r30
+  lis      r0, high_word(player_state_is_2)
+  ori      r0, r0, low_word(player_state_is_2)
+  mtctr    r0
+  bctrl
+  cmpwi    r3, 0
+  bne      return_4
+  addi     r3, r1, 8
+  lis      r0, high_word(construct_6x25)
+  ori      r0, r0, low_word(construct_6x25)
+  mtctr    r0
+  bctrl
+  mr       r3, r30
+  lis      r0, high_word(player_client_id)
+  ori      r0, r0, low_word(player_client_id)
+  mtctr    r0
+  bctrl
+  sth      [r1 + 0x0A], r3               # header.client_id
+  stw      [r1 + 0x0C], r29              # item_id
+  stw      [r1 + 0x10], r27              # equip_slot: 0, as the Item Pack passes it
+  addi     r3, r1, 8
+  lis      r0, high_word(send_6x25)
+  ori      r0, r0, low_word(send_6x25)
   mtctr    r0
   bctrl
   li       r3, 1
@@ -165,9 +217,12 @@ return_2:
   b        return
 return_3:
   li       r3, 3
+  b        return
+return_4:
+  li       r3, 4
 return:
-  lmw      r27, [r1 + 0x0C]
-  lwz      r0, [r1 + 0x24]
-  addi     r1, r1, 0x20
+  lmw      r27, [r1 + 0x1C]
+  lwz      r0, [r1 + 0x34]
+  addi     r1, r1, 0x30
   mtlr     r0
   blr
