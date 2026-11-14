@@ -28,6 +28,12 @@ constexpr uint32_t SPIRE_EQUIP_ITEM_SPECIFIC_VERSION = 0x334F5030; // "3OP0"
 constexpr const char* SPIRE_EQUIP_FUNCTION_NAME = "SpireEquipItem";
 // The label of the .s that receives the item id (send_function_call label_writes)
 constexpr const char* SPIRE_EQUIP_ITEM_ID_LABEL = "item_id";
+// ux-1 (observaties 291): the label of the .s that receives the equip slot: 0 for a weapon, frame, barrier or mag (the
+// item's own slot, as the Item Pack passes it), 9..12 for a unit (as Sega's Equip menu routine 0x80277584 passes it;
+// TObjPlayer_equip_item clamps any other value to 9, so a unit sent with 0 would push out the unit in slot 9). The
+// function answers 3 for a unit without such a slot and for a slot with anything else.
+constexpr const char* SPIRE_EQUIP_SLOT_LABEL = "equip_slot";
+constexpr uint32_t SPIRE_EQUIP_UNIT_SLOT_FIRST = 9; // EquipSlot::UNIT_1; a unit's data1[4] is its slot - 9 (0..3)
 // r143, not r15: every quest version (also the live bundle 8.1) keeps its resume "asked" flag in r15, so an r15 in
 // the 'M' answer would make an older quest skip its resume question. r143 is used by no quest version (bundle 8.1,
 // bundle 9, the rewards track), by no fixed-register opcode in them, and is outside every register newserv writes or
@@ -99,11 +105,19 @@ constexpr const char* SPIRE_EQUIP_MAG_MISSING_TEXT = "Equip your mag: Item Pack,
 // the mag of a resume uses SPIRE_PROMPT_RUN_MAG_REPLACED's line), and that weapon's line when the 6x25 does not come
 constexpr uint8_t SPIRE_EQUIP_RESUME_WEAPON = 0x80;
 constexpr const char* SPIRE_EQUIP_WEAPON_MISSING_TEXT = "Equip your weapon: Item Pack, Equip.";
+// ux-1 (observaties 291): the points of the frame, barrier and units newserv equips again on a resume, and their lines
+constexpr uint8_t SPIRE_EQUIP_RESUME_ARMOR = 0x81;
+constexpr uint8_t SPIRE_EQUIP_RESUME_SHIELD = 0x82;
+constexpr uint8_t SPIRE_EQUIP_RESUME_UNIT = 0x83;
+constexpr const char* SPIRE_EQUIP_ARMOR_MISSING_TEXT = "Equip your armor: Item Pack, Equip.";
+constexpr const char* SPIRE_EQUIP_SHIELD_MISSING_TEXT = "Equip your shield: Item Pack, Equip.";
+constexpr const char* SPIRE_EQUIP_UNITS_MISSING_TEXT = "Equip your units: Item Pack, Equip.";
 // The line for 'C' point after SpireEquipItem for item_id, or nullopt: the 6x25 came (the item is equipped), the item
 // is no longer in newserv's copy, or another point.
 inline std::optional<std::string> spire_equip_missing_text(uint8_t point, uint32_t item_id, const PlayerInventory& inventory) {
   if ((point != SPIRE_PROMPT_KIT_GROUND) && (point != SPIRE_PROMPT_RUN_MAG_REPLACED) &&
-      (point != SPIRE_EQUIP_RESUME_WEAPON)) {
+      (point != SPIRE_EQUIP_RESUME_WEAPON) && (point != SPIRE_EQUIP_RESUME_ARMOR) &&
+      (point != SPIRE_EQUIP_RESUME_SHIELD) && (point != SPIRE_EQUIP_RESUME_UNIT)) {
     return std::nullopt;
   }
   for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
@@ -114,6 +128,9 @@ inline std::optional<std::string> spire_equip_missing_text(uint8_t point, uint32
       }
       return std::string((point == SPIRE_PROMPT_KIT_GROUND)     ? SPIRE_EQUIP_KIT_MISSING_TEXT
               : (point == SPIRE_EQUIP_RESUME_WEAPON) ? SPIRE_EQUIP_WEAPON_MISSING_TEXT
+              : (point == SPIRE_EQUIP_RESUME_ARMOR)  ? SPIRE_EQUIP_ARMOR_MISSING_TEXT
+              : (point == SPIRE_EQUIP_RESUME_SHIELD) ? SPIRE_EQUIP_SHIELD_MISSING_TEXT
+              : (point == SPIRE_EQUIP_RESUME_UNIT)   ? SPIRE_EQUIP_UNITS_MISSING_TEXT
                                                      : SPIRE_EQUIP_MAG_MISSING_TEXT);
     }
   }

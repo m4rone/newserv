@@ -2975,6 +2975,9 @@ void run_static_tests() {
     expect_eq(std::string("Partner is in the shop. The warp waits for him."), spire_bridge_message_text(0x43000802));
     expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000901)); // leader
     expect_eq(std::string("Waiting for your partner at Forest 1."), spire_bridge_message_text(0x43000900)); // follower
+    // ux-1 (observaties 172): the pipe guard's two texts as ticker lines, no quest-board text to close
+    expect_eq(std::string("Clear the room first."), spire_bridge_message_text(0x43001101));
+    expect_eq(std::string("The warps open once both of you took a reward."), spire_bridge_message_text(0x43001102));
     for (uint32_t value : {0x43000302u, 0x43000402u, 0x43000502u}) {
       expect(spire_bridge_message_text(value).empty());
     }
@@ -6988,9 +6991,8 @@ void run_static_tests() {
       SpireSavestate before = rs; // a file from before this change: no "Equipped"
       before.equipped.reset();
       expect(!spire_savestate_from_json(spire_savestate_to_json(before, 1234567890)).equipped.has_value());
-      // the start line: the frame is the player's, the Saber newserv's
-      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your armor."),
-          spire_run_start_ticker(true, false, &rs, true));
+      // the start line: ux-1 (observaties 291), the Saber and the frame are both newserv's, so it asks for nothing
+      expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &rs, true));
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
           spire_run_start_ticker(true, false, &rs, false)); // r143 = 0: all by hand, as before
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min. Equip your gear."),
@@ -7000,9 +7002,13 @@ void run_static_tests() {
       expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &weapon_only, true));
       SpireSavestate all_kinds = rs;
       all_kinds.equipped = std::vector<uint32_t>{0, 3, 4};
-      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your armor and units."),
+      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min."),
+          spire_run_start_ticker(true, true, &all_kinds, true)); // ux-1: the unit (slot byte 0) is newserv's too
+      all_kinds.items[4].data1[4] = 0x07; // ux-1: a unit whose slot byte names no unit slot stays the player's
+      expect_eq(std::string("Practice run resumed at room 5: 2 lives, 31 min. Equip your units."),
           spire_run_start_ticker(true, true, &all_kinds, true));
-      // after the quest's item loop newserv's copy holds the items again, new ids, none equipped: the Saber is the target
+      // after the quest's item loop newserv's copy holds the items again, new ids, none equipped: the Saber and (ux-1)
+      // the frame are the targets
       PlayerInventory after;
       after.num_items = saved.size();
       for (size_t z = 0; z < saved.size(); z++) {
@@ -7011,13 +7017,21 @@ void run_static_tests() {
       }
       size_t expected = 99;
       auto ids = spire_resume_equip_targets(rs, after, &expected);
-      expect_eq(1u, expected); // the frame is not SpireEquipItem's (it answers 3)
-      expect_eq(1u, ids.size());
+      expect_eq(2u, expected); // ux-1: the frame is SpireEquipItem's now
+      expect_eq(2u, ids.size());
       expect_eq(0x00010000u, ids[0]);
+      expect_eq(0x00010003u, ids[1]);
       expect_eq(std::string(SPIRE_EQUIP_WEAPON_MISSING_TEXT),
           spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).value_or(""));
+      expect_eq(std::string(SPIRE_EQUIP_ARMOR_MISSING_TEXT),
+          spire_equip_missing_text(SPIRE_EQUIP_RESUME_ARMOR, ids[1], after).value_or(""));
       after.items[0].flags = 0x00000008; // the 6x25 came
       expect(!spire_equip_missing_text(SPIRE_EQUIP_RESUME_WEAPON, ids[0], after).has_value());
+      ids = spire_resume_equip_targets(rs, after, &expected);
+      expect_eq(1u, expected); // the frame is left
+      expect_eq(1u, ids.size());
+      expect_eq(0x00010003u, ids[0]);
+      after.items[3].flags = 0x00000008; // its 6x25 came too
       expect(spire_resume_equip_targets(rs, after, &expected).empty()); // already equipped: nothing to send
       expect_eq(0u, expected); // kwaliteit-1 r2 (critic B-3a): and nothing left to equip, so no "Equip your gear" line
       {
@@ -7032,7 +7046,113 @@ void run_static_tests() {
       }
       PlayerInventory not_yet; // the item_create2 6x2Bs not in yet
       expect(spire_resume_equip_targets(rs, not_yet, &expected).empty());
-      expect_eq(1u, expected);
+      expect_eq(2u, expected); // the Saber and (ux-1) the frame
+      {
+        // ux-1 (observaties 291): a resume puts on the frame, the barrier and the units again too. Units go to the slot
+        // they were in (data1[4] + 9, as Sega's Equip menu passes it), after the frame; the weapon first, the mag last.
+        PlayerInventory gear;
+        gear.num_items = 8;
+        auto put = [&](size_t z, std::array<uint8_t, 12> d1, uint32_t id, bool on) {
+          for (size_t i = 0; i < 12; i++) {
+            gear.items[z].data.data1[i] = d1[i];
+          }
+          gear.items[z].data.id = id;
+          gear.items[z].flags = on ? 0x00000008 : 0;
+        };
+        put(0, {0x01, 0x03, 0x05, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0}, 0x00820000, true); // a unit in slot 11
+        put(1, {0x01, 0x02, 0x04, 0x00, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00820001, true); // a barrier
+        put(2, {0x00, 0x01, 0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0}, 0x00820002, true); // a Saber +3
+        put(3, {0x01, 0x03, 0x01, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0}, 0x00820003, true); // a unit in slot 9
+        put(4, {0x01, 0x01, 0x05, 0x00, 0x00, 0x04, 0, 0, 0, 0, 0, 0}, 0x00820004, true); // a frame, 4 slots
+        put(5, {0x01, 0x03, 0x05, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0}, 0x00820005, false); // the same unit kind, not worn
+        put(6, {0x03, 0x00, 0x00, 0x00, 0x00, 0x02, 0, 0, 0, 0, 0, 0}, 0x00820006, false); // Monomate x2
+        put(7, {0x01, 0x01, 0x06, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}, 0x00820007, false); // a spare frame
+        for (uint8_t kind : {0x01, 0x02, 0x03}) {
+          ItemData x;
+          x.data1[0] = 0x01;
+          x.data1[1] = kind;
+          expect(spire_resume_equip_by_server(x));
+        }
+        ItemData bad_unit;
+        bad_unit.data1[0] = 0x01;
+        bad_unit.data1[1] = 0x03;
+        bad_unit.data1[4] = 0x04; // no unit slot 13
+        expect(!spire_resume_equip_by_server(bad_unit));
+        std::vector<uint32_t> worn_idx;
+        int32_t gi = 0;
+        SpireSavestate gs = rs;
+        gs.items = spire_savestate_items(gear, 0, &gi, std::nullopt, &worn_idx);
+        gs.equipped = worn_idx;
+        expect_eq(5u, worn_idx.size());
+        expect_eq(std::string("Run resumed at room 5: 2 lives, 31 min."), spire_run_start_ticker(true, false, &gs, true));
+        // back from the quest's item loop: new ids, nothing worn, and the client keeps no slot byte on a new unit
+        PlayerInventory back_in;
+        back_in.num_items = gs.items.size();
+        for (size_t z = 0; z < gs.items.size(); z++) {
+          back_in.items[z].data = gs.items[z];
+          back_in.items[z].data.id = 0x00030000 + z;
+          if ((gs.items[z].data1[0] == 0x01) && (gs.items[z].data1[1] == 0x03)) {
+            back_in.items[z].data.data1[4] = 0x00;
+          }
+        }
+        size_t want = 0;
+        std::vector<uint32_t> at;
+        auto gids = spire_resume_equip_targets(gs, back_in, &want, &at);
+        expect_eq(5u, want);
+        expect_eq(5u, gids.size());
+        expect_eq(gids.size(), at.size());
+        auto plan = spire_resume_equip_plan(gs, gids, at);
+        expect_eq(5u, plan.size());
+        expect_eq(0x00030002u, plan[0].item_id); // the Saber
+        expect_eq(SPIRE_EQUIP_RESUME_WEAPON, plan[0].point);
+        expect_eq(0u, plan[0].slot);
+        expect_eq(0x00030004u, plan[1].item_id); // the frame, before every unit
+        expect_eq(SPIRE_EQUIP_RESUME_ARMOR, plan[1].point);
+        expect_eq(0u, plan[1].slot);
+        expect_eq(0x00030001u, plan[2].item_id); // the barrier
+        expect_eq(SPIRE_EQUIP_RESUME_SHIELD, plan[2].point);
+        expect_eq(0u, plan[2].slot);
+        expect_eq(0x00030003u, plan[3].item_id); // the unit of slot 9
+        expect(plan[3].unit);
+        expect_eq(9u, plan[3].slot);
+        expect_eq(SPIRE_EQUIP_RESUME_UNIT, plan[3].point);
+        expect_eq(0x00030000u, plan[4].item_id); // the unit of slot 11, never the unworn one of the same kind
+        expect_eq(11u, plan[4].slot);
+        expect_eq(std::string(SPIRE_EQUIP_UNITS_MISSING_TEXT),
+            spire_equip_missing_text(SPIRE_EQUIP_RESUME_UNIT, plan[4].item_id, back_in).value_or(""));
+        expect_eq(std::string(SPIRE_EQUIP_SHIELD_MISSING_TEXT),
+            spire_equip_missing_text(SPIRE_EQUIP_RESUME_SHIELD, plan[2].item_id, back_in).value_or(""));
+        // a unit waits for a worn frame in newserv's copy: none worn yet, then the resumed frame's 6x25 came
+        expect_eq(8u, gs.items.size()); // every item of the pack is saved (no mag, no Scape Doll here)
+        expect(!spire_resume_frame_equipped(back_in));
+        for (size_t z = 0; z < back_in.num_items; z++) {
+          if (back_in.items[z].data.id == plan[1].item_id) {
+            back_in.items[z].flags = 0x00000008;
+          }
+        }
+        expect(spire_resume_frame_equipped(back_in));
+        // a unit worn in another slot by the player himself counts as done (B-3a), slot byte apart
+        for (size_t z = 0; z < back_in.num_items; z++) {
+          if (back_in.items[z].data.id == plan[3].item_id) {
+            back_in.items[z].flags = 0x00000008;
+            back_in.items[z].data.data1[4] = 0x03;
+          }
+        }
+        size_t left_now = 0;
+        auto rest = spire_resume_equip_targets(gs, back_in, &left_now);
+        expect_eq(3u, left_now); // Saber, barrier, the unit of slot 11
+        expect_eq(3u, rest.size());
+        // an older save point: a unit whose bytes differ beyond the slot byte is another unit
+        ItemData other_unit = gs.items[0]; // the unit of slot 11
+        other_unit.data1[2] ^= 0x01;
+        expect(!spire_resume_equip_same(gs.items[0], other_unit));
+        ItemData slot_moved = gs.items[0];
+        slot_moved.data1[4] = 0x01;
+        expect(spire_resume_equip_same(gs.items[0], slot_moved));
+        ItemData frame_moved = gs.items[4]; // the frame
+        frame_moved.data1[4] = 0x01; // only a unit's byte 4 is its slot
+        expect(!spire_resume_equip_same(gs.items[4], frame_moved));
+      }
       // kwaliteit-1 r2 (critic B-3b): equipping starts at the last item's ack, or after SPIRE_RESUME_EQUIP_FALLBACK_MS
       // without a 'J' item request when that ack never comes; once, only with "Equipped" and r143 = 1
       expect(spire_resume_equip_start_due(true, 0, false, true, true, 1));
@@ -7836,6 +7956,23 @@ void run_static_tests() {
       expect(fn->label_offsets.count(SPIRE_EQUIP_ITEM_ID_LABEL) == 1);
       expect(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4 <= fn->code.size());
       expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}}).empty());
+      // ux-1 (observaties 291): the slot label sits right after item_id, and a unit only goes with a slot 9..12 that
+      // the 6x25 then carries (cmplwi r27, 9 / cmplwi r27, 12 / mr r5, r27), as Sega's Equip menu routine 0x80277584
+      expect(fn->label_offsets.count(SPIRE_EQUIP_SLOT_LABEL) == 1);
+      expect_eq(fn->label_offsets.at(SPIRE_EQUIP_ITEM_ID_LABEL) + 4, fn->label_offsets.at(SPIRE_EQUIP_SLOT_LABEL));
+      expect(!fn->generate_client_command({{SPIRE_EQUIP_ITEM_ID_LABEL, 0x00210017}, {SPIRE_EQUIP_SLOT_LABEL, 11}}).empty());
+      auto has_word = [&](uint32_t w) {
+        std::string be;
+        be.push_back((w >> 24) & 0xFF);
+        be.push_back((w >> 16) & 0xFF);
+        be.push_back((w >> 8) & 0xFF);
+        be.push_back(w & 0xFF);
+        return fn->code.find(be) != std::string::npos;
+      };
+      expect(has_word(0x281B0009)); // cmplwi r27, 9
+      expect(has_word(0x281B000C)); // cmplwi r27, 12
+      expect(has_word(0x7F65DB78)); // mr r5, r27: the 6x25's equip_slot
+      expect(!has_word(0x38A00000)); // no li r5, 0 any more (every 6x25 carries the label's slot)
       // the game functions it calls are the six of ROUTEB9-NEWSERV-F2-REPORT.md, each loaded as lis r0 / ori r0
       auto has_call_to = [&](uint32_t addr) {
         uint32_t lis = 0x3C000000 | (addr >> 16);

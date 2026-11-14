@@ -549,7 +549,69 @@ std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, ui
 }
 
 bool spire_resume_equip_by_server(const ItemData& item) {
-  return (item.data1[0] == 0x00) || (item.data1[0] == 0x02);
+  if ((item.data1[0] == 0x00) || (item.data1[0] == 0x02)) {
+    return true;
+  }
+  if (item.data1[0] != 0x01) {
+    return false;
+  }
+  return (item.data1[1] == 0x01) || (item.data1[1] == 0x02) || ((item.data1[1] == 0x03) && (item.data1[4] <= 3));
+}
+
+bool spire_resume_equip_same(const ItemData& saved, const ItemData& item) {
+  bool unit = (saved.data1[0] == 0x01) && (saved.data1[1] == 0x03);
+  for (size_t i = 0; i < 12; i++) {
+    if ((saved.data1[i] != item.data1[i]) && !(unit && (i == 4))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<SpireResumeEquipSend> spire_resume_equip_plan(
+    const SpireSavestate& ss, const std::vector<uint32_t>& ids, const std::vector<uint32_t>& saved_indices) {
+  std::vector<std::pair<uint32_t, SpireResumeEquipSend>> ranked; // rank, send
+  for (size_t z = 0; (z < ids.size()) && (z < saved_indices.size()); z++) {
+    if (saved_indices[z] >= ss.items.size()) {
+      continue;
+    }
+    const auto& item = ss.items[saved_indices[z]];
+    SpireResumeEquipSend send;
+    send.item_id = ids[z];
+    uint32_t rank;
+    if (item.data1[0] == 0x00) {
+      rank = 0, send.point = SPIRE_EQUIP_RESUME_WEAPON, send.what = "resumed weapon";
+    } else if (item.data1[0] == 0x02) {
+      rank = 20, send.point = SPIRE_PROMPT_RUN_MAG_REPLACED, send.what = "resumed mag";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x01)) {
+      rank = 1, send.point = SPIRE_EQUIP_RESUME_ARMOR, send.what = "resumed armor";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x02)) {
+      rank = 2, send.point = SPIRE_EQUIP_RESUME_SHIELD, send.what = "resumed shield";
+    } else if ((item.data1[0] == 0x01) && (item.data1[1] == 0x03) && (item.data1[4] <= 3)) {
+      rank = 10 + item.data1[4], send.point = SPIRE_EQUIP_RESUME_UNIT, send.what = "resumed unit";
+      send.unit = true;
+      send.slot = SPIRE_EQUIP_UNIT_SLOT_FIRST + item.data1[4];
+    } else {
+      continue;
+    }
+    ranked.emplace_back(rank, send);
+  }
+  std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<SpireResumeEquipSend> ret;
+  for (const auto& [rank, send] : ranked) {
+    ret.emplace_back(send);
+  }
+  return ret;
+}
+
+bool spire_resume_frame_equipped(const PlayerInventory& inventory) {
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (!item.data.empty() && (item.data.data1[0] == 0x01) && (item.data.data1[1] == 0x01) && item.is_equipped()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string spire_resume_equip_hint(const SpireSavestate& ss, bool server_equips) {
@@ -592,9 +654,12 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
       [&](uint32_t index) { return (index < ss.items.size()) && (ss.items[index].data1[0] == 0x02); });
 }
 
-std::vector<uint32_t> spire_resume_equip_targets(
-    const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected) {
+std::vector<uint32_t> spire_resume_equip_targets(const SpireSavestate& ss, const PlayerInventory& inventory,
+    size_t* expected, std::vector<uint32_t>* saved_indices) {
   std::vector<uint32_t> ret;
+  if (saved_indices) {
+    saved_indices->clear();
+  }
   std::set<size_t> taken;
   size_t count = 0;
   if (ss.equipped) {
@@ -609,7 +674,7 @@ std::vector<uint32_t> spire_resume_equip_targets(
         for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
           const auto& item = inventory.items[z];
           if (!item.data.empty() && (item.is_equipped() == equipped) && !taken.count(z) &&
-              !memcmp(item.data.data1.data(), ss.items[index].data1.data(), 12)) {
+              spire_resume_equip_same(ss.items[index], item.data)) {
             return z;
           }
         }
@@ -621,6 +686,9 @@ std::vector<uint32_t> spire_resume_equip_targets(
       } else if (auto z = find(false)) {
         taken.emplace(*z);
         ret.emplace_back(inventory.items[*z].data.id.load());
+        if (saved_indices) {
+          saved_indices->emplace_back(index);
+        }
       }
     }
   }
@@ -2527,6 +2595,9 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return name.empty() ? std::string("Your waiting exam reward is now in your pack.")
                               : std::format("{} is now in your pack.", name);
         }
+        case 17: // ux-1 (observaties 172): the pipe guard put this player back (make_spire.py guard_say); the low byte
+          // 1 = the room still runs, 2 = a reward is still to take (pause A/B). The quest showed these as board texts.
+          return (b == 2) ? "The warps open once both of you took a reward." : "Clear the room first.";
         default:
           return ""; // 3-5 retired (spire_bridge_handle_register takes them silently)
       }
@@ -3481,13 +3552,14 @@ asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std:
 // Route B bundle 9 (ROUTEB9-PROTOCOL.md § 3): SpireEquipItem with one item id, to this client only, in the game weak_l
 // (the game the client is in when the equip is asked). Never throws; the client's B3 answer is logged.
 static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
-    uint32_t item_id, std::string what, uint8_t point) {
+    uint32_t item_id, std::string what, uint8_t point, uint32_t slot = 0) {
   try {
     auto s = c->require_server_state();
     auto fn = s->data->client_functions->get(SPIRE_EQUIP_FUNCTION_NAME, c->specific_version);
     co_await prepare_client_for_patches(c);
-    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}});
-    c->log.info_f("Spire equip: {} {:08X}; client answered {}", what, item_id, result.return_value.load());
+    // ux-1: the slot label too (0, or a unit's 9..12), so the function never keeps a slot of an earlier call
+    auto result = co_await send_function_call(c, fn, {{SPIRE_EQUIP_ITEM_ID_LABEL, item_id}, {SPIRE_EQUIP_SLOT_LABEL, slot}});
+    c->log.info_f("Spire equip: {} {:08X} (slot {}); client answered {}", what, item_id, slot, result.return_value.load());
   } catch (const std::exception& e) {
     c->log.warning_f("Spire equip: {} {:08X}; failed to send {}: {}", what, item_id, SPIRE_EQUIP_FUNCTION_NAME,
         e.what());
@@ -3499,7 +3571,7 @@ static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, st
 
 // kwaliteit-1 (observaties 209/216): after the last resume item, SpireEquipItem for each weapon and mag that was
 // equipped at the 'V' (spire_resume_equip_targets), one after the other, each with spire_equip_item_send's check and
-// line. It waits up to SPIRE_RESUME_EQUIP_POLLS x SPIRE_RESUME_EQUIP_POLL_DELAY for the quest's item_create2 6x2Bs to
+// line. ux-1 (observaties 291): also the frame, barrier and units, in spire_resume_equip_plan's order. It waits up to SPIRE_RESUME_EQUIP_POLLS x SPIRE_RESUME_EQUIP_POLL_DELAY for the quest's item_create2 6x2Bs to
 // reach newserv's copy; an item still not there gets SPIRE_RESUME_EQUIP_MISSING_TEXT. Holds neither the client nor its
 // game while it waits. Never throws.
 static constexpr auto SPIRE_RESUME_EQUIP_POLL_DELAY = std::chrono::milliseconds(500);
@@ -3510,7 +3582,7 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
     std::weak_ptr<Client> weak_c = c;
     std::weak_ptr<Lobby> weak_l = c->lobby;
     c.reset();
-    std::vector<uint32_t> ids;
+    std::vector<uint32_t> ids, saved_indices; // ux-1: saved_indices[z] = the position in ss.items of ids[z]
     size_t expected = 0;
     for (size_t tries = 0; tries < SPIRE_RESUME_EQUIP_POLLS; tries++) {
       co_await async_sleep(SPIRE_RESUME_EQUIP_POLL_DELAY);
@@ -3520,7 +3592,7 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
         co_return;
       }
       if (auto character = c->character_file(false, true)) {
-        ids = spire_resume_equip_targets(ss, character->inventory, &expected);
+        ids = spire_resume_equip_targets(ss, character->inventory, &expected, &saved_indices);
       }
       if (ids.size() >= expected) {
         break;
@@ -3549,28 +3621,44 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
           ids.size(), expected, SPIRE_RESUME_EQUIP_POLLS * SPIRE_RESUME_EQUIP_POLL_DELAY.count(),
           SPIRE_RESUME_EQUIP_MISSING_TEXT, delay.count());
     }
-    std::vector<std::pair<uint32_t, bool>> sends; // item id, is a mag
+    // ux-1 (observaties 291): weapon, frame, barrier, units and mag, in the order spire_resume_equip_plan gives, each
+    // id still in newserv's copy
+    std::vector<SpireResumeEquipSend> sends;
     if (auto character = c->character_file(false, true)) {
-      for (uint32_t id : ids) {
+      for (const auto& send : spire_resume_equip_plan(ss, ids, saved_indices)) {
         for (size_t z = 0; (z < character->inventory.num_items) && (z < character->inventory.items.size()); z++) {
-          if (character->inventory.items[z].data.id == id) {
-            sends.emplace_back(id, character->inventory.items[z].data.data1[0] == 0x02);
+          if (character->inventory.items[z].data.id == send.item_id) {
+            sends.emplace_back(send);
             break;
           }
         }
       }
     }
     c.reset();
-    for (const auto& [id, is_mag] : sends) {
+    bool units_skipped = false;
+    for (const auto& send : sends) {
       auto l = weak_l.lock();
       c = weak_c.lock();
       if (!c || !l || (c->lobby.lock() != l)) {
         co_return;
       }
-      c->log.info_f("Spire equip: resume; sending {} for the {} {:08X}", SPIRE_EQUIP_FUNCTION_NAME,
-          is_mag ? "mag" : "weapon", id);
-      co_await spire_equip_item_send(std::move(c), l, id, is_mag ? "resumed mag" : "resumed weapon",
-          is_mag ? SPIRE_PROMPT_RUN_MAG_REPLACED : SPIRE_EQUIP_RESUME_WEAPON);
+      if (send.unit) {
+        // ux-1: a unit only on an equipped frame (the frame went before it and its check waited for its 6x25); without
+        // one the units stay the player's, with one line
+        auto character = c->character_file(false, true);
+        if (units_skipped || !character || !spire_resume_frame_equipped(character->inventory)) {
+          if (!units_skipped) {
+            units_skipped = true;
+            c->log.info_f("Spire equip: resume; no frame equipped in the inventory copy, so no unit is sent");
+            spire_equip_missing_line_in_turn(c, l, SPIRE_EQUIP_RESUME_UNIT, send.item_id);
+          }
+          c.reset();
+          continue;
+        }
+      }
+      c->log.info_f("Spire equip: resume; sending {} for the {} {:08X} (slot {})", SPIRE_EQUIP_FUNCTION_NAME,
+          send.what, send.item_id, send.slot);
+      co_await spire_equip_item_send(std::move(c), l, send.item_id, send.what, send.point, send.slot);
     }
   } catch (const std::exception& e) {
     if (auto c2 = c) {

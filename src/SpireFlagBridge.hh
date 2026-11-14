@@ -374,9 +374,30 @@ struct SpireSavestate {
 // kwaliteit-1: *equipped (if given) gets the positions among them of the items the inventory has equipped.
 std::vector<ItemData> spire_savestate_items(const PlayerInventory& inventory, uint32_t glass_item_id,
     int32_t* glass_index, const SpireRunMagBytes& run_mag, std::vector<uint32_t>* equipped = nullptr);
-// kwaliteit-1: whether SpireEquipItem can equip this item on a resume: a weapon or a mag (the function answers 3 for
-// anything else, SpireEquipItemGC.s), so armor, shields and units stay the player's to equip.
+// kwaliteit-1: whether SpireEquipItem can equip this item on a resume. ux-1 (observaties 291): a weapon, a mag, a frame,
+// a barrier, or a unit whose data1[4] names one of the four unit slots (0..3; SpireEquipItemGC.s answers 3 for
+// anything else).
 bool spire_resume_equip_by_server(const ItemData& item);
+// ux-1: whether item is the saved item again after the quest's item_create2: the same 12 data1 bytes, except a unit's
+// data1[4] (its slot, which newserv and the client set at the equip and clear at the unequip)
+bool spire_resume_equip_same(const ItemData& saved, const ItemData& item);
+// ux-1: one SpireEquipItem of a resume: the item id in newserv's copy, the equip slot for the .s (0, or 9..12 for a
+// unit), the point of its line (spire_equip_missing_text) and a word for the log
+struct SpireResumeEquipSend {
+  uint32_t item_id = 0;
+  uint32_t slot = 0;
+  uint8_t point = 0;
+  bool unit = false;
+  const char* what = "";
+};
+// ux-1: the sends for the targets of spire_resume_equip_targets (ids, with saved_indices their positions in ss.items),
+// in the order the game needs them: the weapon first (the player can fight), the frame before the units (a unit needs
+// the frame's slots), the units by slot, the mag last
+std::vector<SpireResumeEquipSend> spire_resume_equip_plan(
+    const SpireSavestate& ss, const std::vector<uint32_t>& ids, const std::vector<uint32_t>& saved_indices);
+// ux-1: whether newserv's copy has a frame equipped, which every unit send waits for (a unit without a frame is no
+// state the game makes; the units then stay the player's, with one line)
+bool spire_resume_frame_equipped(const PlayerInventory& inventory);
 // kwaliteit-1: what the resume start line asks the player to equip: " Equip your gear." when newserv equips nothing
 // (server_equips false: r143 = 0 for the client) or the savestate does not say what was equipped (a file from before);
 // else only the equipped items newserv cannot equip, by kind (" Equip your armor, shield and units."), or "" when
@@ -391,8 +412,9 @@ bool spire_resume_server_equips_mag(const SpireSavestate& ss, bool server_equips
 // given) gets how many such saved items are still to equip; fewer ids than that means some are not (yet) in the copy.
 // kwaliteit-1 r2 (critic B-3a): a saved item with an exactly equal item that is equipped already counts as done: no
 // id and not in *expected.
-std::vector<uint32_t> spire_resume_equip_targets(
-    const SpireSavestate& ss, const PlayerInventory& inventory, size_t* expected = nullptr);
+// ux-1: *saved_indices (if given) gets, per returned id, the position in ss.items of the saved item it is.
+std::vector<uint32_t> spire_resume_equip_targets(const SpireSavestate& ss, const PlayerInventory& inventory,
+    size_t* expected = nullptr, std::vector<uint32_t>* saved_indices = nullptr);
 // kwaliteit-2 r2: whether "Equip your gear: Item Pack > Equip." is true for this inventory: an item that was equipped
 // at the 'V' is still to equip (spire_resume_equip_targets) and newserv sends no SpireEquipItem for it (sent: the ids
 // it does send one for, each with its own check and line). Looked at when the line is planned and again when it goes.
