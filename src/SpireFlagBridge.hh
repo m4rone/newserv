@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 
@@ -1361,6 +1362,16 @@ struct SpireRoomEvent {
 std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
 // The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
 std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size);
+// 2r2-M2 (system critic round 2): what one look of the second net (spire_dead_event_wait) counts in a room, without its
+// clock: the started events without a living enemy at the previous look (seen) and at this one (now), in *both_out, and
+// the never-started events of the room's trigger chain behind them, or behind a wave a net counted in this room before
+// (2-M1: after a net counted a non-last wave, no event of the room is dead any more, so only that room mark starts the
+// chain). The w_ids, never empty when the chain has one.
+std::unordered_set<size_t> spire_dead_event_look_counts(std::shared_ptr<Lobby> l, Version v, uint8_t floor,
+    uint16_t room, const std::unordered_set<size_t>& seen, const std::unordered_set<size_t>& now,
+    std::unordered_set<size_t>* both_out = nullptr);
+// For StaticTests: marks (noted) or unmarks a room as one where a net counted a wave (spire_net_rooms)
+void spire_static_test_note_net_room(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room, bool noted);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,

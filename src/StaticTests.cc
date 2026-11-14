@@ -10955,6 +10955,73 @@ void run_static_tests() {
       expect_eq(1u, p.ch->count("Practice is not saved: your run waits in Spire room 9."));
     });
 
+    r2_case("2r2-M2: after a net counted a non-last wave, the room mark alone starts the chain behind it (the look of spire_dead_event_wait)", [&]() {
+      // k2 (Forest 1, room 10): 111 -> 112 -> 113. A net counted wave 2 (112 on 0x18 on the server only); at the next look
+      // no started event is dead any more (seen and now empty), so only the room's net mark (spire_net_rooms) brings
+      // 113, which the clients never start, into the count
+      using EV = MapFile::Event1Entry;
+      auto ev = [](uint32_t event_id, uint16_t wave_number, uint32_t offset) {
+        EV e;
+        e.event_id = event_id;
+        e.room = 10;
+        e.wave_number = wave_number;
+        e.action_stream_offset = offset;
+        return e;
+      };
+      // the post-wave actions as make_map writes them: 111 triggers 112, 112 triggers 113, 113 stops
+      const uint8_t stream[] = {0x0C, 0x70, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x71, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00};
+      std::vector<EV> evs{ev(111, 1, 0), ev(112, 2, 6), ev(113, 3, 12)};
+      MapFile::EventsSectionHeader eh;
+      eh.entries_offset = sizeof(eh);
+      eh.entry_count = evs.size();
+      eh.action_stream_offset = sizeof(eh) + evs.size() * sizeof(EV);
+      eh.format = 0;
+      auto dat = std::make_shared<std::string>();
+      MapFile::SectionHeader h;
+      h.le_type = static_cast<uint32_t>(MapFile::SectionHeader::Type::EVENTS);
+      h.data_size = sizeof(eh) + evs.size() * sizeof(EV) + sizeof(stream);
+      h.section_size = sizeof(h) + h.data_size;
+      h.floor = 0x01;
+      dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+      dat->append(reinterpret_cast<const char*>(&eh), sizeof(eh));
+      dat->append(reinterpret_cast<const char*>(evs.data()), evs.size() * sizeof(EV));
+      dat->append(reinterpret_cast<const char*>(stream), sizeof(stream));
+      MapFile::SectionHeader end_h;
+      end_h.le_type = 0;
+      end_h.section_size = 0;
+      end_h.floor = 0;
+      end_h.data_size = 0;
+      dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+      std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+      map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+      auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+      auto w = r2_world(0x7D21, Episode::EP1);
+      w.l->map_state = std::make_shared<MapState>(
+          0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+      std::map<uint32_t, std::shared_ptr<MapState::EventState>> by_id;
+      for (const auto& ev_st : w.l->map_state->event_states_for_floor(Version::GC_V3, 0x01)) {
+        by_id[ev_st->super_ev->version(Version::GC_V3).set_entry->event_id] = ev_st;
+      }
+      expect_eq(3u, by_id.size());
+      by_id[111]->flags = 0x18; // done on the client
+      by_id[112]->flags = 0x18; // counted by the net (server's map state only)
+      by_id[113]->flags = 0x00; // never started: the clients send no 6x67 for it
+      const std::unordered_set<size_t> none;
+      // no net counted in this room and nothing dead: this look counts nothing
+      spire_static_test_note_net_room(w.l, 0x01, 10, false);
+      expect(spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 10, none, none).empty());
+      // the net counted wave 2 here: the look counts 113, though no event is dead at it
+      spire_static_test_note_net_room(w.l, 0x01, 10, true);
+      std::unordered_set<size_t> both{12345};
+      auto counted = spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 10, none, none, &both);
+      expect(both.empty());
+      expect_eq(1u, counted.size());
+      expect(counted.count(by_id[113]->w_id));
+      // the mark is per room: room 11 on the same floor counts nothing
+      expect(spire_dead_event_look_counts(w.l, Version::GC_V3, 0x01, 11, none, none).empty());
+      spire_static_test_note_net_room(w.l, 0x01, 10, false);
+    });
+
     expect_eq(0u, r2_failed);
   }
 

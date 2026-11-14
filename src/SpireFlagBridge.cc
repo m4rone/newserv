@@ -7705,6 +7705,40 @@ static std::unordered_set<size_t> spire_unstarted_room_chain(
   return ret;
 }
 
+// 2r2-M2 (system critic round 2): one look of the second net, without its clock (SpireFlagBridge.hh)
+std::unordered_set<size_t> spire_dead_event_look_counts(std::shared_ptr<Lobby> l, Version v, uint8_t floor,
+    uint16_t room, const std::unordered_set<size_t>& seen, const std::unordered_set<size_t>& now,
+    std::unordered_set<size_t>* both_out) {
+  auto key = std::make_tuple(l->lobby_id, floor, room);
+  // Only events without a living enemy at the previous look and still now: at least SPIRE_UNHIT_ENEMY_SECONDS long
+  std::unordered_set<size_t> both;
+  for (size_t w_id : now) {
+    if (seen.count(w_id)) {
+      both.emplace(w_id);
+    }
+  }
+  // veilig-1 (2-M1): behind a wave a net counted (in this room before, or `both` at this look) the clients start no
+  // next wave: the never-started events its trigger chain points at are counted with it
+  std::unordered_set<size_t> chain;
+  if (!both.empty() || spire_net_rooms.count(key)) {
+    chain = spire_unstarted_room_chain(l, v, floor, room, both);
+  }
+  std::unordered_set<size_t> counted = both;
+  counted.insert(chain.begin(), chain.end());
+  if (both_out) {
+    *both_out = std::move(both);
+  }
+  return counted;
+}
+
+void spire_static_test_note_net_room(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room, bool noted) {
+  if (noted) {
+    spire_net_rooms.emplace(l->lobby_id, floor, room);
+  } else {
+    spire_net_rooms.erase(std::make_tuple(l->lobby_id, floor, room));
+  }
+}
+
 // Per (game, floor, room): the generation of the running watch; one watch per room
 static std::map<std::tuple<uint32_t, uint8_t, uint16_t>, uint64_t> spire_dead_event_waits;
 static uint64_t spire_dead_event_next_generation = 1;
@@ -7742,22 +7776,10 @@ static asio::awaitable<void> spire_dead_event_wait(std::weak_ptr<Client> weak_c,
       spire_dead_event_waits.erase(it); // the room cleared by itself: the wave check announced it
       co_return;
     }
-    // Only events without a living enemy at the previous look and still now: at least SPIRE_UNHIT_ENEMY_SECONDS long
+    // what this look counts: the events dead at both looks, and the chain behind them or behind a counted wave
     auto now = spire_dead_room_events(l, v, floor, room);
     std::unordered_set<size_t> both;
-    for (size_t w_id : now) {
-      if (seen.count(w_id)) {
-        both.emplace(w_id);
-      }
-    }
-    // veilig-1 (2-M1): behind a wave a net counted (in this room before, or `both` at this look) the clients start no
-    // next wave: the never-started events its trigger chain points at are counted with it
-    std::unordered_set<size_t> chain;
-    if (!both.empty() || spire_net_rooms.count(key)) {
-      chain = spire_unstarted_room_chain(l, v, floor, room, both);
-    }
-    std::unordered_set<size_t> counted = both;
-    counted.insert(chain.begin(), chain.end());
+    std::unordered_set<size_t> counted = spire_dead_event_look_counts(l, v, floor, room, seen, now, &both);
     if (!counted.empty() && spire_bridge_room_is_clear(l, v, floor, room, &why, &counted)) {
       // veilig-1 (2-M2): counted only at a look where the floor was quiet long enough with a client on it
       bool player_on_floor = false;
