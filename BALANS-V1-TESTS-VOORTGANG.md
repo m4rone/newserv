@@ -1,0 +1,5 @@
+- 13:55 build-map klaar (exit 0); tests schrijven
+- 13:46 vijf tests geschreven (backup bal M2a/M2b/M2c/M1/M3), static tests zonder mutant: exit 0; nu mutanten
+- 13:50 vijf mutanten rood, eindstand groen; rapport geschreven
+- 13:58 opdracht 2: tests 7805 (boss-wapen via spire_drops_filter) en 19c4 (leider met savestate bij I) geschreven, build
+- 14:02 ronde 2: beide mutanten rood; rapport bijgewerkt; schone build op eindsha volgt

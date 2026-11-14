@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 
@@ -117,6 +118,12 @@ constexpr auto SPIRE_BRIDGE_ROOM_CLEAR_TEXT_DELAY = std::chrono::milliseconds(10
 //     on the exit pipe's spot (every exit before a boss but Seaside's): "The way is open. Take the teleporter: Exam
 //     <boss>." when the game's map has that object on the writer's floor (SpireBridgeTextContext::boss_teleporter);
 //     a floor without one keeps "Walk to the warp". The code itself does not say which of the two stands there.
+//     kwaliteit-3 4: bit 2 of a side's type (SPIRE_WAY_SEGA_TELEPORTER: 4-7 = 0-3 with the bit) says that side is
+//     Sega's own teleporter, which has no board of ours. 0xF7 (the one exam way is Sega's boss teleporter) reads "Take
+//     the teleporter: Exam <boss>." whatever the map says; 0x14 (k11: side A Sega's teleporter, side B our pipe) reads
+//     "The way is open: teleporter to Room k normal, warp to Room k ELITE." with no "read it" for a side that has
+//     nothing to read. Without the bit every line is the one of before (a server from before answers a type above 3
+//     with "The way is open. Walk to a warp.").
 //   'A' bits 16-23 = extra: type 0 normal "Room k. Next reward: <tag>." · 1 elite "Room k - Elite: harder foes, rare
 //     reward. Next reward: <tag>." (extra = tag index + 1; no tag name: without "Next reward") · 2 rest "Room k - Rest:
 //     no enemies, full HP, then the shop." (spire.json sign_rest; the same rest in every quest version, so also at
@@ -328,11 +335,27 @@ enum SpireSavestateValue : size_t {
   SPIRE_SS_GLASS, // r138 item id of the Glass run item, 0 = none (stored as an item index)
   SPIRE_SAVESTATE_NUM_VALUES,
 };
+// kwaliteit-3 3 (critic r2 M-3): the 'V' value SPIRE_SS_VARIANT may carry the quest's rest bits above the variant: r131
+// bits 2-5, one per rest room the run took so far (make_spire.py rest_bit), so the quest sends r131 & 0x3F where it sent
+// r131 & 3. The server keeps the variant (bits 0-1) in Values as before and the four rest bits (shifted down) in the
+// savestate's "RestRooms", and gives them back in the 'J' start answer. A quest from before sends them 0: no field in
+// the file, no bits in the answer.
+constexpr uint32_t SPIRE_SS_VARIANT_MASK = 3;
+constexpr uint32_t SPIRE_SS_REST_SHIFT = 2;
+constexpr uint32_t SPIRE_SS_REST_MASK = 0x0F;
 constexpr uint8_t SPIRE_RESUME_ANSWER_REGISTER = 41;
 // The answer always carries 'J' in its top byte, so the quest tells it from the 0 it set before asking (another
 // request's 'DONE' on r248 can come first)
 constexpr uint32_t SPIRE_RESUME_ANSWER_TAG = static_cast<uint32_t>(SPIRE_BRIDGE_RESUME) << 24;
 constexpr uint32_t SPIRE_RESUME_ANSWER_RESUME = 0x100;
+// kwaliteit-3 2 and 3: a resume answer also carries the run's first room in bits 16-23 (SpireSavestate::start_room;
+// critic r2 M-2: a resumed practice run began in a later room than K0, and only the server knows which) and the rest
+// bits in bits 12-15 (SpireSavestate::rest_rooms; the quest puts them back with r131 |= (answer >> 10) & 0x3C). The
+// quest of before reads neither: it compares the top byte with the tag, keeps answer & 0xFFFF and uses that only as
+// "not 0" and "& 0xFF" (the item count, at most 30). A savestate from before has start room as it was and no rest
+// bits; a fresh answer is the tag alone, as before.
+constexpr uint32_t SPIRE_RESUME_ANSWER_REST_SHIFT = 12;
+constexpr uint32_t SPIRE_RESUME_ANSWER_START_ROOM_SHIFT = 16;
 constexpr uint8_t SPIRE_RESUME_ITEM_FIRST_REGISTER = 20; // r20-r31
 constexpr uint8_t SPIRE_RESUME_ITEM_ACK_REGISTER = 44;
 constexpr uint32_t SPIRE_RESUME_ITEM_GLASS = 0x100;
@@ -368,8 +391,15 @@ struct SpireSavestate {
   // creates every item new and unequipped (item_create2), so newserv equips the weapon and the mag again with
   // SpireEquipItem (spire_resume_equip_targets) once the quest's resume item loop is done.
   std::optional<std::vector<uint32_t>> equipped;
+  // kwaliteit-3 3: the quest's rest bits at the 'V' (r131 bits 2-5 shifted down, 0-15), "RestRooms"; written only when
+  // not 0, and 0 for a file without it, so a savestate from before loads as it did and means "no rest room taken"
+  uint8_t rest_rooms = 0;
 };
 // The pure parts, for the static tests:
+// kwaliteit-3 3: takes the rest bits out of a 'V''s values (SPIRE_SS_VARIANT keeps bits 0-1) and returns them
+uint8_t spire_savestate_take_rest_rooms(std::vector<uint32_t>& values);
+// kwaliteit-3 2 and 3: the 'J' start answer of a resume from this savestate (SPIRE_RESUME_ANSWER_REGISTER)
+uint32_t spire_resume_answer_value(const SpireSavestate& ss);
 // The items a savestate takes from a run copy: every item but empty slots, Scape Dolls and mags, in inventory order;
 // F6: the one exception is the run mag, an item whose 12 data1 bytes equal run_mag (the ledger's last mirrored run mag;
 // amendment 2: never matched by data1[1] alone), kept once. *glass_index is the position of the item whose id is
@@ -471,6 +501,12 @@ std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& 
     const std::vector<std::string>& present_files);
 // Whether a run end deletes this savestate: only one of the game's run.
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
+// 7r2-M1 (system critic round 2): whether a true run end deletes this savestate. Only one of the game's run
+// (spire_savestate_is_of_run), and a real one only if a client of the game really played that run (real_played: its
+// 'B' came and it was no practice run, SpireGameRun::real_played); a practice savestate goes as before. A game takes
+// the parked run's id at its first 'J'; a client whose resume answer comes too late starts fresh as a practice run in
+// that game, its 'V' is not stored ("stays parked"), and its end (dead, Give up, won, time up) must not delete the run.
+bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id, bool real_played);
 // Whether a savestate fits a room quest's start: same episode, room and variant, and the same ladder rung (B-AF-9,
 // critic spel-af-3 B2: the rung of the quest that wrote it, spire_meta_ladder_quest_rung, equals the given rung of the
 // quest now; a file from before has no quest number and counts as Normal), so a Hard run never resumes on Normal or
@@ -481,34 +517,74 @@ bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t 
 // stem is "<SPIRE_BRIDGE_DIRECTORY>/<serial>.<character id>"; the rung's file is <stem>.savestate.<rung name>.json. The
 // file of before, <stem>.savestate.json, counts for the rung it records itself (its quest number), only while that
 // rung has no file of its own, and goes at that rung's first write.
+// 7r2-M2 (B-REGIE-21-22): one savestate per difficulty rung per episode, so a start in Episode 2 never replaces a run
+// parked in Episode 1 or the other way round. Episode 1 keeps the rung's file of before, <stem>.savestate.<rung
+// name>.json (spire_savestate_rung_filename); Episode 2 has <stem>.savestate.ep2.<rung name>.json. A rung file written
+// before 7r2-M2 may hold a run of either episode; its own "Episode" field says which (written in every savestate since
+// v44), so it is read for that episode only: for Episode 1 unless it records Episode 2, for Episode 2 only if it does and
+// only while Episode 2 has no file of its own. A rung file that cannot be read is Episode 1's by its name; Episode 2
+// leaves it alone. Every episode other than Episode 2 counts as Episode 1 (as the files of before did).
 constexpr uint8_t SPIRE_SAVESTATE_RUNGS = 4;
 std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung);
+std::string spire_savestate_slot_filename(const std::string& stem, uint8_t episode, uint8_t rung);
 std::string spire_savestate_old_filename(const std::string& stem);
 // Whether the file of before holds the savestate of this rung: the rung has no own file and it records that rung
+// (7r2-M2: the caller also asks that it records the episode, and passes whether that episode's rung has a file)
 bool spire_savestate_old_counts(bool rung_file_exists, const SpireSavestate& old, uint8_t rung);
-// The savestate of one rung (the rung's file, else the file of before if it counts, else none) and in *filename the
-// file it came from ("" for none). Throws on an unreadable file.
+// The savestate of one episode and rung (its file, else for Episode 2 the rung file of before if it records Episode
+// 2, else the file of before if it counts, else none) and in *filename the file it came from ("" for none). Throws on
+// an unreadable file of that episode.
+SpireSavestate spire_savestate_load_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, std::string* filename = nullptr);
+// Episode 1's savestate of one rung (spire_savestate_load_slot)
 SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename = nullptr);
-// Writes data as the rung's file (durable) and removes the file of before if it held this rung; returns the filename
+// Writes data as the episode's rung file (durable) and returns the filename. The files of before that held this
+// episode and rung go (the file of before; for Episode 2 also the rung file of before that records Episode 2:
+// *replaced_old says the first did). Episode 1 writing over a rung file of before that records Episode 2 first copies
+// it to Episode 2's own file, if that has none, so the Episode 2 run stays.
+std::string spire_savestate_store_slot(const std::string& stem, uint8_t episode, uint8_t rung, const std::string& data,
+    bool* replaced_old = nullptr);
+// Episode 1's write of one rung (spire_savestate_store_slot)
 std::string spire_savestate_store_rung(
     const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old = nullptr);
 // 7-M2 (system critic round 1): whether a 'V' may replace the savestate parked on its rung. A practice run (a room
 // quest opened at a room that is not the run's first, spire_run_is_practice) never replaces the savestate of a real
 // run, whatever its run id: "Spire room 3" opened next to a real run parked at room 9 wrote its own savestate over that
 // run at its first room start, without a word. A practice run that was parked and resumed finds its own practice
-// savestate there and replaces it as before; a real run replaces whatever is parked on its rung, as before.
-bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice);
-// The store step of a 'V': writes ss as the rung's file (spire_savestate_store_rung) and returns the filename. Returns
-// "" and writes nothing when spire_savestate_may_replace refuses: the parked savestate (the rung's file, or the file
-// of before if it counts for the rung) stays byte for byte, and *kept gets it. A practice run also leaves a parked
-// file it cannot read (*kept then does not exist): that file may hold a real run. Throws only if the write fails.
+// savestate there and replaces it as before.
+// 7r2-M2 (B-REGIE-21-22): a new run replaces a run parked on its episode and rung only from its first own save point,
+// never at its start: the 'V' of the run's first room (run_first_room, spire_savestate_is_first_room_v) leaves a parked
+// savestate of another run id, so a room 1 opened by mistake costs no run. Every later 'V' of a real run replaces it.
+bool spire_savestate_may_replace(
+    const SpireSavestate& parked, bool practice, bool run_first_room = false, uint32_t run_id = 0);
+// Whether a 'V' is the one of its run's first room: the room it starts is the run's start room
+bool spire_savestate_is_first_room_v(const SpireSavestate& ss);
+// The store step of a 'V': writes ss as its episode's rung file (spire_savestate_store_slot, the episode is
+// ss.episode) and returns the filename. Returns "" and writes nothing when spire_savestate_may_replace refuses: the
+// parked savestate (the episode's rung file, or a file of before that counts for it) stays byte for byte, and *kept
+// gets it. A practice run, and a run at its first room, also leave a parked file they cannot read (*kept then does not
+// exist): that file may hold a real run. Throws only if the write fails.
 std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
     uint32_t serial_number, bool* replaced_old = nullptr, SpireSavestate* kept = nullptr);
-// The line a practice run's player gets, once per run, when its 'V' is not stored for a parked real run
+// The line a practice run's player gets, once per run, when its 'V' is not stored for a parked real run; it names the
+// room quest that resumes the parked run (spire_savestate_room_quest_name, critic r2 K-2)
 std::string spire_savestate_practice_kept_text(const SpireSavestate& kept);
+// 7r2-M2: the line a new real run's player gets at its 'B' when a run of another run id is parked on its episode and
+// rung: the parked run's room and difficulty, and that it is replaced when the next room starts (its first save point)
+std::string spire_savestate_replace_text(const SpireSavestate& parked);
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
+// kwaliteit-3 plek 2: whether a client is the only one in its game and does not stand on the leader's slot
+// (SpireFollowLeader's LeaderClient, else 0; occupied_slots: bit z = lobby client slot z is taken). The quest gives such
+// a client the follower's part, which starts no run (make_spire.py 83d3f9c: ui_ready sends Ready and waits for the
+// leader's clock, and with run.min_players 2 nobody starts alone), so a resume answer would hand out the saved items
+// for a run that never begins, and a run end after it would delete the savestate. For such a client with a savestate
+// that fits the quest the 'J' start answer stays fresh, as before; new: the player reads once what to do
+// (SPIRE_SAVESTATE_ALONE_TEXT) and no 'V' of that client in that game replaces the savestate. With two clients in the
+// game, or the one client on the leader's slot, nothing changes.
+bool spire_alone_off_leader_slot(uint8_t leader_slot, uint32_t occupied_slots, uint8_t client_slot);
+constexpr const char* SPIRE_SAVESTATE_ALONE_TEXT = "Your saved run stays saved. Leave this game and make a new one to go on.";
 // The ack of an item request: index + 1 (| SPIRE_RESUME_ITEM_GLASS for the Glass item), 0 = no item sent (the run
 // ended, this client was not answered with a resume, or no such item).
 uint32_t spire_resume_item_ack(bool run_ended, bool answered_resume, uint32_t index, size_t num_items, int32_t glass_index);
@@ -569,11 +645,15 @@ std::string spire_savestate_room_quest_name(const SpireSavestate& ss);
 // The notice's savestate for a client (savestate file stem, spire_savestate_stem) in a game of this difficulty: that
 // difficulty's own (B-REGIE-18-6), the one the game's room quests resume, and the room quest's name on that difficulty
 // in *quest_name. Throws on an unreadable file (as spire_savestate_load_rung).
-SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name);
+// 7r2-M2: of the game's episode.
+SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name,
+    uint8_t episode = static_cast<uint8_t>(Episode::EP1));
 // Critic spel-af-4b S-1: in a game of a difficulty without its own savestate, the lowest other difficulty that has one,
 // so the notice says where the run waits (once per session, Client::spire_savestate_elsewhere_told); nothing when no
 // difficulty has one. Throws on an unreadable file.
-std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty);
+// 7r2-M2: within the game's episode.
+std::optional<uint8_t> spire_savestate_notice_elsewhere(
+    const std::string& stem, uint8_t difficulty, uint8_t episode = static_cast<uint8_t>(Episode::EP1));
 std::string spire_savestate_elsewhere_text(uint8_t rung);
 // Line 1 of the notice
 std::string spire_savestate_notice_saved_line(const SpireSavestate& ss);
@@ -675,6 +755,47 @@ bool spire_checkpoint_room_first(uint32_t rooms, uint8_t k);
 // kwaliteit-1 r2 (critic B-6): the room a finishing 'F' stores in the checkpoint itself before it records the boss: k15
 // for a won run of Episode 1 (Dark Falz), so the Run II text does not depend on the server-side Dark Falz flag; else 0
 uint8_t spire_finish_boss_store_room(bool won, uint8_t episode);
+// kwaliteit-3 1 (observaties "een verloren Episode 2-run ..."): the server is the truth of what a finished run played.
+// The quest derives the exams in its 'F' and the rooms and exams in its score from its absolute room counter (score.py
+// score_and_persist: r169 = k - 1 less the rest rooms, exams 1 from 4 and 2 from 8), so a run that starts after room 1
+// (Spire Run II, k16) claimed both exams and start_room - 1 rooms it never played: a lost one set the Dragon and
+// De Rol Le flags and all four pacts, and scored 500 per such room and 2000 per such exam. The server knows the run's
+// first room (its 'B'; a resumed run: its savestate's StartRoom) and the room the client reached, and decides from those.
+struct SpireRunSeen {
+  bool known = false; // the client's 'B' came with a start room (v44); false: the 'F' and the score count as sent
+  uint8_t episode = 0;
+  uint8_t start_room = 0; // the run's first room
+  uint8_t reached_room = 0; // spire_run_reached_room
+};
+// The room a client reached in its run: the highest of the run's first room, the saved room of a resume (0: none), the
+// room of its last 'V' (0: none) and the rooms whose checkpoint this game stored for it (a room clear the server saw).
+uint8_t spire_run_reached_room(uint8_t start_room, uint32_t resumed_room, uint32_t v_room, const std::set<uint8_t>& cleared);
+// 'F' bit 22: the quest counted the rooms and exams of its 'F' and its score from the run's first room (its K0, or
+// SpireSavestate::start_room from the 'J' answer on a resume), so the server takes nothing off its score. A quest from
+// before sends 0 and is corrected.
+constexpr uint32_t SPIRE_FINISH_FROM_START = 1 << 22;
+// score.py W_ROOM and W_EXAM: what the quest's score counts per regular room and per exam (before its pact multiplier
+// (4 + pacts) / 4)
+constexpr uint32_t SPIRE_SCORE_PER_ROOM = 500;
+constexpr uint32_t SPIRE_SCORE_PER_EXAM = 2000;
+struct SpireFinishSeen {
+  uint32_t finish_value = 0; // the 'F' with the exams the server counts in bits 16-17
+  uint32_t score = 0; // the 'K' score less what the quest counted for rooms and exams before the run's first room
+  uint8_t quest_exams = 0; // bits 16-17 as the quest sent them (at most 2)
+  uint8_t exams = 0; // what the unlocks get
+  uint32_t rooms_removed = 0; // rooms before the run's first room, taken off the score
+  uint32_t exams_removed = 0; // exams the run did not pass, taken off the score (each counts as a room it did play)
+  uint32_t score_removed = 0;
+};
+// What a finished run gets. A run the server does not know (seen.known false) gets the 'F' and the score as sent.
+// - A run from room 1: the quest's exams or the exams the server saw it pass (spire_meta_exams_passed, at most 2),
+//   whichever is more (the quest counts a boss after a rest room as a regular room), and the score as sent. Such a run
+//   loses nothing it had before, also when the server saw none of its rooms.
+// - A run from a later room: the exams the server saw it pass (a won run: both, as before), whatever the quest's field
+//   says, with or without SPIRE_FINISH_FROM_START. Without the bit also the score less (start_room - 1) rooms and less
+//   the exams it did not pass (a boss room it did play stays a regular room: 2000 - 500 off each), times the pact
+//   multiplier. Exact: every term is a multiple of 4. With the bit the score is the quest's.
+SpireFinishSeen spire_finish_seen(uint32_t finish_value, uint32_t score, const SpireRunSeen& seen);
 // The room index k an arrival on this floor in a game of this episode stores (SpireCheckpointArrivals), or 0.
 uint8_t spire_checkpoint_arrival_k(
     const std::map<uint8_t, std::map<uint8_t, uint8_t>>& arrivals_by_episode, Episode episode, uint8_t floor);
@@ -995,7 +1116,8 @@ void spire_guard_after_98(std::shared_ptr<Client> c);
 // another picker only, never to him. Is he the last player, the game ends with its floor items and his snapshot keeps
 // them. The narrow loss this accepts: he leaves with another present and nobody picks the item up. A floor item without a credit (from a box or an enemy, from a player whose
 // snapshot does not follow, or not found in the dropper's snapshot) is never added to a snapshot.
-// What the server cannot see (shop, tekker, trade window, a 6x29 on its own) changes no snapshot: the 98 still does.
+// What the server cannot see (shop, tekker) changes no snapshot: the 98 still does. Neither does a 6x29 on its own (a
+// sale, a bank deposit, a fed mag); the trade window is followed at its execution since Veilig-2 (below).
 bool spire_guard_floor_follows(const SpireGuardSnapshot& snapshot, bool normal_or_solo);
 // The drop step on a snapshot: removes the dropped item (by its data, item IDs ignored; a stack by its kind, at most
 // what the stack holds; a non-stackable item without an exact match by its kind) or the dropped meseta (at most what
@@ -1038,6 +1160,41 @@ void spire_guard_note_floor_drop(std::shared_ptr<Client> c, std::shared_ptr<Lobb
 // Called from the pickup after the server moved the floor item into c's inventory. Never throws.
 void spire_guard_note_floor_pickup(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l,
     std::shared_ptr<const Lobby::FloorItem> fi);
+
+// Veilig-2 (trade window), corrected: the snapshot follows only what moves between players. On V3 the trade window
+// is not a drop and a pickup. The server sees each side's D0 (the items it gives, with the client's item IDs), then
+// each side deletes those items itself with a 6x29 (before its D2), and when both D2s are in the server executes the
+// trade (D3 to each side with the other's D0 list). A sale, a bank deposit, a fed mag (and possibly the tekker) are a
+// 6x29 alone, with no second player.
+// - A 6x29 never changes the snapshot (spire_guard_delete_apply): no second player, so no doubling; after a drop-out
+//   without a 98 the item comes back, consistent with the card that was not written either. Sale meseta never counts.
+// - Only at the execution (both D2s, D3 sent) does each side's snapshot lose exactly the items and meseta of its D0
+//   list (as far as it holds them: the credit), and the other side's snapshot gains each entry with at most its
+//   credit. Before the execution, or when the trade is cancelled (D4), nothing changes.
+// - If the taker's snapshot does not follow (or the taker cannot take it), the giver still loses it: the only place
+//   where stricter is allowed.
+struct SpireGuardTradeSide {
+  std::vector<ItemData> items; // what this player gives (its D0 list)
+  std::vector<uint32_t> credit; // per entry: what this player's snapshot lost of it at the execution
+};
+// The 6x29 step: a 6x29 is never a move between players, so the snapshot stays; returns the amount taken (always 0).
+// The parameters describe the 6x29 (snapshot null if it does not follow, side the pending trade or null, partial_drop
+// a 6x5D just before it); they are kept so the rule for each case is stated in one tested place.
+uint32_t spire_guard_delete_apply(SpireGuardSnapshot* snapshot, SpireGuardTradeSide* side,
+    const std::optional<ItemData>& partial_drop, uint32_t item_id, const ItemData& deleted,
+    const ItemData::StackLimits& limits);
+// The execution step, giver side: takes each entry of side from the giver's snapshot (null: nothing taken) and stores
+// what was taken as that entry's credit. Call it for both sides before spire_guard_trade_give. Returns the amount taken.
+uint32_t spire_guard_trade_take_rest(
+    SpireGuardSnapshot* giver, SpireGuardTradeSide& side, const ItemData::StackLimits& limits);
+// The execution step, taker side: gives each entry of the other side to the taker's snapshot (null: nothing), with at
+// most that entry's credit, then clears the entries. Returns the number of entries that gained anything.
+size_t spire_guard_trade_give(SpireGuardSnapshot* taker, SpireGuardTradeSide& side, const ItemData::StackLimits& limits);
+// Called from 6x29 after the server removed `deleted` from c's inventory (spire_guard_delete_apply). Never throws.
+void spire_guard_note_delete(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t item_id, const ItemData& deleted);
+// Called from D2 when both sides have confirmed, before the trade is executed and the pending trades are reset.
+// Never throws.
+void spire_guard_note_trade_executed(std::shared_ptr<Client> a, std::shared_ptr<Client> b, std::shared_ptr<Lobby> l);
 
 // v31: true if both inventories hold the same items (data1 + data2, any order, item IDs ignored) and the same meseta.
 // The login confirmation of a lobby restore requires this (spire_guard_same_state, v39).
@@ -1141,6 +1298,11 @@ struct SpireBridgeTextContext {
 std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextContext& ctx);
 // kwaliteit-2 r2 (critic K5): TObjWarpBoss, Sega's teleporter to a boss arena, in a map's object list
 constexpr uint16_t SPIRE_BOSS_TELEPORTER_OBJECT_TYPE = 0x0019;
+// kwaliteit-3 4: 'C' 6, bit 2 of a side's type nibble
+constexpr uint32_t SPIRE_WAY_SEGA_TELEPORTER = 4;
+// kwaliteit-2 r2 (critic K5): whether Sega's boss teleporter stands on this floor in a game's map, for the objects
+// this version has. kwaliteit-3 5 (critic r2 K-2): exported so a static test runs it on a built quest map.
+bool spire_map_has_boss_teleporter(MapState& map_state, Version version, uint8_t floor);
 // The context of a short-message code as spire_bridge_handle_register builds it for the writer: the names (text_table
 // keeps the draw table they point into), the archetype, the kept overview line, last_clear (only for the relic gift's
 // 'C' 12, bit 23 clear, from the writer's last stored 'V') and boss_teleporter (only for 'C' 6, from the game's map).
@@ -1153,6 +1315,8 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
 void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
+void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
 // (spire_equip_missing_text), in its turn in the client's order; the item is looked at again when the line goes.
 // Called by the equip check (spire_equip_item_send, after the client's answer and SPIRE_EQUIP_CHECK_DELAY) and for the
@@ -1261,7 +1425,12 @@ struct SpireWaveEnemy {
 bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
 // veilig-1: the enemies of a wave as the nets see them, one entry per parent (a child counts through its parent, as
 // in the wave check). A hit on a child (hit claim, damage or 6x0A flags on the child's own state) is a hit on its
-// parent: the server books a hit on the enemy that was struck, never on its parent.
+// parent only when the child is a part of the parent's own body (spire_child_hit_is_parent_hit): the server books a
+// hit on the enemy that was struck, never on its parent.
+// 2r2-M1 (system critic round 2): a child that is an enemy of its own (a Bee of a Chaos Sorcerer, a Canadine of a
+// Canane, a Mothmant of a Monest, a Claw of a Bulclaw, a Recon of a Recobox) keeps its hit to itself: a hit on a Bee took
+// the net away from a Chaos Sorcerer that had gone out of reach, so the room stayed shut.
+bool spire_child_hit_is_parent_hit(EnemyType parent_type);
 std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number);
 // veilig-1: the fight clock, per game and floor (a run fights one room at a time, and a player's hit names no room).
@@ -1330,6 +1499,16 @@ struct SpireRoomEvent {
 std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
 // The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
 std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size);
+// 2r2-M2 (system critic round 2): what one look of the second net (spire_dead_event_wait) counts in a room, without its
+// clock: the started events without a living enemy at the previous look (seen) and at this one (now), in *both_out, and
+// the never-started events of the room's trigger chain behind them, or behind a wave a net counted in this room before
+// (2-M1: after a net counted a non-last wave, no event of the room is dead any more, so only that room mark starts the
+// chain). The w_ids, never empty when the chain has one.
+std::unordered_set<size_t> spire_dead_event_look_counts(std::shared_ptr<Lobby> l, Version v, uint8_t floor,
+    uint16_t room, const std::unordered_set<size_t>& seen, const std::unordered_set<size_t>& now,
+    std::unordered_set<size_t>* both_out = nullptr);
+// For StaticTests: marks (noted) or unmarks a room as one where a net counted a wave (spire_net_rooms)
+void spire_static_test_note_net_room(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room, bool noted);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,
@@ -1374,6 +1553,10 @@ void spire_base_game_after_lobby_join(std::shared_ptr<Client> c);
 // the run quest the base came from (q921 if the base game was made at the counter), where the quest starts as at the
 // counter: the guard takes a fresh snapshot of the real character and the run copy gets its start level (v52).
 // v59: the code is 'O' sub 2 (r248 = 'O' << 24 | 2 << 16; the run end's own 'O' is sub 0), so 'Z' stays free.
+// kwaliteit-3: the run quest must be available to every client, as at the quest board
+// (quest_unlocked_for_all_players, ReceiveCommands.hh): asked in the base game at the 'O' sub 2, where a refusal sends
+// nobody out and the leader reads the board's line (QUEST_NOT_UNLOCKED_TEXT, one ticker line), and once more in the
+// new run's game right before its quest starts (the line to that game's leader, no quest started).
 constexpr uint8_t SPIRE_BASE_NEW_RUN_SUB = 2;
 constexpr uint32_t SPIRE_BASE_NEW_RUN_VALUE = (static_cast<uint32_t>('O') << 24) | (SPIRE_BASE_NEW_RUN_SUB << 16);
 constexpr uint32_t SPIRE_BASE_DEFAULT_RUN_QUEST = 921;
@@ -1406,11 +1589,12 @@ bool spire_guard_base_game_follow(
 // drops before its card is written logs in with the bank of before (a deposit was gone, a withdrawal doubled). So the
 // 98 of the base game keeps the inventory and meseta of before it next to the snapshot, and the login push reconciles
 // the snapshot with the bank of the card (the 30), once. On V3 the server sees a deposit as a 6x29, like a sale, a mag
-// feed, the tekker or a tool used, and it does not see the trade window at all: so only a base game the player had to
-// himself gets the record (shared false); in a game shared with another player any item that left the inventory may be
-// with him (B-AF-53: never doubled between players before nothing lost), and the push stays the one of before.
-// before is the snapshot right before spire_guard_base_game_follow took the 98 (with every floor hand-over of K7b).
-void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before, bool shared);
+// feed, the tekker or a tool used. What went to another player is out of the record already (B-AF-53: never doubled
+// between players before nothing lost): before is the snapshot right before spire_guard_base_game_follow took the 98,
+// and the snapshot loses an item at a floor pickup by another (K7b) and at a trade's execution (Veilig-2, D0 list);
+// B-REGIE-21-24: so a base game shared with another player gets the record too. Each of those steps drops an older
+// record (spire_guard_snapshot_take_drop, spire_guard_snapshot_give_pickup).
+void spire_guard_base_before_apply(SpireGuardSnapshot& snapshot, const SpireGuardSnapshot& before);
 // The login push's step on a snapshot with that record, given the bank of the card. Items by their data (item IDs
 // ignored), a stack by its kind and amount:
 // - a non-stackable item of before that the inventory no longer holds and the card's bank does not hold comes back
@@ -1647,12 +1831,15 @@ bool spire_create_battle_overlay(std::shared_ptr<Client> c, std::shared_ptr<cons
 // replace_char and an owned start_level bonus a copy with the rule block's ba_set_char_level raised by the bonus
 // (spire_start_level_patch_bin), which the client applies at ba_start. Remembers the bonus for the client's overlay.
 // Never throws; on any doubt the quest's own .bin (and no bonus for the overlay).
+// B-REGIE-20-5: a client that is not the quest's leader (SpireFollowLeader's LeaderClient, else client 0) gets at
+// least its level for this quest load minus SPIRE_LEVEL_FLOOR_GAP (SpireMeta.hh), on a resume too; so does its overlay.
 std::shared_ptr<const std::string> spire_start_level_quest_bin(std::shared_ptr<Client> c,
     std::shared_ptr<const Lobby> l, std::shared_ptr<const std::string> bin_contents);
 
 // v53 (B-BASIS-54): the quest .bin set_lobby_quest sends this client, before spire_start_level_quest_bin: for a guarded
 // Spire quest with a heat patch (SpireMeta.hh SPIRE_HEAT_PATCH_DIR/q<N>.json) and a GC client, a copy with the override
-// rows of ONE heat step for the whole game: the leader's H = H_auto(class, P) as its 'M' START has it (start_level as
+// rows of ONE heat step for the whole game: the quest leader's (B-REGIE-20-5: SpireFollowLeader's LeaderClient, else
+// client 0; nobody there: the game's leader) H = H_auto(class, P) as its 'M' START has it (start_level as
 // this quest load gives its run copy) + the chosen heat (not known on the server yet: 0). Every client of the game gets
 // the same bytes (compressed once per .bin and step). H 0, no patch file, or any error (logged): the quest's own .bin,
 // which plays the H 0 rows. Never throws. v55: remembers the step it sent for the client's 'M' START (SpireHeatSent).
