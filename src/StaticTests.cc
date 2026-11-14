@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "Channel.hh"
+#include "ChatCommands.hh"
 #include "DataIndex.hh"
 #include "ExpressionEnvironment.hh"
 #include "GameServer.hh"
@@ -10820,6 +10821,295 @@ void run_static_tests() {
         });
       });
     }
+    // veilig-2 (second measurement of bundle 1, section 3): the tests of M1, K7 and K1 call the decision itself; the cases
+    // below play what a client sends through the server's own handlers, so they fail when a handler stops calling the
+    // fix or calls it with the wrong side
+    e2e_case("a player hit or killed by an enemy (6x4A, 6x4B, 6x4C, 6x4D through on_command) moves the floor clock, never the enemies' side clock (M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      auto l = new_game(w);
+      l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = l;
+      constexpr uint8_t FLOOR = 0x03;
+      p.c->floor = FLOOR;
+      for (uint8_t sub : {0x4A, 0x4B, 0x4C, 0x4D}) {
+        // both clocks of the floor 400 s old: the clock a hit on the player makes young again shows which side it set
+        spire_fight_note(l->lobby_id, FLOOR, std::chrono::steady_clock::now() - std::chrono::seconds(400), true);
+        std::string data;
+        if (sub == 0x4D) {
+          G_PlayerDied_6x4D cmd;
+          cmd.header = {0x4D, sizeof(G_PlayerDied_6x4D) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        } else {
+          G_ClientIDHeader cmd{sub, sizeof(G_ClientIDHeader) / 4, 0};
+          data.assign(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+        }
+        client_sends(w, p, 0x60, data);
+        auto now = std::chrono::steady_clock::now();
+        if (spire_fight_quiet(l->lobby_id, FLOOR, now) >= std::chrono::seconds(5)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player did not reach the floor clock (spire_bridge_note_fight not called)", sub));
+        }
+        if (spire_enemy_quiet(l->lobby_id, FLOOR, now) < std::chrono::seconds(390)) {
+          throw std::runtime_error(std::format("6x{:02X} on the player counted as a sign from the enemies' side: an enemy out of reach that shoots keeps the room shut", sub));
+        }
+      }
+    });
+
+    e2e_case("a floor hand-over in a Normal game through the real 6x2A and 6x5A: the dropper's snapshot loses the item, the picker's gains it (K7)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      give_item_tables(w);
+      // the handlers name the item in their log lines: an index without names (no text tables in a static test)
+      w.s->data->item_name_indexes[static_cast<size_t>(Version::GC_V3)] = std::make_shared<ItemNameIndex>(
+          pmt_v3, w.s->data->item_stack_limits(Version::GC_V3), std::vector<std::string>());
+      Session a = connect_as(w, real_character(), SERIAL);
+      Session b = connect_as(w, second_character(), SERIAL_2);
+      client_sends(w, a, 0x61, a.ch->as_61());
+      client_sends(w, b, 0x61, b.ch->as_61());
+      // both under AwaitingSave with their real character, as after a verified restore: the snapshot follows the floor
+      auto awaiting_snapshot = [&](Session& p, uint32_t serial) {
+        auto ch = p.c->character_file(false, false);
+        must(ch != nullptr, "a player has no character data after its 61");
+        SpireGuardSnapshot snap;
+        snap.awaiting_save = true;
+        snap.has_character = true;
+        snap.quest_number = QUEST;
+        snap.inventory = ch->inventory;
+        snap.disp = ch->disp;
+        std::string filename = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial, spire_guard_character_id(ch->disp));
+        spire_guard_save(filename, serial, snap);
+        must(spire_guard_floor_follows(spire_guard_load(filename), true), "the snapshot of this case does not follow a Normal game");
+        return filename;
+      };
+      std::string a_file = awaiting_snapshot(a, SERIAL);
+      std::string b_file = awaiting_snapshot(b, SERIAL_2);
+      must(a_file != b_file, "the two players share a snapshot file name");
+
+      auto base = std::make_shared<Lobby>(w.s, 0x7B21, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->leader_id = 0;
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      while (base->floor_item_managers.size() < 0x12) { // as create_game_generic gives every game
+        base->floor_item_managers.emplace_back(base->lobby_id, base->floor_item_managers.size());
+      }
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      Session* players[2] = {&a, &b};
+      for (size_t z = 0; z < 2; z++) {
+        base->clients[z] = players[z]->c;
+        players[z]->c->lobby_client_id = z;
+        players[z]->c->lobby = base;
+        players[z]->c->floor = 0;
+      }
+
+      // A drops its unequipped rare weapon (inventory item 5), B picks it up
+      const ItemData sword = a.c->character_file(false, false)->inventory.items[5].data;
+      auto in_snapshot = [&](const std::string& filename) {
+        auto snap = spire_guard_load(filename);
+        size_t found = 0;
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          found += !memcmp(snap.inventory.items[z].data.data1.data(), sword.data1.data(), 12);
+        }
+        return found;
+      };
+      expect_eq(1u, in_snapshot(a_file));
+      expect_eq(0u, in_snapshot(b_file));
+      G_DropItem_6x2A drop;
+      drop.header = {0x2A, sizeof(G_DropItem_6x2A) / 4, 0};
+      drop.amount = 1;
+      drop.floor = 0;
+      drop.item_id = sword.id;
+      client_sends(w, a, 0x60, std::string(reinterpret_cast<const char*>(&drop), sizeof(drop)));
+      must(base->item_exists(0, sword.id), "the 6x2A did not put the item on the floor");
+      G_PickUpItemRequest_6x5A pick;
+      pick.header = {0x5A, sizeof(G_PickUpItemRequest_6x5A) / 4, 1};
+      pick.item_id = sword.id;
+      pick.floor = 0;
+      client_sends(w, b, 0x60, std::string(reinterpret_cast<const char*>(&pick), sizeof(pick)));
+      must(!base->item_exists(0, sword.id), "the 6x5A did not take the item from the floor");
+      // the item exists once in the snapshots, with the one who holds it now
+      if (in_snapshot(a_file) != 0) {
+        throw std::runtime_error("the dropper's snapshot still holds the item another player picked up: the floor drop was not followed (spire_guard_note_floor_drop)");
+      }
+      if (in_snapshot(b_file) != 1) {
+        throw std::runtime_error("the picker's snapshot did not gain the item from a followed drop");
+      }
+    });
+
+    // K1 r2: the chain the dead-event net builds behind a counted wave leaves a boss event out. Played through the
+    // server's room check and its watch (one look, SPIRE_UNHIT_ENEMY_SECONDS of real time): room 1 chains a Dragon wave
+    // behind a wave without a living enemy, room 2 a normal wave (the control: the look ran and counted its chain)
+    e2e_case("the dead-event watch counts the chain behind a wave without a living enemy, never a chained boss event (K1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      constexpr uint8_t FLOOR = 0x0B;
+      using ESE = MapFile::EnemySetEntry;
+      auto make_set = [&](uint16_t base_type, uint16_t room, uint16_t wave_number) {
+        ESE e;
+        e.base_type = base_type;
+        e.floor = FLOOR;
+        e.room = room;
+        e.wave_number = wave_number;
+        return e;
+      };
+      // room 1: a Booma (wave 1), the Dragon (wave 2); room 2: a Booma in wave 1 and one in wave 2
+      std::vector<ESE> sets{make_set(0x0044, 1, 1), make_set(0x00C0, 1, 2), make_set(0x0044, 2, 1), make_set(0x0044, 2, 2)};
+      using EV = MapFile::Event1Entry;
+      auto make_event = [](uint32_t event_id, uint16_t room, uint16_t wave_number, uint32_t action_stream_offset) {
+        EV e;
+        e.event_id = event_id;
+        e.room = room;
+        e.wave_number = wave_number;
+        e.action_stream_offset = action_stream_offset;
+        return e;
+      };
+      // 101 -> 102 (the Dragon's wave) in room 1, 201 -> 202 in room 2; post-wave actions 0C <event id> 01, as make_map
+      // writes them
+      std::vector<EV> events{make_event(101, 1, 1, 0), make_event(102, 1, 2, 6), make_event(201, 2, 1, 7), make_event(202, 2, 2, 13)};
+      const uint8_t actions[16] = {0x0C, 0x66, 0x00, 0x00, 0x00, 0x01, 0x01, 0x0C, 0xCA, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00};
+      auto dat = std::make_shared<std::string>();
+      auto add_section = [&](MapFile::SectionHeader::Type type, const std::string& data) {
+        MapFile::SectionHeader h;
+        h.le_type = static_cast<uint32_t>(type);
+        h.data_size = data.size();
+        h.section_size = sizeof(h) + h.data_size;
+        h.floor = FLOOR;
+        dat->append(reinterpret_cast<const char*>(&h), sizeof(h));
+        dat->append(data);
+      };
+      add_section(MapFile::SectionHeader::Type::ENEMY_SETS, std::string(reinterpret_cast<const char*>(sets.data()), sets.size() * sizeof(ESE)));
+      MapFile::EventsSectionHeader ev_h;
+      ev_h.entries_offset = sizeof(ev_h);
+      ev_h.entry_count = events.size();
+      ev_h.action_stream_offset = sizeof(ev_h) + events.size() * sizeof(EV);
+      ev_h.format = 0;
+      std::string ev_data(reinterpret_cast<const char*>(&ev_h), sizeof(ev_h));
+      ev_data.append(reinterpret_cast<const char*>(events.data()), events.size() * sizeof(EV));
+      ev_data.append(reinterpret_cast<const char*>(actions), sizeof(actions));
+      add_section(MapFile::SectionHeader::Type::EVENTS, ev_data);
+      MapFile::SectionHeader end_h;
+      end_h.le_type = 0;
+      end_h.section_size = 0;
+      end_h.floor = 0;
+      end_h.data_size = 0;
+      dat->append(reinterpret_cast<const char*>(&end_h), sizeof(end_h));
+      std::array<std::shared_ptr<const MapFile>, NUM_VERSIONS> map_files;
+      map_files.at(static_cast<size_t>(Version::GC_V3)) = std::make_shared<MapFile>(dat);
+      auto supermap = std::make_shared<SuperMap>(map_files, SetDataTableBase::default_floor_to_area(Version::GC_V3, Episode::EP1));
+      auto map_state = std::make_shared<MapState>(
+          0, Difficulty::NORMAL, 0, 0, MapState::DEFAULT_RARE_ENEMIES, std::make_shared<MT19937Generator>(0), supermap);
+      auto ene = [&](uint16_t room, uint16_t wave_number) {
+        auto ene_sts = map_state->enemy_states_for_floor_room_wave(Version::GC_V3, FLOOR, room, wave_number);
+        must(ene_sts.size() == 1, "a wave of this case does not have exactly one enemy");
+        return ene_sts.at(0);
+      };
+      auto ev = [&](uint32_t event_id) -> std::shared_ptr<MapState::EventState> {
+        for (const auto& ev_st : map_state->event_states_for_floor(Version::GC_V3, FLOOR)) {
+          if (ev_st->super_ev->version(Version::GC_V3).set_entry->event_id == event_id) {
+            return ev_st;
+          }
+        }
+        throw std::runtime_error(std::format("event {} is not in the map state", event_id));
+      };
+      expect_eq(EnemyType::BOOMA, ene(1, 1)->super_ene->type);
+      expect_eq(EnemyType::DRAGON, ene(1, 2)->super_ene->type);
+      expect_eq(EnemyType::BOOMA, ene(2, 2)->super_ene->type);
+      // waves 1 started, their Booma never hit; waves 2 never started (the clients send no 6x67 behind a counted wave)
+      ev(101)->flags |= 0x04;
+      ev(201)->flags |= 0x04;
+
+      auto l = std::make_shared<Lobby>(w.s, 0x7B31, true);
+      l->episode = Episode::EP1;
+      l->mode = GameMode::BATTLE;
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = QUEST;
+      l->quest = std::make_shared<Quest>(vq);
+      l->map_state = map_state;
+      w.s->id_to_lobby.emplace(l->lobby_id, l);
+      l->clients[0] = p.c;
+      p.c->lobby_client_id = 0;
+      p.c->lobby = l;
+      p.c->floor = FLOOR; // a client on the floor: the look may count
+      // the floor quiet for 200 s: the first look may count (SPIRE_UNHIT_QUIET_SECONDS)
+      spire_fight_note(l->lobby_id, FLOOR, std::chrono::steady_clock::now() - std::chrono::seconds(200), true);
+      p.ch->inbox.clear();
+      spire_bridge_check_room_clear(p.c, l, FLOOR, 1, 1);
+      spire_bridge_check_room_clear(p.c, l, FLOOR, 2, 1);
+      auto cleared = [&](uint16_t room) {
+        uint32_t value = SPIRE_BRIDGE_ROOM_CLEARED_TAG | (static_cast<uint32_t>(FLOOR) << 8) | room;
+        for (const auto& raw : p.ch->inbox) {
+          if ((raw.size() >= sizeof(PSOCommandHeaderDCV3) + sizeof(G_SyncQuestRegister_6x77)) &&
+              (static_cast<uint8_t>(raw[0]) == 0x60) && (static_cast<uint8_t>(raw[sizeof(PSOCommandHeaderDCV3)]) == 0x77)) {
+            const auto& reg = *reinterpret_cast<const G_SyncQuestRegister_6x77*>(raw.data() + sizeof(PSOCommandHeaderDCV3));
+            if ((reg.register_number.load() == SPIRE_BRIDGE_ROOM_CLEARED_REGISTER) && (reg.value.as_int.load() == value)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      must(!cleared(1) && !cleared(2), "a room cleared before the watch looked");
+      auto deadline = std::chrono::steady_clock::now() + SPIRE_UNHIT_ENEMY_SECONDS + std::chrono::seconds(10);
+      while (!cleared(2) && (std::chrono::steady_clock::now() < deadline)) {
+        w.s->io_context->restart();
+        w.s->io_context->run_one_for(std::chrono::milliseconds(250));
+      }
+      // room 1's watch started first, so its look ran before room 2's
+      w.s->io_context->restart();
+      w.s->io_context->poll();
+      must(cleared(2), "the control room did not clear within one look: the chain behind the wave without a living enemy was not counted");
+      must((ev(202)->flags & 0x08) && (ene(2, 2)->set_flags & 8), "the control room's chained normal wave was not counted as finished");
+      if ((ene(1, 2)->set_flags & 8) || (ev(102)->flags & 0x08) || cleared(1)) {
+        throw std::runtime_error("the Dragon's event chained behind a counted wave was counted and the room cleared while the boss lives: the server did not mark the chained event as a boss event (is_boss)");
+      }
+      l->map_state.reset(); // the watch of room 1 looks again later and then stops (no map state)
+    });
+
+    // veilig-2 (10r2-M1): a chat command's usage line goes to the client as a text message (send_text_message, not the
+    // ticker), so it holds no angle bracket. Played through on_chat_command, as on_06 hands a "$" chat over.
+    e2e_case("the usage lines of $lv and $kitlobby reach the client without an angle bracket (10r2-M1)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      auto p = connect(w, real_character());
+      client_sends(w, p, 0x61, p.ch->as_61());
+      for (const char* text : {"$lv", "$lv x", "$kitlobby 0", "$kitlobby 201"}) {
+        p.ch->inbox.clear();
+        std::exception_ptr failed;
+        bool done = false;
+        asio::co_spawn(*w.s->io_context, on_chat_command(p.c, text, false), [&](std::exception_ptr e) {
+          failed = e;
+          done = true;
+        });
+        w.s->io_context->restart();
+        w.s->io_context->poll();
+        if (failed) {
+          std::rethrow_exception(failed);
+        }
+        must(done, "the chat command did not finish");
+        size_t usage_lines = 0;
+        for (const auto& raw : p.ch->inbox) {
+          if ((raw.size() < sizeof(PSOCommandHeaderDCV3)) || (static_cast<uint8_t>(raw[0]) != 0xB0)) {
+            continue;
+          }
+          std::string body = raw.substr(sizeof(PSOCommandHeaderDCV3));
+          if (body.find("Gebruik") == std::string::npos) {
+            continue;
+          }
+          usage_lines++;
+          if ((body.find('<') != std::string::npos) || (body.find('>') != std::string::npos)) {
+            throw std::runtime_error(std::format("the usage line of \"{}\" holds an angle bracket", text));
+          }
+        }
+        if (usage_lines != 1) {
+          throw std::runtime_error(std::format("\"{}\" sent {} usage line(s) instead of one", text, usage_lines));
+        }
+      }
+    });
 
     expect_eq(0u, e2e_failed);
 

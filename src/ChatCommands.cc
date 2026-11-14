@@ -1032,7 +1032,7 @@ ChatCommandDefinition cc_lv(
     {"$lv"},
     +[](const Args& a) -> asio::awaitable<void> {
       if (a.text.empty() || (a.text.find_first_not_of("0123456789") != std::string::npos)) {
-        throw precondition_failed("$C6Gebruik: $lv <level>");
+        throw precondition_failed("$C6Gebruik: $lv 1-200");
       }
       if (!is_v1_or_v2(a.c->version()) && (a.c->version() != Version::BB_V4)) {
         // $edit refuses these versions: the client owns its character and sends it to the server (on_61_98)
@@ -1359,7 +1359,7 @@ ChatCommandDefinition cc_kitlobby(
       if (!a.text.empty()) {
         if ((a.text.size() > 3) || (a.text.find_first_not_of("0123456789") != std::string::npos) ||
             (std::stoul(a.text) < 1) || (std::stoul(a.text) > 200)) {
-          throw precondition_failed("$C6Gebruik: $kitlobby\nof $kitlobby <1-200>");
+          throw precondition_failed("$C6Gebruik: $kitlobby\nof $kitlobby 1-200");
         }
         level = std::stoul(a.text);
       }
