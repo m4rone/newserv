@@ -324,9 +324,12 @@ uint8_t spire_meta_ladder_quest_rung(uint32_t quest_number) {
   if ((quest_number >= 981) && (quest_number <= 986)) {
     return (quest_number - 981) % 3 + 1;
   }
-  // spel-af item 3: a room quest on a rung is the Normal room quest (q940-q979) plus 1000 per rung (build.sh --rooms)
+  // spel-af item 3: a room quest on a rung is the Normal room quest (q940-q979) plus 1000 per rung (build.sh --rooms).
+  // audit 1 A3: so are the elite and rest variants of the rooms after room 8, q987-q998 (q980-q986 and q999 are not
+  // room quests: q981-q986 plus 1000 stays Normal, as StaticTests has it)
   uint32_t room = quest_number % 1000;
-  if ((quest_number >= 1000) && (quest_number < 4000) && (room >= 940) && (room <= 979)) {
+  if ((quest_number >= 1000) && (quest_number < 4000) &&
+      (((room >= 940) && (room <= 979)) || ((room >= 987) && (room <= 998)))) {
     return quest_number / 1000;
   }
   return 0;
