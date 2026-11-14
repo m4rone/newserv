@@ -11433,7 +11433,9 @@ void run_static_tests() {
         w.leave(p2, l);
       }
 
-      // two clients and no leader (slots 1 and 2): as before, a fresh run that is told nothing and stores its 'V'
+      // two clients and no leader (slots 1 and 2): as before, a fresh run that is not told the alone text. Since the
+      // bank pair (7-M2) this fresh run is a practice run, so its 'V' leaves the real run parked on its rung and says
+      // so once (spire_savestate_practice_kept_text), instead of replacing it
       {
         auto p1 = w.player();
         auto p2 = w.player();
@@ -11445,16 +11447,19 @@ void run_static_tests() {
         k3_reg(p1, l, REQ, J_K20_REST);
         fresh_run(p1, l);
         bool replaced = phosg::load_file(file_of(p1)) != saved;
-        phosg::log_info_f("   K3 measure: two clients on slots 1 and 2: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}",
-            answer_of(p1), p1.ch->count_containing(text), replaced ? "yes" : "no");
+        size_t practice_told = p1.ch->count_containing("Practice is not saved");
+        phosg::log_info_f("   K3 measure: two clients on slots 1 and 2: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}, practice text {} time(s)",
+            answer_of(p1), p1.ch->count_containing(text), replaced ? "yes" : "no", practice_told);
         expect_eq(SPIRE_RESUME_ANSWER_TAG, answer_of(p1));
         expect_eq(0u, p1.ch->count_containing(text));
-        expect(replaced);
+        expect(!replaced); // 7-M2: the parked real run stays
+        expect_eq(1u, practice_told);
         w.leave(p1, l);
         w.leave(p2, l);
       }
 
-      // alone on slot 1 in a room quest its savestate does not fit (k19): as before
+      // alone on slot 1 in a room quest its savestate does not fit (k19): as before, not told the alone text; the fresh
+      // practice run leaves the real run parked on its rung (7-M2, as in the case above)
       {
         auto p = w.player();
         play_to_k20({&p});
@@ -11465,11 +11470,13 @@ void run_static_tests() {
         k3_reg(p, l, REQ, BEGIN | (16 << 8) | 19);
         k3_v_write(p, l, 19, 0);
         bool replaced = phosg::load_file(file_of(p)) != saved;
-        phosg::log_info_f("   K3 measure: alone on slot 1 in the room quest of k19: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}",
-            answer_of(p), p.ch->count_containing(text), replaced ? "yes" : "no");
+        size_t practice_told = p.ch->count_containing("Practice is not saved");
+        phosg::log_info_f("   K3 measure: alone on slot 1 in the room quest of k19: 'J' answer {:08X}, told {} time(s), savestate replaced by the fresh run: {}, practice text {} time(s)",
+            answer_of(p), p.ch->count_containing(text), replaced ? "yes" : "no", practice_told);
         expect_eq(SPIRE_RESUME_ANSWER_TAG, answer_of(p));
         expect_eq(0u, p.ch->count_containing(text));
-        expect(replaced);
+        expect(!replaced); // 7-M2: the parked real run stays
+        expect_eq(1u, practice_told);
         w.leave(p, l);
       }
     });
