@@ -18,6 +18,12 @@ std::shared_ptr<Lobby> create_game_generic(
     std::shared_ptr<Lobby> watched_lobby = nullptr,
     std::shared_ptr<Episode3::BattleRecordPlayer> battle_player = nullptr);
 void set_lobby_quest(std::shared_ptr<Lobby> l, std::shared_ptr<const Quest> q, bool substitute_v3_for_ep3 = false);
+// What the quest board asks before it loads a quest in a game (the 10 command for the quest menu): the quest is
+// available to every client in the game (Lobby::quest_include_condition). Spire's "Start a new run" asks the same
+// before it starts the run quest (SpireFlagBridge.cc spire_base_new_run and spire_base_game_start). The text is what
+// the asking client reads when it is not: at the board in a message box, from the Spire bridge as one ticker line.
+bool quest_unlocked_for_all_players(std::shared_ptr<const Lobby> l, std::shared_ptr<const Quest> q);
+constexpr const char* QUEST_NOT_UNLOCKED_TEXT = "This quest has not\nbeen unlocked for\nall players in this\ngame.";
 asio::awaitable<void> start_login_server_procedure(std::shared_ptr<Client> c);
 
 asio::awaitable<void> start_proxy_session(

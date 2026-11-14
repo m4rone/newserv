@@ -1,0 +1,24 @@
+{
+  "Credited": [
+    {"Won": false, "BonusPaid": 0, "Finished": true, "Bosses": [], "Rooms": [], "Base": 0, "Run": 4238946400},
+    {
+      "Won": true,
+      "BonusPaid": 0,
+      "Finished": true,
+      "Bosses": [15],
+      "Rooms": [15],
+      "Base": 13,
+      "Run": 757272716
+    }
+  ],
+  "Difficulties": {
+    "Normal": {"BestTime": 3000, "Won": 1}
+  },
+  "SplintersTotal": 13,
+  "Splinters": 13,
+  "Won": 1,
+  "BestTime": 3000,
+  "BestScore": 11500,
+  "Runs": 3,
+  "SerialNumber": 5200
+}

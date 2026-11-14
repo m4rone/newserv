@@ -123,7 +123,20 @@ std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class) {
   return {0x01, 0x0C};
 }
 
-ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random) {
+uint32_t spire_drops_weapon_strength(const ItemParameterTable& pmt, const ItemData& item) {
+  if (item.empty() || (item.data1[0] != 0x00)) {
+    return 0;
+  }
+  try {
+    const auto& w = pmt.get_weapon(item.data1[1], item.data1[2]);
+    return w.atp_min + w.atp_max + 4 * item.data1[3];
+  } catch (const std::exception&) {
+    return 0; // not in Sega's table
+  }
+}
+
+ItemData spire_drops_pick_weapon(
+    const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random, uint8_t grind, uint32_t better_than) {
   std::vector<ItemData> best; // per weapon group, its last (strongest) common weapon the player can equip now
   for (uint8_t group = 0x01; (group <= 0x0C) && (group < pmt.num_weapon_classes()); group++) {
     ItemData group_best;
@@ -139,6 +152,19 @@ ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropP
     }
     if (!group_best.empty()) {
       best.emplace_back(group_best);
+    }
+  }
+  if (better_than) { // BALANS-4 174: a boss weapon, from the groups that beat the equipped weapon if there are any
+    std::vector<ItemData> stronger;
+    for (const auto& w : best) {
+      ItemData ground = w;
+      ground.data1[3] = std::min(pmt.get_weapon(w.data1[1], w.data1[2]).max_grind, grind);
+      if (spire_drops_weapon_strength(pmt, ground) > better_than) {
+        stronger.emplace_back(w);
+      }
+    }
+    if (!stronger.empty()) {
+      return stronger[random % stronger.size()];
     }
   }
   if (!best.empty()) {
@@ -307,11 +333,13 @@ const char* spire_drops_filter_item(const SpireDropsConfig& cfg, const ItemParam
   auto fit = spire_drops_weapon_fit(pmt, item, p);
   // F8: a picked weapon gets the pick grind and Hit of room k, a boss weapon the boss grind and Hit
   auto give_weapon = [&](const char* why, const char* why_none, bool boss = false) -> const char* {
-    ItemData w = spire_drops_pick_weapon(pmt, p, random);
+    auto boost = boss ? spire_drops_boss_boost(cfg, k) : spire_drops_pick_boost(cfg, k);
+    // BALANS-4 174: a boss weapon beats the equipped one where a group allows it; items 25-27 pick as before
+    ItemData w = spire_drops_pick_weapon(pmt, p, random, boost.grind, boss ? p.carried : 0);
     if (w.empty()) {
       return why_none;
     }
-    spire_drops_boost_weapon(pmt, w, boss ? spire_drops_boss_boost(cfg, k) : spire_drops_pick_boost(cfg, k));
+    spire_drops_boost_weapon(pmt, w, boost);
     item = w;
     pity = 0;
     return why;
@@ -472,6 +500,12 @@ bool spire_drops_filter(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, Ite
     player.now = p->disp.stats.char_stats;
     player.ahead = spire_drops_stats_ahead(
         *level_table, player.char_class, p->disp.stats.level, player.now, cfg->levels_ahead);
+    try { // BALANS-4 174: the weapon he has equipped, the reference for a boss weapon
+      player.carried = spire_drops_weapon_strength(
+          *pmt, p->inventory.items[p->inventory.find_equipped_item(EquipSlot::WEAPON)].data);
+    } catch (const std::exception&) {
+      player.carried = 0; // nothing equipped: every group, as before
+    }
     ItemData before = item;
     uint32_t& pity = spire_drops_pity[c.get()];
     uint32_t pity_before = pity;

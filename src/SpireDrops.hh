@@ -28,7 +28,9 @@ class Lobby;
 // - item 28 (BossWeaponPerPlayer): a boss's drop is exactly one weapon each player can equip now (Sega's own drop when it
 //   already is one, else a picked one), also when Sega's table gave nothing.
 // A picked weapon is the best common (not rare) weapon of a random weapon group 01-0C (Saber ... Wand) whose
-// requirements the player meets now, without grind, special or percentages (see spire_drops_pick_weapon).
+// requirements the player meets now, without grind, special or percentages (see spire_drops_pick_weapon). BALANS-4 174:
+// a picked boss weapon comes only from the groups whose weapon, with the boss grind, is stronger than the weapon the
+// player has equipped (spire_drops_weapon_strength); if no group's is, from all groups as before.
 // Route B F8 (plan-route-b-2026-10-26 section 6): the boss weapon of room k gets grind min(MaxGrind, BossGrindBase +
 // BossGrindPerK * k) and Hit min(50, BossHitBase + BossHitPerK * k), also when it is Sega's own drop; from room PickFromK
 // on, a picked weapon (items 25-27) gets grind min(MaxGrind, 1 + k) and Hit min(25, 5 + 2k). The Hit sits in the
@@ -64,6 +66,7 @@ struct SpireDropPlayer {
   uint8_t char_class = 0;
   CharacterStats now; // the player's stats now
   CharacterStats ahead; // his stats levels_ahead levels later (Sega's level table)
+  uint32_t carried = 0; // spire_drops_weapon_strength of the weapon he has equipped (0 = none or unknown)
 };
 // The stats of a character of this class at level (0-based) + levels_ahead, from his stats now (level capped at 199)
 CharacterStats spire_drops_stats_ahead(
@@ -79,10 +82,17 @@ SpireWeaponFit spire_drops_weapon_fit(const ItemParameterTable& pmt, const ItemD
 // B-BEL-4: the weapon groups of a class's role, in Sega's weapon class order (ItemNameIndex): hunter 01-05 (Saber,
 // Sword, Dagger, Partisan, Slicer), ranger 06-09 (Handgun, Rifle, Mechgun, Shot), force 0A-0C (Cane, Rod, Wand)
 std::pair<uint8_t, uint8_t> spire_drops_role_groups(uint8_t char_class);
-// The weapon to give: see above. random picks the group. If no common weapon fits the player now (Sega's level-1
-// rangers), the common weapons of his class he lacks the least for, first only in the groups of his role
-// (spire_drops_role_groups), then in all. Empty only if his class can equip none.
-ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random);
+// BALANS-4 174: the strength the Spire compares weapons by, ATPMin + ATPMax of Sega's table + 4 x grind (data1[3]):
+// twice the mean ATP the weapon adds, so that no half point is lost. 0 for an empty item, a non-weapon, or a weapon
+// not in Sega's table.
+uint32_t spire_drops_weapon_strength(const ItemParameterTable& pmt, const ItemData& item);
+// The weapon to give: see above. random picks the group. With better_than (a boss weapon, BALANS-4 174) only the groups
+// whose weapon, given grind (capped at its MaxGrind), is stronger than better_than (spire_drops_weapon_strength) count,
+// unless no group's is: then every group, as without better_than. If no common weapon fits the player now (Sega's
+// level-1 rangers), the common weapons of his class he lacks the least for, first only in the groups of his role
+// (spire_drops_role_groups), then in all. Empty only if his class can equip none. The returned weapon has no grind.
+ItemData spire_drops_pick_weapon(const ItemParameterTable& pmt, const SpireDropPlayer& p, uint32_t random,
+    uint8_t grind = 0, uint32_t better_than = 0);
 
 // B-BEL-4 (armour): a frame or barrier this class cannot wear (Sega's usability bits, as for weapons) becomes one of
 // the same kind it can wear: the strongest common one (DFP + EVP of Sega's table, the later one on a tie) that is not
