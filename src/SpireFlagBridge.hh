@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 
@@ -446,6 +447,12 @@ std::vector<std::string> spire_savestate_end_files(const std::set<std::string>& 
     const std::vector<std::string>& present_files);
 // Whether a run end deletes this savestate: only one of the game's run.
 bool spire_savestate_is_of_run(const SpireSavestate& ss, uint32_t run_id);
+// 7r2-M1 (system critic round 2): whether a true run end deletes this savestate. Only one of the game's run
+// (spire_savestate_is_of_run), and a real one only if a client of the game really played that run (real_played: its
+// 'B' came and it was no practice run, SpireGameRun::real_played); a practice savestate goes as before. A game takes
+// the parked run's id at its first 'J'; a client whose resume answer comes too late starts fresh as a practice run in
+// that game, its 'V' is not stored ("stays parked"), and its end (dead, Give up, won, time up) must not delete the run.
+bool spire_savestate_end_deletes_file(const SpireSavestate& ss, uint32_t run_id, bool real_played);
 // Whether a savestate fits a room quest's start: same episode, room and variant, and the same ladder rung (B-AF-9,
 // critic spel-af-3 B2: the rung of the quest that wrote it, spire_meta_ladder_quest_rung, equals the given rung of the
 // quest now; a file from before has no quest number and counts as Normal), so a Hard run never resumes on Normal or
@@ -456,31 +463,61 @@ bool spire_savestate_matches(const SpireSavestate& ss, uint8_t episode, uint8_t 
 // stem is "<SPIRE_BRIDGE_DIRECTORY>/<serial>.<character id>"; the rung's file is <stem>.savestate.<rung name>.json. The
 // file of before, <stem>.savestate.json, counts for the rung it records itself (its quest number), only while that
 // rung has no file of its own, and goes at that rung's first write.
+// 7r2-M2 (B-REGIE-21-22): one savestate per difficulty rung per episode, so a start in Episode 2 never replaces a run
+// parked in Episode 1 or the other way round. Episode 1 keeps the rung's file of before, <stem>.savestate.<rung
+// name>.json (spire_savestate_rung_filename); Episode 2 has <stem>.savestate.ep2.<rung name>.json. A rung file written
+// before 7r2-M2 may hold a run of either episode; its own "Episode" field says which (written in every savestate since
+// v44), so it is read for that episode only: for Episode 1 unless it records Episode 2, for Episode 2 only if it does and
+// only while Episode 2 has no file of its own. A rung file that cannot be read is Episode 1's by its name; Episode 2
+// leaves it alone. Every episode other than Episode 2 counts as Episode 1 (as the files of before did).
 constexpr uint8_t SPIRE_SAVESTATE_RUNGS = 4;
 std::string spire_savestate_rung_filename(const std::string& stem, uint8_t rung);
+std::string spire_savestate_slot_filename(const std::string& stem, uint8_t episode, uint8_t rung);
 std::string spire_savestate_old_filename(const std::string& stem);
 // Whether the file of before holds the savestate of this rung: the rung has no own file and it records that rung
+// (7r2-M2: the caller also asks that it records the episode, and passes whether that episode's rung has a file)
 bool spire_savestate_old_counts(bool rung_file_exists, const SpireSavestate& old, uint8_t rung);
-// The savestate of one rung (the rung's file, else the file of before if it counts, else none) and in *filename the
-// file it came from ("" for none). Throws on an unreadable file.
+// The savestate of one episode and rung (its file, else for Episode 2 the rung file of before if it records Episode
+// 2, else the file of before if it counts, else none) and in *filename the file it came from ("" for none). Throws on
+// an unreadable file of that episode.
+SpireSavestate spire_savestate_load_slot(
+    const std::string& stem, uint8_t episode, uint8_t rung, std::string* filename = nullptr);
+// Episode 1's savestate of one rung (spire_savestate_load_slot)
 SpireSavestate spire_savestate_load_rung(const std::string& stem, uint8_t rung, std::string* filename = nullptr);
-// Writes data as the rung's file (durable) and removes the file of before if it held this rung; returns the filename
+// Writes data as the episode's rung file (durable) and returns the filename. The files of before that held this
+// episode and rung go (the file of before; for Episode 2 also the rung file of before that records Episode 2:
+// *replaced_old says the first did). Episode 1 writing over a rung file of before that records Episode 2 first copies
+// it to Episode 2's own file, if that has none, so the Episode 2 run stays.
+std::string spire_savestate_store_slot(const std::string& stem, uint8_t episode, uint8_t rung, const std::string& data,
+    bool* replaced_old = nullptr);
+// Episode 1's write of one rung (spire_savestate_store_slot)
 std::string spire_savestate_store_rung(
     const std::string& stem, uint8_t rung, const std::string& data, bool* replaced_old = nullptr);
 // 7-M2 (system critic round 1): whether a 'V' may replace the savestate parked on its rung. A practice run (a room
 // quest opened at a room that is not the run's first, spire_run_is_practice) never replaces the savestate of a real
 // run, whatever its run id: "Spire room 3" opened next to a real run parked at room 9 wrote its own savestate over that
 // run at its first room start, without a word. A practice run that was parked and resumed finds its own practice
-// savestate there and replaces it as before; a real run replaces whatever is parked on its rung, as before.
-bool spire_savestate_may_replace(const SpireSavestate& parked, bool practice);
-// The store step of a 'V': writes ss as the rung's file (spire_savestate_store_rung) and returns the filename. Returns
-// "" and writes nothing when spire_savestate_may_replace refuses: the parked savestate (the rung's file, or the file
-// of before if it counts for the rung) stays byte for byte, and *kept gets it. A practice run also leaves a parked
-// file it cannot read (*kept then does not exist): that file may hold a real run. Throws only if the write fails.
+// savestate there and replaces it as before.
+// 7r2-M2 (B-REGIE-21-22): a new run replaces a run parked on its episode and rung only from its first own save point,
+// never at its start: the 'V' of the run's first room (run_first_room, spire_savestate_is_first_room_v) leaves a parked
+// savestate of another run id, so a room 1 opened by mistake costs no run. Every later 'V' of a real run replaces it.
+bool spire_savestate_may_replace(
+    const SpireSavestate& parked, bool practice, bool run_first_room = false, uint32_t run_id = 0);
+// Whether a 'V' is the one of its run's first room: the room it starts is the run's start room
+bool spire_savestate_is_first_room_v(const SpireSavestate& ss);
+// The store step of a 'V': writes ss as its episode's rung file (spire_savestate_store_slot, the episode is
+// ss.episode) and returns the filename. Returns "" and writes nothing when spire_savestate_may_replace refuses: the
+// parked savestate (the episode's rung file, or a file of before that counts for it) stays byte for byte, and *kept
+// gets it. A practice run, and a run at its first room, also leave a parked file they cannot read (*kept then does not
+// exist): that file may hold a real run. Throws only if the write fails.
 std::string spire_savestate_store_v(const std::string& stem, uint8_t rung, const SpireSavestate& ss,
     uint32_t serial_number, bool* replaced_old = nullptr, SpireSavestate* kept = nullptr);
-// The line a practice run's player gets, once per run, when its 'V' is not stored for a parked real run
+// The line a practice run's player gets, once per run, when its 'V' is not stored for a parked real run; it names the
+// room quest that resumes the parked run (spire_savestate_room_quest_name, critic r2 K-2)
 std::string spire_savestate_practice_kept_text(const SpireSavestate& kept);
+// 7r2-M2: the line a new real run's player gets at its 'B' when a run of another run id is parked on its episode and
+// rung: the parked run's room and difficulty, and that it is replaced when the next room starts (its first save point)
+std::string spire_savestate_replace_text(const SpireSavestate& parked);
 // The resume answer for one client: resume only if the game's run is a resume, the client's own savestate fits the
 // quest and has the game's run id, and the run has not ended.
 bool spire_resume_client(bool run_ended, bool game_resumed, uint32_t game_run_id, bool own_matches, uint32_t own_run_id);
@@ -544,11 +581,15 @@ std::string spire_savestate_room_quest_name(const SpireSavestate& ss);
 // The notice's savestate for a client (savestate file stem, spire_savestate_stem) in a game of this difficulty: that
 // difficulty's own (B-REGIE-18-6), the one the game's room quests resume, and the room quest's name on that difficulty
 // in *quest_name. Throws on an unreadable file (as spire_savestate_load_rung).
-SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name);
+// 7r2-M2: of the game's episode.
+SpireSavestate spire_savestate_notice_pick(const std::string& stem, uint8_t difficulty, std::string* quest_name,
+    uint8_t episode = static_cast<uint8_t>(Episode::EP1));
 // Critic spel-af-4b S-1: in a game of a difficulty without its own savestate, the lowest other difficulty that has one,
 // so the notice says where the run waits (once per session, Client::spire_savestate_elsewhere_told); nothing when no
 // difficulty has one. Throws on an unreadable file.
-std::optional<uint8_t> spire_savestate_notice_elsewhere(const std::string& stem, uint8_t difficulty);
+// 7r2-M2: within the game's episode.
+std::optional<uint8_t> spire_savestate_notice_elsewhere(
+    const std::string& stem, uint8_t difficulty, uint8_t episode = static_cast<uint8_t>(Episode::EP1));
 std::string spire_savestate_elsewhere_text(uint8_t rung);
 // Line 1 of the notice
 std::string spire_savestate_notice_saved_line(const SpireSavestate& ss);
@@ -1253,7 +1294,12 @@ struct SpireWaveEnemy {
 bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
 // veilig-1: the enemies of a wave as the nets see them, one entry per parent (a child counts through its parent, as
 // in the wave check). A hit on a child (hit claim, damage or 6x0A flags on the child's own state) is a hit on its
-// parent: the server books a hit on the enemy that was struck, never on its parent.
+// parent only when the child is a part of the parent's own body (spire_child_hit_is_parent_hit): the server books a
+// hit on the enemy that was struck, never on its parent.
+// 2r2-M1 (system critic round 2): a child that is an enemy of its own (a Bee of a Chaos Sorcerer, a Canadine of a
+// Canane, a Mothmant of a Monest, a Claw of a Bulclaw, a Recon of a Recobox) keeps its hit to itself: a hit on a Bee took
+// the net away from a Chaos Sorcerer that had gone out of reach, so the room stayed shut.
+bool spire_child_hit_is_parent_hit(EnemyType parent_type);
 std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number);
 // veilig-1: the fight clock, per game and floor (a run fights one room at a time, and a player's hit names no room).
@@ -1322,6 +1368,16 @@ struct SpireRoomEvent {
 std::vector<size_t> spire_unstarted_chain(const std::vector<SpireRoomEvent>& events);
 // The event ids a post-wave action stream triggers (0C), read the way spire_room_actions_hold reads it
 std::vector<uint32_t> spire_room_actions_triggers(const void* action_stream, size_t action_stream_size);
+// 2r2-M2 (system critic round 2): what one look of the second net (spire_dead_event_wait) counts in a room, without its
+// clock: the started events without a living enemy at the previous look (seen) and at this one (now), in *both_out, and
+// the never-started events of the room's trigger chain behind them, or behind a wave a net counted in this room before
+// (2-M1: after a net counted a non-last wave, no event of the room is dead any more, so only that room mark starts the
+// chain). The w_ids, never empty when the chain has one.
+std::unordered_set<size_t> spire_dead_event_look_counts(std::shared_ptr<Lobby> l, Version v, uint8_t floor,
+    uint16_t room, const std::unordered_set<size_t>& seen, const std::unordered_set<size_t>& now,
+    std::unordered_set<size_t>* both_out = nullptr);
+// For StaticTests: marks (noted) or unmarks a room as one where a net counted a wave (spire_net_rooms)
+void spire_static_test_note_net_room(std::shared_ptr<const Lobby> l, uint8_t floor, uint16_t room, bool noted);
 // Called from the 6x76 wave check when a defeat leaves the wave unfinished; recheck is that wave check (was_defeat
 // false). Never throws.
 using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t floor, uint16_t room,
