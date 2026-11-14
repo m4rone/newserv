@@ -10133,6 +10133,87 @@ void run_static_tests() {
       }
     });
 
+    e2e_case("a floor hand-over in a Normal game through the real 6x2A and 6x5A: the dropper's snapshot loses the item, the picker's gains it (K7)", [&]() {
+      TempCwd temp_cwd;
+      auto w = make_world();
+      give_item_tables(w);
+      // the handlers name the item in their log lines: an index without names (no text tables in a static test)
+      w.s->data->item_name_indexes[static_cast<size_t>(Version::GC_V3)] = std::make_shared<ItemNameIndex>(
+          pmt_v3, w.s->data->item_stack_limits(Version::GC_V3), std::vector<std::string>());
+      Session a = connect_as(w, real_character(), SERIAL);
+      Session b = connect_as(w, second_character(), SERIAL_2);
+      client_sends(w, a, 0x61, a.ch->as_61());
+      client_sends(w, b, 0x61, b.ch->as_61());
+      // both under AwaitingSave with their real character, as after a verified restore: the snapshot follows the floor
+      auto awaiting_snapshot = [&](Session& p, uint32_t serial) {
+        auto ch = p.c->character_file(false, false);
+        must(ch != nullptr, "a player has no character data after its 61");
+        SpireGuardSnapshot snap;
+        snap.awaiting_save = true;
+        snap.has_character = true;
+        snap.quest_number = QUEST;
+        snap.inventory = ch->inventory;
+        snap.disp = ch->disp;
+        std::string filename = std::format("{}/{:010}.{}.snapshot.json", SPIRE_BRIDGE_DIRECTORY, serial, spire_guard_character_id(ch->disp));
+        spire_guard_save(filename, serial, snap);
+        must(spire_guard_floor_follows(spire_guard_load(filename), true), "the snapshot of this case does not follow a Normal game");
+        return filename;
+      };
+      std::string a_file = awaiting_snapshot(a, SERIAL);
+      std::string b_file = awaiting_snapshot(b, SERIAL_2);
+      must(a_file != b_file, "the two players share a snapshot file name");
+
+      auto base = std::make_shared<Lobby>(w.s, 0x7B21, true);
+      base->episode = Episode::EP1;
+      base->mode = GameMode::NORMAL;
+      base->leader_id = 0;
+      base->rand_crypt = std::make_shared<MT19937Generator>(base->random_seed);
+      while (base->floor_item_managers.size() < 0x12) { // as create_game_generic gives every game
+        base->floor_item_managers.emplace_back(base->lobby_id, base->floor_item_managers.size());
+      }
+      w.s->id_to_lobby.emplace(base->lobby_id, base);
+      Session* players[2] = {&a, &b};
+      for (size_t z = 0; z < 2; z++) {
+        base->clients[z] = players[z]->c;
+        players[z]->c->lobby_client_id = z;
+        players[z]->c->lobby = base;
+        players[z]->c->floor = 0;
+      }
+
+      // A drops its unequipped rare weapon (inventory item 5), B picks it up
+      const ItemData sword = a.c->character_file(false, false)->inventory.items[5].data;
+      auto in_snapshot = [&](const std::string& filename) {
+        auto snap = spire_guard_load(filename);
+        size_t found = 0;
+        for (size_t z = 0; z < snap.inventory.num_items; z++) {
+          found += !memcmp(snap.inventory.items[z].data.data1.data(), sword.data1.data(), 12);
+        }
+        return found;
+      };
+      expect_eq(1u, in_snapshot(a_file));
+      expect_eq(0u, in_snapshot(b_file));
+      G_DropItem_6x2A drop;
+      drop.header = {0x2A, sizeof(G_DropItem_6x2A) / 4, 0};
+      drop.amount = 1;
+      drop.floor = 0;
+      drop.item_id = sword.id;
+      client_sends(w, a, 0x60, std::string(reinterpret_cast<const char*>(&drop), sizeof(drop)));
+      must(base->item_exists(0, sword.id), "the 6x2A did not put the item on the floor");
+      G_PickUpItemRequest_6x5A pick;
+      pick.header = {0x5A, sizeof(G_PickUpItemRequest_6x5A) / 4, 1};
+      pick.item_id = sword.id;
+      pick.floor = 0;
+      client_sends(w, b, 0x60, std::string(reinterpret_cast<const char*>(&pick), sizeof(pick)));
+      must(!base->item_exists(0, sword.id), "the 6x5A did not take the item from the floor");
+      // the item exists once in the snapshots, with the one who holds it now
+      if (in_snapshot(a_file) != 0) {
+        throw std::runtime_error("the dropper's snapshot still holds the item another player picked up: the floor drop was not followed (spire_guard_note_floor_drop)");
+      }
+      if (in_snapshot(b_file) != 1) {
+        throw std::runtime_error("the picker's snapshot did not gain the item from a followed drop");
+      }
+    });
+
     expect_eq(0u, e2e_failed);
 
     // Bank (regie): a restore never reads the bank back, so its log line may not read as if it did, and the push may
