@@ -1287,7 +1287,12 @@ struct SpireWaveEnemy {
 bool spire_wave_held_only_by_unhit(const std::vector<SpireWaveEnemy>& enemies);
 // veilig-1: the enemies of a wave as the nets see them, one entry per parent (a child counts through its parent, as
 // in the wave check). A hit on a child (hit claim, damage or 6x0A flags on the child's own state) is a hit on its
-// parent: the server books a hit on the enemy that was struck, never on its parent.
+// parent only when the child is a part of the parent's own body (spire_child_hit_is_parent_hit): the server books a
+// hit on the enemy that was struck, never on its parent.
+// 2r2-M1 (system critic round 2): a child that is an enemy of its own (a Bee of a Chaos Sorcerer, a Canadine of a
+// Canane, a Mothmant of a Monest, a Claw of a Bulclaw, a Recon of a Recobox) keeps its hit to itself: a hit on a Bee took
+// the net away from a Chaos Sorcerer that had gone out of reach, so the room stayed shut.
+bool spire_child_hit_is_parent_hit(EnemyType parent_type);
 std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number);
 // veilig-1: the fight clock, per game and floor (a run fights one room at a time, and a player's hit names no room).

@@ -7370,20 +7370,27 @@ static bool spire_enemy_ever_hit(const MapState::EnemyState& ene_st) {
   return (ene_st.server_flags & MapState::EnemyState::Flag::ALL_HITS_MASK) || ene_st.total_damage || ene_st.game_flags;
 }
 
+// 2r2-M1: the parents whose children are parts of one body: the Pan Arms (Hidoom and Migium, 2-M2)
+bool spire_child_hit_is_parent_hit(EnemyType parent_type) {
+  return parent_type == EnemyType::PAN_ARMS;
+}
+
 std::vector<SpireWaveEnemy> spire_wave_enemies(
     std::shared_ptr<MapState> map_state, Version v, uint8_t floor, uint16_t room, uint16_t wave_number) {
   std::vector<SpireWaveEnemy> ret;
   auto ene_sts = map_state->enemy_states_for_floor_room_wave(v, floor, room, wave_number);
-  std::unordered_map<size_t, size_t> parent_index; // the parent's super id -> its entry in ret
+  std::unordered_map<size_t, size_t> parent_index; // the super id of a parent of one body -> its entry in ret
   for (const auto& ene_st : ene_sts) {
     if (ene_st->super_ene->child_index) {
       continue; // as in the wave check: a child counts through its parent
     }
-    parent_index.emplace(ene_st->super_ene->super_id, ret.size());
+    if (spire_child_hit_is_parent_hit(ene_st->super_ene->type)) {
+      parent_index.emplace(ene_st->super_ene->super_id, ret.size());
+    }
     ret.emplace_back(SpireWaveEnemy{.defeated = !!(ene_st->set_flags & 8), .ever_hit = spire_enemy_ever_hit(*ene_st),
         .is_boss = type_definition_for_enemy(ene_st->super_ene->type).is_boss()});
   }
-  // veilig-1: a hit on a child is a hit on its parent (the children follow their parent in the super map)
+  // veilig-1: a hit on a part of one body is a hit on its parent (the children follow their parent in the super map)
   for (const auto& ene_st : ene_sts) {
     size_t child_index = ene_st->super_ene->child_index;
     if (!child_index || !spire_enemy_ever_hit(*ene_st) || (child_index > ene_st->super_ene->super_id)) {

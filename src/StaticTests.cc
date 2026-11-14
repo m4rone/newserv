@@ -3271,11 +3271,22 @@ void run_static_tests() {
     ene(2)->total_damage = 40;
     expect(!spire_wave_held_only_by_unhit(wave(3)));
 
-    // the second net: an event whose only living enemy is a Chaos Sorcerer hit through a Bee has a living enemy
+    // 2r2-M1: a Bee is an enemy of its own, not a part of the Chaos Sorcerer: a hit on it leaves the Sorcerer never hit,
+    // so both nets still count a Sorcerer gone out of reach; only the Pan Arms' parts reach their parent
+    expect(spire_child_hit_is_parent_hit(EnemyType::PAN_ARMS));
+    expect(!spire_child_hit_is_parent_hit(EnemyType::CHAOS_SORCERER));
+    expect(!spire_child_hit_is_parent_hit(EnemyType::CANANE));
     ene(8)->set_flags |= 8;
     expect_eq(2u, wave(4).size());
+    expect(spire_wave_held_only_by_unhit(wave(4)));
     expect(spire_event_without_living_enemy(wave(4)));
+    ene(7)->set_last_hit_by_client_id(0);
     ene(7)->game_flags = 0x00000200;
+    expect(spire_wave_held_only_by_unhit(wave(4)));
+    expect(spire_event_without_living_enemy(wave(4)));
+    // a hit on the Sorcerer itself still makes it a living enemy
+    ene(5)->set_last_hit_by_client_id(0);
+    expect(!spire_wave_held_only_by_unhit(wave(4)));
     expect(!spire_event_without_living_enemy(wave(4)));
     // a child's hit reaches its own parent only: without Migium's damage the Pan Arms wave is held again
     ene(2)->reset();
