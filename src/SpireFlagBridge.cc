@@ -28,6 +28,8 @@
 #include "SpireDraw.hh"
 #include "SpireDrops.hh"
 #include "SpireMeta.hh"
+#include "SpireRewards.hh"
+#include "Items.hh"
 #include "ServerState.hh"
 
 // Stored entries, keyed by (difficulty, flag number). The value is true if the flag was set, false if it was cleared.
@@ -874,6 +876,16 @@ std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_nu
     if (led.last_mirrored) {
       led_json.emplace("LastMirrored", spire_run_mag_bytes_hex(*led.last_mirrored));
     }
+    // fase 1 part A, rule B: what the reward weapon asks of the mag, and mag food still owed
+    if (led.need.pow || led.need.dex || led.need.mind) {
+      led_json.emplace("Need", phosg::JSON::list({led.need.pow, led.need.dex, led.need.mind}));
+    }
+    if (led.boost_due) {
+      led_json.emplace("BoostDue", true);
+    }
+    if (led.feed_levels) {
+      led_json.emplace("FeedLevels", led.feed_levels);
+    }
     json.emplace("RunMag", std::move(led_json));
   }
   return json.serialize(phosg::JSON::SerializeOption::FORMAT);
@@ -968,6 +980,16 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     if (led_json.contains("LastMirrored")) {
       led.last_mirrored = spire_run_mag_bytes_from_hex(led_json.get_string("LastMirrored"));
     }
+    if (led_json.contains("Need")) {
+      const auto& need = led_json.get_list("Need");
+      if (need.size() == 3) {
+        led.need = SpireMagNeed{static_cast<uint16_t>(std::min<int64_t>(need[0]->as_int(), 200)),
+            static_cast<uint16_t>(std::min<int64_t>(need[1]->as_int(), 200)),
+            static_cast<uint16_t>(std::min<int64_t>(need[2]->as_int(), 200))};
+      }
+    }
+    led.boost_due = led_json.get_bool("BoostDue", false);
+    led.feed_levels = std::min<int64_t>(led_json.get_int("FeedLevels", 0), 200);
     ret.run_mag = led;
   }
   ret.exists = true;
@@ -2104,6 +2126,9 @@ static std::optional<SpireDrawTable> spire_draw_table_for_text(std::shared_ptr<c
   }
 }
 
+static std::map<uint32_t, std::string> spire_reward_draw_offers(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t serial_number, const SpireDrawTable& draw, const SpireDrawInput& in, uint32_t drawn, uint64_t seed);
+
 static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   std::vector<uint32_t> values = std::move(spire_draw_inputs[c.get()]);
@@ -2129,12 +2154,14 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
   auto* run = spire_game_run_for(l);
   auto* cr = spire_client_run_for(c, l, false);
   uint32_t drawn;
+  uint64_t reward_seed = phosg::random_object<uint64_t>(); // fase 1 part A: the server rewards' tiers and items
   if (run && cr && cr->began) {
     uint32_t nth = cr->draws_per_room[in.k]++;
     uint64_t state = spire_draw_seed(run->run_id, in.k, nth, values);
     drawn = spire_draw(table, in, [&state](uint32_t n) -> uint32_t {
       return n ? static_cast<uint32_t>(spire_splitmix_next(state) % n) : 0;
     });
+    reward_seed = spire_splitmix_next(state); // seeded too: a replayed room offers the same rewards
     c->log.info_f("Spire savestate: draw {} of room {} seeded from run {:08X}", nth + 1, in.k, run->run_id);
   } else {
     drawn = spire_draw(table, in, [](uint32_t n) -> uint32_t {
@@ -2157,7 +2184,8 @@ static void spire_draw_answer(std::shared_ptr<Client> c, std::shared_ptr<const L
       SPIRE_BRIDGE_DRAW_RESULT_REGISTER, drawn, SPIRE_BRIDGE_REQUEST_REGISTER);
 
   // v62 (ROUTEB8-PROTOCOL.md § 2): the overview of the three rewards, to this client only, kept for its 'C' 2
-  std::string overview = spire_draw_overview_line(table, in.archetype, drawn);
+  auto reward_names = spire_reward_draw_offers(c, l, serial_number, table, in, drawn, reward_seed);
+  std::string overview = spire_draw_overview_line(table, in.archetype, drawn, reward_names);
   if (overview.empty()) {
     c->log.info_f("Spire bridge: draw for serial {:010} in q{}: no overview line (not every drawn entry has a name)",
         serial_number, quest_number);
@@ -4169,6 +4197,486 @@ static SpireRunMagRefusal spire_run_mag_check(std::shared_ptr<Client> c, std::sh
   return refusal;
 }
 
+// ---- fase 1 part A: the server's rewards (SpireRewards.hh; pso-roguelike design/beloningen-per-klasse.md par. 6)
+
+// The grid, read again only when its file changes; nullptr (with why) when it is missing or unreadable
+static std::shared_ptr<const SpireRewardTable> spire_rewards_table_cached(std::string* why) {
+  static std::shared_ptr<const SpireRewardTable> cached;
+  static std::filesystem::file_time_type cached_time{};
+  try {
+    if (!std::filesystem::is_regular_file(SPIRE_REWARDS_FILE)) {
+      cached.reset();
+      *why = std::format("no {}", SPIRE_REWARDS_FILE);
+      return nullptr;
+    }
+    auto t = std::filesystem::last_write_time(SPIRE_REWARDS_FILE);
+    if (!cached || (t != cached_time)) {
+      cached = std::make_shared<SpireRewardTable>(spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE)));
+      cached_time = t;
+    }
+    return cached;
+  } catch (const std::exception& e) {
+    cached.reset();
+    *why = std::format("{} unreadable: {}", SPIRE_REWARDS_FILE, e.what());
+    return nullptr;
+  }
+}
+
+// What a reward pick answered with an item, until its RESULT ('Z' sub 7)
+struct SpireRewardPending {
+  SpireRewardOffer offer;
+  SpireMagNeed need;
+  bool mag_due = false;
+  bool server_offer = false; // false: the entry's own item (no server reward)
+  uint32_t atp = 0, ata = 0, mst = 0, level = 0; // the run copy at the pick
+  std::string class_name;
+  std::optional<SpireMagBytes> mag_before;
+};
+// Per client and game: the offers of its last 'Q' by board slot (replaced at each 'Q'), and the pick in flight
+struct SpireRewardOffers {
+  std::weak_ptr<const Client> client;
+  uint32_t lobby_id = 0;
+  std::map<uint8_t, SpireRewardOffer> by_slot;
+  std::optional<SpireRewardPending> pending;
+};
+static std::unordered_map<const Client*, SpireRewardOffers> spire_reward_offers;
+
+static SpireRewardOffers& spire_reward_offers_for(const std::shared_ptr<Client>& c, uint32_t lobby_id) {
+  auto it = spire_reward_offers.find(c.get());
+  if ((it != spire_reward_offers.end()) && ((it->second.client.lock() != c) || (it->second.lobby_id != lobby_id))) {
+    spire_reward_offers.erase(it);
+    it = spire_reward_offers.end();
+  }
+  if (it == spire_reward_offers.end()) {
+    if (spire_reward_offers.size() > 256) {
+      std::erase_if(spire_reward_offers, [](const auto& e) { return e.second.client.expired(); });
+    }
+    it = spire_reward_offers.emplace(c.get(), SpireRewardOffers{}).first;
+    it->second.client = c;
+    it->second.lobby_id = lobby_id;
+  }
+  return it->second;
+}
+
+// data1 of the weapon the run copy has equipped, or nullptr
+static const uint8_t* spire_reward_held_weapon(const PlayerInventory& inventory) {
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if ((item.data.data1[0] == 0x00) && item.is_equipped() && !item.data.empty()) {
+      return item.data.data1.data();
+    }
+  }
+  return nullptr;
+}
+
+// The one run mag of the run copy (type 02), or nullopt
+static std::optional<SpireMagBytes> spire_reward_run_mag(const PlayerInventory& inventory, bool* equipped = nullptr) {
+  std::optional<SpireMagBytes> ret;
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (!item.data.empty() && (item.data.data1[0] == 0x02)) {
+      if (ret) {
+        return std::nullopt; // two mags: none is the run mag
+      }
+      SpireMagBytes b;
+      memcpy(b.data(), item.data.data1.data(), 12);
+      ret = b;
+      if (equipped) {
+        *equipped = item.is_equipped();
+      }
+    }
+  }
+  return ret;
+}
+
+static std::string spire_reward_mag_text(const std::optional<SpireMagBytes>& mag) {
+  if (!mag) {
+    return "none";
+  }
+  return std::format("L{} DEF {}/POW {}/DEX {}/MIND {} (kind {:02X})", spire_mag_level_of(*mag),
+      spire_mag_stat_word(*mag, 0) / 100, spire_mag_stat_word(*mag, 1) / 100, spire_mag_stat_word(*mag, 2) / 100,
+      spire_mag_stat_word(*mag, 3) / 100, (*mag)[1]);
+}
+
+// Sega's evolution of a run mag with these stats (Items.cc apply_mag_evolution), for this client's class and section id
+static SpireMagEvolveAt spire_reward_evolve_for(std::shared_ptr<Client> c) {
+  auto s = c->require_server_state();
+  auto character = c->character_file(false, false);
+  if (!character) {
+    return nullptr;
+  }
+  auto ipt = s->data->item_parameter_table(Version::GC_V3);
+  auto mmt = s->data->mag_metadata_table(Version::GC_V3);
+  if (!ipt || !mmt) {
+    return nullptr;
+  }
+  uint8_t char_class = character->disp.visual.sh.char_class;
+  uint8_t section_id = character->disp.visual.sh.section_id;
+  return [ipt, mmt, char_class, section_id](const SpireMagBytes& bytes, uint8_t level) -> uint8_t {
+    ItemData item;
+    for (size_t z = 0; z < 12; z++) {
+      item.data1[z] = bytes[z];
+    }
+    try {
+      apply_mag_evolution(item, ipt, mmt, char_class, section_id, true, level);
+    } catch (const std::exception&) {
+      return bytes[1]; // no evolution known for this kind: it stays
+    }
+    return item.data1[1];
+  };
+}
+
+// One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4
+static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t serial_number, const SpireRewardTable& table, SpireRewardKind kind, uint32_t k, bool elite,
+    uint32_t rare_bonus, const std::function<uint32_t(uint32_t)>& rnd, std::string* why) {
+  auto character = c->character_file(false, false);
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+  if (!character || !overlay) {
+    *why = "no run copy";
+    return std::nullopt;
+  }
+  std::set<uint8_t> run_bosses;
+  auto rr_it = spire_run_rooms.find(c.get());
+  if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {
+    run_bosses = rr_it->second.boss_rooms;
+  }
+  std::set<uint8_t> beaten;
+  try {
+    beaten = spire_meta_load_for_client(c, serial_number, nullptr).bosses_beaten;
+  } catch (const std::exception&) {
+  }
+  uint32_t trede = spire_reward_trede(table, beaten, run_bosses);
+  uint32_t room_index = spire_reward_room_index(k);
+  auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
+  auto tier = spire_reward_tier_for_roll(odds, rnd(100));
+  try {
+    auto offer = spire_reward_offer(table, kind, character->disp.visual.sh.char_class,
+        spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd);
+    c->log.info_f("Spire reward: offer {} {} for room {} (index {}, W{}, trede {}, odds L<{} E<{} R<{}{}): {}",
+        spire_reward_kind_name(kind), spire_reward_tier_name(tier), k, room_index, offer.w, trede, odds.legendary,
+        odds.epic, odds.rare, elite ? ", elite" : "", offer.label);
+    return offer;
+  } catch (const std::exception& e) {
+    *why = e.what();
+    return std::nullopt;
+  }
+}
+
+// At a 'Q': the server's offer in every drawn slot of a server reward entry (SpireDrawEntry::srv_kind), kept for the
+// pick, and their coloured names for the reward line (spire_draw_overview_line)
+static std::map<uint32_t, std::string> spire_reward_draw_offers(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t serial_number, const SpireDrawTable& draw, const SpireDrawInput& in, uint32_t drawn, uint64_t seed) {
+  std::map<uint32_t, std::string> names;
+  auto& offers = spire_reward_offers_for(c, l->lobby_id);
+  offers.by_slot.clear();
+  offers.pending.reset();
+  if (in.archetype >= draw.archetypes.size()) {
+    return names;
+  }
+  const auto& entries = draw.archetypes[in.archetype].entries;
+  std::string why;
+  std::shared_ptr<const SpireRewardTable> table;
+  uint64_t state = seed;
+  auto rnd = [&state](uint32_t n) -> uint32_t { return n ? static_cast<uint32_t>(spire_splitmix_next(state) % n) : 0; };
+  for (uint32_t slot : {2, 3, 4, 5}) {
+    uint32_t id = (drawn >> ((slot - 2) * 6)) & 0x3F;
+    if (!id || (id > entries.size()) || !entries[id - 1].srv_kind) {
+      continue;
+    }
+    if (!table && why.empty()) {
+      table = spire_rewards_table_cached(&why);
+      if (table && !table->enabled) {
+        why = std::format("{} Enabled false", SPIRE_REWARDS_FILE);
+        table.reset();
+      }
+    }
+    if (!table) {
+      c->log.info_f("Spire reward: slot {} entry {}: {}; the entry's own item", slot, id, why);
+      continue;
+    }
+    std::string offer_why;
+    auto offer = spire_reward_make_offer(c, l, serial_number, *table, static_cast<SpireRewardKind>(entries[id - 1].srv_kind),
+        in.k, in.path == 1, (in.state >> 8) & 0xFF, rnd, &offer_why);
+    if (!offer) {
+      c->log.warning_f("Spire reward: slot {} entry {}: no offer ({}); the entry's own item", slot, id, offer_why);
+      continue;
+    }
+    offer->slot = slot;
+    offer->entry_id = id;
+    names.emplace(slot, (offer->tier == SpireRewardTier::NORMAL)
+            ? offer->label
+            : std::format("{}{}$C7", spire_reward_tier_color(offer->tier), offer->label));
+    offers.by_slot.emplace(slot, std::move(*offer));
+  }
+  return names;
+}
+
+// The 6x77s of a reward answer: r20-r31 (with an item), r41, DONE
+static void spire_reward_answer(std::shared_ptr<Client> c, const SpireMagBytes* item, bool mag_follows) {
+  if (item) {
+    for (size_t z = 0; z < 12; z++) {
+      spire_send_register(c, SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + z, (*item)[z]);
+    }
+  }
+  uint32_t answer = SPIRE_REWARD_ANSWER_TAG | (item ? SPIRE_REWARD_ITEM : 0) | (mag_follows ? SPIRE_REWARD_MAG_FOLLOWS : 0);
+  spire_send_register(c, SPIRE_RUN_MAG_ANSWER_REGISTER, answer);
+  spire_send_register(c, SPIRE_BRIDGE_REQUEST_REGISTER, SPIRE_BRIDGE_DONE_VALUE);
+}
+
+// 'Z' sub 6: the pick of a server reward entry. Answers the offer of its slot (made at the 'Q'), or one made now (a
+// quest's own draw); the entry's own item when the server has no reward to give; never more than one item per pick.
+static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  uint8_t slot = (value >> 8) & 0xFF;
+  uint8_t entry_id = value & 0xFF;
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+  auto character = c->character_file(false, false);
+  auto& offers = spire_reward_offers_for(c, l->lobby_id);
+  offers.pending.reset();
+
+  // the entry and its own item, from the quest's draw table
+  const SpireDrawEntry* entry = nullptr;
+  std::optional<SpireDrawTable> draw = spire_draw_table_for_text(c, quest_number);
+  int32_t arch = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
+  if (draw && (arch >= 0) && (static_cast<size_t>(arch) < draw->archetypes.size()) && entry_id &&
+      (entry_id <= draw->archetypes[arch].entries.size())) {
+    entry = &draw->archetypes[arch].entries[entry_id - 1];
+  }
+  auto own_item = [&](const std::string& why) {
+    SpireMagBytes b{};
+    bool has = entry && entry->has_own_bytes;
+    if (has) {
+      memcpy(b.data(), entry->own_bytes.data(), 12);
+      SpireRewardPending p;
+      p.offer.slot = slot;
+      p.offer.entry_id = entry_id;
+      p.offer.item = b;
+      offers.pending = std::move(p);
+    }
+    spire_reward_answer(c, has ? &b : nullptr, false);
+    c->log.info_f("Spire reward: pick slot {} entry {} for serial {:010} in q{}: {}; answered {}", slot, entry_id,
+        serial_number, quest_number, why, has ? std::format("the entry's own item {}", spire_run_mag_bytes_hex(b))
+                                               : std::string("nothing (no own item)"));
+  };
+
+  SpireMagTable mag_table;
+  const SpireMagLine* mag_line = nullptr;
+  std::string detail;
+  auto refusal = spire_run_mag_check(c, l, serial_number, quest_number, overlay, mag_table, mag_line, detail);
+  using R = SpireRunMagRefusal;
+  // a mag table that is off or missing still lets a weapon through (without rule B); everything else refuses
+  if ((refusal != R::NONE) && (refusal != R::DISABLED) && (refusal != R::NO_TABLE) && (refusal != R::TWO_MAGS)) {
+    own_item(std::format("refused ({}{})", spire_run_mag_refusal_name(refusal), detail));
+    return;
+  }
+  if (!entry || !entry->srv_kind) {
+    own_item("not a server reward entry");
+    return;
+  }
+  std::string why;
+  auto table = spire_rewards_table_cached(&why);
+  if (!table || !table->enabled) {
+    own_item(table ? std::format("{} Enabled false", SPIRE_REWARDS_FILE) : why);
+    return;
+  }
+  auto* run = spire_game_run_for(l);
+  std::optional<SpireRewardOffer> offer;
+  auto it = offers.by_slot.find(slot);
+  if ((it != offers.by_slot.end()) && (it->second.entry_id == entry_id)) {
+    offer = it->second;
+  } else { // no server draw for this slot (the quest drew itself): an offer now, for the room of its last 'V'
+    auto* cr = spire_client_run_for(c, l, false);
+    uint32_t k = (cr && cr->v_room) ? cr->v_room : 1;
+    std::string offer_why;
+    offer = spire_reward_make_offer(c, l, serial_number, *table, static_cast<SpireRewardKind>(entry->srv_kind), k, false,
+        0, [](uint32_t n) -> uint32_t { return n ? (phosg::random_object<uint32_t>() % n) : 0; }, &offer_why);
+    if (!offer) {
+      own_item(std::format("no offer ({})", offer_why));
+      return;
+    }
+    offer->slot = slot;
+    offer->entry_id = entry_id;
+  }
+
+  auto* led = (run && mag_line && (refusal == R::NONE)) ? spire_run_mag_ledger_for(c, run->run_id, true) : nullptr;
+  const auto& stats = overlay->disp.stats.char_stats;
+  SpireRewardPending p;
+  p.offer = *offer;
+  p.server_offer = true;
+  p.atp = stats.atp;
+  p.ata = stats.ata;
+  p.mst = stats.mst;
+  p.level = overlay->disp.stats.level;
+  p.mag_before = spire_reward_run_mag(overlay->inventory);
+  std::string arch_name = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "";
+  if (character) {
+    auto cls_it = table->classes.find(character->disp.visual.sh.char_class);
+    p.class_name = (cls_it != table->classes.end()) ? cls_it->second.name : "";
+  }
+  size_t main_stat = spire_mag_main_stat(arch_name, led ? led->lean : 0);
+
+  if (offer->kind == SpireRewardKind::MAG_FOOD) {
+    if (!led) {
+      own_item(std::format("mag food without a run mag ({})", (refusal == R::NONE) ? "no ledger" : spire_run_mag_refusal_name(refusal)));
+      return;
+    }
+    led->feed_levels = std::min<uint32_t>(led->feed_levels + offer->food_levels, 200);
+    led->boost_due = true;
+    offers.by_slot.erase(slot);
+    spire_reward_answer(c, nullptr, true);
+    c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} on {}; run copy Lv{} ATP {} ATA {} MST {}; "
+        "mag now {}; owed food {} levels; the quest asks the run mag next",
+        spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+        offer->label, (main_stat == 0) ? "DEF" : (main_stat == 3) ? "MIND" : "POW", p.level + 1, p.atp, p.ata, p.mst,
+        spire_reward_mag_text(p.mag_before), led->feed_levels);
+    return;
+  }
+
+  p.need = spire_reward_mag_need(offer->info, p.atp, p.ata, p.mst, table->ata_model);
+  if (led) {
+    auto column = spire_mag_column(*mag_line, led->lean);
+    auto preview = spire_mag_rule_b(column.line, std::max<int32_t>(led->issued_step, 0),
+        spire_start_level_run_bonus(c.get(), l->lobby_id, quest_number).value_or(0), led->last_mirrored, p.need,
+        led->feed_levels, main_stat);
+    bool differs = !led->last_mirrored;
+    for (size_t z = 0; (z < 4) && !differs; z++) {
+      differs = spire_mag_stat_word(preview, z) != spire_mag_stat_word(*led->last_mirrored, z);
+    }
+    p.mag_due = differs;
+  }
+  offers.pending = p;
+  spire_reward_answer(c, &offer->item, p.mag_due);
+  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {} (line {}{}); needs mag POW {} DEX {} "
+      "MIND {} ({} ATA model); {}",
+      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+      offer->label, spire_run_mag_bytes_hex(offer->item), offer->line,
+      (offer->line != offer->from_line) ? std::format(", held {}", offer->from_line) : "", p.need.pow, p.need.dex,
+      p.need.mind, spire_ata_model_name(table->ata_model),
+      !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
+      : p.mag_due ? std::string("the run mag follows (rule B)") : std::string("the run mag already meets it"));
+}
+
+// After the RESULT of a server reward weapon: SpireEquipItem for it once the run mag is settled (rule B first, so the
+// weapon goes on with the mag that carries it), then the journal line the evening run answers design par. 7 with
+static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
+    SpireRewardPending p, uint32_t serial_number, uint32_t run_id) {
+  std::optional<uint32_t> item_id;
+  for (size_t z = 0; z < 16; z++) { // up to 8 s: the item in newserv's copy, and the boosted mag created and equipped
+    co_await async_sleep(std::chrono::milliseconds(500));
+    auto c = weak_c.lock();
+    auto l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+    if (!overlay) {
+      co_return;
+    }
+    item_id.reset();
+    const auto& inv = overlay->inventory;
+    for (size_t x = 0; (x < inv.num_items) && (x < inv.items.size()); x++) {
+      const auto& it = inv.items[x];
+      if (!it.data.empty() && !memcmp(it.data.data1.data(), p.offer.item.data(), 5) && !it.is_equipped()) {
+        item_id = it.data.id.load();
+      }
+    }
+    bool mag_settled = true;
+    if (p.mag_due) {
+      auto* led = spire_run_mag_ledger_for(c, run_id, false);
+      bool equipped = false;
+      auto mag = spire_reward_run_mag(inv, &equipped);
+      mag_settled = !led || (!led->boost_due && mag && equipped);
+    }
+    if (item_id && mag_settled) {
+      break;
+    }
+  }
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  bool available = spire_equip_item_available_for(c);
+  if (item_id && available) {
+    co_await spire_equip_item_send(c, l, *item_id, "reward weapon", SPIRE_EQUIP_RESUME_WEAPON);
+    c = weak_c.lock();
+    l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+  } else if (item_id) {
+    spire_send_ticker(c, SPIRE_EQUIP_WEAPON_MISSING_TEXT);
+  }
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+  if (!overlay) {
+    co_return;
+  }
+  bool landed = false;
+  for (size_t x = 0; item_id && (x < overlay->inventory.num_items) && (x < overlay->inventory.items.size()); x++) {
+    const auto& it = overlay->inventory.items[x];
+    if (it.data.id == *item_id) {
+      landed = it.is_equipped();
+    }
+  }
+  bool mag_equipped = false;
+  auto mag = spire_reward_run_mag(overlay->inventory, &mag_equipped);
+  const SpireMagBytes* mag_p = mag ? &*mag : nullptr;
+  auto meets = [&](SpireAtaModel m, const SpireMagBytes* with) {
+    return spire_reward_meets(p.offer.info, p.atp, p.ata, p.mst, with, m) ? "yes" : "no";
+  };
+  c->log.info_f("Spire reward: TAKEN serial {:010} run {:08X} class {} {} line {} W{} {} {} {} (req ATP {} ATA {} MST {}, "
+      "weapon ATA {}); run copy Lv{} ATP {} ATA {} MST {}; mag before {}; mag now {} ({}); rule B need POW {} DEX {} "
+      "MIND {}; equip {} ({}); meets without mag table/screen_weapon/screen_bare {}/{}/{}, with mag {}/{}/{}",
+      serial_number, run_id, p.class_name.empty() ? "?" : p.class_name,
+      spire_reward_kind_name(p.offer.kind), p.offer.line, p.offer.w, spire_reward_tier_name(p.offer.tier),
+      p.offer.item_name, spire_run_mag_bytes_hex(p.offer.item), p.offer.info.atp, p.offer.info.ata, p.offer.info.mst,
+      p.offer.info.weapon_ata, p.level + 1, p.atp, p.ata, p.mst, spire_reward_mag_text(p.mag_before),
+      spire_reward_mag_text(mag), mag_equipped ? "equipped" : "not equipped", p.need.pow, p.need.dex, p.need.mind,
+      !item_id ? "NOT FOUND in the run copy" : landed ? "LANDED" : "NOT LANDED",
+      !item_id ? "no item" : available ? "SpireEquipItem sent" : std::format("r{} = 0, the player's own", SPIRE_EQUIP_REGISTER),
+      meets(SpireAtaModel::TABLE, nullptr), meets(SpireAtaModel::SCREEN_WEAPON, nullptr),
+      meets(SpireAtaModel::SCREEN_BARE, nullptr), meets(SpireAtaModel::TABLE, mag_p),
+      meets(SpireAtaModel::SCREEN_WEAPON, mag_p), meets(SpireAtaModel::SCREEN_BARE, mag_p));
+}
+
+// 'Z' sub 7: the RESULT of a reward pick that answered an item
+static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  bool created = value & 1;
+  auto& offers = spire_reward_offers_for(c, l->lobby_id);
+  if (!offers.pending) {
+    c->log.warning_f("Spire reward: RESULT {} for serial {:010} in q{} without a pick in flight; ignored", created,
+        serial_number, quest_number);
+    return;
+  }
+  auto p = std::move(*offers.pending);
+  offers.pending.reset();
+  if (!created) { // pack full: the offer stays for the next Take
+    c->log.info_f("Spire reward: RESULT 0 (pack full) for serial {:010} in q{} slot {}; the offer stays", serial_number,
+        quest_number, p.offer.slot);
+    return;
+  }
+  offers.by_slot.erase(p.offer.slot);
+  if (!p.server_offer) {
+    c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: the entry's own item {}", serial_number,
+        quest_number, p.offer.slot, spire_run_mag_bytes_hex(p.offer.item));
+    return;
+  }
+  auto* run = spire_game_run_for(l);
+  auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
+  if (led) {
+    led->need = p.need; // rule B: every later mag keeps what this weapon asks
+    if (p.mag_due) {
+      led->boost_due = true;
+    }
+  }
+  c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created{}", serial_number, quest_number,
+      p.offer.slot, p.offer.label, led ? (p.mag_due ? "; rule B mag owed" : "; the mag meets it") : "; no run mag ledger");
+  asio::co_spawn(*c->require_server_state()->io_context,
+      spire_reward_equip(c, l, std::move(p), serial_number, run ? run->run_id : 0), asio::detached);
+}
+
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t sub = (value >> 16) & 0xFF;
@@ -4292,14 +4800,12 @@ static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<cons
     if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {
       server_bosses = rr_it->second.boss_rooms;
     }
-    uint32_t start_bonus = 0;
-    auto sl_it = spire_start_level_run.find(c.get());
-    if ((sl_it != spire_start_level_run.end()) && (sl_it->second.lobby_id == l->lobby_id) &&
-        (sl_it->second.quest_number == quest_number)) {
-      start_bonus = sl_it->second.bonus;
-    }
+    uint32_t start_bonus = spire_start_level_run_bonus(c.get(), l->lobby_id, quest_number).value_or(0);
     auto mags = spire_run_mag_inventory_mags(overlay->inventory);
-    handled = spire_run_mag_handle(*led, table, *line, sub, k, mags, server_bosses, start_bonus, lean_bits);
+    auto character = c->character_file(false, false);
+    std::string archetype = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "HU";
+    handled = spire_run_mag_handle(*led, table, *line, sub, k, mags, server_bosses, start_bonus, lean_bits, archetype,
+        spire_reward_evolve_for(c));
     if (handled.shell_fell_back) {
       c->log.warning_f("Spire run mag: lean Shell for serial {:010} in q{}, but {} has no usable ShellSteps ({}); Steps answer",
           serial_number, quest_number, SPIRE_RUN_MAG_FILE, line->shell_note);
@@ -4458,8 +4964,15 @@ bool spire_bridge_handle_register(
         spire_shop_handle(c, serial_number, quest_number, value);
         return true;
       }
-      if ((value >> 24) == SPIRE_BRIDGE_RUN_MAG) { // route B F6
-        spire_run_mag_handle(c, l, serial_number, quest_number, value);
+      if ((value >> 24) == SPIRE_BRIDGE_RUN_MAG) { // route B F6; fase 1 part A: subs 6 and 7 are the reward pick
+        uint8_t sub = (value >> 16) & 0xFF;
+        if (sub == SPIRE_RUN_MAG_REWARD) {
+          spire_reward_pick(c, l, serial_number, quest_number, value);
+        } else if (sub == SPIRE_RUN_MAG_REWARD_RESULT) {
+          spire_reward_result(c, l, serial_number, quest_number, value);
+        } else {
+          spire_run_mag_handle(c, l, serial_number, quest_number, value);
+        }
         return true;
       }
       if ((value >> 24) == SPIRE_BRIDGE_RUN_AGAIN) { // v49
