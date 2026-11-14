@@ -155,6 +155,18 @@ constexpr uint8_t SPIRE_BRIDGE_MSG_DOWN = 'U';
 constexpr uint8_t SPIRE_BRIDGE_MSG_HINT = 'H';
 constexpr uint8_t SPIRE_BRIDGE_MSG_APPROACH = 'A';
 constexpr uint8_t SPIRE_BRIDGE_MSG_PROMPT = 'C';
+// Marck's run 2026-11-14 ("Nyra has no debuff"): the quest's set_slot_jellen (R13 Jellen Mark, each client on its
+// own slot) stays on the caster's client: the game sends a 6x0C for negative states only, never for 09-0C, so the
+// partner never saw that player's Jellen. After each own cast the quest writes 'C' 18 (rewards.py), and newserv sends
+// the writer's Jellen as a 6x0C to every other client in the game, which the game applies for a remote player as
+// set_slot_jellen does locally (type 0x0B, amount 20.0f, Lv21; its receiver drops a 6x0C for its own player).
+constexpr uint8_t SPIRE_PROMPT_JELLEN = 18;
+constexpr uint32_t SPIRE_JELLEN_EFFECT_TYPE = 0x0B;
+constexpr float SPIRE_JELLEN_EFFECT_AMOUNT = 20.0f;
+// True for the quest's 'C' 18 ('C', 0, point 18, low byte 0).
+bool spire_jellen_prompt_is(uint32_t value);
+// The 6x0C newserv sends to the other clients for the Jellen of client_id.
+G_AddStatusEffect_6x0C spire_jellen_status_effect(uint16_t client_id);
 // v18: records per character, kept by the server (system/spire-bridge/<serial>.<character>.records.json) instead of
 // quest counters 12-14 on the card. Codes in register 248, from each client for its own character:
 //   'B' run started (runs + 1) · 'K' final score (low 24 bits; held until 'F') · 'F' run finished (bit 23 won, low 16
@@ -1498,6 +1510,17 @@ using SpireWaveCheck = void (*)(std::shared_ptr<Client>, std::shared_ptr<Lobby>,
     uint16_t wave_number, bool was_defeat);
 void spire_bridge_watch_unhit_wave(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor, uint16_t room,
     uint16_t wave_number, SpireWaveCheck recheck);
+// Marck's run 2026-11-14 ("the pc still had Rappies"): each client gives the quest's enemies the HP of its own class, and a
+// Rappy reports itself defeated (6x76, set_flags 8) from paths that are no death, so a wave can finish while its copy
+// on another client still lives (E-059: flag 19:53:16, room clear 19:55:02, killed on the Dolphin 19:55:52). True for
+// an enemy of a finished wave that is defeated (8) but not dead (game_flags 0x800), not a child and no boss (bosses
+// need their own state commands, as newserv's fast kill says).
+bool spire_wave_end_needs_kill(uint16_t child_index, uint32_t set_flags, uint32_t game_flags, bool is_boss);
+// Called by the 6x76 wave check when a wave of a Spire quest game newly finishes: every enemy of that wave that
+// spire_wave_end_needs_kill names gets 0x800 in newserv's copy and a 6x0A to every client, the way newserv's fast kill
+// sends it. Returns how many enemies it ended. Never throws.
+size_t spire_bridge_kill_wave_leftovers(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor,
+    uint16_t room, uint16_t wave_number);
 
 // v35: the lobby return after 'X' (see above). spire_run_over_exit_action is the decision, free of state for the static
 // tests: nothing if the client left the game or was already sent; 6x73 while a quest runs; ExitAnywhere without a

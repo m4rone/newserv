@@ -8447,6 +8447,28 @@ void run_static_tests() {
     // in the may-equip check 0x801B0F4C of its 6x25 sender 0x801BA5AC, also from the Item Pack. SpireEquipItem sends a
     // mag's 6x25 through that sender's own later steps (constructor 0x801C19A8, client id 0x80019628, send 0x801C19CC,
     // the player + 0x324 check 0x800193B4 kept) and never calls the may-equip check; other kinds keep the sender.
+    // Marck's run 2026-11-14, the second client: Jellen on the partner's screen ('C' 18) and a wave's leftovers
+    b9_case("fase 0: 'C' 18 sends the writer's Jellen as a 6x0C; a finished Spire wave ends its defeated-but-alive enemies", [&]() {
+      expect_eq(18, static_cast<int>(SPIRE_PROMPT_JELLEN));
+      expect(spire_jellen_prompt_is(0x43001200)); // ('C' << 24) | (18 << 8), as rewards.py writes it
+      expect(!spire_jellen_prompt_is(0x43001100)); // 'C' 17, the pipe guard
+      expect(!spire_jellen_prompt_is(0x43001201)); // a low byte: not ours
+      expect(!spire_jellen_prompt_is(0x43011200)); // bits 16-23 set
+      expect(!spire_jellen_prompt_is(0x44001200)); // another kind
+      auto fx = spire_jellen_status_effect(1);
+      expect_eq(0x0C, static_cast<int>(fx.header.subcommand));
+      expect_eq(3, static_cast<int>(fx.header.size)); // 12 bytes
+      expect_eq(1, static_cast<int>(fx.header.client_id)); // the caster, for the other clients
+      expect_eq(0x0Bu, fx.effect_type.load()); // Jellen (CommandFormats.hh 6x0C)
+      expect(fx.amount.load() == 20.0f); // set_slot_jellen's Lv21 (0x80478A28 on 3OP0)
+      // the wave end: defeated (8) but not dead (0x800), no child, no boss
+      expect(spire_wave_end_needs_kill(0, 0x00000008, 0x20800600, false)); // E-059 on the Wii: flagged, still alive
+      expect(!spire_wave_end_needs_kill(0, 0x00000008, 0x20900E00, false)); // dead already (0x800)
+      expect(!spire_wave_end_needs_kill(0, 0x00000000, 0x20800600, false)); // not defeated: the wave is not done
+      expect(!spire_wave_end_needs_kill(1, 0x00000008, 0x20800600, false)); // a child goes with its parent
+      expect(!spire_wave_end_needs_kill(0, 0x00000008, 0x20800600, true)); // a boss needs its own state commands
+    });
+
     b9_case("B-REGIE-22-34: SpireEquipItem sends a mag's 6x25 past the game's mag rule, every other kind as before", [&]() {
       ClientFunctionIndex index("system/client-functions", true);
       auto fn = index.get(SPIRE_EQUIP_FUNCTION_NAME, SPIRE_EQUIP_ITEM_SPECIFIC_VERSION);

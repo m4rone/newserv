@@ -3982,6 +3982,82 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
   return true;
 }
 
+bool spire_wave_end_needs_kill(uint16_t child_index, uint32_t set_flags, uint32_t game_flags, bool is_boss) {
+  return !child_index && !is_boss && (set_flags & 8) && !(game_flags & 0x00000800);
+}
+
+size_t spire_bridge_kill_wave_leftovers(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t floor,
+    uint16_t room, uint16_t wave_number) {
+  size_t ended = 0;
+  try {
+    if (!l->is_game() || !l->quest || !l->map_state) {
+      return 0;
+    }
+    uint32_t quest_number = l->quest->meta.quest_number;
+    if (!spire_guard_quest_is_guarded(c, quest_number) && !spire_bridge_quest_is_bridged(c, quest_number)) {
+      return 0;
+    }
+    for (auto ene_st : l->map_state->enemy_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
+      bool is_boss = type_definition_for_enemy(ene_st->super_ene->type).is_boss();
+      if (!spire_wave_end_needs_kill(ene_st->super_ene->child_index, ene_st->set_flags, ene_st->game_flags, is_boss)) {
+        continue;
+      }
+      ene_st->game_flags |= 0x00000800;
+      G_UpdateEnemyState_DC_PC_XB_BB_6x0A cmd;
+      cmd.total_damage = ene_st->total_damage;
+      for (auto lc : l->clients) {
+        if (lc) {
+          cmd.enemy_index = l->map_state->index_for_enemy_state(lc->version(), ene_st);
+          if (cmd.enemy_index != 0xFFFF) {
+            cmd.header.entity_id = 0x1000 | cmd.enemy_index;
+            cmd.game_flags = is_big_endian(lc->version()) ? phosg::bswap32(ene_st->game_flags) : ene_st->game_flags;
+            send_command_t(lc, 0x60, 0x00, cmd);
+          }
+        }
+      }
+      ended++;
+      l->log.info_f("Spire bridge: wave {} of room {} on floor {:02X} finished; E-{:03X} was defeated but alive "
+          "(game_flags {:08X}): ended on every client", wave_number, room, floor, ene_st->e_id, ene_st->game_flags);
+    }
+  } catch (const std::exception& e) {
+    l->log.warning_f("Spire bridge: ending the leftovers of wave {} of room {} failed: {}", wave_number, room, e.what());
+  }
+  return ended;
+}
+
+bool spire_jellen_prompt_is(uint32_t value) {
+  return ((value >> 24) == SPIRE_BRIDGE_MSG_PROMPT) && !((value >> 16) & 0xFF) &&
+      (((value >> 8) & 0xFF) == SPIRE_PROMPT_JELLEN) && !(value & 0xFF);
+}
+
+G_AddStatusEffect_6x0C spire_jellen_status_effect(uint16_t client_id) {
+  G_AddStatusEffect_6x0C cmd;
+  cmd.header = {0x0C, sizeof(G_AddStatusEffect_6x0C) >> 2, client_id};
+  cmd.effect_type = SPIRE_JELLEN_EFFECT_TYPE;
+  cmd.amount = SPIRE_JELLEN_EFFECT_AMOUNT;
+  return cmd;
+}
+
+// 'C' 18 (SpireFlagBridge.hh): the writer's own Jellen, as a 6x0C to every other client in the game. False for every
+// other value.
+static bool spire_jellen_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    uint32_t quest_number, uint32_t value) {
+  if (!spire_jellen_prompt_is(value)) {
+    return false;
+  }
+  auto cmd = spire_jellen_status_effect(c->lobby_client_id);
+  size_t sent = 0;
+  for (const auto& lc : l->clients) {
+    if (lc && (lc != c)) {
+      send_command_t(lc, 0x60, 0x00, cmd);
+      sent++;
+    }
+  }
+  c->log.info_f("Spire Jellen: 'C' {} for serial {:010} in q{}; the Jellen of client {} sent to {} other client(s)",
+      SPIRE_PROMPT_JELLEN, serial_number, quest_number, c->lobby_client_id, sent);
+  return true;
+}
+
 // v48: the return to base ('O'), below with the guard's restore
 static asio::awaitable<void> spire_base_return(
     std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t serial_number, uint32_t quest_number);
@@ -4424,6 +4500,9 @@ bool spire_bridge_handle_register(
       }
       if (spire_equip_prompt_handle(c, l, serial_number, quest_number, value)) {
         return true; // route B bundle 9: 'C' 13 and 'C' 14 have no text of their own
+      }
+      if (spire_jellen_prompt_handle(c, l, serial_number, quest_number, value)) {
+        return true; // Marck's run 2026-11-14: 'C' 18 has no text of its own
       }
       std::optional<SpireDrawTable> text_table;
       SpireBridgeTextContext text_ctx = spire_bridge_text_context_for(c, l, quest_number, value, text_table);

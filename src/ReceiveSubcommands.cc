@@ -3421,6 +3421,10 @@ static void check_wave_defeated(
       wave_newly_finished = true;
     }
   }
+  if (wave_newly_finished) {
+    // Spire (Marck's run 2026-11-14): an enemy defeated but alive on another client goes with its wave
+    spire_bridge_kill_wave_leftovers(c, l, floor, room, wave_number);
+  }
   for (auto ev_st : l->map_state->event_states_for_floor_room_wave(c->version(), floor, room, wave_number)) {
     ev_st->flags = (ev_st->flags | 0x18) & (~4);
     l->log.info_f("Set flags on W-{:03X} to {:04X}", ev_st->w_id, ev_st->flags);
