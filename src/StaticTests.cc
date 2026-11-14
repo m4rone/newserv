@@ -7808,8 +7808,8 @@ void run_static_tests() {
       // keeps r65) is never applied by the quest, so the line names no curse there (ux-pass Q1 observation)
       expect_eq(std::string("Rewards: Saber, Fire Shield, Lavis Cannon (rare). Walk to choose."),
           spire_draw_overview_line(named, 0, drawn_of(0, 1, 2, 3, 0, 2)));
-      // cursed wins over rare
-      expect_eq(std::string("Rewards: Lavis Cannon (cursed), Saber, Fire Shield. Walk to choose."),
+      // a cursed rare names its curse (Marck's run 2026-11-14: the reward line names its curse)
+      expect_eq(std::string("Rewards: Lavis Cannon (rare, cursed: Glass), Saber, Fire Shield. Walk to choose."),
           spire_draw_overview_line(named, 0, drawn_of(0, 3, 1, 2, 3, 0)));
       // the archetype's own names; R14's slot 2 is the fourth page
       expect_eq(std::string("Rewards: Handgun, Ranger Wall, Spread Needle (rare), Dimate x2. Walk to choose."),
@@ -7841,6 +7841,48 @@ void run_static_tests() {
           }
         }
       }
+    });
+
+    b8_case("fase 0: the overview line names the curse of a reward, drawn or the entry's own", [&]() {
+      // every curse code by its short name; the code of a plain entry stays unnamed (the quest never applies it)
+      expect_eq(std::string("Rewards: Lavis Cannon (rare, cursed: -1 life), Saber. Walk to choose."),
+          spire_draw_overview_line(named, 0, drawn_of(0, 3, 1, 0, 1, 2)));
+      expect_eq(std::string("Rewards: Lavis Cannon (rare, cursed: Jellen), Saber. Walk to choose."),
+          spire_draw_overview_line(named, 0, drawn_of(0, 3, 1, 0, 2, 0)));
+      expect_eq(std::string("-1 life"), std::string(spire_draw_curse_name(1)));
+      expect_eq(std::string("Jellen"), std::string(spire_draw_curse_name(2)));
+      expect_eq(std::string("Glass"), std::string(spire_draw_curse_name(3)));
+      expect(std::string(spire_draw_curse_name(0)).empty() && std::string(spire_draw_curse_name(4)).empty());
+      // an entry with its own vloek (rewards.json "vloek": "R13", Fire Saber +20): named from own_curse_code, also on
+      // a plain entry; a drawn code on top is never read; an older draw.json without the code says only "cursed"
+      auto own = [&](const std::string& extra, bool rare) {
+        std::string json = b8_table_json({hu, ra, fo}, "");
+        std::string from = std::format("\"rare\":{},\"own_curse\":false,\"glass_ok\":false,\"name\":\"Saber\"",
+            "false");
+        std::string to = std::format("\"rare\":{},\"own_curse\":true{},\"glass_ok\":false,\"name\":\"Fire Saber +20\"",
+            rare ? "true" : "false", extra);
+        size_t at = json.find(from);
+        expect(at != std::string::npos);
+        json.replace(at, from.size(), to);
+        return b8_load(json);
+      };
+      auto own_r13 = own(",\"own_curse_code\":2", true);
+      expect(own_r13.archetypes.at(0).entries.at(0).own_curse);
+      expect_eq(2u, static_cast<uint32_t>(own_r13.archetypes.at(0).entries.at(0).own_curse_code));
+      expect_eq(std::string("Rewards: Fire Saber +20 (rare, cursed: Jellen), Fire Shield. Walk to choose."),
+          spire_draw_overview_line(own_r13, 0, drawn_of(0, 1, 2, 0, 3, 0)));
+      expect_eq(std::string("Rewards: Fire Saber +20 (cursed: Jellen), Fire Shield. Walk to choose."),
+          spire_draw_overview_line(own(",\"own_curse_code\":2", false), 0, drawn_of(0, 1, 2, 0, 0, 0)));
+      expect_eq(std::string("Rewards: Fire Saber +20 (rare, cursed), Fire Shield. Walk to choose."),
+          spire_draw_overview_line(own("", true), 0, drawn_of(0, 1, 2, 0, 0, 0)));
+      // over 90: the rare tags go before the curse tags, the tail before the curse tags
+      const B8Entries rares = {{"\"Eighteen chars abc\"", true}, {"\"Eighteen chars def\"", true},
+          {"\"Eighteen chars ghi\"", true}, {"\"Monomate x3\"", false}};
+      auto t = b8_load(b8_table_json({rares, rares, rares}, ""));
+      std::string kept_curse = spire_draw_overview_line(t, 0, drawn_of(0, 1, 2, 3, 2, 0));
+      expect_eq(std::string("Rewards: Eighteen chars abc (cursed: Jellen), Eighteen chars def, Eighteen chars ghi."), kept_curse);
+      expect(kept_curse.size() <= SPIRE_DRAW_OVERVIEW_MAX);
+      expect_eq(kept_curse, spire_ticker_line(kept_curse));
     });
 
     b8_case("'C' 2 shows the kept overview line until the next 'Q' or a floor change", [&]() {

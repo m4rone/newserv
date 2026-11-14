@@ -21,6 +21,7 @@ struct SpireDrawEntry {
   bool android_ok = true;
   bool rare = false; // z == 'R'
   bool own_curse = false; // vloek: never a drawn curse on top
+  uint8_t own_curse_code = 0; // the curse code of that vloek (1 R12, 2 R13, 3 Glass); 0 = not in the draw.json
   bool glass_ok = false; // weapon or tech disk: the only entries a Glass curse may ride on
   // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 1): the display name, the first line of its reward page without tags;
   // "" = no name known (an older draw.json, or a value that is no plain ASCII string of at most 22 characters)
@@ -91,8 +92,13 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
 
 // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 2): the one-line overview of a draw (r181 as spire_draw returns it) for
 // archetype: "Rewards: <n1>, <n2>, <n3>. Walk to choose." in the order of the reward pages (board slot 3, 4, 5, then
-// slot 2 of R14), each name followed by " (cursed)" for a cursed draw or else " (rare)" for a rare entry. Over
-// SPIRE_DRAW_OVERVIEW_MAX characters the suffixes go; still over, "Rewards: <count> ready. Walk to choose.". Empty if
+// slot 2 of R14), each name followed by " (rare)" for a rare entry and, with a curse (drawn, or the entry's own
+// vloek), " (rare, cursed: <curse>)" or " (cursed: <curse>)", <curse> being spire_draw_curse_name (Marck's run
+// 2026-11-14: the reward line names its curse). Over SPIRE_DRAW_OVERVIEW_MAX characters first the rare tags go, then
+// the tail "Walk to choose.", then the curse tags; still over, "Rewards: <count> ready. Walk to choose.". Empty if
 // nothing was drawn, the archetype is out of range, or a drawn entry has no name.
 constexpr size_t SPIRE_DRAW_OVERVIEW_MAX = 90;
 std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn);
+// The short name of a curse code in the overview line: 1 (R12 Cursed Chest) "-1 life", 2 (R13 Jellen Mark) "Jellen",
+// 3 "Glass"; any other code "" (the line then says only "cursed").
+const char* spire_draw_curse_name(uint32_t curse);

@@ -72,6 +72,7 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
       e.android_ok = e_json->get_bool("android_ok");
       e.rare = e_json->get_bool("rare");
       e.own_curse = e_json->get_bool("own_curse");
+      e.own_curse_code = e.own_curse ? e_json->get_int("own_curse_code", 0) : 0;
       e.glass_ok = e_json->get_bool("glass_ok");
       e.name = spire_draw_optional_name(spire_draw_optional_key(*e_json, "name"), ENTRY_NAME_MAX); // v62
       a.entries.emplace_back(e);
@@ -396,6 +397,19 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
   return d.drawn;
 }
 
+const char* spire_draw_curse_name(uint32_t curse) {
+  switch (curse) {
+    case CURSE_R12:
+      return "-1 life";
+    case CURSE_R13:
+      return "Jellen";
+    case CURSE_GLASS:
+      return "Glass";
+    default:
+      return "";
+  }
+}
+
 std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn) {
   if (archetype >= table.archetypes.size()) {
     return "";
@@ -403,7 +417,8 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
   const auto& entries = table.archetypes[archetype].entries;
   struct Drawn {
     const std::string* name;
-    const char* suffix;
+    std::string full; // " (rare)", " (rare, cursed: Jellen)", " (cursed: Jellen)" or ""
+    std::string curse_only; // " (cursed: Jellen)" for a cursed entry, else ""
   };
   std::vector<Drawn> list;
   for (uint32_t slot : {3, 4, 5, 2}) { // the order of the reward pages: "Reward n of N" is slot 3, 4, 5, then 2 (R14)
@@ -416,25 +431,41 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
     }
     // a curse rides only on a rare (rewards.json vloek.pct_van_zeldzaam); the sequential fallback past a rare row keeps
     // r65 on a plain entry, where the quest never applies it, so the line names no curse there (ux-pass Q1 observation)
-    bool rare = entries[id - 1].rare;
-    uint32_t curse = rare ? ((drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3) : 0;
-    list.emplace_back(Drawn{&entries[id - 1].name, curse ? " (cursed)" : rare ? " (rare)" : ""});
+    // an entry with its own vloek never carries a drawn curse (spire_draw); its own one is named from the draw.json
+    const auto& e = entries[id - 1];
+    bool rare = e.rare;
+    bool cursed = e.own_curse;
+    uint32_t curse = e.own_curse_code;
+    if (!cursed && rare) {
+      curse = (drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3;
+      cursed = (curse != 0);
+    }
+    std::string curse_tag;
+    if (cursed) {
+      const char* curse_name = spire_draw_curse_name(curse);
+      curse_tag = *curse_name ? std::format("cursed: {}", curse_name) : "cursed";
+    }
+    std::string full = rare ? (cursed ? " (rare, " + curse_tag + ")" : " (rare)") : (cursed ? " (" + curse_tag + ")" : "");
+    list.emplace_back(Drawn{&e.name, std::move(full), cursed ? " (" + curse_tag + ")" : ""});
   }
   if (list.empty()) {
     return "";
   }
-  // over the limit: first the suffixes go, then the tail "Walk to choose." (critic route-b-8 C4: three names of 22
-  // characters fit that way), and only then the names
-  for (const char* tail : {". Walk to choose.", "."}) {
-    for (bool suffixes : {true, false}) {
-      std::string line = "Rewards: ";
-      for (size_t z = 0; z < list.size(); z++) {
-        line += (z ? ", " : "") + *list[z].name + (suffixes ? list[z].suffix : "");
-      }
-      line += tail;
-      if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
-        return line;
-      }
+  // over the limit: first the rare tags go, then the tail "Walk to choose." (critic route-b-8 C4: three names of 22
+  // characters fit that way), then the curse tags, and only then the names
+  enum class Suffix { FULL, CURSE_ONLY, NONE };
+  static constexpr std::pair<Suffix, const char*> LEVELS[] = {{Suffix::FULL, ". Walk to choose."},
+      {Suffix::CURSE_ONLY, ". Walk to choose."}, {Suffix::FULL, "."}, {Suffix::CURSE_ONLY, "."},
+      {Suffix::NONE, ". Walk to choose."}, {Suffix::NONE, "."}};
+  for (const auto& [suffix, tail] : LEVELS) {
+    std::string line = "Rewards: ";
+    for (size_t z = 0; z < list.size(); z++) {
+      line += (z ? ", " : "") + *list[z].name +
+          ((suffix == Suffix::FULL) ? list[z].full : (suffix == Suffix::CURSE_ONLY) ? list[z].curse_only : "");
+    }
+    line += tail;
+    if (line.size() <= SPIRE_DRAW_OVERVIEW_MAX) {
+      return line;
     }
   }
   return std::format("Rewards: {} ready. Walk to choose.", list.size());
