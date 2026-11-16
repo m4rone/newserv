@@ -160,6 +160,18 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
   for (const auto& [k, w] : json.get_dict("RoomW")) {
     ret.room_w.emplace(std::stoul(k), spire_get_u(json.at("RoomW"), k, 6));
   }
+  const auto& rung_steps = json.get_list("RungWeaponSteps");
+  if (rung_steps.size() != ret.rung_weapon_steps.size()) {
+    throw std::runtime_error(std::format("RungWeaponSteps has {} rungs, not {}", rung_steps.size(),
+        ret.rung_weapon_steps.size()));
+  }
+  for (size_t r = 0; r < ret.rung_weapon_steps.size(); r++) {
+    int64_t v = rung_steps[r]->as_int();
+    if ((v < 0) || (v > 4)) {
+      throw std::runtime_error(std::format("RungWeaponSteps {}: {} outside 0-4", r, v));
+    }
+    ret.rung_weapon_steps[r] = v;
+  }
   for (const auto& [g, line] : json.get_dict("LineGroups")) {
     ret.line_groups.emplace(std::stoul(g, nullptr, 16), line->as_string());
   }
@@ -354,18 +366,19 @@ uint32_t spire_reward_room_index(uint32_t k) {
   return (k > 15) ? (k - 15) : std::max<uint32_t>(k, 1);
 }
 
-uint8_t spire_reward_w(const SpireRewardTable& table, uint32_t room_index) {
+uint8_t spire_reward_w(const SpireRewardTable& table, uint32_t room_index, uint8_t rung) {
+  uint8_t ret = 2;
   auto it = table.room_w.find(room_index);
   if (it != table.room_w.end()) {
-    return it->second;
-  }
-  uint8_t ret = 2;
-  for (const auto& [k, w] : table.room_w) {
-    if (k <= room_index) {
-      ret = std::max(ret, w);
+    ret = it->second;
+  } else {
+    for (const auto& [k, w] : table.room_w) {
+      if (k <= room_index) {
+        ret = std::max(ret, w);
+      }
     }
   }
-  return ret;
+  return std::min<uint32_t>(ret + table.rung_weapon_steps[rung & 3], 6);
 }
 
 std::string spire_reward_line_of(const SpireRewardTable& table, const SpireRewardClass& cls, const uint8_t* data1) {
@@ -437,12 +450,12 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level,
 
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
     const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
-    const SpireRewardDiskState* disk) {
+    const SpireRewardDiskState* disk, uint8_t rung) {
   SpireRewardOffer ret;
   ret.kind = kind;
   ret.tier = tier;
   ret.room_index = room_index;
-  ret.w = spire_reward_w(table, room_index);
+  ret.w = spire_reward_w(table, room_index, rung);
   auto cls_it = table.classes.find(char_class);
   if (cls_it == table.classes.end()) {
     throw std::runtime_error(std::format("class {} is not in the reward grid", char_class));

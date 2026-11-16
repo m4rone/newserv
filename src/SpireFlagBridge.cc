@@ -4446,6 +4446,7 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
   }
   uint32_t trede = spire_reward_trede_for(c, l, serial_number, table);
   uint32_t room_index = spire_reward_room_index(k);
+  uint8_t rung = l->quest ? spire_meta_ladder_quest_rung(l->quest->meta.quest_number) : 0; // the quest's difficulty
   auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
   if (entry.rare && (tier < SpireRewardTier::RARE)) {
@@ -4476,10 +4477,11 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
       disk->extra_levels = entry.rare ? spire_reward_curse_disk_levels(curse) : 0;
     }
     auto offer = spire_reward_offer(table, kind, character->disp.visual.sh.char_class,
-        spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd, disk ? &*disk : nullptr);
-    c->log.info_f("Spire reward: offer {} {} for room {} (index {}, W{}, trede {}, odds L<{} E<{} R<{}{}{}): {}{}",
-        spire_reward_kind_name(kind), spire_reward_tier_name(tier), k, room_index, offer.w, trede, odds.legendary,
-        odds.epic, odds.rare, elite ? ", elite" : "", entry.rare ? ", a rare line" : "", offer.label,
+        spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd, disk ? &*disk : nullptr, rung);
+    c->log.info_f("Spire reward: offer {} {} for room {} (index {}, {}, W{}, trede {}, odds L<{} E<{} R<{}{}{}): {}{}",
+        spire_reward_kind_name(kind), spire_reward_tier_name(tier), k, room_index, spire_meta_difficulty_name(rung),
+        offer.w, trede, odds.legendary, odds.epic, odds.rare, elite ? ", elite" : "", entry.rare ? ", a rare line" : "",
+        offer.label,
         !disk ? std::string()
         : std::format(" (the line's own disk: {}; a curse adds {} level(s))",
               (disk->line_tech < SPIRE_TECH_COUNT) ? std::format("{} Lv{}", table.techs[disk->line_tech].name, disk->line_level)

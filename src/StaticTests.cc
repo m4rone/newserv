@@ -7798,6 +7798,38 @@ void run_static_tests() {
     expect_eq(1u, spire_reward_room_index(16));
     expect_eq(spire_reward_w(rewards, 5), spire_reward_w(rewards, spire_reward_room_index(20)));
     expect_eq(6, spire_reward_w(rewards, 40));
+    // A difficulty rung lifts a room's W by its weapon steps (pso-roguelike sim/ladder.json: Hard 1, Very Hard 2,
+    // Ultimate 3), at most W6; Normal stays as it was
+    expect_eq(0, rewards.rung_weapon_steps[0]);
+    for (uint8_t rung = 1; rung <= 3; rung++) {
+      expect_eq(rung, rewards.rung_weapon_steps[rung]);
+      for (uint32_t room = 1; room <= 15; room++) {
+        expect_eq(std::min<uint32_t>(spire_reward_w(rewards, room) + rung, 6), spire_reward_w(rewards, room, rung));
+      }
+    }
+    expect_eq(3, spire_reward_w(rewards, 1, 1));
+    expect_eq(6, spire_reward_w(rewards, 3, 3));
+    {
+      // the weapon a rung offers is the grid's cell of that higher W: Ultimate's first room gives a HUmar the W5 saber
+      auto first = [](uint32_t) -> uint32_t { return 0; };
+      auto on_normal = spire_reward_offer(rewards, SpireRewardKind::WEAPON, 0, nullptr, 1, SpireRewardTier::NORMAL, first);
+      auto on_ultimate = spire_reward_offer(rewards, SpireRewardKind::WEAPON, 0, nullptr, 1, SpireRewardTier::NORMAL, first,
+          nullptr, 3);
+      expect_eq(2, on_normal.w);
+      expect_eq(5, on_ultimate.w);
+      const auto& saber = rewards.classes.at(0).lines.at("Saber").w;
+      expect_eq(saber.at(2).tiers[0].code, (on_normal.item[0] << 16) | (on_normal.item[1] << 8) | on_normal.item[2]);
+      expect_eq(saber.at(5).tiers[0].code, (on_ultimate.item[0] << 16) | (on_ultimate.item[1] << 8) | on_ultimate.item[2]);
+      expect(saber.at(5).tiers[0].code != saber.at(2).tiers[0].code);
+      // a grid file without the rungs' steps, or with a rung missing, is refused at load
+      const std::string grid_text = phosg::load_file(SPIRE_REWARDS_FILE);
+      const std::string steps_key = "\"RungWeaponSteps\":[0,1,2,3]";
+      size_t steps_at = grid_text.find(steps_key);
+      expect(steps_at != std::string::npos);
+      std::string three_rungs = grid_text;
+      three_rungs.replace(steps_at, steps_key.size(), "\"RungWeaponSteps\":[0,1,2]");
+      expect_raises(std::runtime_error, [&]() { spire_rewards_parse(three_rungs); });
+    }
 
     // Every cell: the item the server answers is the grid's (code, grind at most MaxGrind, a special of the cell's
     // list, Hit), for the line the player holds, at the W of the room, in the tier rolled; its rule B need at the grid's

@@ -138,6 +138,10 @@ struct SpireRewardTable {
   uint8_t trede1_room = 4, trede2_room = 8;
   std::array<uint16_t, 4> mag_food{};
   std::map<uint32_t, uint8_t> room_w; // room index -> W
+  // The weapon levels a difficulty rung's rooms sit above Normal's, by rung (0 Normal, 1 Hard, 2 Very Hard, 3 Ultimate;
+  // SpireMeta spire_meta_ladder_quest_rung): the places up Sega's series a rung's rooms are solved with (pso-roguelike
+  // sim/ladder.json weapon_steps), so a rung never offers a weapon below its own kit
+  std::array<uint8_t, 4> rung_weapon_steps{};
   std::map<uint8_t, std::string> line_groups; // data1[1] of a plain weapon -> line
   std::map<uint32_t, std::string> line_of; // a weapon code -> line
   std::map<uint32_t, SpireRewardItemInfo> items;
@@ -170,8 +174,9 @@ SpireRewardOdds spire_reward_odds(const SpireRewardTable& table, uint32_t k, uin
 SpireRewardTier spire_reward_tier_for_roll(const SpireRewardOdds& odds, uint32_t roll); // roll 0-99
 // The room index of the grid for a quest's room k: Episode 2 rooms (k16-k30) map to 1-15 (by index, as Episode 1)
 uint32_t spire_reward_room_index(uint32_t k);
-// W of a room index (RoomW; past the last room the highest W)
-uint8_t spire_reward_w(const SpireRewardTable& table, uint32_t room_index);
+// W of a room index (RoomW; past the last room the highest W) on a difficulty rung (0-3): the rung's weapon steps
+// higher, at most W6 (the grid's last)
+uint8_t spire_reward_w(const SpireRewardTable& table, uint32_t room_index, uint8_t rung = 0);
 // The line of a weapon (data1): the grid's code, else its group (data1[1]); "" for none or a line the class has not
 std::string spire_reward_line_of(const SpireRewardTable& table, const SpireRewardClass& cls, const uint8_t* data1);
 
@@ -238,10 +243,11 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level,
     const SpireRewardDiskState& state);
 // rnd(n): uniform 0..n-1. held: data1 of the weapon the player holds (nullptr: none, the class's first line). The tier is
 // given (spire_reward_tier_for_roll). Throws when the class has no line for it (not in the grid). disk: the run copy
-// for a DISK offer (required for that kind; it throws without, and when no technique has a level to give).
+// for a DISK offer (required for that kind; it throws without, and when no technique has a level to give). rung: the
+// difficulty rung of the run's quest (0 Normal - 3 Ultimate), which lifts a weapon's W (spire_reward_w).
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
     const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
-    const SpireRewardDiskState* disk = nullptr);
+    const SpireRewardDiskState* disk = nullptr, uint8_t rung = 0);
 // The weapon of a cell as data1: code, grind (at most the weapon's MaxGrind), the special, Hit
 SpireMagBytes spire_reward_weapon_bytes(const SpireRewardTable& table, const SpireRewardCell& cell, uint8_t special);
 
