@@ -4802,42 +4802,6 @@ static uint16_t spire_reward_mind_plan(std::shared_ptr<Client> c, std::shared_pt
   }
 }
 
-void spire_reward_mag_food_parse(const phosg::JSON& json, SpireRewardTable& ret);
-std::optional<SpireRewardOffer> spire_reward_mag_food_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret);
-
-// 'Z' sub 6 of kind 3: the ledger owes the food; no item, the run mag follows (rule B). No RESULT follows.
-void spire_reward_mag_food_pick(SpireRewardPick& pk) {
-  auto& c = pk.c;
-  auto& serial_number = pk.serial_number;
-  auto& quest_number = pk.quest_number;
-  auto& slot = pk.slot;
-  auto& offer = pk.offer;
-  auto& offers = pk.offers;
-  auto& p = pk.p;
-  auto& led = pk.led;
-  auto& refusal = pk.refusal;
-  auto& main_stat = pk.main_stat;
-  auto& own_item = pk.own_item;
-  using R = SpireRunMagRefusal;
-  if (!led) {
-    own_item(std::format("mag food without a run mag ({})", (refusal == R::NONE) ? "no ledger" : spire_run_mag_refusal_name(refusal)));
-    return;
-  }
-  led->feed_levels = std::min<uint32_t>(led->feed_levels + offer->food_levels, 200);
-  led->boost_due = true;
-  offers.by_slot.erase(slot);
-  spire_reward_answer(c, nullptr, true);
-  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} on {}; run copy Lv{} ATP {} ATA {} MST {}; "
-      "mag now {}; owed food {} levels; the run mag follows in this room's pause B (rule B)",
-      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
-      offer->label, (main_stat == 0) ? "DEF" : (main_stat == 3) ? "MIND" : "POW", p.level + 1, p.atp, p.ata, p.mst,
-      spire_reward_mag_text(p.mag_before), led->feed_levels);
-  return;
-}
-
-[[maybe_unused]] const bool spire_reward_mag_food_registered = spire_mech_register_kind({SpireRewardKind::MAG_FOOD, "mags",
-    false, spire_reward_mag_food_parse, spire_reward_mag_food_offer, spire_reward_mag_food_pick, nullptr});
-
 void spire_reward_disk_parse(const phosg::JSON& json, SpireRewardTable& ret);
 
 // What a DISK offer needs to know of the run copy (SpireRewardDiskState), read from the client at the bridge

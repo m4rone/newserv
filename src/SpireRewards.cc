@@ -371,24 +371,6 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, ui
 // ---- The seam, step a: the kinds' own halves of the grid and the offer, still in this file. Each moves to its own
 // file (src/SpireReward*.cc) and registers there; the registration is in SpireFlagBridge.cc until then.
 
-// The section of kind 3: MagFood, the levels per tier
-void spire_reward_mag_food_parse(const phosg::JSON& json, SpireRewardTable& ret) {
-  for (size_t z = 0; z < 4; z++) {
-    ret.mag_food[z] = spire_get_u(json.at("MagFood"), TIER_NAMES[z], 200);
-  }
-}
-
-// The offer of kind 3: the tier's levels of mag food
-std::optional<SpireRewardOffer> spire_reward_mag_food_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
-  const auto& table = in.table;
-  const auto& tier = in.tier;
-  const auto& tier_label = in.tier_label;
-  ret.food_levels = table.mag_food[static_cast<size_t>(tier)];
-  ret.item_name = std::format("Mag food +{}", ret.food_levels);
-  ret.label = tier_label + " " + ret.item_name;
-  return ret;
-}
-
 // The section of kind 4: Disks, the techniques with the MST each level asks and Sega's disks per room and tier
 void spire_reward_disk_parse(const phosg::JSON& json, SpireRewardTable& ret) {
   if (json.contains("Disks")) { // part B, the disk; a file without it gives a DISK entry its own item
