@@ -91,6 +91,9 @@ struct SpireMetaFile {
   // difficulty, in the file as "BossesBeaten": [11, 15, ...]. A shop level with a Boss entry is sold only once its boss
   // is in here (SpireShopItem::boss). Written only if there is one, kept through every flag write like Upgrades.
   std::set<uint8_t> bosses_beaten;
+  // The seam (SpireMechanics.hh H11 char_meta): what a registrant of the hook read of its own key, under that key, so
+  // every write of the file carries it; only the registrant's own file casts it back. Empty without such a registrant.
+  std::map<std::string, std::shared_ptr<const void>> sections = {};
 };
 SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
 SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags

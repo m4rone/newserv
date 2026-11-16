@@ -405,6 +405,9 @@ struct SpireSavestate {
   // kwaliteit-3 3: the quest's rest bits at the 'V' (r131 bits 2-5 shifted down, 0-15), "RestRooms"; written only when
   // not 0, and 0 for a file without it, so a savestate from before loads as it did and means "no rest room taken"
   uint8_t rest_rooms = 0;
+  // The seam (SpireMechanics.hh H10 run_state): what a registrant of the hook carries of its own key between the hook's
+  // moments, under that key; only the registrant's own file casts it back. Empty without such a registrant.
+  std::map<std::string, std::shared_ptr<const void>> sections = {};
 };
 // The pure parts, for the static tests:
 // kwaliteit-3 3: takes the rest bits out of a 'V''s values (SPIRE_SS_VARIANT keeps bits 0-1) and returns them

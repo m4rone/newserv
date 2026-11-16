@@ -15,11 +15,15 @@
 #include <string>
 #include <vector>
 
+#include "ReceiveSubcommands.hh"
+#include "SpireDraw.hh"
+#include "SpireFlagBridge.hh"
 #include "SpireMechanics.hh"
+#include "SpireMeta.hh"
 #include "SpireRewards.hh"
 
 // The tests of the seam's own rules (SpireMechanics.hh; docs/review-loop/goals/naad.md point 2): the table of reward
-// kinds and the switches. What a kind gives is tested in its owner's file (SpireTestsAttack.cc and the others) and
+// kinds, the switches and the hooks H1-H11. What a kind gives is tested in its owner's file (SpireTestsAttack.cc and the others) and
 // pinned by the seam's fingerprint (SpireTestsSeam.cc).
 //
 // "No offer" is a throw of spire_reward_offer here. At the bridge every throw of an offer ends in the entry's own item
@@ -73,6 +77,411 @@ std::string no_offer(FnT&& fn) {
     return e.what();
   }
   return "";
+}
+
+// --- The hooks H1-H11 ---
+//
+// Per hook three registrants of this file: 'L' ("aa", number 20, switch test.haak.aan) is registered first, then 'E'
+// ("zz", number 10, no switch), then 'O' ("mm", number 15, switch test.haak.uit). The order of the calls is E, O, L:
+// by number, not by name (aa, mm, zz) and not by registration (L, E, O). A hook is called with no client and no game:
+// a registrant of this file reads neither.
+
+std::string hook_calls; // one letter per call, in the order of the calls
+
+// A registration of a test goes when the test leaves it, also on a failed expectation
+struct HookGuard {
+  SpireMechHookId hook;
+  const char* name;
+  ~HookGuard() {
+    spire_mech_forget_hook(hook, name);
+  }
+};
+
+template <char TAG>
+std::shared_ptr<const std::string> t_quest_bin(std::shared_ptr<Client>, std::shared_ptr<const Lobby>,
+    std::shared_ptr<const std::string> bin) {
+  hook_calls += TAG;
+  return std::make_shared<const std::string>(*bin + TAG);
+}
+std::shared_ptr<const std::string> t_quest_bin_null(std::shared_ptr<Client>, std::shared_ptr<const Lobby>,
+    std::shared_ptr<const std::string>) {
+  hook_calls += 'n';
+  return nullptr;
+}
+template <char TAG>
+void t_reward_room(const SpireMechRewardRoom& at, uint32_t& room_index, uint32_t& trede) {
+  hook_calls += TAG;
+  room_index = (room_index * 100) + TAG;
+  trede += at.k;
+}
+void t_reward_room_throws(const SpireMechRewardRoom&, uint32_t& room_index, uint32_t& trede) {
+  hook_calls += 't';
+  room_index = 999;
+  trede = 999;
+  throw std::runtime_error("a registrant of the test that fails");
+}
+uint32_t type_weight_target = 0; // t_type_weight<'E'>: the one candidate value that keeps its weight (0: all do)
+std::vector<uint32_t> type_weight_seen; // every candidate value t_type_weight<'E'> was asked about
+template <char TAG>
+uint32_t t_type_weight(const SpireMechTypeWeight& tw) {
+  hook_calls += TAG;
+  if (TAG != 'E') {
+    return 1;
+  }
+  type_weight_seen.emplace_back(tw.value);
+  return (!type_weight_target || (tw.value == type_weight_target)) ? 1 : 0;
+}
+uint32_t t_type_weight_three(const SpireMechTypeWeight& tw) {
+  return (tw.value == 2) ? 3 : 1;
+}
+template <char TAG>
+void t_player_hp(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t subcommand) {
+  hook_calls += TAG;
+  hook_calls += std::format("{:02X}", subcommand);
+}
+template <char TAG>
+void t_player_died(std::shared_ptr<Client>, std::shared_ptr<Lobby>) {
+  hook_calls += TAG;
+}
+void t_player_died_throws(std::shared_ptr<Client>, std::shared_ptr<Lobby>) {
+  hook_calls += 't';
+  throw std::runtime_error("a registrant of the test that fails");
+}
+template <char TAG>
+void t_tech_done(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint32_t technique, uint32_t level) {
+  hook_calls += TAG;
+  hook_calls += std::format("{}.{}", technique, level);
+}
+template <char TAG>
+void t_enemy_killed(std::shared_ptr<Client>, std::shared_ptr<Lobby>, const DropReconcileResult& rec, uint8_t floor) {
+  hook_calls += TAG;
+  hook_calls += std::format("{}.{}", floor, rec.should_drop ? 1 : 0);
+}
+template <char TAG>
+void t_wave_start(std::shared_ptr<Client>, std::shared_ptr<const Lobby>, uint32_t serial_number, uint32_t quest_number,
+    uint32_t a, uint32_t b) {
+  hook_calls += TAG;
+  hook_calls += std::format("{}.{}.{}.{}", serial_number, quest_number, a, b);
+}
+template <char TAG>
+void t_run_end(std::shared_ptr<Client>, std::shared_ptr<const Lobby>, SpireMechRunEnd why) {
+  hook_calls += TAG;
+  hook_calls += std::format("{}", static_cast<uint32_t>(why));
+}
+// H10 and H11: a registrant carries its own key, from the text into the struct's sections and back
+template <char TAG>
+void t_run_state_capture(std::shared_ptr<Client>, std::shared_ptr<const Lobby>, SpireSavestate& ss) {
+  hook_calls += TAG;
+  hook_calls += 'c';
+  ss.sections[std::string("Test") + TAG] = std::make_shared<const int64_t>(ss.run_id + TAG);
+}
+template <char TAG>
+void t_run_state_write(const SpireSavestate& ss, phosg::JSON& json) {
+  hook_calls += TAG;
+  hook_calls += 'w';
+  auto it = ss.sections.find(std::string("Test") + TAG);
+  if (it != ss.sections.end()) {
+    json.emplace(std::string("Test") + TAG, *std::static_pointer_cast<const int64_t>(it->second));
+  }
+}
+template <char TAG>
+void t_run_state_read(const phosg::JSON& json, SpireSavestate& ret) {
+  hook_calls += TAG;
+  hook_calls += 'r';
+  if (json.contains(std::string("Test") + TAG)) {
+    ret.sections[std::string("Test") + TAG] = std::make_shared<const int64_t>(json.get_int(std::string("Test") + TAG));
+  }
+}
+template <char TAG>
+void t_run_state_resume(std::shared_ptr<Client>, std::shared_ptr<const Lobby>, const SpireSavestate& ss) {
+  hook_calls += TAG;
+  hook_calls += 's';
+  hook_calls += std::format("{}", ss.sections.count(std::string("Test") + TAG));
+}
+template <char TAG>
+constexpr SpireMechRunState T_RUN_STATE = {t_run_state_capture<TAG>, t_run_state_write<TAG>, t_run_state_read<TAG>,
+    t_run_state_resume<TAG>};
+template <char TAG>
+void t_char_meta_read(const phosg::JSON& json, SpireMetaFile& ret) {
+  hook_calls += TAG;
+  hook_calls += 'r';
+  if (json.contains(std::string("Test") + TAG)) {
+    ret.sections[std::string("Test") + TAG] = std::make_shared<const int64_t>(json.get_int(std::string("Test") + TAG));
+  }
+}
+template <char TAG>
+void t_char_meta_write(const SpireMetaFile& file, phosg::JSON& json) {
+  hook_calls += TAG;
+  hook_calls += 'w';
+  auto it = file.sections.find(std::string("Test") + TAG);
+  if (it != file.sections.end()) {
+    json.emplace(std::string("Test") + TAG, *std::static_pointer_cast<const int64_t>(it->second));
+  }
+}
+template <char TAG>
+constexpr SpireMechCharMeta T_CHAR_META = {t_char_meta_read<TAG>, t_char_meta_write<TAG>};
+
+constexpr const char* HOOK_KEY_ON = "test.haak.aan";
+constexpr const char* HOOK_KEY_OFF = "test.haak.uit";
+
+// What every hook has in common. call makes the hook's one call of the core and answers what the registrants were
+// handed and did, as text; none is that text without a registrant, and the three others are it for the calls E L,
+// E O L and E. write writes the switches file.
+template <typename FnT, typename RegisterT>
+void expect_hook(SpireMechHookId hook, RegisterT&& reg, FnT late, FnT early, FnT off,
+    const std::function<std::string()>& call, const std::function<void(const std::string&)>& write,
+    const std::string& none, const std::string& e_l, const std::string& e_o_l, const std::string& e) {
+  auto called = [&]() {
+    hook_calls.clear();
+    return call();
+  };
+  const auto names_before = spire_mech_hook_names(hook);
+  write("{}");
+  expect_eq(none, called()); // without a registrant: what the core had before the seam
+  {
+    HookGuard g1{hook, "aa"}, g2{hook, "zz"}, g3{hook, "mm"};
+    reg(SpireMechHook<FnT>{"aa", HOOK_KEY_ON, 20, late});
+    reg(SpireMechHook<FnT>{"zz", "", 10, early});
+    reg(SpireMechHook<FnT>{"mm", HOOK_KEY_OFF, 15, off});
+    expect(spire_mech_hook_conflicts().empty());
+    std::vector<std::string> own;
+    for (const auto& name : spire_mech_hook_names(hook)) {
+      if ((name == "aa") || (name == "zz") || (name == "mm")) {
+        own.emplace_back(name);
+      }
+    }
+    expect(own == std::vector<std::string>({"zz", "mm", "aa"})); // by number
+    write(R"({"test.haak.uit": false})");
+    expect_eq(e_l, called()); // a registrant whose switch is off is not called
+    write(R"({"test.haak.uit": true})");
+    expect_eq(e_o_l, called()); // the fixed order
+    write("{}");
+    expect_eq(e_o_l, called()); // a missing key is on
+    write(R"({"test.haak.aan": false, "test.haak.uit": false})");
+    expect_eq(e, called()); // an empty switch key is no switch
+    // a name registered twice on a hook keeps the first registration and is named
+    reg(SpireMechHook<FnT>{"zz", "", 99, late});
+    expect_eq(1u, spire_mech_hook_conflicts().size());
+    expect_eq(e, called());
+  }
+  // nothing is left behind: the hook is as it was, for the tests after this one and for the server
+  expect(spire_mech_hook_conflicts().empty());
+  expect(names_before == spire_mech_hook_names(hook));
+  write("{}");
+  expect_eq(none, called());
+}
+
+void spire_tests_hooks() {
+  using H = SpireMechHookId;
+  auto dir = std::filesystem::temp_directory_path() / std::format("newserv-static-spire-hooks-{}", getpid());
+  std::filesystem::create_directories(dir);
+  std::string file = (dir / "spire-schakelaars.json").string();
+  uint32_t writes = 0;
+  std::function<void(const std::string&)> write = [&](const std::string& text) {
+    phosg::save_file(file, text);
+    std::filesystem::last_write_time(file, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(++writes));
+  };
+  spire_mech_set_switches_file(file);
+  expect(spire_mech_hook_conflicts().empty());
+  std::shared_ptr<Client> no_c;
+  std::shared_ptr<Lobby> no_l;
+
+  // H1 quest_bin: without a registrant the client gets the very .bin the core handed in; each registrant gets what the
+  // one before it answered
+  auto bin = std::make_shared<const std::string>("bin");
+  expect(spire_mech_quest_bin(no_c, no_l, bin) == bin);
+  expect_hook<SpireMechQuestBinFn>(
+      H::QUEST_BIN, spire_mech_register_quest_bin, t_quest_bin<'L'>, t_quest_bin<'E'>, t_quest_bin<'O'>,
+      [&]() {
+        auto out = spire_mech_quest_bin(no_c, no_l, bin);
+        return hook_calls + " " + *out;
+      },
+      write, " bin", "EL binEL", "EOL binEOL", "E binE");
+  {
+    HookGuard g{H::QUEST_BIN, "nul"};
+    spire_mech_register_quest_bin({"nul", "", 1, t_quest_bin_null});
+    hook_calls.clear();
+    expect(spire_mech_quest_bin(no_c, no_l, bin) == bin); // a registrant that answers nullptr leaves the .bin
+    expect_eq(std::string("n"), hook_calls);
+  }
+
+  // H2 reward_room: without a registrant the room index and the rung stay the quest's; a registrant that fails leaves
+  // them as they were before it
+  SpireDrawEntry entry;
+  auto room_call = [&]() {
+    uint32_t room_index = 3, trede = 1;
+    spire_mech_reward_room({no_c, no_l, 7, entry, 5, false}, room_index, trede);
+    return std::format("{} {} {}", hook_calls, room_index, trede);
+  };
+  expect_hook<SpireMechRewardRoomFn>(
+      H::REWARD_ROOM, spire_mech_register_reward_room, t_reward_room<'L'>, t_reward_room<'E'>, t_reward_room<'O'>,
+      room_call, write, " 3 1", std::format("EL {} 11", ((3 * 100 + 'E') * 100) + 'L'),
+      std::format("EOL {} 16", ((((3 * 100 + 'E') * 100) + 'O') * 100) + 'L'), std::format("E {} 6", 3 * 100 + 'E'));
+  {
+    HookGuard g1{H::REWARD_ROOM, "stuk"}, g2{H::REWARD_ROOM, "na"};
+    spire_mech_register_reward_room({"stuk", "", 1, t_reward_room_throws});
+    spire_mech_register_reward_room({"na", "", 2, t_reward_room<'E'>});
+    hook_calls.clear();
+    expect_eq(std::format("tE {} 6", 3 * 100 + 'E'), room_call());
+  }
+
+  // H3 type_weight, the hook alone: without a registrant one draw rnd(n) and no candidate is asked; with registrants
+  // every candidate is asked once, by each of them in their order, and weights that are all 1 give the same draw
+  std::vector<uint32_t> asked;
+  std::function<uint32_t(uint32_t)> rnd = [&](uint32_t n) -> uint32_t {
+    asked.emplace_back(n);
+    return 6; // the draw the kinds reduce with % n
+  };
+  size_t candidates_asked = 0;
+  std::function<SpireMechTypeWeight(size_t)> candidate = [&](size_t z) {
+    candidates_asked++;
+    return SpireMechTypeWeight{nullptr, SpireMechCandidate::UNIT, nullptr, static_cast<uint32_t>(z), 0};
+  };
+  auto weight_call = [&]() {
+    asked.clear();
+    candidates_asked = 0;
+    size_t z = spire_mech_type_weight_pick(4, rnd, candidate);
+    return std::format("{} {} {} {}", hook_calls, z, asked.size() == 1 ? asked[0] : 999, candidates_asked);
+  };
+  type_weight_target = 0;
+  expect_hook<SpireMechTypeWeightFn>(
+      H::TYPE_WEIGHT, spire_mech_register_type_weight, t_type_weight<'L'>, t_type_weight<'E'>, t_type_weight<'O'>,
+      weight_call, write, " 2 4 0", "ELELELEL 2 4 4", "EOLEOLEOLEOL 2 4 4", "EEEE 2 4 4");
+  {
+    HookGuard g1{H::TYPE_WEIGHT, "drie"}, g2{H::TYPE_WEIGHT, "een"};
+    spire_mech_register_type_weight({"drie", "", 1, t_type_weight_three});
+    // candidate 2 weighs 3 of 6: the draw is rnd(6) and 6 % 6 = 0 falls on candidate 0, 2-4 on candidate 2
+    expect_eq(std::string(" 0 6 4"), (hook_calls.clear(), weight_call()));
+    std::function<uint32_t(uint32_t)> rnd4 = [](uint32_t) -> uint32_t { return 4; };
+    expect_eq(2u, spire_mech_type_weight_pick(4, rnd4, candidate));
+    std::function<uint32_t(uint32_t)> rnd5 = [](uint32_t) -> uint32_t { return 5; };
+    expect_eq(3u, spire_mech_type_weight_pick(4, rnd5, candidate));
+    // the weights of two registrants multiply: only candidate 2 keeps a weight, whatever the draw
+    type_weight_target = 2;
+    spire_mech_register_type_weight({"een", "", 2, t_type_weight<'E'>});
+    expect_eq(2u, spire_mech_type_weight_pick(4, rnd5, candidate));
+    expect_eq(2u, spire_mech_type_weight_pick(4, rnd, candidate));
+    // every weight 0: the plain draw again
+    type_weight_target = 99;
+    expect_eq(std::string("EEEE 2 4 4"), (hook_calls.clear(), weight_call()));
+    type_weight_target = 0;
+  }
+
+  // H4 player_hp: only 6x4B and 6x4C are a hit; 6x4A and 6x2F share the handler and reach no registrant
+  expect_hook<SpireMechPlayerHPFn>(
+      H::PLAYER_HP, spire_mech_register_player_hp, t_player_hp<'L'>, t_player_hp<'E'>, t_player_hp<'O'>,
+      [&]() {
+        spire_mech_player_hp(no_c, no_l, 0x4A);
+        spire_mech_player_hp(no_c, no_l, 0x2F);
+        spire_mech_player_hp(no_c, no_l, 0x4B);
+        spire_mech_player_hp(no_c, no_l, 0x4C);
+        return hook_calls;
+      },
+      write, "", "E4BL4BE4CL4C", "E4BO4BL4BE4CO4CL4C", "E4BE4C");
+
+  // H5 player_died; a registrant that fails does not keep the next one from its call
+  expect_hook<SpireMechPlayerDiedFn>(
+      H::PLAYER_DIED, spire_mech_register_player_died, t_player_died<'L'>, t_player_died<'E'>, t_player_died<'O'>,
+      [&]() {
+        spire_mech_player_died(no_c, no_l);
+        return hook_calls;
+      },
+      write, "", "EL", "EOL", "E");
+  {
+    HookGuard g1{H::PLAYER_DIED, "stuk"}, g2{H::PLAYER_DIED, "na"};
+    spire_mech_register_player_died({"stuk", "", 1, t_player_died_throws});
+    spire_mech_register_player_died({"na", "", 2, t_player_died<'E'>});
+    hook_calls.clear();
+    spire_mech_player_died(no_c, no_l);
+    expect_eq(std::string("tE"), hook_calls);
+  }
+
+  // H6 tech_done: the technique and its level
+  expect_hook<SpireMechTechDoneFn>(
+      H::TECH_DONE, spire_mech_register_tech_done, t_tech_done<'L'>, t_tech_done<'E'>, t_tech_done<'O'>,
+      [&]() {
+        spire_mech_tech_done(no_c, no_l, 15, 4);
+        return hook_calls;
+      },
+      write, "", "E15.4L15.4", "E15.4O15.4L15.4", "E15.4");
+
+  // H7 enemy_killed: the reconciled drop request and its floor
+  DropReconcileResult rec;
+  rec.should_drop = false;
+  expect_hook<SpireMechEnemyKilledFn>(
+      H::ENEMY_KILLED, spire_mech_register_enemy_killed, t_enemy_killed<'L'>, t_enemy_killed<'E'>, t_enemy_killed<'O'>,
+      [&]() {
+        spire_mech_enemy_killed(no_c, no_l, rec, 3);
+        return hook_calls;
+      },
+      write, "", "E3.0L3.0", "E3.0O3.0L3.0", "E3.0");
+
+  // H8 wave_start: wave a of b
+  expect_hook<SpireMechWaveStartFn>(
+      H::WAVE_START, spire_mech_register_wave_start, t_wave_start<'L'>, t_wave_start<'E'>, t_wave_start<'O'>,
+      [&]() {
+        spire_mech_wave_start(no_c, no_l, 42, 929, 1, 3);
+        return hook_calls;
+      },
+      write, "", "E42.929.1.3L42.929.1.3", "E42.929.1.3O42.929.1.3L42.929.1.3", "E42.929.1.3");
+
+  // H9 run_end: which of the three ends
+  expect_hook<SpireMechRunEndFn>(
+      H::RUN_END, spire_mech_register_run_end, t_run_end<'L'>, t_run_end<'E'>, t_run_end<'O'>,
+      [&]() {
+        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::BASE_RETURN);
+        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::RUN_AGAIN);
+        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::GAME_EXIT);
+        return hook_calls;
+      },
+      write, "", "E1L1E2L2E3L3", "E1O1L1E2O2L2E3O3L3", "E1E2E3");
+
+  // H10 run_state, the hook alone: the four moments, each registrant with a key of its own carried in the sections
+  auto state_call = [&]() {
+    SpireSavestate ss;
+    ss.run_id = 1000;
+    spire_mech_run_state_capture(no_c, no_l, ss);
+    auto json = phosg::JSON::dict();
+    spire_mech_run_state_write(ss, json);
+    SpireSavestate back;
+    spire_mech_run_state_read(json, back);
+    spire_mech_run_state_resume(no_c, no_l, back);
+    std::string keys;
+    for (const char* key : {"TestE", "TestO", "TestL"}) {
+      if (json.contains(key)) {
+        keys += std::format(" {}={}", key, json.get_int(key));
+      }
+    }
+    return hook_calls + keys;
+  };
+  expect_hook<SpireMechRunState>(
+      H::RUN_STATE, spire_mech_register_run_state, T_RUN_STATE<'L'>, T_RUN_STATE<'E'>, T_RUN_STATE<'O'>, state_call, write,
+      "", std::format("EcLcEwLwErLrEs1Ls1 TestE={} TestL={}", 1000 + 'E', 1000 + 'L'),
+      std::format("EcOcLcEwOwLwErOrLrEs1Os1Ls1 TestE={} TestO={} TestL={}", 1000 + 'E', 1000 + 'O', 1000 + 'L'),
+      std::format("EcEwErEs1 TestE={}", 1000 + 'E'));
+
+  // H11 char_meta, the hook alone: read and write, a key of its own carried in the sections
+  auto meta_call = [&]() {
+    auto json = phosg::JSON::dict({{"TestE", 5}, {"TestO", 6}, {"TestL", 7}});
+    SpireMetaFile meta;
+    spire_mech_char_meta_read(json, meta);
+    auto out = phosg::JSON::dict();
+    spire_mech_char_meta_write(meta, out);
+    std::string keys;
+    for (const char* key : {"TestE", "TestO", "TestL"}) {
+      if (out.contains(key)) {
+        keys += std::format(" {}={}", key, out.get_int(key));
+      }
+    }
+    return hook_calls + keys;
+  };
+  expect_hook<SpireMechCharMeta>(
+      H::CHAR_META, spire_mech_register_char_meta, T_CHAR_META<'L'>, T_CHAR_META<'E'>, T_CHAR_META<'O'>, meta_call, write,
+      "", "ErLrEwLw TestE=5 TestL=7", "ErOrLrEwOwLw TestE=5 TestO=6 TestL=7", "ErEw TestE=5");
+
+  spire_mech_set_switches_file("");
+  std::filesystem::remove_all(dir);
+  expect(spire_mech_hook_conflicts().empty());
 }
 
 void spire_tests_mechanics() {
@@ -214,6 +623,8 @@ void spire_tests_mechanics() {
   spire_mech_set_switches_file("");
   std::filesystem::remove_all(dir);
   expect(spire_mech_enabled("aanval"));
+
+  spire_tests_hooks();
 }
 
 [[maybe_unused]] const bool registered = spire_mech_register_tests("mechanics", spire_tests_mechanics);
