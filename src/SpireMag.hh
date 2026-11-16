@@ -164,6 +164,10 @@ struct SpireRunMagLedger {
   SpireMagNeed need;
   bool boost_due = false;
   uint16_t feed_levels = 0;
+  // Part B, the disk (persisted "DiskMind"): the highest MIND a reward disk taken in this run asks. It is part of
+  // need.mind, and kept apart so a later reward weapon, which replaces need, does not drop it (SpireRewards.hh
+  // spire_reward_need_with_disk).
+  uint16_t disk_mind = 0;
   bool offered_boost = false; // the offered mag is a boost (its kind follows Sega's evolution; in memory only)
 };
 

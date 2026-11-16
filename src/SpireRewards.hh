@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <functional>
@@ -58,14 +59,14 @@ const char* spire_reward_tier_label(SpireRewardTier tier);
 // The ticker colour of the tier (KV par. 4: Normal white, Rare blue, Epic yellow, Legendary yellow with its word)
 const char* spire_reward_tier_color(SpireRewardTier tier);
 
-// Part B adds UNIT (Kracht, KV par. 4): a unit for one of the frame's slots, by the class's archetype and the tier. 4 is
-// kept for the technique disk, which is not built yet.
-enum class SpireRewardKind : uint8_t { NONE = 0, WEAPON = 1, NEW_LINE = 2, MAG_FOOD = 3, UNIT = 5 };
+// Part B adds UNIT (Kracht, KV par. 4): a unit for one of the frame's slots, by the class's archetype and the tier, and
+// DISK (Schijf): a technique disk of Sega's level for the room and the tier, which the run copy can learn (below).
+enum class SpireRewardKind : uint8_t { NONE = 0, WEAPON = 1, NEW_LINE = 2, MAG_FOOD = 3, DISK = 4, UNIT = 5 };
 const char* spire_reward_kind_name(SpireRewardKind kind);
 // Whether a draw table's srv value names a kind this server gives; any other value reads as "no server reward"
 // (SpireDraw.cc), so the pick answers the entry's own item
 constexpr bool spire_reward_kind_known(int64_t srv) {
-  return ((srv >= 1) && (srv <= 3)) || (srv == 5);
+  return (srv >= 1) && (srv <= 5);
 }
 
 struct SpireRewardItemInfo {
@@ -88,6 +89,22 @@ struct SpireRewardUnit {
   uint16_t stat = 0;
   uint16_t amount = 0;
 };
+// A technique of the grid (part B, the disk): the MST the GC client asks before it lets a disk be used is
+// Base + Step * (level - 1), held against the total MST with the mag and the units (pso-roguelike
+// new-features/roguelike/research/schijf-mst-eis.md; read from the client image, every technique)
+constexpr size_t SPIRE_TECH_COUNT = 19;
+struct SpireRewardTech {
+  std::string name;
+  uint16_t base = 0;
+  uint16_t step = 0;
+};
+constexpr uint32_t spire_reward_disk_mst(const SpireRewardTech& tech, uint8_t level) { // level 1-30
+  return tech.base + (static_cast<uint32_t>(tech.step) * (level ? (level - 1) : 0));
+}
+// The MIND levels a mag must have for a requirement on a copy with this MST (+2 MST per MIND level, rounded up)
+constexpr uint16_t spire_reward_disk_mind(uint32_t mst_required, uint32_t mst) {
+  return (mst_required > mst) ? static_cast<uint16_t>(std::min<uint32_t>((mst_required - mst + 1) / 2, 0xFFFF)) : 0;
+}
 struct SpireRewardCell {
   uint32_t code = 0; // data1[0-2], big-endian as the grid writes it (000101 = Brand)
   std::string name;
@@ -129,6 +146,11 @@ struct SpireRewardTable {
   // from. Both empty when the file has no Units (a part A file): a UNIT entry then gives its own item.
   std::map<uint32_t, SpireRewardUnit> units;
   std::map<std::string, std::array<std::vector<uint32_t>, 4>> unit_tiers;
+  // part B, the disk: the techniques by id (0 Foie - 18 Megid) and per room index (1 = the first room of the episode)
+  // the level of Sega's disk per technique and tier (0: Sega drops none there). Empty when the file has no Disks: a
+  // DISK entry then gives its own item.
+  std::array<SpireRewardTech, SPIRE_TECH_COUNT> techs;
+  std::map<uint32_t, std::array<std::array<uint8_t, 4>, SPIRE_TECH_COUNT>> disk_levels;
 };
 // Strict: throws on a missing key or a value out of range
 SpireRewardTable spire_rewards_parse(const std::string& json_text);
@@ -166,13 +188,43 @@ struct SpireRewardOffer {
   SpireMagBytes item{}; // the weapon's data1 (kind WEAPON and NEW_LINE)
   std::string item_name; // "Brand +3", "VISK-235W", "Gladius +12 Berserk"
   uint16_t food_levels = 0; // MAG_FOOD
+  uint8_t tech = 0xFF; // DISK: the technique (0-18) and its level (1-30); the item is 03 02 level-1 00 tech
+  uint8_t tech_level = 0;
+  uint32_t mst_required = 0; // DISK: the MST the client asks for it
   SpireRewardItemInfo info; // the weapon's requirements
-  std::string label; // the menu text: tier word + name ("EPIC Musashi", "RARE Mag food +10")
+  std::string label; // the menu text: tier word + name ("EPIC Musashi", "RARE Mag food +10", "RARE Foie Lv8")
 };
+// What a DISK offer needs to know of the run copy (the bridge fills it; the pure part chooses):
+//   known      per technique 0xFF, or the level (0-based) the copy knows
+//   class_max  per technique 0xFF, or the highest level (0-based) the class can learn: the item parameter table's
+//              MaxTechLevels, the same value newserv holds a used disk against (Items.cc), so no disk is ever above it
+//   mst        the copy's MST with the worn units, without the mag (as a weapon's MST requirement reads it)
+//   mst_cap    the class's highest MST (the client caps the total there); 0 = not known, no cap
+//   mind_room  the MIND levels rule B's mag can carry: 200 less the POW and DEX the reward weapon asks
+struct SpireRewardDiskState {
+  std::array<uint8_t, SPIRE_TECH_COUNT> known;
+  std::array<uint8_t, SPIRE_TECH_COUNT> class_max;
+  uint32_t mst = 0;
+  uint32_t mst_cap = 0;
+  uint16_t mind_room = 200;
+  SpireRewardDiskState() {
+    this->known.fill(0xFF);
+    this->class_max.fill(0xFF);
+  }
+};
+// The level of a DISK offer for one technique, 0 for none. Sega's level for the room and tier (the grid), at most the
+// class's highest; for a technique the copy knows at least two levels above what it knows (pso-roguelike
+// design/kracht-voorbij-normaal.md par. 4: "disk +2 levels"; one level when that is the class's highest), so a disk
+// always teaches something. Then down, never to what the copy knows, until the copy can meet the MST the client
+// asks: the requirement at most mst_cap, and the MIND it takes within mind_room.
+uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level, uint8_t known, uint8_t class_max,
+    const SpireRewardDiskState& state);
 // rnd(n): uniform 0..n-1. held: data1 of the weapon the player holds (nullptr: none, the class's first line). The tier is
-// given (spire_reward_tier_for_roll). Throws when the class has no line for it (not in the grid).
+// given (spire_reward_tier_for_roll). Throws when the class has no line for it (not in the grid). disk: the run copy
+// for a DISK offer (required for that kind; it throws without, and when no technique has a level to give).
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
-    const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd);
+    const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
+    const SpireRewardDiskState* disk = nullptr);
 // The weapon of a cell as data1: code, grind (at most the weapon's MaxGrind), the special, Hit
 SpireMagBytes spire_reward_weapon_bytes(const SpireRewardTable& table, const SpireRewardCell& cell, uint8_t special);
 
@@ -180,6 +232,11 @@ SpireMagBytes spire_reward_weapon_bytes(const SpireRewardTable& table, const Spi
 // model): the levels each stat must have, rounded up
 SpireMagNeed spire_reward_mag_need(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst,
     SpireAtaModel model);
+// Rule B's need with a reward disk in the run: per stat the highest of what the weapon asks and what the disks ask
+// (MIND only), so a disk never drops the weapon's POW and DEX and a later weapon never drops the disk's MIND
+constexpr SpireMagNeed spire_reward_need_with_disk(const SpireMagNeed& weapon, uint16_t disk_mind) {
+  return SpireMagNeed{weapon.pow, weapon.dex, std::max<uint16_t>(weapon.mind, disk_mind)};
+}
 // Whether stats plus a mag (the same assumed rates) meet a weapon's requirement under a model (the log's measurement)
 bool spire_reward_meets(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst, const SpireMagBytes* mag,
     SpireAtaModel model);

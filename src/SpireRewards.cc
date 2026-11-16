@@ -112,6 +112,8 @@ const char* spire_reward_kind_name(SpireRewardKind kind) {
       return "Nieuwe lijn";
     case SpireRewardKind::MAG_FOOD:
       return "Mag-voer";
+    case SpireRewardKind::DISK:
+      return "Schijf";
     case SpireRewardKind::UNIT:
       return "Kracht";
   }
@@ -263,6 +265,50 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
       ret.unit_tiers.emplace(arch, std::move(tiers));
     }
   }
+  if (json.contains("Disks")) { // part B, the disk; a file without it gives a DISK entry its own item
+    const auto& disks = json.at("Disks");
+    const auto& techs = disks.get_list("Techs");
+    if (techs.size() != SPIRE_TECH_COUNT) {
+      throw std::runtime_error(std::format("Disks Techs has {} techniques, not {}", techs.size(), SPIRE_TECH_COUNT));
+    }
+    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+      ret.techs[t].name = techs[t]->get_string("Name");
+      ret.techs[t].base = spire_get_u(*techs[t], "Base", 2000);
+      ret.techs[t].step = spire_get_u(*techs[t], "Step", 200);
+      if (ret.techs[t].name.empty() || !ret.techs[t].base) {
+        throw std::runtime_error(std::format("Disks Techs {}: no name or no Base", t));
+      }
+    }
+    for (const auto& [room, r_json] : disks.get_dict("Rooms")) {
+      const auto& rows = r_json->as_list();
+      if (rows.size() != SPIRE_TECH_COUNT) {
+        throw std::runtime_error(std::format("Disks Rooms {}: {} techniques, not {}", room, rows.size(), SPIRE_TECH_COUNT));
+      }
+      std::array<std::array<uint8_t, 4>, SPIRE_TECH_COUNT> levels{};
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        const auto& row = rows[t]->as_list();
+        if (row.size() != 4) {
+          throw std::runtime_error(std::format("Disks Rooms {} technique {}: {} tiers, not 4", room, t, row.size()));
+        }
+        for (size_t z = 0; z < 4; z++) {
+          int64_t v = row[z]->as_int();
+          if ((v < 0) || (v > 30)) {
+            throw std::runtime_error(std::format("Disks Rooms {} technique {} {}: level {} outside 0-30", room, t,
+                TIER_NAMES[z], v));
+          }
+          levels[t][z] = v;
+        }
+      }
+      uint32_t index = std::stoul(room);
+      if (!index) {
+        throw std::runtime_error("Disks Rooms 0: the first room is 1");
+      }
+      ret.disk_levels.emplace(index, levels);
+    }
+    if (ret.disk_levels.empty()) {
+      throw std::runtime_error("Disks Rooms is empty");
+    }
+  }
   return ret;
 }
 
@@ -366,8 +412,31 @@ static std::string spire_reward_weapon_name(const SpireRewardCell& cell, const S
   return ret;
 }
 
+uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level, uint8_t known, uint8_t class_max,
+    const SpireRewardDiskState& state) {
+  if (!sega_level || (class_max == 0xFF)) {
+    return 0; // Sega drops none here, or the class cannot learn it
+  }
+  uint8_t max_level = std::min<uint8_t>(class_max, 29) + 1;
+  uint8_t known_level = (known == 0xFF) ? 0 : (std::min<uint8_t>(known, 29) + 1);
+  // a technique the copy knows comes at least two levels higher (KV par. 4: "disk +2 levels"), one at the class's top
+  uint8_t floor = known_level ? std::min<uint8_t>(known_level + 2, max_level) : 1;
+  uint8_t level = std::max(std::min(sega_level, max_level), floor);
+  if (level <= known_level) {
+    return 0; // the copy knows the class's highest already
+  }
+  for (; level > known_level; level--) {
+    uint32_t mst = spire_reward_disk_mst(tech, level);
+    if ((!state.mst_cap || (mst <= state.mst_cap)) && (spire_reward_disk_mind(mst, state.mst) <= state.mind_room)) {
+      return level;
+    }
+  }
+  return 0; // no level above what the copy knows that it could use
+}
+
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
-    const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd) {
+    const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
+    const SpireRewardDiskState* disk) {
   SpireRewardOffer ret;
   ret.kind = kind;
   ret.tier = tier;
@@ -403,6 +472,43 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
     ret.item[1] = (code >> 8) & 0xFF;
     ret.item[2] = code & 0xFF;
     ret.item_name = table.units.at(code).name;
+    ret.label = tier_label + " " + ret.item_name;
+    return ret;
+  }
+  if (kind == SpireRewardKind::DISK) {
+    if (!disk) {
+      throw std::runtime_error("a disk offer without the run copy's techniques");
+    }
+    if (table.disk_levels.empty()) {
+      throw std::runtime_error("the reward grid has no Disks");
+    }
+    // the room's row; past the last room of the grid, the last one (as spire_reward_w)
+    auto r_it = table.disk_levels.upper_bound(room_index);
+    if (r_it != table.disk_levels.begin()) {
+      r_it--;
+    }
+    std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
+    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+      uint8_t level = spire_reward_disk_level(table.techs[t], r_it->second[t][static_cast<size_t>(tier) & 3],
+          disk->known[t], disk->class_max[t], *disk);
+      if (level) {
+        can.emplace_back(static_cast<uint8_t>(t), level);
+      }
+    }
+    if (can.empty()) {
+      throw std::runtime_error(std::format("no technique disk for {} at room index {} {}: every technique of the tier "
+                                           "is known, not the class's, or asks more MST than the copy can reach",
+          cls.name, room_index, tier_label));
+    }
+    const auto& [tech, level] = can[rnd(can.size()) % can.size()];
+    ret.tech = tech;
+    ret.tech_level = level;
+    ret.mst_required = spire_reward_disk_mst(table.techs[tech], level);
+    ret.item[0] = 0x03;
+    ret.item[1] = 0x02;
+    ret.item[2] = level - 1;
+    ret.item[4] = tech;
+    ret.item_name = std::format("{} Lv{}", table.techs[tech].name, level);
     ret.label = tier_label + " " + ret.item_name;
     return ret;
   }

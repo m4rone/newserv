@@ -6327,6 +6327,7 @@ void run_static_tests() {
       led.need = SpireMagNeed{57, 31, 4};
       led.boost_due = true;
       led.feed_levels = 20;
+      led.disk_mind = 4; // part B: the MIND the run's reward disks ask
       SpireSavestate ss;
       ss.run_id = led.run_id;
       ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
@@ -6337,6 +6338,7 @@ void run_static_tests() {
       expect(back.run_mag->need == led.need);
       expect(back.run_mag->boost_due);
       expect_eq(20, back.run_mag->feed_levels);
+      expect_eq(4, back.run_mag->disk_mind);
       // the resumed ledger answers the owed boost at the next ASK without a new step: the weapon's need and the food
       auto d = spire_run_mag_decide(*back.run_mag, hu, SPIRE_RUN_MAG_ASK, 3, {}, 0, 1);
       expect(d.result);
@@ -6348,12 +6350,14 @@ void run_static_tests() {
       plain.need = SpireMagNeed{};
       plain.boost_due = false;
       plain.feed_levels = 0;
+      plain.disk_mind = 0;
       ss.run_mag = plain;
       std::string plain_json = spire_savestate_to_json(ss, 1);
       expect((plain_json.find("\"Need\"") == std::string::npos) && (plain_json.find("\"BoostDue\"") == std::string::npos) &&
-          (plain_json.find("\"FeedLevels\"") == std::string::npos));
+          (plain_json.find("\"FeedLevels\"") == std::string::npos) && (plain_json.find("\"DiskMind\"") == std::string::npos));
       auto plain_back = spire_savestate_from_json(plain_json);
-      expect((plain_back.run_mag->need == SpireMagNeed{}) && !plain_back.run_mag->boost_due && !plain_back.run_mag->feed_levels);
+      expect((plain_back.run_mag->need == SpireMagNeed{}) && !plain_back.run_mag->boost_due && !plain_back.run_mag->feed_levels &&
+          !plain_back.run_mag->disk_mind);
       // an edited file: a value below 0 is nothing owed and one above 200 is 200, never a wrapped number
       auto edited = [&](const std::string& key, const std::string& value) {
         std::string j = json;
@@ -6367,6 +6371,8 @@ void run_static_tests() {
       expect(edited("Need", "[-1, 999, 7]").need == (SpireMagNeed{0, 200, 7}));
       expect_eq(0, edited("FeedLevels", "-1").feed_levels);
       expect_eq(200, edited("FeedLevels", "70000").feed_levels);
+      expect_eq(0, edited("DiskMind", "-1").disk_mind);
+      expect_eq(200, edited("DiskMind", "70000").disk_mind);
     });
 
     f6_case("the ledger follows the feed mirror", [&]() {
@@ -7997,6 +8003,129 @@ void run_static_tests() {
       not_a_unit.insert(brace_at + 1, "\"000100\":{\"Name\":\"Saber\",\"Stars\":1,\"Stat\":0,\"Amount\":0},");
       expect_eq(rewards.units.size(), spire_rewards_parse(grid_text).units.size());
       expect_raises(std::runtime_error, [&]() { spire_rewards_parse(not_a_unit); });
+
+      // part B, the disk (Schijf). The MST rule of the client image on the grid's techniques: Base + Step x (level - 1)
+      expect_eq(15u, rewards.disk_levels.size());
+      expect_eq("Foie", rewards.techs[0].name);
+      expect_eq(40u, spire_reward_disk_mst(rewards.techs[0], 1));
+      expect_eq(180u, spire_reward_disk_mst(rewards.techs[0], 8));
+      expect_eq(620u, spire_reward_disk_mst(rewards.techs[0], 30));
+      expect_eq(150u, spire_reward_disk_mst(rewards.techs[14], 1)); // Ryuker: flat
+      expect_eq(150u, spire_reward_disk_mst(rewards.techs[17], 30)); // Reverser: flat
+      expect_eq(972u, spire_reward_disk_mst(rewards.techs[18], 30)); // Megid
+      expect_eq(40, spire_reward_disk_mind(180, 100));
+      expect_eq(41, spire_reward_disk_mind(181, 100)); // rounded up: a MIND level gives 2 MST
+      expect_eq(0, spire_reward_disk_mind(100, 180));
+      // the level of one technique: Sega's, at most the class's highest, two above what the copy knows when Sega's is
+      // no higher, and down to what the copy's MST and its mag can reach
+      {
+        const auto& foie = rewards.techs[0];
+        SpireRewardDiskState st;
+        st.mst = 1000;
+        expect_eq(8, spire_reward_disk_level(foie, 8, 0xFF, 29, st));
+        expect_eq(5, spire_reward_disk_level(foie, 8, 0xFF, 4, st)); // the class learns Lv5 at most
+        expect_eq(8, spire_reward_disk_level(foie, 8, 2, 29, st)); // the copy knows Lv3
+        expect_eq(12, spire_reward_disk_level(foie, 8, 9, 29, st)); // it knows Lv10 already: two above
+        expect_eq(11, spire_reward_disk_level(foie, 8, 9, 10, st)); // one, when that is the class's highest
+        expect_eq(0, spire_reward_disk_level(foie, 8, 9, 9, st)); // and that is the class's highest: nothing to teach
+        expect_eq(0, spire_reward_disk_level(foie, 0, 0xFF, 29, st)); // Sega drops none here
+        expect_eq(0, spire_reward_disk_level(foie, 8, 0xFF, 0xFF, st)); // not the class's
+        st.mst = 100;
+        st.mind_room = 20; // the mag can add 40 MST: 140 holds Foie Lv6 (40 + 5 x 20)
+        expect_eq(6, spire_reward_disk_level(foie, 8, 0xFF, 29, st));
+        expect_eq(6, spire_reward_disk_level(foie, 8, 4, 29, st)); // it knows Lv5
+        expect_eq(0, spire_reward_disk_level(foie, 8, 5, 29, st)); // it knows Lv6: Lv7 is out of reach
+        st.mst = 1000;
+        st.mind_room = 200;
+        st.mst_cap = 100; // the class's highest MST: Foie Lv4 asks 100
+        expect_eq(4, spire_reward_disk_level(foie, 8, 0xFF, 29, st));
+      }
+      // an offer for every class that learns techniques, in every room and tier: a disk (03 02 level-1 00 technique)
+      // of Sega's level, never above the class's highest (newserv refuses such a disk when it is used), with its name
+      // and tier word; an android gets none (the entry's own item)
+      size_t disk_offers = 0, disk_classes = 0;
+      for (const auto& [char_class, cls] : rewards.classes) {
+        SpireRewardDiskState st;
+        st.mst = 5000;
+        st.mind_room = 0;
+        bool learns = false;
+        for (size_t x = 0; x < SPIRE_TECH_COUNT; x++) {
+          st.class_max[x] = ipt->get_max_tech_level(char_class, x);
+          learns |= (st.class_max[x] != 0xFF);
+        }
+        disk_classes += learns;
+        for (const auto& [room, levels] : rewards.disk_levels) {
+          for (size_t t = 0; t < 4; t++) {
+            auto tier = static_cast<SpireRewardTier>(t);
+            std::vector<size_t> want;
+            for (size_t x = 0; x < SPIRE_TECH_COUNT; x++) {
+              if (levels[x][t] && (st.class_max[x] != 0xFF)) {
+                want.emplace_back(x);
+              }
+            }
+            if (want.empty()) {
+              expect(!learns || (t == 0)); // a class that learns always has a Rare, Epic and Legendary disk
+              expect_raises(std::runtime_error, [&]() {
+                spire_reward_offer(rewards, SpireRewardKind::DISK, char_class, nullptr, room, tier,
+                    [](uint32_t) -> uint32_t { return 0; }, &st);
+              });
+              continue;
+            }
+            for (uint32_t r = 0; r < want.size(); r++) {
+              auto offer = spire_reward_offer(rewards, SpireRewardKind::DISK, char_class, nullptr, room, tier,
+                  [&](uint32_t n) -> uint32_t {
+                    expect_eq(want.size(), n);
+                    return r;
+                  },
+                  &st);
+              size_t x = want[r];
+              uint8_t level = std::min<uint8_t>(levels[x][t], st.class_max[x] + 1);
+              expect_eq(x, offer.tech);
+              expect_eq(level, offer.tech_level);
+              expect_eq(spire_reward_disk_mst(rewards.techs[x], level), offer.mst_required);
+              expect((offer.item == SpireMagBytes{0x03, 0x02, static_cast<uint8_t>(level - 1), 0x00, static_cast<uint8_t>(x)}));
+              expect_eq(std::format("{} {} Lv{}", spire_reward_tier_label(tier), rewards.techs[x].name, level), offer.label);
+              disk_offers++;
+            }
+          }
+        }
+      }
+      phosg::log_info_f("   rewards: {} disk offers checked for {} classes that learn techniques", disk_offers, disk_classes);
+      expect(disk_classes >= 4); // the four forces at least
+      expect(disk_offers >= 4 * 15 * 4);
+      {
+        // a copy that knows the class's highest of every technique gets no disk; an offer without the copy is refused
+        SpireRewardDiskState st;
+        st.mst = 5000;
+        for (size_t x = 0; x < SPIRE_TECH_COUNT; x++) {
+          st.class_max[x] = ipt->get_max_tech_level(6, x); // FOmarl
+          st.known[x] = st.class_max[x];
+        }
+        auto first = [](uint32_t) -> uint32_t { return 0; };
+        expect_raises(std::runtime_error, [&]() {
+          spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 15, SpireRewardTier::LEGENDARY, first, &st);
+        });
+        expect_raises(std::runtime_error, [&]() {
+          spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 15, SpireRewardTier::LEGENDARY, first);
+        });
+        // with one technique a level short, that one, a level above what the copy knows
+        st.known[3] = st.class_max[3] - 1; // Barta
+        auto offer = spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 15, SpireRewardTier::LEGENDARY, first, &st);
+        expect_eq(3, offer.tech);
+        expect_eq(st.class_max[3] + 1, offer.tech_level);
+      }
+      // rule B's need with a disk in the run: per stat the highest, so the weapon's POW and DEX stay
+      expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 10}, 25) == SpireMagNeed{40, 30, 25}));
+      expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 50}, 25) == SpireMagNeed{40, 30, 50}));
+      // a grid with a disk level past 30 is refused at load
+      {
+        std::string bad_level = grid_text;
+        size_t disks_at = bad_level.find("\"Disks\"");
+        size_t row_at = (disks_at == std::string::npos) ? disks_at : bad_level.find("[[1,8,13,18]", disks_at);
+        expect(row_at != std::string::npos);
+        bad_level.replace(row_at, 12, "[[1,8,13,31]");
+        expect_raises(std::runtime_error, [&]() { spire_rewards_parse(bad_level); });
+      }
     }
     // what worn units add to a weapon's requirement: ATP, MST, both from God/Ability (stat 8); nothing from the rest
     {
@@ -8639,12 +8768,16 @@ void run_static_tests() {
     b8_case("loader: a server reward entry's srv and own bytes; a bad value is no server reward, never a failed table", [&]() {
       const B8Entries srv = {{"\"Weapon\",\"srv\":1,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false},
           {"\"New line\",\"srv\":2", false}, {"\"Mag food\",\"srv\":3,\"bytes\":\"01 01 00 00 00 00 06 00 00 00 00 00\"", false},
-          {"\"Odd\",\"srv\":4,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false}, {"\"Bad\",\"srv\":\"x\"", false},
+          {"\"Odd\",\"srv\":6,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false}, {"\"Bad\",\"srv\":\"x\"", false},
           {"\"Short\",\"srv\":1,\"bytes\":\"00 01\"", false},
-          {"\"Unit\",\"srv\":5,\"bytes\":\"03 0B 01 00 00 00 00 00 00 00 00 00\"", false}};
+          {"\"Unit\",\"srv\":5,\"bytes\":\"03 0B 01 00 00 00 00 00 00 00 00 00\"", false},
+          {"\"Disk\",\"srv\":4,\"bytes\":\"03 01 02 00 00 02 00 00 00 00 00 00\"", false}};
       auto t = b8_load(b8_table_json({srv, srv, srv}, ""));
       const auto& e = t.archetypes.at(0).entries;
-      expect_eq(7u, e.size());
+      expect_eq(8u, e.size());
+      // part B: kind 4, Schijf, is a server reward with its own item (two Trifluids)
+      expect_eq(4, e[7].srv_kind);
+      expect(e[7].has_own_bytes && (e[7].own_bytes == std::array<uint8_t, 12>{0x03, 0x01, 0x02, 0x00, 0x00, 0x02}));
       // review r1 B1 (part B): kind 5, Kracht, is a server reward with its own item (a material)
       expect_eq(5, e[6].srv_kind);
       expect(e[6].has_own_bytes && (e[6].own_bytes == std::array<uint8_t, 12>{0x03, 0x0B, 0x01}));
@@ -8655,7 +8788,7 @@ void run_static_tests() {
       expect(!e[1].has_own_bytes);
       expect_eq(3, e[2].srv_kind);
       expect(e[2].has_own_bytes && (e[2].own_bytes[6] == 0x06));
-      expect(!e[3].srv_kind && !e[3].has_own_bytes); // no kind 4
+      expect(!e[3].srv_kind && !e[3].has_own_bytes); // no kind 6
       expect(!e[4].srv_kind && !e[4].has_own_bytes);
       expect_eq(1, e[5].srv_kind);
       expect(!e[5].has_own_bytes); // not 12 bytes
@@ -11233,6 +11366,162 @@ void run_static_tests() {
       expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, weapon_pick("a Cane pick with God/Mind worn"));
       wear_only(3); // Priest/Mind instead: too little
       expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS, weapon_pick("a Cane pick without it"));
+      spire_static_test_forget(p.c, r.l);
+      p.c->lobby.reset();
+      r.l->clients.fill(nullptr);
+    });
+
+    // Part B, the disk, played through the bridge as the quest plays it: a force's Disk pick (kind 4 in the draw table)
+    // answers a disk the class may learn, above what the copy knows; rule B's mag carries the MIND the client's MST rule
+    // asks for it; and a reward weapon taken before that mag came does not drop the disk's MIND
+    e2e_case("part B: a Disk reward through the bridge; rule B's mag carries its MST, also past a reward weapon", [&]() {
+      TempCwd temp_cwd;
+      phosg::save_file(SPIRE_REWARDS_FILE, rewards_json_e2e);
+      phosg::save_file(SPIRE_RUN_MAG_FILE, mags_json_e2e);
+      // the quest's draw table: per archetype three weapon entries and the Disk entry (its own item two Trifluids)
+      std::string entries;
+      for (size_t z = 0; z < 4; z++) {
+        entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,"
+                               "\"glass_ok\":false,\"name\":\"Entry {}\",\"srv\":{},\"bytes\":\"{}\"}}",
+            z ? "," : "", z + 1, (z == 3) ? 4 : 1,
+            (z == 3) ? "03 01 02 00 00 02 00 00 00 00 00 00" : "00 01 00 08 00 00 00 00 00 00 00 00");
+      }
+      const std::string row = "[0,1,2,3]";
+      std::string arch = std::format("{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{},{},{},{}]}},"
+                                     "\"slot_c_zero_tags\":[]}}",
+          entries, row, row, row, row, row, row, row);
+      std::filesystem::create_directories(SPIRE_BRIDGE_DRAW_DIRECTORY);
+      phosg::save_file(std::format("{}/q{}.json", SPIRE_BRIDGE_DRAW_DIRECTORY, QUEST),
+          std::format("{{\"num_tags\":2,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,"
+                      "\"max_attempts\":8,\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,"
+                      "\"relic_bit_r14\":16,\"archetypes\":[{},{},{}]}}",
+              arch, arch, arch));
+      auto w = make_world();
+      w.s->data->item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = pmt_v3;
+      w.s->data->item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] =
+          std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+      w.s->data->spire_equip_item_patch = false; // r143 = 0: the weapon's equip is its line, which shows when it goes
+      GCCharacter real = real_character();
+      real.disp.visual.sh.char_class = 6; // FOmarl
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1;
+      spire_checkpoint_run_started(p.c);
+      spire_static_test_run_state(p.c, r.l, true, false);
+      auto overlay = p.c->character_file(false, true);
+      auto& inv = overlay->inventory;
+      auto& stats = overlay->disp.stats.char_stats;
+      auto item_answer = [&](size_t from) {
+        SpireMagBytes b{};
+        for (size_t z = from; z < seen.registers.size(); z++) {
+          auto [reg, value] = seen.registers[z];
+          if ((reg >= SPIRE_RUN_MAG_ITEM_FIRST_REGISTER) && (reg < SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + 12)) {
+            b[reg - SPIRE_RUN_MAG_ITEM_FIRST_REGISTER] = value;
+          }
+        }
+        return b;
+      };
+      auto line_sent = [&](size_t from, const std::string& text) {
+        for (size_t z = from; z < seen.sent.size(); z++) {
+          if (seen.sent[z].find(text) != std::string::npos) {
+            return true;
+          }
+        }
+        return false;
+      };
+      auto z_word = [](uint8_t sub, uint32_t low) {
+        return SPIRE_RUN_MAG_TAG | (static_cast<uint32_t>(sub) << 16) | low;
+      };
+      // an item the quest made (item_create2 appends it, not equipped)
+      auto add = [&](const SpireMagBytes& data1) {
+        size_t z = inv.num_items;
+        inv.items[z] = PlayerInventoryItem();
+        inv.items[z].state = 1;
+        for (size_t x = 0; x < 12; x++) {
+          inv.items[z].data.data1[x] = data1[x];
+        }
+        inv.items[z].data.id = 0x00810040 + z;
+        inv.items[z].flags = 0x00000004;
+        inv.num_items = z + 1;
+      };
+      // the quest's swap of the run mag (the old one deleted, the new one created and equipped)
+      auto swap_mag = [&](const SpireMagBytes& b) {
+        auto& it = inv.items[1];
+        expect_eq(0x02, it.data.data1[0]);
+        for (size_t z = 0; z < 12; z++) {
+          it.data.data1[z] = b[z];
+        }
+        it.flags = 0x0000000C;
+      };
+
+      // the kit's mag (step 0: MIND 0), created and confirmed
+      size_t from = seen.registers.size();
+      expect_eq(1u, quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_ASK, 1), "the kit's mag") & 1);
+      SpireMagBytes kit_mag = item_answer(from);
+      expect_eq(0u, spire_mag_stat_word(kit_mag, 3));
+      swap_mag(kit_mag);
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_RESULT, 1)), "the kit's RESULT");
+
+      // the copy knows Foie Lv1 and nothing else, and has no MST of its own: every disk asks MIND of the mag
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        overlay->set_technique_level(t, 0xFF);
+      }
+      overlay->set_technique_level(0, 0);
+      stats.atp = 999;
+      stats.ata = 999;
+      stats.mst = 0;
+
+      // the Disk pick (entry 4): a disk as data1 03 02 level-1 00 technique and nothing else, and the mag follows
+      from = seen.registers.size();
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS,
+          quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (2u << 8) | 4), "the Disk pick"));
+      SpireMagBytes disk = item_answer(from);
+      expect_eq(0x03, disk[0]);
+      expect_eq(0x02, disk[1]);
+      expect_eq(0, disk[3]);
+      for (size_t z = 5; z < 12; z++) {
+        expect_eq(0, disk[z]);
+      }
+      uint8_t tech = disk[4];
+      uint8_t level = disk[2] + 1;
+      expect(tech < SPIRE_TECH_COUNT);
+      uint8_t class_max = pmt_v3->get_max_tech_level(6, tech);
+      expect((class_max != 0xFF) && (disk[2] <= class_max)); // never a disk newserv refuses when it is used
+      expect((tech != 0) || (level >= 2)); // above the Foie the copy knows
+      uint16_t mind = spire_reward_disk_mind(spire_reward_disk_mst(rewards_e2e.techs[tech], level), 0);
+      expect((mind >= 1) && (mind <= 200)); // within what a mag can carry
+      add(disk);
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_REWARD_RESULT, 1)),
+          "the Disk's RESULT");
+
+      // before the mag came, a reward weapon (entry 1) that asks nothing of this copy: its RESULT replaces the weapon's
+      // part of rule B's need, and the disk's MIND stays owed
+      auto& held = inv.items[0];
+      expect(held.is_equipped() && (held.data.data1[0] == 0x00));
+      held.data.data1[1] = 0x01; // a Saber: the Saber line asks ATP, which the copy has
+      held.data.data1[2] = 0x00;
+      from = seen.registers.size();
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS,
+          quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (3u << 8) | 1), "a weapon pick after the Disk"));
+      SpireMagBytes weapon = item_answer(from);
+      expect_eq(0x00, weapon[0]);
+      add(weapon);
+      size_t sent_result = seen.sent.size();
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_REWARD_RESULT, 1)),
+          "the weapon's RESULT");
+
+      // pause B: rule B's mag carries the MIND the disk asks
+      from = seen.registers.size();
+      expect_eq(1u, quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_ASK, 1), "pause B's mag") & 1);
+      SpireMagBytes grown = item_answer(from);
+      expect(spire_mag_stat_word(grown, 3) >= mind * 100u);
+      expect(spire_mag_level_of(grown) <= 200);
+      swap_mag(grown);
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_RESULT, 1)), "the grown mag's RESULT");
+      // settled: the next ASK without a new step answers nothing, and the weapon's equip goes after its mag
+      expect_eq(0u, quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_ASK, 1), "an ASK with nothing owed") & 1);
+      drive_clock(w, p, seen, [&]() { return line_sent(sent_result, SPIRE_EQUIP_WEAPON_MISSING_TEXT); }, "the weapon's equip after its mag");
       spire_static_test_forget(p.c, r.l);
       p.c->lobby.reset();
       r.l->clients.fill(nullptr);
