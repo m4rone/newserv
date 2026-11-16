@@ -286,6 +286,12 @@ void spire_tests_hooks() {
   std::shared_ptr<Client> no_c;
   std::shared_ptr<Lobby> no_l;
 
+  // Who is registered on the server: the run mag's savestate key on H10 (SpireMagState.cc), and nobody else anywhere
+  for (uint8_t z = 1; z <= 11; z++) {
+    auto names = spire_mech_hook_names(static_cast<H>(z));
+    expect(names == ((z == 10) ? std::vector<std::string>({"mags"}) : std::vector<std::string>()));
+  }
+
   // H1 quest_bin: without a registrant the client gets the very .bin the core handed in; each registrant gets what the
   // one before it answered
   auto bin = std::make_shared<const std::string>("bin");
@@ -539,6 +545,27 @@ void spire_tests_hooks() {
   expect_hook<SpireMechCharMeta>(
       H::CHAR_META, spire_mech_register_char_meta, T_CHAR_META<'L'>, T_CHAR_META<'E'>, T_CHAR_META<'O'>, meta_call, write,
       "", "ErLrEwLw TestE=5 TestL=7", "ErOrLrEwOwLw TestE=5 TestO=6 TestL=7", "ErEw TestE=5");
+
+  // The run mag's ledger is in the savestate whatever the switches say: its registration has no switch
+  {
+    SpireSavestate with_mag;
+    with_mag.exists = true;
+    with_mag.run_id = 78;
+    with_mag.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+    SpireRunMagLedger led;
+    led.run_id = 78;
+    led.issued_step = 2;
+    with_mag.run_mag = led;
+    write("{}");
+    const std::string on = spire_savestate_to_json(with_mag, 1);
+    expect(on.find("\"RunMag\"") != std::string::npos);
+    write(R"({"mags": false})");
+    expect_eq(on, spire_savestate_to_json(with_mag, 1));
+    auto back = spire_savestate_from_json(on);
+    expect(back.run_mag.has_value());
+    expect_eq(2u, back.run_mag->issued_step);
+    write("{}");
+  }
 
   // H10 through the core: a registrant's key is written by spire_savestate_to_json and read by
   // spire_savestate_from_json; without the registrant the text is the one of before and the key is not read
