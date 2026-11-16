@@ -29,6 +29,8 @@
 #include "SpireDrops.hh"
 #include "SpireMeta.hh"
 #include "SpireRewards.hh"
+#include "SpireMechanics.hh"
+#include "SpireRewardKinds.hh"
 #include "Items.hh"
 #include "ServerState.hh"
 
@@ -390,7 +392,7 @@ bool spire_client_text_safe(const std::string& text) {
   return text.find_first_of("<>") == std::string::npos;
 }
 
-static void spire_send_ticker(std::shared_ptr<Client> c, const std::string& text) {
+void spire_send_ticker(std::shared_ptr<Client> c, const std::string& text) {
   send_text_message(c, spire_ticker_line(text));
 }
 
@@ -1168,19 +1170,9 @@ std::vector<std::string> spire_savestate_notice_take(
   return {spire_savestate_notice_saved_line(ss), spire_savestate_notice_continue_line(category_name, quest_name)};
 }
 
-// The run of a game (lobby id; a game's id is never reused while the server runs): set by the first 'J' or 'B' in the
-// game, forgotten at its next quest start.
-struct SpireGameRun {
-  uint32_t run_id = 0;
-  bool resumed = false; // the leader resumed from its savestate
-  uint32_t elapsed = 0; // the leader's saved seconds (resumed only)
-  size_t max_clients = 0; // the most clients the game had during the run
-  std::set<std::string> savestate_files; // written ('V') or answered from ('J') in this run, also of a client gone since
-  bool real_played = false; // 7r2-M1: a client's 'B' in this run was no practice run (spire_savestate_end_deletes_file)
-};
 static std::unordered_map<uint32_t, SpireGameRun> spire_game_runs;
 
-static SpireGameRun* spire_game_run_for(std::shared_ptr<const Lobby> l) {
+SpireGameRun* spire_game_run_for(std::shared_ptr<const Lobby> l) {
   auto it = spire_game_runs.find(l->lobby_id);
   if (it == spire_game_runs.end()) {
     return nullptr;
@@ -1237,7 +1229,7 @@ static std::unordered_map<const Client*, SpireClientRun> spire_client_runs;
 
 // Route B bundle 9 (SpireEquipItem.hh): r143 for this client, the same answer in every 'M' answer, at 'C' 13/14 and for
 // the kit and evolution texts
-static bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
+bool spire_equip_item_available_for(std::shared_ptr<Client> c) {
   auto s = c->require_server_state();
   bool loaded = false;
   if (spire_equip_item_applies(c->specific_version) && s->data->client_functions) {
@@ -1516,7 +1508,7 @@ static std::string spire_run_mag_key(std::shared_ptr<const Client> c) {
   return std::format("{:010}.{}", serial_number, spire_guard_character_id(character->disp));
 }
 
-static SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client> c, uint32_t run_id, bool create) {
+SpireRunMagLedger* spire_run_mag_ledger_for(std::shared_ptr<const Client> c, uint32_t run_id, bool create) {
   std::string key = spire_run_mag_key(c);
   if (!run_id || key.empty()) {
     return nullptr;
@@ -2209,7 +2201,7 @@ static void spire_checkpoint_record_boss(
 static void spire_checkpoint_store(std::shared_ptr<const Lobby> l, const auto& clients, uint8_t k, bool boss = false);
 
 // v44: 'V' (SpireFlagBridge.hh): the client's room-start state and its run copy's items, replacing its savestate
-static std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number);
+std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number);
 
 static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -3548,7 +3540,7 @@ static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_
 static std::unordered_map<const Client*, SpireStartLevelSent> spire_start_level_run;
 
 // B-AF-7: the start_level bonus of the run this client plays in this game and quest (spire_start_level_run), if known
-static std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number) {
+std::optional<uint32_t> spire_start_level_run_bonus(const Client* c, uint32_t lobby_id, uint32_t quest_number) {
   auto it = spire_start_level_run.find(c);
   if ((it == spire_start_level_run.end()) || (it->second.lobby_id != lobby_id) || (it->second.quest_number != quest_number)) {
     return std::nullopt;
@@ -3837,8 +3829,8 @@ asio::awaitable<void> spire_equip_check_later(std::weak_ptr<Client> weak_c, std:
 // B-REGIE-22-34: the run mag (point 'C' 14, also a resume's mag) gets no line; SPIRE_EQUIP_CHECK_DELAY after each send
 // newserv looks at its copy and sends SpireEquipItem again while the mag is still unequipped
 // (spire_run_mag_equip_again), up to SPIRE_RUN_MAG_EQUIP_SENDS sends.
-static asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
-    uint32_t item_id, std::string what, uint8_t point, uint32_t slot = 0) {
+asio::awaitable<void> spire_equip_item_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
+    uint32_t item_id, std::string what, uint8_t point, uint32_t slot) {
   for (uint32_t sends = 1;; sends++) {
     try {
       auto s = c->require_server_state();
@@ -4271,28 +4263,9 @@ static std::shared_ptr<const SpireRewardTable> spire_rewards_table_cached(std::s
   }
 }
 
-// What a reward pick answered with an item, until its RESULT ('Z' sub 7)
-struct SpireRewardPending {
-  SpireRewardOffer offer;
-  SpireMagNeed need;
-  uint16_t disk_mind = 0; // part B: the MIND this reward disk asks of the mag (in need.mind too)
-  bool mag_due = false;
-  bool server_offer = false; // false: the entry's own item (no server reward)
-  uint32_t atp = 0, ata = 0, mst = 0, level = 0; // the run copy at the pick
-  std::string class_name;
-  std::optional<SpireMagBytes> mag_before;
-};
-// Per client and game: the offers of its last 'Q' by board slot (replaced at each 'Q'), and the pick in flight
-struct SpireRewardOffers {
-  std::weak_ptr<const Client> client;
-  uint32_t lobby_id = 0;
-  std::map<uint8_t, SpireRewardOffer> by_slot;
-  std::optional<SpireRewardPending> pending;
-  uint32_t equip_seq = 0; // counts the server weapons taken: a later one ends an earlier one's wait for its mag
-};
 static std::unordered_map<const Client*, SpireRewardOffers> spire_reward_offers;
 
-static SpireRewardOffers& spire_reward_offers_for(const std::shared_ptr<Client>& c, uint32_t lobby_id) {
+SpireRewardOffers& spire_reward_offers_for(const std::shared_ptr<Client>& c, uint32_t lobby_id) {
   auto it = spire_reward_offers.find(c.get());
   if ((it != spire_reward_offers.end()) && ((it->second.client.lock() != c) || (it->second.lobby_id != lobby_id))) {
     spire_reward_offers.erase(it);
@@ -4321,7 +4294,7 @@ static const uint8_t* spire_reward_held_weapon(const PlayerInventory& inventory)
 }
 
 // The one run mag of the run copy (type 02), or nullopt
-static std::optional<SpireMagBytes> spire_reward_run_mag(const PlayerInventory& inventory, bool* equipped = nullptr) {
+std::optional<SpireMagBytes> spire_reward_run_mag(const PlayerInventory& inventory, bool* equipped) {
   std::optional<SpireMagBytes> ret;
   for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
     const auto& item = inventory.items[z];
@@ -4368,7 +4341,7 @@ SpireRewardWorn spire_reward_worn(std::shared_ptr<const ItemParameterTable> ipt,
   return ret;
 }
 
-static std::string spire_reward_mag_text(const std::optional<SpireMagBytes>& mag) {
+std::string spire_reward_mag_text(const std::optional<SpireMagBytes>& mag) {
   if (!mag) {
     return "none";
   }
@@ -4431,29 +4404,6 @@ void spire_static_test_run_boss(std::shared_ptr<Client> c, std::shared_ptr<const
   spire_run_rooms_for(c, l->lobby_id).boss_rooms.emplace(k);
 }
 
-// The MIND levels the run mag is planned to have at this point of the run (SpireRewardDiskState mind_plan): the row of
-// the step the ledger expects, in the column of its lean, merged with the floor of the run's bought start levels; 0
-// without a ledger or a usable mag table
-static uint16_t spire_reward_mind_plan(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
-    const SpireRunMagLedger* led, uint8_t char_class) {
-  if (!led) {
-    return 0;
-  }
-  try {
-    auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
-    auto it = table.classes.find(spire_mag_archetype(char_class));
-    if (!table.enabled || (it == table.classes.end())) {
-      return 0;
-    }
-    auto column = spire_mag_column(it->second, led->lean);
-    uint32_t step = spire_mag_expected_step(column.line.steps.size(), led->start_step, led->boss_rooms.size(), false);
-    uint32_t bonus = l->quest ? spire_start_level_run_bonus(c.get(), l->lobby_id, l->quest->meta.quest_number).value_or(0) : 0;
-    return spire_mag_stat_word(spire_mag_step_bytes(column.line, step, bonus, std::nullopt), 3) / 100;
-  } catch (const std::exception&) {
-    return 0;
-  }
-}
-
 // One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4; a rare line of the pool is
 // never below Rare. curse: the drawn curse code of the slot (1 Cursed Chest, 2 Jellen Mark, 3 Glass; 0 none), which
 // rides only on a rare line and pays a disk in levels (spire_reward_curse_disk_levels).
@@ -4476,42 +4426,14 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
     tier = SpireRewardTier::RARE;
   }
   try {
-    std::optional<SpireRewardDiskState> disk;
-    if (kind == SpireRewardKind::DISK) { // part B: what the run copy knows, may learn and can reach with its mag
-      disk.emplace();
-      auto s = c->require_server_state();
-      auto ipt = s->data->item_parameter_table(Version::GC_V3);
-      uint8_t char_class = character->disp.visual.sh.char_class;
-      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-        disk->known[t] = overlay->get_technique_level(t);
-        disk->class_max[t] = ipt->get_max_tech_level(char_class, t);
-      }
-      disk->mst = overlay->disp.stats.char_stats.mst + spire_reward_worn(ipt, overlay->inventory).bonus.mst;
-      disk->mst_cap = s->data->level_table(c->version())->max_stats_for_class(char_class).char_stats.mst;
-      auto* run = spire_game_run_for(l);
-      auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
-      uint32_t asked = led ? (led->need.pow + led->need.dex) : 0; // the reward weapon's POW and DEX stay (rule B)
-      disk->mind_room = (asked < 200) ? (200 - asked) : 0;
-      auto mag = spire_reward_run_mag(overlay->inventory);
-      disk->mind_now = mag ? (spire_mag_stat_word(*mag, 3) / 100) : 0;
-      disk->mind_plan = spire_reward_mind_plan(c, l, led, char_class);
-      // a line that was a fixed disk ("Foie"): its own item names the technique
-      if (entry.has_own_bytes && (entry.own_bytes[0] == 0x03) && (entry.own_bytes[1] == 0x02)) {
-        disk->line_tech = entry.own_bytes[4];
-      }
-      disk->extra_levels = entry.rare ? spire_reward_curse_disk_levels(curse) : 0;
-    }
+    SpireRewardLive live{c, l, serial_number, character, overlay, entry, curse, k, trede, elite, std::string()};
     auto offer = spire_reward_offer(table, kind, character->disp.visual.sh.char_class,
-        spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd, disk ? &*disk : nullptr, rung);
+        spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd, nullptr, rung, &live);
     c->log.info_f("Spire reward: offer {} {} for room {} (index {}, {}, W{}, trede {}, odds L<{} E<{} R<{}{}{}): {}{}",
         spire_reward_kind_name(kind), spire_reward_tier_name(tier), k, room_index, spire_meta_difficulty_name(rung),
         offer.w, trede, odds.legendary, odds.epic, odds.rare, elite ? ", elite" : "", entry.rare ? ", a rare line" : "",
         offer.label,
-        !disk ? std::string()
-        : std::format(" (the line's own technique: {}; MST {}, mag MIND {} worn and {} planned, room for {}; a curse "
-                      "adds {} level(s))",
-              (disk->line_tech < SPIRE_TECH_COUNT) ? table.techs[disk->line_tech].name : std::string("none"), disk->mst,
-              disk->mind_now, disk->mind_plan, disk->mind_room, disk->extra_levels));
+        live.log_detail);
     return offer;
   } catch (const std::exception& e) {
     *why = e.what();
@@ -4569,7 +4491,7 @@ static std::map<uint32_t, std::string> spire_reward_draw_offers(std::shared_ptr<
 }
 
 // The 6x77s of a reward answer: r20-r31 (with an item), r41, DONE
-static void spire_reward_answer(std::shared_ptr<Client> c, const SpireMagBytes* item, bool mag_follows) {
+void spire_reward_answer(std::shared_ptr<Client> c, const SpireMagBytes* item, bool mag_follows) {
   if (item) {
     for (size_t z = 0; z < 12; z++) {
       spire_send_register(c, SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + z, (*item)[z]);
@@ -4689,54 +4611,29 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
   size_t main_stat = spire_mag_main_stat(arch_name, led ? led->lean : 0);
 
-  if (offer->kind == SpireRewardKind::MAG_FOOD) {
-    if (!led) {
-      own_item(std::format("mag food without a run mag ({})", (refusal == R::NONE) ? "no ledger" : spire_run_mag_refusal_name(refusal)));
-      return;
-    }
-    led->feed_levels = std::min<uint32_t>(led->feed_levels + offer->food_levels, 200);
-    led->boost_due = true;
-    offers.by_slot.erase(slot);
-    spire_reward_answer(c, nullptr, true);
-    c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} on {}; run copy Lv{} ATP {} ATA {} MST {}; "
-        "mag now {}; owed food {} levels; the run mag follows in this room's pause B (rule B)",
-        spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
-        offer->label, (main_stat == 0) ? "DEF" : (main_stat == 3) ? "MIND" : "POW", p.level + 1, p.atp, p.ata, p.mst,
-        spire_reward_mag_text(p.mag_before), led->feed_levels);
+  // The seam: the kind's own pick (SpireMechanics.hh). A kind that is not registered, or whose switch is off, answers
+  // the entry's own item, also for an offer it made at the 'Q' while it was on.
+  const SpireMechKind* reg = spire_mech_kind(offer->kind, offer->first_route);
+  if (!reg || !reg->pick || !spire_mech_enabled(reg->switch_key, reg->default_off)) {
+    own_item(std::format("reward kind {} is not registered or is switched off", spire_reward_kind_name(offer->kind)));
     return;
   }
+  SpireRewardPick pk{c, l, serial_number, quest_number, slot, entry_id, pick_curse, character, overlay, entry, table.get(),
+      &*offer, offers, p, led, mag_line, refusal, worn, main_stat, own_item};
+  reg->pick(pk);
+}
 
-  if (offer->kind == SpireRewardKind::UNIT) { // part B: no requirement and no mag; newserv equips it after its RESULT
-    offers.pending = p;
-    spire_reward_answer(c, &offer->item, false);
-    c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {}; frame {} with {} slot(s), unit slots "
-        "taken {:X}",
-        spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
-        offer->label, spire_run_mag_bytes_hex(offer->item), worn.frame ? "worn" : "NOT worn", worn.frame_slots,
-        worn.occupied);
-    return;
-  }
-
-  // part B, the disk: rule B's need keeps the weapon's POW and DEX, and the run's disks' MIND takes what they leave of
-  // the mag's 200 levels (spire_reward_need_with_disk). So a disk never costs the weapon its requirement, and a later
-  // reward weapon can be worn when it is given (the disks are learned by then).
-  bool is_disk = offer->kind == SpireRewardKind::DISK;
-  if (is_disk) {
-    // never a disk newserv itself refuses when it is used (Items.cc throws on a level above the class's highest)
-    uint8_t class_max = character ? c->require_server_state()->data->item_parameter_table(Version::GC_V3)->get_max_tech_level(
-                                        character->disp.visual.sh.char_class, offer->tech)
-                                  : 0xFF;
-    if ((class_max == 0xFF) || (offer->tech_level < 1) || (offer->tech_level > class_max + 1)) {
-      own_item(std::format("disk {} is above the class's highest level", offer->label));
-      return;
-    }
-    p.disk_mind = std::min<uint16_t>(spire_reward_disk_mind(offer->mst_required, p.mst), 200);
-    p.need = spire_reward_need_with_disk(led ? led->need : SpireMagNeed{},
-        std::max<uint16_t>(led ? led->disk_mind : 0, p.disk_mind));
-  } else {
-    p.need = spire_reward_need_with_disk(spire_reward_mag_need(offer->info, p.atp, p.ata, p.mst, table->ata_model),
-        led ? led->disk_mind : 0);
-  }
+// SpireRewardKinds.hh: shared by the kinds whose item rule B's mag must carry (a weapon, a disk)
+void spire_reward_pick_rule_b(SpireRewardPick& pk) {
+  auto& c = pk.c;
+  auto& l = pk.l;
+  auto& quest_number = pk.quest_number;
+  auto& offer = pk.offer;
+  auto& offers = pk.offers;
+  auto& p = pk.p;
+  auto& led = pk.led;
+  auto& mag_line = pk.mag_line;
+  auto& main_stat = pk.main_stat;
   if (led) {
     auto column = spire_mag_column(*mag_line, led->lean);
     auto preview = spire_mag_rule_b(column.line, std::max<int32_t>(led->issued_step, 0),
@@ -4750,26 +4647,6 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
   }
   offers.pending = p;
   spire_reward_answer(c, &offer->item, p.mag_due);
-  if (is_disk) {
-    c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {}; the client asks MST {}, the run "
-        "copy has {} (worn units +{}), so mag MIND {}; rule B needs mag POW {} DEX {} MIND {}; {}",
-        spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
-        offer->label, spire_run_mag_bytes_hex(offer->item), offer->mst_required, p.mst, worn.bonus.mst, p.disk_mind,
-        p.need.pow, p.need.dex, p.need.mind,
-        !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
-        : p.mag_due ? std::string("rule B's run mag follows in this room's pause B; the disk is the player's to use after it")
-                    : std::string("the run mag already meets it"));
-    return;
-  }
-  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {} (line {}{}); needs mag POW {} DEX {} "
-      "MIND {} ({} ATA model; worn units count ATP +{} MST +{}); {}",
-      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
-      offer->label, spire_run_mag_bytes_hex(offer->item), offer->line,
-      (offer->line != offer->from_line) ? std::format(", held {}", offer->from_line) : "", p.need.pow, p.need.dex,
-      p.need.mind, spire_ata_model_name(table->ata_model), worn.bonus.atp, worn.bonus.mst,
-      !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
-      : p.mag_due ? std::string("rule B's run mag follows in this room's pause B, the weapon's equip after it")
-                  : std::string("the run mag already meets it"));
 }
 
 // After the RESULT of a server reward weapon: SpireEquipItem for it once newserv's copy holds it and, when rule B owes a
@@ -4982,13 +4859,24 @@ static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const
         quest_number, p.offer.slot, spire_run_mag_bytes_hex(p.offer.item));
     return;
   }
-  if (p.offer.kind == SpireRewardKind::UNIT) { // part B: no rule B need of its own; the weapon's need stays
-    c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created", serial_number, quest_number,
-        p.offer.slot, p.offer.label);
-    asio::co_spawn(*c->require_server_state()->io_context,
-        spire_reward_equip_unit(c, l, std::move(p), serial_number), asio::detached);
+  // The seam: the kind's own result (SpireMechanics.hh). The item exists on the client by now, so a switch that went
+  // off since the pick does not stop it.
+  const SpireMechKind* reg = spire_mech_kind(p.offer.kind, p.offer.first_route);
+  if (!reg || !reg->result) {
+    c->log.warning_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created; reward kind {} has no result "
+        "function, nothing follows", serial_number, quest_number, p.offer.slot, p.offer.label,
+        spire_reward_kind_name(p.offer.kind));
     return;
   }
+  SpireRewardResult rs{c, l, serial_number, quest_number, offers, p};
+  reg->result(rs);
+}
+
+// SpireRewardKinds.hh: shared by the same kinds
+void spire_reward_result_rule_b(SpireRewardResult& rs) {
+  auto& c = rs.c;
+  auto& l = rs.l;
+  auto& p = rs.p;
   auto* run = spire_game_run_for(l);
   auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
   if (led) {
@@ -5000,17 +4888,332 @@ static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const
       led->boost_due = true;
     }
   }
-  if (p.offer.kind == SpireRewardKind::DISK) { // nothing to equip: the player uses the disk
-    c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created{}", serial_number, quest_number,
-        p.offer.slot, p.offer.label, led ? (p.mag_due ? "; rule B mag owed" : "; the mag meets it") : "; no run mag ledger");
-    return;
+  rs.run = run;
+  rs.led = led;
+}
+
+// ---- The seam, step a: the kinds' own halves of the offer, the pick and the result, still in this file, with their
+// registration. Each moves to its own file (src/SpireReward*.cc).
+
+// The MIND levels the run mag is planned to have at this point of the run (SpireRewardDiskState mind_plan): the row of
+// the step the ledger expects, in the column of its lean, merged with the floor of the run's bought start levels; 0
+// without a ledger or a usable mag table
+static uint16_t spire_reward_mind_plan(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    const SpireRunMagLedger* led, uint8_t char_class) {
+  if (!led) {
+    return 0;
   }
+  try {
+    auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+    auto it = table.classes.find(spire_mag_archetype(char_class));
+    if (!table.enabled || (it == table.classes.end())) {
+      return 0;
+    }
+    auto column = spire_mag_column(it->second, led->lean);
+    uint32_t step = spire_mag_expected_step(column.line.steps.size(), led->start_step, led->boss_rooms.size(), false);
+    uint32_t bonus = l->quest ? spire_start_level_run_bonus(c.get(), l->lobby_id, l->quest->meta.quest_number).value_or(0) : 0;
+    return spire_mag_stat_word(spire_mag_step_bytes(column.line, step, bonus, std::nullopt), 3) / 100;
+  } catch (const std::exception&) {
+    return 0;
+  }
+}
+
+std::optional<SpireRewardOffer> spire_reward_weapon_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret);
+
+// 'Z' sub 6 of kind 1 and kind 2: rule B's need of the weapon, then the answer with the item
+void spire_reward_weapon_pick(SpireRewardPick& pk) {
+  auto& c = pk.c;
+  auto& serial_number = pk.serial_number;
+  auto& quest_number = pk.quest_number;
+  auto& slot = pk.slot;
+  auto& table = pk.table;
+  auto& offer = pk.offer;
+  auto& p = pk.p;
+  auto& led = pk.led;
+  auto& refusal = pk.refusal;
+  auto& worn = pk.worn;
+  using R = SpireRunMagRefusal;
+  p.need = spire_reward_need_with_disk(spire_reward_mag_need(offer->info, p.atp, p.ata, p.mst, table->ata_model),
+      led ? led->disk_mind : 0);
+  spire_reward_pick_rule_b(pk); // SpireFlagBridge.cc: p.mag_due, the pick in flight, the answer
+  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {} (line {}{}); needs mag POW {} DEX {} "
+      "MIND {} ({} ATA model; worn units count ATP +{} MST +{}); {}",
+      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+      offer->label, spire_run_mag_bytes_hex(offer->item), offer->line,
+      (offer->line != offer->from_line) ? std::format(", held {}", offer->from_line) : "", p.need.pow, p.need.dex,
+      p.need.mind, spire_ata_model_name(table->ata_model), worn.bonus.atp, worn.bonus.mst,
+      !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
+      : p.mag_due ? std::string("rule B's run mag follows in this room's pause B, the weapon's equip after it")
+                  : std::string("the run mag already meets it"));
+}
+
+// 'Z' sub 7 of kind 1 and kind 2: the weapon exists; the equip follows (spire_reward_equip)
+void spire_reward_weapon_result(SpireRewardResult& rs) {
+  auto& c = rs.c;
+  auto& l = rs.l;
+  auto& serial_number = rs.serial_number;
+  auto& quest_number = rs.quest_number;
+  auto& offers = rs.offers;
+  auto& p = rs.p;
+  spire_reward_result_rule_b(rs); // SpireFlagBridge.cc: the ledger keeps the weapon's need
+  auto& run = rs.run;
+  auto& led = rs.led;
   uint32_t equip_seq = ++offers.equip_seq;
   c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created{}", serial_number, quest_number,
       p.offer.slot, p.offer.label, led ? (p.mag_due ? "; rule B mag owed" : "; the mag meets it") : "; no run mag ledger");
   asio::co_spawn(*c->require_server_state()->io_context,
       spire_reward_equip(c, l, std::move(p), serial_number, run ? run->run_id : 0, equip_seq), asio::detached);
 }
+
+// Kind 1 and kind 2: one file, one switch, no section of their own in the grid (classes, lines and items are shared)
+[[maybe_unused]] const bool spire_reward_weapon_registered =
+    spire_mech_register_kind({SpireRewardKind::WEAPON, "aanval", false, nullptr, spire_reward_weapon_offer,
+        spire_reward_weapon_pick, spire_reward_weapon_result}) &&
+    spire_mech_register_kind({SpireRewardKind::NEW_LINE, "aanval", false, nullptr, spire_reward_weapon_offer,
+        spire_reward_weapon_pick, spire_reward_weapon_result});
+
+void spire_reward_mag_food_parse(const phosg::JSON& json, SpireRewardTable& ret);
+std::optional<SpireRewardOffer> spire_reward_mag_food_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret);
+
+// 'Z' sub 6 of kind 3: the ledger owes the food; no item, the run mag follows (rule B). No RESULT follows.
+void spire_reward_mag_food_pick(SpireRewardPick& pk) {
+  auto& c = pk.c;
+  auto& serial_number = pk.serial_number;
+  auto& quest_number = pk.quest_number;
+  auto& slot = pk.slot;
+  auto& offer = pk.offer;
+  auto& offers = pk.offers;
+  auto& p = pk.p;
+  auto& led = pk.led;
+  auto& refusal = pk.refusal;
+  auto& main_stat = pk.main_stat;
+  auto& own_item = pk.own_item;
+  using R = SpireRunMagRefusal;
+  if (!led) {
+    own_item(std::format("mag food without a run mag ({})", (refusal == R::NONE) ? "no ledger" : spire_run_mag_refusal_name(refusal)));
+    return;
+  }
+  led->feed_levels = std::min<uint32_t>(led->feed_levels + offer->food_levels, 200);
+  led->boost_due = true;
+  offers.by_slot.erase(slot);
+  spire_reward_answer(c, nullptr, true);
+  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} on {}; run copy Lv{} ATP {} ATA {} MST {}; "
+      "mag now {}; owed food {} levels; the run mag follows in this room's pause B (rule B)",
+      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+      offer->label, (main_stat == 0) ? "DEF" : (main_stat == 3) ? "MIND" : "POW", p.level + 1, p.atp, p.ata, p.mst,
+      spire_reward_mag_text(p.mag_before), led->feed_levels);
+  return;
+}
+
+[[maybe_unused]] const bool spire_reward_mag_food_registered = spire_mech_register_kind({SpireRewardKind::MAG_FOOD, "mags",
+    false, spire_reward_mag_food_parse, spire_reward_mag_food_offer, spire_reward_mag_food_pick, nullptr});
+
+void spire_reward_disk_parse(const phosg::JSON& json, SpireRewardTable& ret);
+
+// What a DISK offer needs to know of the run copy (SpireRewardDiskState), read from the client at the bridge
+SpireRewardDiskState spire_reward_disk_state(const SpireRewardLive& live) {
+  const auto& c = live.c;
+  const auto& l = live.l;
+  const auto& character = live.character;
+  const auto& overlay = live.overlay;
+  const auto& entry = live.entry;
+  const auto& curse = live.curse;
+  std::optional<SpireRewardDiskState> disk;
+  { // part B: what the run copy knows, may learn and can reach with its mag
+    disk.emplace();
+    auto s = c->require_server_state();
+    auto ipt = s->data->item_parameter_table(Version::GC_V3);
+    uint8_t char_class = character->disp.visual.sh.char_class;
+    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+      disk->known[t] = overlay->get_technique_level(t);
+      disk->class_max[t] = ipt->get_max_tech_level(char_class, t);
+    }
+    disk->mst = overlay->disp.stats.char_stats.mst + spire_reward_worn(ipt, overlay->inventory).bonus.mst;
+    disk->mst_cap = s->data->level_table(c->version())->max_stats_for_class(char_class).char_stats.mst;
+    auto* run = spire_game_run_for(l);
+    auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
+    uint32_t asked = led ? (led->need.pow + led->need.dex) : 0; // the reward weapon's POW and DEX stay (rule B)
+    disk->mind_room = (asked < 200) ? (200 - asked) : 0;
+    auto mag = spire_reward_run_mag(overlay->inventory);
+    disk->mind_now = mag ? (spire_mag_stat_word(*mag, 3) / 100) : 0;
+    disk->mind_plan = spire_reward_mind_plan(c, l, led, char_class);
+    // a line that was a fixed disk ("Foie"): its own item names the technique
+    if (entry.has_own_bytes && (entry.own_bytes[0] == 0x03) && (entry.own_bytes[1] == 0x02)) {
+      disk->line_tech = entry.own_bytes[4];
+    }
+    disk->extra_levels = entry.rare ? spire_reward_curse_disk_levels(curse) : 0;
+  }
+  return *disk;
+}
+
+// The offer of kind 4: one technique the copy can learn and reach, at the level its MST budget meets
+std::optional<SpireRewardOffer> spire_reward_disk_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
+  const auto& table = in.table;
+  const auto& cls = in.cls;
+  const auto& room_index = in.room_index;
+  const auto& tier = in.tier;
+  const auto& tier_label = in.tier_label;
+  const auto& rnd = in.rnd;
+  const auto& rung = in.rung;
+  // a test hands the run copy's state itself (in.disk); at the bridge the kind reads it from the client
+  const SpireRewardDiskState* disk = in.disk;
+  std::optional<SpireRewardDiskState> live_disk;
+  if (!disk && in.live) {
+    live_disk = spire_reward_disk_state(*in.live);
+    disk = &*live_disk;
+    in.live->log_detail = std::format(" (the line's own technique: {}; MST {}, mag MIND {} worn and {} planned, room for {}; a curse "
+                    "adds {} level(s))",
+            (disk->line_tech < SPIRE_TECH_COUNT) ? table.techs[disk->line_tech].name : std::string("none"), disk->mst,
+            disk->mind_now, disk->mind_plan, disk->mind_room, disk->extra_levels);
+  }
+  if (!disk) {
+    throw std::runtime_error("a disk offer without the run copy's techniques");
+  }
+  if (table.disk_levels.empty()) {
+    throw std::runtime_error("the reward grid has no Disks");
+  }
+  // the room's row; past the last room of the grid, the last one (as spire_reward_w)
+  auto r_it = table.disk_levels.upper_bound(room_index);
+  if (r_it != table.disk_levels.begin()) {
+    r_it--;
+  }
+  size_t z = static_cast<size_t>(tier) & 3;
+  // the techniques Sega drops here: on a rung its disks of that difficulty, which the grid holds in a later column
+  size_t column = std::min<size_t>(z + table.rung_disk_columns[rung & 3], 3);
+  uint32_t budget = spire_reward_disk_budget(*disk, table.tier_disk_mind[z]);
+  auto level_of = [&](size_t t) -> uint8_t {
+    return spire_reward_disk_level(table.techs[t], budget, disk->known[t], disk->class_max[t], *disk);
+  };
+  std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
+  // a line that names a disk of its own keeps that technique while the copy can still grow in it and reach it,
+  // also where Sega drops none of it; only then any technique Sega drops here
+  if (disk->line_tech < SPIRE_TECH_COUNT) {
+    uint8_t level = level_of(disk->line_tech);
+    if (level) {
+      can.emplace_back(disk->line_tech, level);
+    }
+  }
+  if (can.empty()) {
+    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+      uint8_t level = r_it->second[t][column] ? level_of(t) : 0;
+      if (level) {
+        can.emplace_back(static_cast<uint8_t>(t), level);
+      }
+    }
+  }
+  if (can.empty()) {
+    throw std::runtime_error(std::format("no technique disk for {} at room index {} {}: every technique of the tier "
+                                         "is known, not the class's, or asks more MST than the copy can reach",
+        cls.name, room_index, tier_label));
+  }
+  const auto& [tech, level] = can[rnd(can.size()) % can.size()];
+  ret.tech = tech;
+  ret.tech_level = level;
+  ret.mst_required = spire_reward_disk_mst(table.techs[tech], level);
+  ret.item[0] = 0x03;
+  ret.item[1] = 0x02;
+  ret.item[2] = level - 1;
+  ret.item[4] = tech;
+  ret.item_name = std::format("{} Lv{}", table.techs[tech].name, level);
+  ret.label = tier_label + " " + ret.item_name;
+  return ret;
+}
+
+// 'Z' sub 6 of kind 4: the MIND the disk asks of the mag, then the answer with the item
+void spire_reward_disk_pick(SpireRewardPick& pk) {
+  auto& c = pk.c;
+  auto& serial_number = pk.serial_number;
+  auto& quest_number = pk.quest_number;
+  auto& slot = pk.slot;
+  auto& character = pk.character;
+  auto& offer = pk.offer;
+  auto& p = pk.p;
+  auto& led = pk.led;
+  auto& refusal = pk.refusal;
+  auto& worn = pk.worn;
+  auto& own_item = pk.own_item;
+  using R = SpireRunMagRefusal;
+  // part B, the disk: rule B's need keeps the weapon's POW and DEX, and the run's disks' MIND takes what they leave of
+  // the mag's 200 levels (spire_reward_need_with_disk). So a disk never costs the weapon its requirement, and a later
+  // reward weapon can be worn when it is given (the disks are learned by then).
+  // never a disk newserv itself refuses when it is used (Items.cc throws on a level above the class's highest)
+  uint8_t class_max = character ? c->require_server_state()->data->item_parameter_table(Version::GC_V3)->get_max_tech_level(
+                                      character->disp.visual.sh.char_class, offer->tech)
+                                : 0xFF;
+  if ((class_max == 0xFF) || (offer->tech_level < 1) || (offer->tech_level > class_max + 1)) {
+    own_item(std::format("disk {} is above the class's highest level", offer->label));
+    return;
+  }
+  p.disk_mind = std::min<uint16_t>(spire_reward_disk_mind(offer->mst_required, p.mst), 200);
+  p.need = spire_reward_need_with_disk(led ? led->need : SpireMagNeed{},
+      std::max<uint16_t>(led ? led->disk_mind : 0, p.disk_mind));
+  spire_reward_pick_rule_b(pk); // SpireFlagBridge.cc: p.mag_due, the pick in flight, the answer
+  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {}; the client asks MST {}, the run "
+      "copy has {} (worn units +{}), so mag MIND {}; rule B needs mag POW {} DEX {} MIND {}; {}",
+      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+      offer->label, spire_run_mag_bytes_hex(offer->item), offer->mst_required, p.mst, worn.bonus.mst, p.disk_mind,
+      p.need.pow, p.need.dex, p.need.mind,
+      !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
+      : p.mag_due ? std::string("rule B's run mag follows in this room's pause B; the disk is the player's to use after it")
+                  : std::string("the run mag already meets it"));
+}
+
+// 'Z' sub 7 of kind 4: the disk exists
+void spire_reward_disk_result(SpireRewardResult& rs) {
+  auto& c = rs.c;
+  auto& serial_number = rs.serial_number;
+  auto& quest_number = rs.quest_number;
+  auto& p = rs.p;
+  spire_reward_result_rule_b(rs); // SpireFlagBridge.cc: the ledger keeps the disk's MIND
+  auto& led = rs.led;
+  // nothing to equip: the player uses the disk
+  c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created{}", serial_number, quest_number,
+      p.offer.slot, p.offer.label, led ? (p.mag_due ? "; rule B mag owed" : "; the mag meets it") : "; no run mag ledger");
+}
+
+[[maybe_unused]] const bool spire_reward_disk_registered = spire_mech_register_kind({SpireRewardKind::DISK, "force.schijf",
+    false, spire_reward_disk_parse, spire_reward_disk_offer, spire_reward_disk_pick, spire_reward_disk_result});
+
+void spire_reward_unit_parse(const phosg::JSON& json, SpireRewardTable& ret);
+std::optional<SpireRewardOffer> spire_reward_unit_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret);
+
+// 'Z' sub 6 of kind 5 (part B): no requirement and no mag; newserv equips it after its RESULT
+void spire_reward_unit_pick(SpireRewardPick& pk) {
+  auto& c = pk.c;
+  auto& serial_number = pk.serial_number;
+  auto& quest_number = pk.quest_number;
+  auto& slot = pk.slot;
+  auto& offer = pk.offer;
+  auto& offers = pk.offers;
+  auto& p = pk.p;
+  auto& worn = pk.worn;
+  offers.pending = p;
+  spire_reward_answer(c, &offer->item, false);
+  c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {}; frame {} with {} slot(s), unit slots "
+      "taken {:X}",
+      spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+      offer->label, spire_run_mag_bytes_hex(offer->item), worn.frame ? "worn" : "NOT worn", worn.frame_slots,
+      worn.occupied);
+  return;
+}
+
+// 'Z' sub 7 of kind 5 (part B): no rule B need of its own; the weapon's need stays
+void spire_reward_unit_result(SpireRewardResult& rs) {
+  auto& c = rs.c;
+  auto& l = rs.l;
+  auto& serial_number = rs.serial_number;
+  auto& quest_number = rs.quest_number;
+  auto& p = rs.p;
+  c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created", serial_number, quest_number,
+      p.offer.slot, p.offer.label);
+  asio::co_spawn(*c->require_server_state()->io_context,
+      spire_reward_equip_unit(c, l, std::move(p), serial_number), asio::detached);
+  return;
+}
+
+[[maybe_unused]] const bool spire_reward_unit_registered = spire_mech_register_kind({SpireRewardKind::UNIT,
+    "verdediging.units", false, spire_reward_unit_parse, spire_reward_unit_offer, spire_reward_unit_pick,
+    spire_reward_unit_result});
 
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {

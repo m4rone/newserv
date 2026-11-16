@@ -7,6 +7,9 @@
 #include <phosg/JSON.hh>
 #include <stdexcept>
 
+#include "SpireMechanics.hh"
+#include "SpireRewardKinds.hh"
+
 SpireAtaModel spire_ata_model_for_name(const std::string& name) {
   if (name == "table") {
     return SpireAtaModel::TABLE;
@@ -85,8 +88,6 @@ SpireAtaModel spire_ata_model_configured() {
   }
 }
 
-static constexpr const char* TIER_NAMES[4] = {"Normal", "Rare", "Epic", "Legendary"};
-
 const char* spire_reward_tier_name(SpireRewardTier tier) {
   return TIER_NAMES[static_cast<size_t>(tier) & 3];
 }
@@ -116,18 +117,24 @@ const char* spire_reward_kind_name(SpireRewardKind kind) {
       return "Schijf";
     case SpireRewardKind::UNIT:
       return "Kracht";
+    case SpireRewardKind::FOCUS:
+      return "Focus";
+    case SpireRewardKind::MANA:
+      return "Mana";
+    case SpireRewardKind::ARMOR:
+      return "Pantser";
   }
   return "?";
 }
 
-static uint32_t spire_code_of(const std::string& hex) {
+uint32_t spire_code_of(const std::string& hex) {
   if (hex.size() != 6) {
     throw std::runtime_error(std::format("item code {} is not 6 hex digits", hex));
   }
   return std::stoul(hex, nullptr, 16);
 }
 
-static uint32_t spire_get_u(const phosg::JSON& json, const std::string& key, uint32_t max, uint32_t def = 0xFFFFFFFF) {
+uint32_t spire_get_u(const phosg::JSON& json, const std::string& key, uint32_t max, uint32_t def) {
   int64_t v = (def == 0xFFFFFFFF) ? json.get_int(key) : json.get_int(key, def);
   if ((v < 0) || (v > max)) {
     throw std::runtime_error(std::format("{} {} outside 0-{}", key, v, max));
@@ -154,9 +161,6 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
   const auto& tr = json.at("TredeRooms");
   ret.trede1_room = spire_get_u(tr, "Dragon", 255);
   ret.trede2_room = spire_get_u(tr, "DeRolLe", 255);
-  for (size_t z = 0; z < 4; z++) {
-    ret.mag_food[z] = spire_get_u(json.at("MagFood"), TIER_NAMES[z], 200);
-  }
   for (const auto& [k, w] : json.get_dict("RoomW")) {
     ret.room_w.emplace(std::stoul(k), spire_get_u(json.at("RoomW"), k, 6));
   }
@@ -251,86 +255,10 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
     });
     ret.classes.emplace(index, std::move(cls));
   }
-  if (json.contains("Units")) { // part B; a part A file has none
-    const auto& units = json.at("Units");
-    for (const auto& [code, u_json] : units.get_dict("Items")) {
-      SpireRewardUnit u;
-      u.name = u_json->get_string("Name");
-      u.stars = spire_get_u(*u_json, "Stars", 12);
-      u.stat = spire_get_u(*u_json, "Stat", 0xFFFF);
-      u.amount = spire_get_u(*u_json, "Amount", 0xFFFF);
-      uint32_t c = spire_code_of(code);
-      if ((c >> 8) != 0x0103) {
-        throw std::runtime_error(std::format("Units Items {} is not a unit (0103xx)", code));
-      }
-      ret.units.emplace(c, std::move(u));
-    }
-    for (const auto& [arch, a_json] : units.get_dict("Archetypes")) {
-      std::array<std::vector<uint32_t>, 4> tiers;
-      for (size_t z = 0; z < 4; z++) {
-        for (const auto& code : a_json->get_list(TIER_NAMES[z])) {
-          uint32_t c = spire_code_of(code->as_string());
-          if (!ret.units.count(c)) {
-            throw std::runtime_error(std::format("Units {} {}: {:06X} not in Units Items", arch, TIER_NAMES[z], c));
-          }
-          tiers[z].emplace_back(c);
-        }
-        if (tiers[z].empty()) {
-          throw std::runtime_error(std::format("Units {} {}: no unit", arch, TIER_NAMES[z]));
-        }
-      }
-      ret.unit_tiers.emplace(arch, std::move(tiers));
-    }
-  }
-  if (json.contains("Disks")) { // part B, the disk; a file without it gives a DISK entry its own item
-    const auto& disks = json.at("Disks");
-    const auto& techs = disks.get_list("Techs");
-    if (techs.size() != SPIRE_TECH_COUNT) {
-      throw std::runtime_error(std::format("Disks Techs has {} techniques, not {}", techs.size(), SPIRE_TECH_COUNT));
-    }
-    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-      ret.techs[t].name = techs[t]->get_string("Name");
-      const auto& req = techs[t]->get_list("Req");
-      if (ret.techs[t].name.empty() || (req.size() != SPIRE_TECH_LEVELS)) {
-        throw std::runtime_error(std::format("Disks Techs {}: no name, or Req has {} levels, not {}", t, req.size(),
-            SPIRE_TECH_LEVELS));
-      }
-      for (size_t z = 0; z < SPIRE_TECH_LEVELS; z++) {
-        int64_t v = req[z]->as_int();
-        if ((v < 1) || (v > 5000) || (z && (v < ret.techs[t].req[z - 1]))) {
-          throw std::runtime_error(std::format("Disks Techs {} Req level {}: {} is not 1-5000 or falls", t, z + 1, v));
-        }
-        ret.techs[t].req[z] = v;
-      }
-    }
-    for (const auto& [room, r_json] : disks.get_dict("Rooms")) {
-      const auto& rows = r_json->as_list();
-      if (rows.size() != SPIRE_TECH_COUNT) {
-        throw std::runtime_error(std::format("Disks Rooms {}: {} techniques, not {}", room, rows.size(), SPIRE_TECH_COUNT));
-      }
-      std::array<std::array<uint8_t, 4>, SPIRE_TECH_COUNT> levels{};
-      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-        const auto& row = rows[t]->as_list();
-        if (row.size() != 4) {
-          throw std::runtime_error(std::format("Disks Rooms {} technique {}: {} tiers, not 4", room, t, row.size()));
-        }
-        for (size_t z = 0; z < 4; z++) {
-          int64_t v = row[z]->as_int();
-          if ((v < 0) || (v > 30)) {
-            throw std::runtime_error(std::format("Disks Rooms {} technique {} {}: level {} outside 0-30", room, t,
-                TIER_NAMES[z], v));
-          }
-          levels[t][z] = v;
-        }
-      }
-      uint32_t index = std::stoul(room);
-      if (!index) {
-        throw std::runtime_error("Disks Rooms 0: the first room is 1");
-      }
-      ret.disk_levels.emplace(index, levels);
-    }
-    if (ret.disk_levels.empty()) {
-      throw std::runtime_error("Disks Rooms is empty");
+  // The seam: every registered kind reads its own section (SpireMechanics.hh), in the order of the kind numbers
+  for (const SpireMechKind* reg : spire_mech_kinds()) {
+    if (reg->parse) {
+      reg->parse(json, ret);
     }
   }
   return ret;
@@ -466,9 +394,182 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, ui
   return 0; // no level above what the copy knows that it could use
 }
 
+// ---- The seam, step a: the kinds' own halves of the grid and the offer, still in this file. Each moves to its own
+// file (src/SpireReward*.cc) and registers there; the registration is in SpireFlagBridge.cc until then.
+
+// The offer of kind 1 and kind 2: the weapon of the cell (line, W, tier), with one of the cell's specials
+std::optional<SpireRewardOffer> spire_reward_weapon_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
+  const auto& table = in.table;
+  const auto& kind = in.kind;
+  const auto& cls = in.cls;
+  const auto& tier = in.tier;
+  const auto& tier_label = in.tier_label;
+  const auto& rnd = in.rnd;
+  const auto& own_line = in.own_line;
+  ret.line = ret.from_line;
+  if (kind == SpireRewardKind::NEW_LINE) {
+    std::vector<std::string> others;
+    for (const auto& ln : cls.line_order) {
+      if ((ln != ret.from_line) && own_line(ln)) { // a force: another MST line, never a saber, slicer or gun
+        others.emplace_back(ln);
+      }
+    }
+    if (!others.empty()) {
+      ret.line = others[rnd(others.size()) % others.size()];
+    }
+  }
+  const auto& line = cls.lines.at(ret.line);
+  auto w_it = line.w.find(ret.w);
+  if (w_it == line.w.end()) {
+    throw std::runtime_error(std::format("{} {} has no W{}", cls.name, ret.line, ret.w));
+  }
+  const auto& cell = w_it->second.tiers[static_cast<size_t>(tier)];
+  std::string special_name;
+  uint8_t special = 0;
+  if (!cell.specials.empty()) {
+    const auto& sp = cell.specials[rnd(cell.specials.size()) % cell.specials.size()];
+    special = sp.id;
+    special_name = sp.name;
+  }
+  ret.item = spire_reward_weapon_bytes(table, cell, special);
+  ret.info = table.items.at(cell.code);
+  ret.item_name = spire_reward_weapon_name(cell, ret.item, special_name);
+  ret.label = tier_label + " " + ret.item_name;
+  return ret;
+}
+
+// The section of kind 3: MagFood, the levels per tier
+void spire_reward_mag_food_parse(const phosg::JSON& json, SpireRewardTable& ret) {
+  for (size_t z = 0; z < 4; z++) {
+    ret.mag_food[z] = spire_get_u(json.at("MagFood"), TIER_NAMES[z], 200);
+  }
+}
+
+// The offer of kind 3: the tier's levels of mag food
+std::optional<SpireRewardOffer> spire_reward_mag_food_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
+  const auto& table = in.table;
+  const auto& tier = in.tier;
+  const auto& tier_label = in.tier_label;
+  ret.food_levels = table.mag_food[static_cast<size_t>(tier)];
+  ret.item_name = std::format("Mag food +{}", ret.food_levels);
+  ret.label = tier_label + " " + ret.item_name;
+  return ret;
+}
+
+// The section of kind 4: Disks, the techniques with the MST each level asks and Sega's disks per room and tier
+void spire_reward_disk_parse(const phosg::JSON& json, SpireRewardTable& ret) {
+  if (json.contains("Disks")) { // part B, the disk; a file without it gives a DISK entry its own item
+    const auto& disks = json.at("Disks");
+    const auto& techs = disks.get_list("Techs");
+    if (techs.size() != SPIRE_TECH_COUNT) {
+      throw std::runtime_error(std::format("Disks Techs has {} techniques, not {}", techs.size(), SPIRE_TECH_COUNT));
+    }
+    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+      ret.techs[t].name = techs[t]->get_string("Name");
+      const auto& req = techs[t]->get_list("Req");
+      if (ret.techs[t].name.empty() || (req.size() != SPIRE_TECH_LEVELS)) {
+        throw std::runtime_error(std::format("Disks Techs {}: no name, or Req has {} levels, not {}", t, req.size(),
+            SPIRE_TECH_LEVELS));
+      }
+      for (size_t z = 0; z < SPIRE_TECH_LEVELS; z++) {
+        int64_t v = req[z]->as_int();
+        if ((v < 1) || (v > 5000) || (z && (v < ret.techs[t].req[z - 1]))) {
+          throw std::runtime_error(std::format("Disks Techs {} Req level {}: {} is not 1-5000 or falls", t, z + 1, v));
+        }
+        ret.techs[t].req[z] = v;
+      }
+    }
+    for (const auto& [room, r_json] : disks.get_dict("Rooms")) {
+      const auto& rows = r_json->as_list();
+      if (rows.size() != SPIRE_TECH_COUNT) {
+        throw std::runtime_error(std::format("Disks Rooms {}: {} techniques, not {}", room, rows.size(), SPIRE_TECH_COUNT));
+      }
+      std::array<std::array<uint8_t, 4>, SPIRE_TECH_COUNT> levels{};
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        const auto& row = rows[t]->as_list();
+        if (row.size() != 4) {
+          throw std::runtime_error(std::format("Disks Rooms {} technique {}: {} tiers, not 4", room, t, row.size()));
+        }
+        for (size_t z = 0; z < 4; z++) {
+          int64_t v = row[z]->as_int();
+          if ((v < 0) || (v > 30)) {
+            throw std::runtime_error(std::format("Disks Rooms {} technique {} {}: level {} outside 0-30", room, t,
+                TIER_NAMES[z], v));
+          }
+          levels[t][z] = v;
+        }
+      }
+      uint32_t index = std::stoul(room);
+      if (!index) {
+        throw std::runtime_error("Disks Rooms 0: the first room is 1");
+      }
+      ret.disk_levels.emplace(index, levels);
+    }
+    if (ret.disk_levels.empty()) {
+      throw std::runtime_error("Disks Rooms is empty");
+    }
+  }
+}
+
+// The section of kind 5: Units, the units by code and per archetype and tier the codes an offer draws from
+void spire_reward_unit_parse(const phosg::JSON& json, SpireRewardTable& ret) {
+  if (json.contains("Units")) { // part B; a part A file has none
+    const auto& units = json.at("Units");
+    for (const auto& [code, u_json] : units.get_dict("Items")) {
+      SpireRewardUnit u;
+      u.name = u_json->get_string("Name");
+      u.stars = spire_get_u(*u_json, "Stars", 12);
+      u.stat = spire_get_u(*u_json, "Stat", 0xFFFF);
+      u.amount = spire_get_u(*u_json, "Amount", 0xFFFF);
+      uint32_t c = spire_code_of(code);
+      if ((c >> 8) != 0x0103) {
+        throw std::runtime_error(std::format("Units Items {} is not a unit (0103xx)", code));
+      }
+      ret.units.emplace(c, std::move(u));
+    }
+    for (const auto& [arch, a_json] : units.get_dict("Archetypes")) {
+      std::array<std::vector<uint32_t>, 4> tiers;
+      for (size_t z = 0; z < 4; z++) {
+        for (const auto& code : a_json->get_list(TIER_NAMES[z])) {
+          uint32_t c = spire_code_of(code->as_string());
+          if (!ret.units.count(c)) {
+            throw std::runtime_error(std::format("Units {} {}: {:06X} not in Units Items", arch, TIER_NAMES[z], c));
+          }
+          tiers[z].emplace_back(c);
+        }
+        if (tiers[z].empty()) {
+          throw std::runtime_error(std::format("Units {} {}: no unit", arch, TIER_NAMES[z]));
+        }
+      }
+      ret.unit_tiers.emplace(arch, std::move(tiers));
+    }
+  }
+}
+
+// The offer of kind 5: one unit of the archetype's tier
+std::optional<SpireRewardOffer> spire_reward_unit_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
+  const auto& table = in.table;
+  const auto& cls = in.cls;
+  const auto& tier = in.tier;
+  const auto& tier_label = in.tier_label;
+  const auto& rnd = in.rnd;
+  auto a_it = table.unit_tiers.find(cls.archetype);
+  if (a_it == table.unit_tiers.end()) {
+    throw std::runtime_error(std::format("archetype {} has no units in the reward grid", cls.archetype));
+  }
+  const auto& codes = a_it->second[static_cast<size_t>(tier) & 3];
+  uint32_t code = codes[rnd(codes.size()) % codes.size()];
+  ret.item[0] = (code >> 16) & 0xFF;
+  ret.item[1] = (code >> 8) & 0xFF;
+  ret.item[2] = code & 0xFF;
+  ret.item_name = table.units.at(code).name;
+  ret.label = tier_label + " " + ret.item_name;
+  return ret;
+}
+
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
     const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
-    const SpireRewardDiskState* disk, uint8_t rung) {
+    const SpireRewardDiskState* disk, uint8_t rung, SpireRewardLive* live) {
   SpireRewardOffer ret;
   ret.kind = kind;
   ret.tier = tier;
@@ -505,109 +606,35 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
     }
   }
   const std::string tier_label = spire_reward_tier_label(tier);
-  if (kind == SpireRewardKind::MAG_FOOD) {
-    ret.food_levels = table.mag_food[static_cast<size_t>(tier)];
-    ret.item_name = std::format("Mag food +{}", ret.food_levels);
-    ret.label = tier_label + " " + ret.item_name;
-    return ret;
-  }
-  if (kind == SpireRewardKind::UNIT) {
-    auto a_it = table.unit_tiers.find(cls.archetype);
-    if (a_it == table.unit_tiers.end()) {
-      throw std::runtime_error(std::format("archetype {} has no units in the reward grid", cls.archetype));
+  // The distribution (the seam, SpireMechanics.hh): the kind's own offer function gives the offer. First the route that
+  // registered before the kind, when there is one, then the kind itself. Two such points wait, and nobody registers
+  // there yet: kind 4 (the android route, asked before the disk) and kind 5 ("power first", asked before the unit). A
+  // kind that is not registered, or whose switch is off, gives no offer: the throw below is the path of every offer
+  // that cannot be made (the bridge answers the entry's own item).
+  const std::function<bool(const std::string&)> own_line_fn = own_line;
+  SpireRewardOfferInput in{table, kind, char_class, cls, held, room_index, tier, tier_label, rnd, rung, own_line_fn, disk, live};
+  std::string why = "is not registered";
+  for (bool first : {true, false}) {
+    const SpireMechKind* reg = spire_mech_kind(kind, first);
+    if (!reg || !reg->offer) {
+      continue;
     }
-    const auto& codes = a_it->second[static_cast<size_t>(tier) & 3];
-    uint32_t code = codes[rnd(codes.size()) % codes.size()];
-    ret.item[0] = (code >> 16) & 0xFF;
-    ret.item[1] = (code >> 8) & 0xFF;
-    ret.item[2] = code & 0xFF;
-    ret.item_name = table.units.at(code).name;
-    ret.label = tier_label + " " + ret.item_name;
-    return ret;
-  }
-  if (kind == SpireRewardKind::DISK) {
-    if (!disk) {
-      throw std::runtime_error("a disk offer without the run copy's techniques");
-    }
-    if (table.disk_levels.empty()) {
-      throw std::runtime_error("the reward grid has no Disks");
-    }
-    // the room's row; past the last room of the grid, the last one (as spire_reward_w)
-    auto r_it = table.disk_levels.upper_bound(room_index);
-    if (r_it != table.disk_levels.begin()) {
-      r_it--;
-    }
-    size_t z = static_cast<size_t>(tier) & 3;
-    // the techniques Sega drops here: on a rung its disks of that difficulty, which the grid holds in a later column
-    size_t column = std::min<size_t>(z + table.rung_disk_columns[rung & 3], 3);
-    uint32_t budget = spire_reward_disk_budget(*disk, table.tier_disk_mind[z]);
-    auto level_of = [&](size_t t) -> uint8_t {
-      return spire_reward_disk_level(table.techs[t], budget, disk->known[t], disk->class_max[t], *disk);
-    };
-    std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
-    // a line that names a disk of its own keeps that technique while the copy can still grow in it and reach it,
-    // also where Sega drops none of it; only then any technique Sega drops here
-    if (disk->line_tech < SPIRE_TECH_COUNT) {
-      uint8_t level = level_of(disk->line_tech);
-      if (level) {
-        can.emplace_back(disk->line_tech, level);
+    if (!spire_mech_enabled(reg->switch_key, reg->default_off)) {
+      if (!first) {
+        why = std::format("is switched off ({})", reg->switch_key);
       }
+      continue;
     }
-    if (can.empty()) {
-      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-        uint8_t level = r_it->second[t][column] ? level_of(t) : 0;
-        if (level) {
-          can.emplace_back(static_cast<uint8_t>(t), level);
-        }
-      }
+    auto offer = reg->offer(in, ret);
+    if (offer) {
+      offer->first_route = first;
+      return *offer;
     }
-    if (can.empty()) {
-      throw std::runtime_error(std::format("no technique disk for {} at room index {} {}: every technique of the tier "
-                                           "is known, not the class's, or asks more MST than the copy can reach",
-          cls.name, room_index, tier_label));
-    }
-    const auto& [tech, level] = can[rnd(can.size()) % can.size()];
-    ret.tech = tech;
-    ret.tech_level = level;
-    ret.mst_required = spire_reward_disk_mst(table.techs[tech], level);
-    ret.item[0] = 0x03;
-    ret.item[1] = 0x02;
-    ret.item[2] = level - 1;
-    ret.item[4] = tech;
-    ret.item_name = std::format("{} Lv{}", table.techs[tech].name, level);
-    ret.label = tier_label + " " + ret.item_name;
-    return ret;
-  }
-  ret.line = ret.from_line;
-  if (kind == SpireRewardKind::NEW_LINE) {
-    std::vector<std::string> others;
-    for (const auto& ln : cls.line_order) {
-      if ((ln != ret.from_line) && own_line(ln)) { // a force: another MST line, never a saber, slicer or gun
-        others.emplace_back(ln);
-      }
-    }
-    if (!others.empty()) {
-      ret.line = others[rnd(others.size()) % others.size()];
+    if (!first) {
+      why = "gives no offer";
     }
   }
-  const auto& line = cls.lines.at(ret.line);
-  auto w_it = line.w.find(ret.w);
-  if (w_it == line.w.end()) {
-    throw std::runtime_error(std::format("{} {} has no W{}", cls.name, ret.line, ret.w));
-  }
-  const auto& cell = w_it->second.tiers[static_cast<size_t>(tier)];
-  std::string special_name;
-  uint8_t special = 0;
-  if (!cell.specials.empty()) {
-    const auto& sp = cell.specials[rnd(cell.specials.size()) % cell.specials.size()];
-    special = sp.id;
-    special_name = sp.name;
-  }
-  ret.item = spire_reward_weapon_bytes(table, cell, special);
-  ret.info = table.items.at(cell.code);
-  ret.item_name = spire_reward_weapon_name(cell, ret.item, special_name);
-  ret.label = tier_label + " " + ret.item_name;
-  return ret;
+  throw std::runtime_error(std::format("reward kind {} {}", static_cast<uint32_t>(kind), why));
 }
 
 SpireMagNeed spire_reward_mag_need(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst,

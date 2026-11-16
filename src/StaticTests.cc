@@ -6903,7 +6903,8 @@ void run_static_tests() {
     // a draw table's srv: the kinds this server gives (4 is the disk), and nothing else
     expect(spire_reward_kind_known(1) && spire_reward_kind_known(2) && spire_reward_kind_known(3) && spire_reward_kind_known(4) &&
         spire_reward_kind_known(5));
-    expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(6) && !spire_reward_kind_known(-1));
+    expect(spire_reward_kind_known(6) && spire_reward_kind_known(7) && spire_reward_kind_known(8)); // the seam: known, not registered
+    expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(9) && !spire_reward_kind_known(-1));
 
     // KV par. 4: no Legendary before trede 2 (De Rol Le, across runs or in this run), Rare and Epic as the room grows
     expect_eq(0u, spire_reward_trede(rewards, {}, {}));
@@ -7458,7 +7459,7 @@ void run_static_tests() {
     b8_case("loader: a server reward entry's srv and own bytes; a bad value is no server reward, never a failed table", [&]() {
       const B8Entries srv = {{"\"Weapon\",\"srv\":1,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false},
           {"\"New line\",\"srv\":2", false}, {"\"Mag food\",\"srv\":3,\"bytes\":\"01 01 00 00 00 00 06 00 00 00 00 00\"", false},
-          {"\"Odd\",\"srv\":6,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false}, {"\"Bad\",\"srv\":\"x\"", false},
+          {"\"Odd\",\"srv\":9,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false}, {"\"Bad\",\"srv\":\"x\"", false},
           {"\"Short\",\"srv\":1,\"bytes\":\"00 01\"", false},
           {"\"Unit\",\"srv\":5,\"bytes\":\"03 0B 01 00 00 00 00 00 00 00 00 00\"", false},
           {"\"Disk\",\"srv\":4,\"bytes\":\"03 01 02 00 00 02 00 00 00 00 00 00\"", false}};
@@ -7478,7 +7479,7 @@ void run_static_tests() {
       expect(!e[1].has_own_bytes);
       expect_eq(3, e[2].srv_kind);
       expect(e[2].has_own_bytes && (e[2].own_bytes[6] == 0x06));
-      expect(!e[3].srv_kind && !e[3].has_own_bytes); // no kind 6
+      expect(!e[3].srv_kind && !e[3].has_own_bytes); // no kind 9 (the seam: 6-8 are known)
       expect(!e[4].srv_kind && !e[4].has_own_bytes);
       expect_eq(1, e[5].srv_kind);
       expect(!e[5].has_own_bytes); // not 12 bytes
