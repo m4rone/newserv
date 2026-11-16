@@ -243,10 +243,17 @@ size_t spire_mech_type_weight_pick(size_t n, const std::function<uint32_t(uint32
 
 // H4 player_hp: an enemy's hit on the player itself (ReceiveSubcommands.cc on_change_hp, 6x4B a minor and 6x4C a major
 // hit, by the number the client sent: a GC client's; the handler's other subcommands never reach a registrant),
-// before the hit is forwarded
-using SpireMechPlayerHPFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand);
+// before the hit is forwarded. current_hp: the player's HP after the hit as the client says it in the packet
+// (G_HitByEnemy_6x4B_6x4C::current_hp); empty when the packet is too short to carry the field.
+using SpireMechPlayerHPFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand,
+    std::optional<uint16_t> current_hp);
 bool spire_mech_register_player_hp(const SpireMechHook<SpireMechPlayerHPFn>& reg);
-void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand);
+void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand,
+    std::optional<uint16_t> current_hp);
+// The current_hp of a hit's packet, for the call of H4: read as G_HitByEnemy_6x4B_6x4C with the size check every
+// subcommand is read with (check_size_t). Empty when the subcommand is not 6x4B or 6x4C, or when the packet is shorter
+// than that struct. Never throws; the packet itself is not changed.
+std::optional<uint16_t> spire_mech_hit_current_hp(uint8_t subcommand, const void* data, size_t size);
 
 // H5 player_died: the player itself died (ReceiveSubcommands.cc on_player_died, 6x4D), before the death is forwarded
 using SpireMechPlayerDiedFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l);

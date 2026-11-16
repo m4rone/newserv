@@ -1,5 +1,7 @@
 #include "SpireMechanics.hh"
 
+#include "CommandFormats.hh"
+#include "PSOProtocol.hh"
 #include "ReceiveSubcommands.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMeta.hh"
@@ -485,14 +487,23 @@ bool spire_mech_register_player_hp(const SpireMechHook<SpireMechPlayerHPFn>& reg
   return register_hook(HookId::PLAYER_HP, reg);
 }
 
-void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand) {
+std::optional<uint16_t> spire_mech_hit_current_hp(uint8_t subcommand, const void* data, size_t size) {
+  if (((subcommand != 0x4B) && (subcommand != 0x4C)) || !data || (size < sizeof(G_HitByEnemy_6x4B_6x4C))) {
+    return std::nullopt;
+  }
+  // the reader SubcommandMessage::check_size_t wraps (ReceiveSubcommands.cc); the size was asked above, so no throw
+  return check_size_t<G_HitByEnemy_6x4B_6x4C>(data, size, 0xFFFF).current_hp;
+}
+
+void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand,
+    std::optional<uint16_t> current_hp) {
   if ((subcommand != 0x4B) && (subcommand != 0x4C)) {
     return; // 6x4A (a fully shielded attack) shares the handler and is no hit
   }
   if (!in_spire_run(c, l)) {
     return;
   }
-  each_hook<SpireMechPlayerHPFn>(HookId::PLAYER_HP, true, [&](SpireMechPlayerHPFn fn) { fn(c, l, subcommand); });
+  each_hook<SpireMechPlayerHPFn>(HookId::PLAYER_HP, true, [&](SpireMechPlayerHPFn fn) { fn(c, l, subcommand, current_hp); });
 }
 
 // H5

@@ -1821,7 +1821,7 @@ static asio::awaitable<void> on_change_hp(std::shared_ptr<Client> c, SubcommandM
   // r2: the players' side only; an enemy out of reach that shoots keeps the floor clock young, not the enemies' one
   if constexpr (std::is_same_v<CmdT, G_ClientIDHeader>) {
     spire_bridge_note_fight(l, c->floor, false);
-    spire_mech_player_hp(c, l, cmd.subcommand); // the seam's H4 (SpireMechanics.hh)
+    spire_mech_player_hp(c, l, cmd.subcommand, spire_mech_hit_current_hp(cmd.subcommand, msg.data, msg.size)); // the seam's H4
   }
 
   forward_subcommand(c, msg);

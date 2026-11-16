@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "Channel.hh"
+#include "CommandFormats.hh"
 #include "DataIndex.hh"
 #include "GameServer.hh"
 #include "ReceiveSubcommands.hh"
@@ -153,9 +154,13 @@ uint32_t t_type_weight_three(const SpireMechTypeWeight& tw) {
   return (tw.value == 2) ? 3 : 1;
 }
 template <char TAG>
-void t_player_hp(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t subcommand) {
+void t_player_hp(std::shared_ptr<Client>, std::shared_ptr<Lobby>, uint8_t subcommand,
+    std::optional<uint16_t> current_hp) {
   hook_calls += TAG;
   hook_calls += std::format("{:02X}", subcommand);
+  if (current_hp) { // the HP after the hit, when the packet carried it
+    hook_calls += std::format("={}", *current_hp);
+  }
 }
 template <char TAG>
 void t_player_died(std::shared_ptr<Client>, std::shared_ptr<Lobby>) {
@@ -528,13 +533,46 @@ void spire_tests_hooks() {
   expect_hook<SpireMechPlayerHPFn>(
       H::PLAYER_HP, spire_mech_register_player_hp, t_player_hp<'L'>, t_player_hp<'E'>, t_player_hp<'O'>,
       [&]() {
-        spire_mech_player_hp(run_c, run_l, 0x4A);
-        spire_mech_player_hp(run_c, run_l, 0x2F);
-        spire_mech_player_hp(run_c, run_l, 0x4B);
-        spire_mech_player_hp(run_c, run_l, 0x4C);
+        spire_mech_player_hp(run_c, run_l, 0x4A, std::nullopt);
+        spire_mech_player_hp(run_c, run_l, 0x2F, std::nullopt);
+        spire_mech_player_hp(run_c, run_l, 0x4B, std::nullopt);
+        spire_mech_player_hp(run_c, run_l, 0x4C, std::nullopt);
         return hook_calls;
       },
       write, "", "E4BL4BE4CL4C", "E4BO4BL4BE4CO4CL4C", "E4BE4C");
+
+  // H4's HP after the hit: read from the packet as newserv reads every subcommand (the typed struct behind the size
+  // check). A full packet gives the registrant the HP, also 0 and also with bytes after the struct; a packet too short
+  // for the field gives it an empty value, and so does a subcommand that is no hit
+  {
+    HookGuard g{H::PLAYER_HP, "zz"};
+    spire_mech_register_player_hp({"zz", "", 10, t_player_hp<'E'>});
+    G_HitByEnemy_6x4B_6x4C hit;
+    hit.header.subcommand = 0x4B;
+    hit.header.size = sizeof(hit) / 4;
+    hit.current_hp = 123;
+    std::string raw(reinterpret_cast<const char*>(&hit), sizeof(hit));
+    auto hit_call = [&](uint8_t subcommand, const std::string& data) {
+      hook_calls.clear();
+      auto hp = spire_mech_hit_current_hp(subcommand, data.data(), data.size());
+      spire_mech_player_hp(run_c, run_l, subcommand, hp);
+      return hook_calls;
+    };
+    expect_eq(std::string("E4B=123"), hit_call(0x4B, raw));
+    expect_eq(std::string("E4C=123"), hit_call(0x4C, raw));
+    expect_eq(std::string("E4B=123"), hit_call(0x4B, raw + std::string(8, '\0')));
+    hit.current_hp = 0;
+    expect_eq(std::string("E4B=0"), hit_call(0x4B, std::string(reinterpret_cast<const char*>(&hit), sizeof(hit))));
+    hit.current_hp = 0xFFFF;
+    expect_eq(std::string("E4B=65535"), hit_call(0x4B, std::string(reinterpret_cast<const char*>(&hit), sizeof(hit))));
+    expect_eq(std::string("E4B"), hit_call(0x4B, raw.substr(0, sizeof(hit) - 1))); // one byte short of the struct
+    expect_eq(std::string("E4B"), hit_call(0x4B, raw.substr(0, 8))); // the field itself is there, the struct is not
+    expect_eq(std::string("E4C"), hit_call(0x4C, raw.substr(0, sizeof(G_ClientIDHeader)))); // the header alone
+    expect_eq(std::string("E4B"), hit_call(0x4B, std::string()));
+    expect(!spire_mech_hit_current_hp(0x4B, nullptr, sizeof(hit)).has_value());
+    expect(!spire_mech_hit_current_hp(0x4A, raw.data(), raw.size()).has_value()); // a shielded attack is no hit
+    expect(!spire_mech_hit_current_hp(0x2F, raw.data(), raw.size()).has_value());
+  }
 
   // H5 player_died; a registrant that fails does not keep the next one from its call
   expect_hook<SpireMechPlayerDiedFn>(
@@ -611,8 +649,8 @@ void spire_tests_hooks() {
       hook_calls.clear();
       bool same_bin = (spire_mech_quest_bin(c, l, bin) == bin);
       hook_calls += same_bin ? "=" : "*";
-      spire_mech_player_hp(c, l, 0x4B);
-      spire_mech_player_hp(c, l, 0x4C);
+      spire_mech_player_hp(c, l, 0x4B, std::nullopt);
+      spire_mech_player_hp(c, l, 0x4C, std::nullopt);
       spire_mech_player_died(c, l);
       spire_mech_tech_done(c, l, 15, 4);
       spire_mech_enemy_killed(c, l, rec, 3);
