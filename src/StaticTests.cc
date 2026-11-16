@@ -8306,6 +8306,11 @@ void run_static_tests() {
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));
+      // B-E02-16: 'C' 19, the follower's reward decided for him at the leader's warp
+      expect_eq(std::string("You did not choose: Lavis Cannon was taken for you."), spire_bridge_message_text(0x43031300, with_names));
+      expect_eq(std::string("You did not choose: you got the Skip bonus."), spire_bridge_message_text(0x43001300, with_names));
+      expect_eq(std::string("You did not choose: a reward was taken for you."), spire_bridge_message_text(0x43031300)); // no table
+      expect_eq(std::string("You did not choose: a reward was taken for you."), spire_bridge_message_text(0x437F1300, with_names));
       // full: with the extra it would be 92 characters, so the extra goes and the rare with its note stays
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon. Inventory full: make room, it waits."),
           spire_bridge_message_text(0x43830A21, with_names));
