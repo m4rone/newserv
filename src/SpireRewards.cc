@@ -112,6 +112,8 @@ const char* spire_reward_kind_name(SpireRewardKind kind) {
       return "Nieuwe lijn";
     case SpireRewardKind::MAG_FOOD:
       return "Mag-voer";
+    case SpireRewardKind::UNIT:
+      return "Kracht";
   }
   return "?";
 }
@@ -229,6 +231,37 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
       return ((a == "Saber") != (b == "Saber")) ? (a == "Saber") : (a < b);
     });
     ret.classes.emplace(index, std::move(cls));
+  }
+  if (json.contains("Units")) { // part B; a part A file has none
+    const auto& units = json.at("Units");
+    for (const auto& [code, u_json] : units.get_dict("Items")) {
+      SpireRewardUnit u;
+      u.name = u_json->get_string("Name");
+      u.stars = spire_get_u(*u_json, "Stars", 12);
+      u.stat = spire_get_u(*u_json, "Stat", 0xFFFF);
+      u.amount = spire_get_u(*u_json, "Amount", 0xFFFF);
+      uint32_t c = spire_code_of(code);
+      if ((c >> 8) != 0x0103) {
+        throw std::runtime_error(std::format("Units Items {} is not a unit (0103xx)", code));
+      }
+      ret.units.emplace(c, std::move(u));
+    }
+    for (const auto& [arch, a_json] : units.get_dict("Archetypes")) {
+      std::array<std::vector<uint32_t>, 4> tiers;
+      for (size_t z = 0; z < 4; z++) {
+        for (const auto& code : a_json->get_list(TIER_NAMES[z])) {
+          uint32_t c = spire_code_of(code->as_string());
+          if (!ret.units.count(c)) {
+            throw std::runtime_error(std::format("Units {} {}: {:06X} not in Units Items", arch, TIER_NAMES[z], c));
+          }
+          tiers[z].emplace_back(c);
+        }
+        if (tiers[z].empty()) {
+          throw std::runtime_error(std::format("Units {} {}: no unit", arch, TIER_NAMES[z]));
+        }
+      }
+      ret.unit_tiers.emplace(arch, std::move(tiers));
+    }
   }
   return ret;
 }
@@ -356,6 +389,20 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
   if (kind == SpireRewardKind::MAG_FOOD) {
     ret.food_levels = table.mag_food[static_cast<size_t>(tier)];
     ret.item_name = std::format("Mag food +{}", ret.food_levels);
+    ret.label = tier_label + " " + ret.item_name;
+    return ret;
+  }
+  if (kind == SpireRewardKind::UNIT) {
+    auto a_it = table.unit_tiers.find(cls.archetype);
+    if (a_it == table.unit_tiers.end()) {
+      throw std::runtime_error(std::format("archetype {} has no units in the reward grid", cls.archetype));
+    }
+    const auto& codes = a_it->second[static_cast<size_t>(tier) & 3];
+    uint32_t code = codes[rnd(codes.size()) % codes.size()];
+    ret.item[0] = (code >> 16) & 0xFF;
+    ret.item[1] = (code >> 8) & 0xFF;
+    ret.item[2] = code & 0xFF;
+    ret.item_name = table.units.at(code).name;
     ret.label = tier_label + " " + ret.item_name;
     return ret;
   }

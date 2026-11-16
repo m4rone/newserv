@@ -58,8 +58,15 @@ const char* spire_reward_tier_label(SpireRewardTier tier);
 // The ticker colour of the tier (KV par. 4: Normal white, Rare blue, Epic yellow, Legendary yellow with its word)
 const char* spire_reward_tier_color(SpireRewardTier tier);
 
-enum class SpireRewardKind : uint8_t { NONE = 0, WEAPON = 1, NEW_LINE = 2, MAG_FOOD = 3 };
+// Part B adds UNIT (Kracht, KV par. 4): a unit for one of the frame's slots, by the class's archetype and the tier. 4 is
+// kept for the technique disk, which is not built yet.
+enum class SpireRewardKind : uint8_t { NONE = 0, WEAPON = 1, NEW_LINE = 2, MAG_FOOD = 3, UNIT = 5 };
 const char* spire_reward_kind_name(SpireRewardKind kind);
+// Whether a draw table's srv value names a kind this server gives; any other value reads as "no server reward"
+// (SpireDraw.cc), so the pick answers the entry's own item
+constexpr bool spire_reward_kind_known(int64_t srv) {
+  return ((srv >= 1) && (srv <= 3)) || (srv == 5);
+}
 
 struct SpireRewardItemInfo {
   std::string name;
@@ -73,6 +80,13 @@ struct SpireRewardItemInfo {
 struct SpireRewardSpecial {
   uint8_t id = 0;
   std::string name;
+};
+// A unit of the grid (01 03 xx): its stat and amount as the item parameter table has them (ItemParameterTable.hh Unit)
+struct SpireRewardUnit {
+  std::string name;
+  uint32_t stars = 0;
+  uint16_t stat = 0;
+  uint16_t amount = 0;
 };
 struct SpireRewardCell {
   uint32_t code = 0; // data1[0-2], big-endian as the grid writes it (000101 = Brand)
@@ -111,6 +125,10 @@ struct SpireRewardTable {
   std::map<uint32_t, std::string> line_of; // a weapon code -> line
   std::map<uint32_t, SpireRewardItemInfo> items;
   std::map<uint8_t, SpireRewardClass> classes; // by the character class (0-11)
+  // part B: the units by code (0103xx), and per archetype ("HU", "RA", "FO") and tier the codes a UNIT reward draws
+  // from. Both empty when the file has no Units (a part A file): a UNIT entry then gives its own item.
+  std::map<uint32_t, SpireRewardUnit> units;
+  std::map<std::string, std::array<std::vector<uint32_t>, 4>> unit_tiers;
 };
 // Strict: throws on a missing key or a value out of range
 SpireRewardTable spire_rewards_parse(const std::string& json_text);
@@ -165,6 +183,38 @@ SpireMagNeed spire_reward_mag_need(const SpireRewardItemInfo& info, uint32_t atp
 // Whether stats plus a mag (the same assumed rates) meet a weapon's requirement under a model (the log's measurement)
 bool spire_reward_meets(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst, const SpireMagBytes* mag,
     SpireAtaModel model);
+
+// What the equipped units add to the stats a weapon's requirement is held against (Marck, 16 Nov 2026: "frame with 4
+// slots and items in it count toward the ability to equip weapons"): ATP (unit stat 0), MST (stat 1), both from stat 8
+// (God/Ability). ATA units are left out: whether their amount is in table units or tenths is not settled
+// (ItemParameterTable.hh says tenths, the table holds 3 for Marksman/Arm), and leaving them out only makes rule B's
+// mag carry a little more.
+struct SpireUnitBonus {
+  uint32_t atp = 0;
+  uint32_t mst = 0;
+};
+constexpr void spire_reward_unit_bonus_add(SpireUnitBonus& bonus, uint16_t stat, uint16_t amount) {
+  if ((stat == 0) || (stat == 8)) {
+    bonus.atp += amount;
+  }
+  if ((stat == 1) || (stat == 8)) {
+    bonus.mst += amount;
+  }
+}
+// The slot (0-3; equip slot 9 + n) a new unit goes into: the first of the frame's slots (its data1[5], at most 4) that
+// no equipped unit holds (occupied: bit n set = slot n taken); nullopt when the frame has none free
+constexpr std::optional<uint8_t> spire_reward_free_unit_slot(uint8_t occupied, uint8_t frame_slots) {
+  for (uint8_t n = 0; (n < 4) && (n < frame_slots); n++) {
+    if (!(occupied & (1 << n))) {
+      return n;
+    }
+  }
+  return std::nullopt;
+}
+
+// What the player reads when a reward unit stays in the pack (no % and no < >: a ticker line)
+constexpr const char* SPIRE_REWARD_UNIT_NO_SLOT_TEXT = "Unit slots full: the unit is in your Item Pack.";
+constexpr const char* SPIRE_REWARD_UNIT_NO_FRAME_TEXT = "No frame worn: the unit is in your Item Pack.";
 
 // When SpireEquipItem goes out for a reward weapon. The game holds a weapon's requirement also when the server equips
 // it (Marck, 16 Nov 2026), so a weapon that rule B's mag must carry (mag_due) waits until that mag is on the client

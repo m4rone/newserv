@@ -7897,6 +7897,62 @@ void run_static_tests() {
     }
     expect_eq(5u, rewards.mag_food[0]);
     expect_eq(30u, rewards.mag_food[3]);
+    // part B, Kracht: for every class and tier a unit of its archetype's list, as data1 01 03 xx and nothing else, with
+    // the tier word in front; every unit of the grid is one the item parameter table knows with that stat and amount
+    expect(!rewards.units.empty());
+    {
+      auto ipt = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
+      for (const auto& [code, unit] : rewards.units) {
+        expect_eq(0x0103u, code >> 8);
+        const auto& def = ipt->get_unit(code & 0xFF);
+        expect_eq(unit.stat, static_cast<uint16_t>(def.stat));
+        expect_eq(unit.amount, static_cast<uint16_t>(def.amount));
+      }
+      size_t unit_offers = 0;
+      for (const auto& [char_class, cls] : rewards.classes) {
+        const auto& tiers = rewards.unit_tiers.at(cls.archetype);
+        for (size_t t = 0; t < 4; t++) {
+          auto tier = static_cast<SpireRewardTier>(t);
+          for (uint32_t r = 0; r < tiers[t].size(); r++) {
+            auto offer = spire_reward_offer(rewards, SpireRewardKind::UNIT, char_class, nullptr, 3, tier,
+                [r](uint32_t n) -> uint32_t { return n ? (r % n) : 0; });
+            uint32_t code = (offer.item[0] << 16) | (offer.item[1] << 8) | offer.item[2];
+            expect_eq(tiers[t][r], code);
+            expect_eq(rewards.units.at(code).name, offer.item_name);
+            expect_eq(std::string(spire_reward_tier_label(tier)) + " " + offer.item_name, offer.label);
+            for (size_t z = 3; z < 12; z++) {
+              expect_eq(0, offer.item[z]);
+            }
+            unit_offers++;
+          }
+        }
+      }
+      phosg::log_info_f("   rewards: {} units, {} unit offers checked", rewards.units.size(), unit_offers);
+      expect(unit_offers >= 12 * 4);
+    }
+    // what worn units add to a weapon's requirement: ATP, MST, both from God/Ability (stat 8); nothing from the rest
+    {
+      SpireUnitBonus b;
+      spire_reward_unit_bonus_add(b, 0, 50); // God/Power
+      spire_reward_unit_bonus_add(b, 1, 40); // God/Mind
+      spire_reward_unit_bonus_add(b, 8, 20); // God/Ability
+      spire_reward_unit_bonus_add(b, 2, 15); // God/Arm: ATA is not counted
+      spire_reward_unit_bonus_add(b, 0x13, 20); // God/Battle
+      expect_eq(70u, b.atp);
+      expect_eq(60u, b.mst);
+    }
+    // the slot of a new unit: the first free one of the frame's slots, none on a frame without slots or a full one
+    expect(spire_reward_free_unit_slot(0x00, 4) == std::optional<uint8_t>(0));
+    expect(spire_reward_free_unit_slot(0x01, 4) == std::optional<uint8_t>(1));
+    expect(spire_reward_free_unit_slot(0x0B, 4) == std::optional<uint8_t>(2));
+    expect(spire_reward_free_unit_slot(0x0F, 4) == std::nullopt);
+    expect(spire_reward_free_unit_slot(0x00, 0) == std::nullopt);
+    expect(spire_reward_free_unit_slot(0x01, 1) == std::nullopt);
+    expect(spire_reward_free_unit_slot(0x00, 9) == std::optional<uint8_t>(0)); // a slot byte past 4 gives no fifth slot
+    expect(spire_reward_free_unit_slot(0x0F, 9) == std::nullopt);
+    // a draw table's srv: the kinds this server gives, and nothing else (4, the disk, is not built)
+    expect(spire_reward_kind_known(1) && spire_reward_kind_known(2) && spire_reward_kind_known(3) && spire_reward_kind_known(5));
+    expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(4) && !spire_reward_kind_known(6) && !spire_reward_kind_known(-1));
     // review r4: without a weapon of a known line (none held, or one outside the grid) every class gets the Saber line,
     // the one every class carries (design par. 1), never the line a hash order put first
     for (const auto& [char_class, cls] : rewards.classes) {

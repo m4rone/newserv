@@ -68,6 +68,26 @@ inline std::optional<uint32_t> spire_equip_find_kit_weapon(const PlayerInventory
   return ret;
 }
 
+// 'C' 13, part B: the kit frame, when the quest made it with item_create2 for its slots (equip_item carries data1[0-2]
+// only, so no slot byte): the newest unequipped, unwrapped frame (01 01) with slots (data1[5]). nullopt: none, or a
+// frame is worn already (a quest that equips its frame itself; a later frame is the player's to equip).
+inline std::optional<uint32_t> spire_equip_find_kit_frame(const PlayerInventory& inventory) {
+  std::optional<uint32_t> ret;
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    if (item.data.empty() || (item.data.data1[0] != 0x01) || (item.data.data1[1] != 0x01)) {
+      continue;
+    }
+    if (item.is_equipped()) {
+      return std::nullopt;
+    }
+    if (item.data.data1[5] && !(item.flags & 0x400)) {
+      ret = item.data.id.load();
+    }
+  }
+  return ret;
+}
+
 // 'C' 14: the one run mag (type 02) of the run copy, when it is not equipped yet. nullopt: no mag, more than one, or
 // the one mag is already equipped (nothing to do).
 inline std::optional<uint32_t> spire_equip_find_run_mag(const PlayerInventory& inventory) {

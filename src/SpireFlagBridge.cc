@@ -3975,6 +3975,35 @@ static asio::awaitable<void> spire_resume_equip(std::shared_ptr<Client> c, Spire
 // Route B bundle 9: 'C' 13 (the kit weapon with grind G in the low byte) and 'C' 14 (the run mag replaced after an
 // evolution) from the writer: with r143 = 1 for it, send SpireEquipItem for the item in newserv's copy of its inventory
 // (the run copy during a run). r143 = 0 or no such item: one log line, nothing sent. False for every other value.
+// Part B: 'C' 13 equips the kit frame too, before the weapon, when the quest made the frame with item_create2 for its
+// four slots (spire_equip_find_kit_frame). The quest gives the frame right after the weapon, so newserv's copy is read
+// for up to 2 s; a frame worn already (a quest that still equips its frame itself) ends the search at once.
+static asio::awaitable<void> spire_equip_kit_send(std::shared_ptr<Client> c, std::weak_ptr<const Lobby> weak_l,
+    std::optional<uint32_t> weapon_id) {
+  std::optional<uint32_t> frame_id;
+  for (size_t z = 0; z < 5; z++) {
+    auto l = weak_l.lock();
+    if (!l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    auto character = c->character_file(false, true);
+    if (!character) {
+      co_return;
+    }
+    frame_id = spire_equip_find_kit_frame(character->inventory);
+    if (frame_id || spire_resume_frame_equipped(character->inventory)) {
+      break;
+    }
+    co_await async_sleep(std::chrono::milliseconds(500));
+  }
+  if (frame_id) {
+    co_await spire_equip_item_send(c, weak_l, *frame_id, "kit frame", SPIRE_EQUIP_RESUME_ARMOR);
+  }
+  if (weapon_id) {
+    co_await spire_equip_item_send(c, weak_l, *weapon_id, "kit weapon", SPIRE_PROMPT_KIT_GROUND);
+  }
+}
+
 static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t point = (value >> 8) & 0xFF;
@@ -4010,6 +4039,11 @@ static bool spire_equip_prompt_handle(std::shared_ptr<Client> c, std::shared_ptr
   if (!available) {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; r{} = 0 for this client, nothing sent",
         point, what, low, serial_number, quest_number, SPIRE_EQUIP_REGISTER);
+  } else if (point == SPIRE_PROMPT_KIT_GROUND) {
+    c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; sending {} for the kit frame with "
+        "slots, if the quest made one, then for {}", point, what, low, serial_number, quest_number,
+        SPIRE_EQUIP_FUNCTION_NAME, item_id ? std::format("item {:08X}", *item_id) : std::string("no weapon (none in the inventory copy)"));
+    asio::co_spawn(*c->require_server_state()->io_context, spire_equip_kit_send(c, l, item_id), asio::detached);
   } else if (!item_id) {
     c->log.info_f("Spire equip: 'C' {} ({}, low byte {}) for serial {:010} in q{}; no such item in the inventory copy, nothing sent",
         point, what, low, serial_number, quest_number);
@@ -4301,6 +4335,43 @@ static std::optional<SpireMagBytes> spire_reward_run_mag(const PlayerInventory& 
   return ret;
 }
 
+// Part B: the run copy's worn frame and units as newserv's copy has them: the frame's slots (data1[5]), the unit slots
+// taken (bit n: a unit equipped with data1[4] = n, as on_equip_item writes it) and what the worn units add to ATP and
+// MST (SpireRewards.hh SpireUnitBonus)
+struct SpireRewardWorn {
+  bool frame = false;
+  uint8_t frame_slots = 0;
+  uint8_t occupied = 0;
+  SpireUnitBonus bonus;
+};
+static SpireRewardWorn spire_reward_worn(std::shared_ptr<Client> c, const PlayerInventory& inventory) {
+  SpireRewardWorn ret;
+  auto ipt = c->require_server_state()->data->item_parameter_table(Version::GC_V3);
+  for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
+    const auto& item = inventory.items[z];
+    const auto& d = item.data.data1;
+    if (item.data.empty() || (d[0] != 0x01) || !item.is_equipped()) {
+      continue;
+    }
+    if (d[1] == 0x01) {
+      ret.frame = true;
+      ret.frame_slots = std::min<uint8_t>(d[5], 4);
+    } else if (d[1] == 0x03) {
+      if (d[4] <= 3) {
+        ret.occupied |= (1 << d[4]);
+      }
+      if (ipt) {
+        try {
+          const auto& unit = ipt->get_unit(d[2]);
+          spire_reward_unit_bonus_add(ret.bonus, unit.stat, unit.amount);
+        } catch (const std::exception&) { // a unit the table does not know adds nothing
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 static std::string spire_reward_mag_text(const std::optional<SpireMagBytes>& mag) {
   if (!mag) {
     return "none";
@@ -4532,9 +4603,11 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
   SpireRewardPending p;
   p.offer = *offer;
   p.server_offer = true;
-  p.atp = stats.atp;
+  // part B: what the worn units give counts for a weapon's requirement, as in the game (Marck, 16 Nov 2026)
+  auto worn = spire_reward_worn(c, overlay->inventory);
+  p.atp = stats.atp + worn.bonus.atp;
   p.ata = stats.ata;
-  p.mst = stats.mst;
+  p.mst = stats.mst + worn.bonus.mst;
   p.level = overlay->disp.stats.level;
   p.mag_before = spire_reward_run_mag(overlay->inventory);
   std::string arch_name = character ? spire_mag_archetype(character->disp.visual.sh.char_class) : "";
@@ -4561,6 +4634,17 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
     return;
   }
 
+  if (offer->kind == SpireRewardKind::UNIT) { // part B: no requirement and no mag; newserv equips it after its RESULT
+    offers.pending = p;
+    spire_reward_answer(c, &offer->item, false);
+    c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {}; frame {} with {} slot(s), unit slots "
+        "taken {:X}",
+        spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
+        offer->label, spire_run_mag_bytes_hex(offer->item), worn.frame ? "worn" : "NOT worn", worn.frame_slots,
+        worn.occupied);
+    return;
+  }
+
   p.need = spire_reward_mag_need(offer->info, p.atp, p.ata, p.mst, table->ata_model);
   if (led) {
     auto column = spire_mag_column(*mag_line, led->lean);
@@ -4576,11 +4660,11 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
   offers.pending = p;
   spire_reward_answer(c, &offer->item, p.mag_due);
   c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} {} (line {}{}); needs mag POW {} DEX {} "
-      "MIND {} ({} ATA model); {}",
+      "MIND {} ({} ATA model; worn units count ATP +{} MST +{}); {}",
       spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
       offer->label, spire_run_mag_bytes_hex(offer->item), offer->line,
       (offer->line != offer->from_line) ? std::format(", held {}", offer->from_line) : "", p.need.pow, p.need.dex,
-      p.need.mind, spire_ata_model_name(table->ata_model),
+      p.need.mind, spire_ata_model_name(table->ata_model), worn.bonus.atp, worn.bonus.mst,
       !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
       : p.mag_due ? std::string("rule B's run mag follows in this room's pause B, the weapon's equip after it")
                   : std::string("the run mag already meets it"));
@@ -4702,6 +4786,75 @@ static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, st
       meets(SpireAtaModel::SCREEN_WEAPON, mag_p), meets(SpireAtaModel::SCREEN_BARE, mag_p));
 }
 
+// After the RESULT of a server reward unit (part B): SpireEquipItem puts it in the first free slot of the worn frame,
+// once newserv's copy holds it. Without the function on this client (r143 = 0) it is the player's to equip; without a
+// worn frame or with every slot taken it stays in the pack and the player reads why. Then the journal line of the pick.
+static asio::awaitable<void> spire_reward_equip_unit(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
+    SpireRewardPending p, uint32_t serial_number) {
+  std::optional<uint32_t> item_id;
+  SpireRewardWorn worn;
+  for (size_t z = 0; (z < 16) && !item_id; z++) { // up to 8 s: the item in newserv's copy
+    co_await async_sleep(std::chrono::milliseconds(500));
+    auto c = weak_c.lock();
+    auto l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+    if (!overlay) {
+      co_return;
+    }
+    const auto& inv = overlay->inventory;
+    for (size_t x = 0; (x < inv.num_items) && (x < inv.items.size()); x++) {
+      const auto& it = inv.items[x];
+      if (!it.data.empty() && !memcmp(it.data.data1.data(), p.offer.item.data(), 3) && !it.is_equipped()) {
+        item_id = it.data.id.load();
+      }
+    }
+    worn = spire_reward_worn(c, inv);
+  }
+  auto c = weak_c.lock();
+  auto l = weak_l.lock();
+  if (!c || !l || (c->lobby.lock() != l)) {
+    co_return;
+  }
+  auto free_slot = worn.frame ? spire_reward_free_unit_slot(worn.occupied, worn.frame_slots) : std::nullopt;
+  std::string outcome;
+  if (!item_id) {
+    outcome = "NOT FOUND in the run copy";
+  } else if (!spire_equip_item_available_for(c)) {
+    outcome = std::format("in the pack (r{} = 0, the player's own)", SPIRE_EQUIP_REGISTER);
+  } else if (!free_slot) {
+    outcome = worn.frame ? "in the pack (no free slot)" : "in the pack (no frame worn)";
+    spire_send_ticker(c, worn.frame ? SPIRE_REWARD_UNIT_NO_SLOT_TEXT : SPIRE_REWARD_UNIT_NO_FRAME_TEXT);
+  } else {
+    co_await spire_equip_item_send(c, l, *item_id, "reward unit", SPIRE_EQUIP_RESUME_UNIT,
+        SPIRE_EQUIP_UNIT_SLOT_FIRST + *free_slot);
+    c = weak_c.lock();
+    l = weak_l.lock();
+    if (!c || !l || (c->lobby.lock() != l)) {
+      co_return;
+    }
+    auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+    if (!overlay) {
+      co_return;
+    }
+    bool landed = false;
+    for (size_t x = 0; (x < overlay->inventory.num_items) && (x < overlay->inventory.items.size()); x++) {
+      const auto& it = overlay->inventory.items[x];
+      if (it.data.id == *item_id) {
+        landed = it.is_equipped();
+      }
+    }
+    outcome = std::format("slot {} of {}: {}", *free_slot + 1, worn.frame_slots, landed ? "LANDED" : "NOT LANDED");
+  }
+  c->log.info_f("Spire reward: TAKEN serial {:010} class {} {} {} {} {}; frame {} with {} slot(s), unit slots taken {:X} "
+      "before it; equip {}",
+      serial_number, p.class_name.empty() ? "?" : p.class_name, spire_reward_kind_name(p.offer.kind),
+      spire_reward_tier_name(p.offer.tier), p.offer.item_name, spire_run_mag_bytes_hex(p.offer.item),
+      worn.frame ? "worn" : "NOT worn", worn.frame_slots, worn.occupied, outcome);
+}
+
 // 'Z' sub 7: the RESULT of a reward pick that answered an item
 static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
@@ -4723,6 +4876,13 @@ static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const
   if (!p.server_offer) {
     c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: the entry's own item {}", serial_number,
         quest_number, p.offer.slot, spire_run_mag_bytes_hex(p.offer.item));
+    return;
+  }
+  if (p.offer.kind == SpireRewardKind::UNIT) { // part B: no rule B need of its own; the weapon's need stays
+    c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created", serial_number, quest_number,
+        p.offer.slot, p.offer.label);
+    asio::co_spawn(*c->require_server_state()->io_context,
+        spire_reward_equip_unit(c, l, std::move(p), serial_number), asio::detached);
     return;
   }
   auto* run = spire_game_run_for(l);

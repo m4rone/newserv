@@ -1,5 +1,7 @@
 #include "SpireDraw.hh"
 
+#include "SpireRewards.hh"
+
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
 #include <phosg/Strings.hh>
@@ -81,7 +83,7 @@ SpireDrawTable SpireDrawTable::from_json_file(const std::string& filename) {
       // the table (the draw is the part that must always work)
       try {
         int64_t srv = e_json->get_int("srv", 0);
-        e.srv_kind = ((srv >= 0) && (srv <= 3)) ? srv : 0;
+        e.srv_kind = spire_reward_kind_known(srv) ? srv : 0;
         if (e.srv_kind && e_json->contains("bytes")) {
           auto b = phosg::parse_data_string(e_json->get_string("bytes"));
           if (b.size() == 12) {
