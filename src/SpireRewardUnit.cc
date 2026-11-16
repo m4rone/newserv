@@ -75,7 +75,9 @@ std::optional<SpireRewardOffer> spire_reward_unit_offer(const SpireRewardOfferIn
     throw std::runtime_error(std::format("archetype {} has no units in the reward grid", cls.archetype));
   }
   const auto& codes = a_it->second[static_cast<size_t>(tier) & 3];
-  uint32_t code = codes[rnd(codes.size()) % codes.size()];
+  uint32_t code = codes[spire_mech_type_weight_pick(codes.size(), rnd, [&](size_t z) { // the seam's H3
+    return SpireMechTypeWeight{&in, SpireMechCandidate::UNIT, nullptr, codes[z], 0};
+  })];
   ret.item[0] = (code >> 16) & 0xFF;
   ret.item[1] = (code >> 8) & 0xFF;
   ret.item[2] = code & 0xFF;

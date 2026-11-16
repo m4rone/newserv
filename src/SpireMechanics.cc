@@ -1,5 +1,7 @@
 #include "SpireMechanics.hh"
 
+#include "ReceiveSubcommands.hh"
+
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
 #include <phosg/Strings.hh>
@@ -403,6 +405,9 @@ bool spire_mech_register_enemy_killed(const SpireMechHook<SpireMechEnemyKilledFn
 
 void spire_mech_enemy_killed(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, const DropReconcileResult& rec,
     uint8_t floor) {
+  if (!rec.target_ene_st) {
+    return; // the drop request of a box
+  }
   each_hook<SpireMechEnemyKilledFn>(HookId::ENEMY_KILLED, true, [&](SpireMechEnemyKilledFn fn) { fn(c, l, rec, floor); });
 }
 

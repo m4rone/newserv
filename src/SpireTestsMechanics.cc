@@ -367,6 +367,64 @@ void spire_tests_hooks() {
     type_weight_target = 0;
   }
 
+  // H3 through the kinds that choose (a unit, another line): with a registrant whose weights are all 1, and with one
+  // whose switch is off, every draw and every offer is the one without a registrant
+  auto rewards = spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE));
+  auto offers_text = [&]() {
+    std::string out;
+    for (SpireRewardKind kind : {SpireRewardKind::UNIT, SpireRewardKind::NEW_LINE}) {
+      for (uint8_t char_class = 0; char_class < 12; char_class++) {
+        for (uint32_t tier = 0; tier < 4; tier++) {
+          uint64_t state = (static_cast<uint64_t>(kind) << 16) | (char_class << 8) | tier;
+          std::function<uint32_t(uint32_t)> stream = [&](uint32_t n) -> uint32_t {
+            state = (state * 6364136223846793005ULL) + 1442695040888963407ULL;
+            uint32_t v = n ? static_cast<uint32_t>((state >> 33) % n) : 0;
+            out += std::format("[{} {}]", n, v);
+            return v;
+          };
+          try {
+            auto o = spire_reward_offer(rewards, kind, char_class, nullptr, 7, static_cast<SpireRewardTier>(tier), stream);
+            out += offer_text(o) + "\n";
+          } catch (const std::runtime_error& e) {
+            out += std::string("THROW ") + e.what() + "\n";
+          }
+        }
+      }
+    }
+    return out;
+  };
+  write("{}");
+  const std::string offers_before = offers_text();
+  expect(offers_before.find("[") != std::string::npos); // the offers do draw
+  {
+    HookGuard g1{H::TYPE_WEIGHT, "aa"}, g2{H::TYPE_WEIGHT, "mm"};
+    type_weight_target = 0;
+    type_weight_seen.clear();
+    spire_mech_register_type_weight({"mm", HOOK_KEY_OFF, 15, t_type_weight<'E'>});
+    write(R"({"test.haak.uit": false})");
+    expect_eq(offers_before, offers_text());
+    expect(type_weight_seen.empty()); // off: not asked
+    write(R"({"test.haak.uit": true})");
+    expect_eq(offers_before, offers_text());
+    expect(!type_weight_seen.empty()); // on: asked, and nothing moved
+    // and a registrant that leaves one unit its weight: that unit is the offer, whatever the draw
+    auto first = [](uint32_t) -> uint32_t { return 0; };
+    auto unit_code = [&]() {
+      auto o = spire_reward_offer(rewards, SpireRewardKind::UNIT, 0, nullptr, 7, SpireRewardTier::RARE, first);
+      return (static_cast<uint32_t>(o.item[0]) << 16) | (static_cast<uint32_t>(o.item[1]) << 8) | o.item[2];
+    };
+    type_weight_seen.clear();
+    uint32_t plain = unit_code();
+    expect(type_weight_seen.size() >= 2); // the class has more than one unit to choose from in this tier
+    expect_eq(type_weight_seen.front(), plain);
+    uint32_t other = type_weight_seen.back();
+    expect(other != plain);
+    type_weight_target = other;
+    expect_eq(other, unit_code());
+    type_weight_target = 0;
+  }
+  expect_eq(offers_before, offers_text());
+
   // H4 player_hp: only 6x4B and 6x4C are a hit; 6x4A and 6x2F share the handler and reach no registrant
   expect_hook<SpireMechPlayerHPFn>(
       H::PLAYER_HP, spire_mech_register_player_hp, t_player_hp<'L'>, t_player_hp<'E'>, t_player_hp<'O'>,
@@ -405,12 +463,15 @@ void spire_tests_hooks() {
       },
       write, "", "E15.4L15.4", "E15.4O15.4L15.4", "E15.4");
 
-  // H7 enemy_killed: the reconciled drop request and its floor
+  // H7 enemy_killed: the reconciled drop request and its floor; the request of a box reaches no registrant
+  DropReconcileResult box;
   DropReconcileResult rec;
+  rec.target_ene_st = std::make_shared<MapState::EnemyState>();
   rec.should_drop = false;
   expect_hook<SpireMechEnemyKilledFn>(
       H::ENEMY_KILLED, spire_mech_register_enemy_killed, t_enemy_killed<'L'>, t_enemy_killed<'E'>, t_enemy_killed<'O'>,
       [&]() {
+        spire_mech_enemy_killed(no_c, no_l, box, 2);
         spire_mech_enemy_killed(no_c, no_l, rec, 3);
         return hook_calls;
       },
@@ -478,6 +539,72 @@ void spire_tests_hooks() {
   expect_hook<SpireMechCharMeta>(
       H::CHAR_META, spire_mech_register_char_meta, T_CHAR_META<'L'>, T_CHAR_META<'E'>, T_CHAR_META<'O'>, meta_call, write,
       "", "ErLrEwLw TestE=5 TestL=7", "ErOrLrEwOwLw TestE=5 TestO=6 TestL=7", "ErEw TestE=5");
+
+  // H10 through the core: a registrant's key is written by spire_savestate_to_json and read by
+  // spire_savestate_from_json; without the registrant the text is the one of before and the key is not read
+  SpireSavestate ss;
+  ss.exists = true;
+  ss.run_id = 77;
+  ss.values.assign(SPIRE_SAVESTATE_NUM_VALUES, 0);
+  ss.sections["TestE"] = std::make_shared<const int64_t>(5);
+  write("{}");
+  const std::string ss_plain = spire_savestate_to_json(ss, 1);
+  expect(ss_plain.find("TestE") == std::string::npos);
+  std::string ss_with;
+  {
+    HookGuard g{H::RUN_STATE, "zz"};
+    spire_mech_register_run_state({"zz", HOOK_KEY_ON, 99, T_RUN_STATE<'E'>});
+    hook_calls.clear();
+    ss_with = spire_savestate_to_json(ss, 1);
+    expect_eq(std::string("Ew"), hook_calls);
+    expect(ss_with.find("\"TestE\": 5") != std::string::npos);
+    hook_calls.clear();
+    auto back = spire_savestate_from_json(ss_with);
+    expect_eq(std::string("Er"), hook_calls);
+    expect_eq(1u, back.sections.count("TestE"));
+    expect_eq(ss_with, spire_savestate_to_json(back, 1));
+    write(R"({"test.haak.aan": false})"); // its switch off: not written, not read
+    hook_calls.clear();
+    expect_eq(ss_plain, spire_savestate_to_json(ss, 1));
+    expect_eq(0u, spire_savestate_from_json(ss_with).sections.count("TestE"));
+    expect_eq(std::string(""), hook_calls);
+    write("{}");
+  }
+  expect_eq(ss_plain, spire_savestate_to_json(ss, 1));
+  expect_eq(0u, spire_savestate_from_json(ss_with).sections.count("TestE"));
+  expect_eq(ss_plain, spire_savestate_to_json(spire_savestate_from_json(ss_plain), 1));
+
+  // H11 through the core: a registrant's key survives the file's load and save (every flag write loads the file first);
+  // without the registrant the file is the one of before
+  std::string meta_file = (dir / "meta.json").string();
+  SpireMetaFile meta;
+  meta.exists = true;
+  meta.flags[std::make_pair(static_cast<uint8_t>(1), SPIRE_BRIDGE_FIRST_FLAG)] = true;
+  meta.upgrades["hp_mat"] = 2;
+  spire_meta_save_file(meta_file, 1, meta);
+  const std::string meta_plain = phosg::load_file(meta_file);
+  {
+    HookGuard g{H::CHAR_META, "zz"};
+    spire_mech_register_char_meta({"zz", HOOK_KEY_ON, 99, T_CHAR_META<'E'>});
+    auto with = meta;
+    with.sections["TestE"] = std::make_shared<const int64_t>(9);
+    hook_calls.clear();
+    spire_meta_save_file(meta_file, 1, with);
+    expect_eq(std::string("Ew"), hook_calls);
+    hook_calls.clear();
+    auto loaded = spire_meta_load_file(meta_file);
+    expect_eq(std::string("Er"), hook_calls);
+    expect_eq(1u, loaded.sections.count("TestE"));
+    expect(loaded.flags == meta.flags);
+    expect(loaded.upgrades == meta.upgrades);
+    const std::string meta_with = phosg::load_file(meta_file);
+    spire_meta_save_file(meta_file, 1, loaded); // the load and save of a flag write
+    expect_eq(meta_with, phosg::load_file(meta_file));
+    expect_eq(9, *std::static_pointer_cast<const int64_t>(spire_meta_load_file(meta_file).sections.at("TestE")));
+  }
+  expect_eq(0u, spire_meta_load_file(meta_file).sections.count("TestE"));
+  spire_meta_save_file(meta_file, 1, meta);
+  expect_eq(meta_plain, phosg::load_file(meta_file));
 
   spire_mech_set_switches_file("");
   std::filesystem::remove_all(dir);

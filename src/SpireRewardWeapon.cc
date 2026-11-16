@@ -73,7 +73,9 @@ std::optional<SpireRewardOffer> spire_reward_weapon_offer(const SpireRewardOffer
       }
     }
     if (!others.empty()) {
-      ret.line = others[rnd(others.size()) % others.size()];
+      ret.line = others[spire_mech_type_weight_pick(others.size(), rnd, [&](size_t z) { // the seam's H3
+        return SpireMechTypeWeight{&in, SpireMechCandidate::LINE, &others[z], 0, 0};
+      })];
     }
   }
   const auto& line = cls.lines.at(ret.line);

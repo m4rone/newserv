@@ -226,7 +226,8 @@ size_t spire_mech_type_weight_pick(size_t n, const std::function<uint32_t(uint32
     const std::function<SpireMechTypeWeight(size_t)>& candidate);
 
 // H4 player_hp: an enemy's hit on the player itself (ReceiveSubcommands.cc on_change_hp, 6x4B a minor and 6x4C a major
-// hit; the handler's other subcommands never reach a registrant), before the hit is forwarded
+// hit, by the number the client sent: a GC client's; the handler's other subcommands never reach a registrant),
+// before the hit is forwarded
 using SpireMechPlayerHPFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand);
 bool spire_mech_register_player_hp(const SpireMechHook<SpireMechPlayerHPFn>& reg);
 void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint8_t subcommand);
@@ -243,8 +244,9 @@ using SpireMechTechDoneFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<
 bool spire_mech_register_tech_done(const SpireMechHook<SpireMechTechDoneFn>& reg);
 void spire_mech_tech_done(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t technique, uint32_t level);
 
-// H7 enemy_killed: the drop request of a dying enemy (ReceiveSubcommands.cc on_entity_drop_item_request, when the
-// request names an enemy), before the drop is made. rec.should_drop is false for a request the map answered already.
+// H7 enemy_killed: the drop request of a dying enemy (ReceiveSubcommands.cc on_entity_drop_item_request; the request
+// of a box, rec.target_ene_st null, reaches no registrant), before the drop is made and whatever the game's drop mode.
+// rec.should_drop is false for a request the map answered already.
 using SpireMechEnemyKilledFn = void (*)(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l,
     const DropReconcileResult& rec, uint8_t floor);
 bool spire_mech_register_enemy_killed(const SpireMechHook<SpireMechEnemyKilledFn>& reg);

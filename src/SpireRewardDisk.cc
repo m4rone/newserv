@@ -231,7 +231,9 @@ std::optional<SpireRewardOffer> spire_reward_disk_offer(const SpireRewardOfferIn
                                          "is known, not the class's, or asks more MST than the copy can reach",
         cls.name, room_index, tier_label));
   }
-  const auto& [tech, level] = can[rnd(can.size()) % can.size()];
+  const auto& [tech, level] = can[spire_mech_type_weight_pick(can.size(), rnd, [&](size_t z) { // the seam's H3
+    return SpireMechTypeWeight{&in, SpireMechCandidate::TECH, nullptr, can[z].first, can[z].second};
+  })];
   ret.tech = tech;
   ret.tech_level = level;
   ret.mst_required = spire_reward_disk_mst(table.techs[tech], level);

@@ -10,6 +10,7 @@
 #include "CommandFormats.hh"
 #include "SendCommands.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMechanics.hh"
 #include "StaticGameData.hh"
 
 
@@ -105,6 +106,7 @@ SpireMetaFile spire_meta_load_file(const std::string& filename) {
       }
     }
   }
+  spire_mech_char_meta_read(json, ret); // the seam's H11
   return ret;
 }
 
@@ -162,6 +164,7 @@ static void spire_meta_save(const std::string& filename, uint32_t serial_number,
   } else if (file.adopted == SpireMetaAdopted::KNOWN) {
     json.emplace("Adopted", "known");
   }
+  spire_mech_char_meta_write(file, json); // the seam's H11
   spire_bridge_write_durable(filename,
       json.serialize(phosg::JSON::SerializeOption::FORMAT | phosg::JSON::SerializeOption::HEX_INTEGERS));
 }

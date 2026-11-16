@@ -893,6 +893,7 @@ std::string spire_savestate_to_json(const SpireSavestate& ss, uint32_t serial_nu
     }
     json.emplace("RunMag", std::move(led_json));
   }
+  spire_mech_run_state_write(ss, json); // the seam's H10
   return json.serialize(phosg::JSON::SerializeOption::FORMAT);
 }
 
@@ -999,6 +1000,7 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     led.disk_mind = std::clamp<int64_t>(led_json.get_int("DiskMind", 0), 0, 200);
     ret.run_mag = led;
   }
+  spire_mech_run_state_read(json, ret); // the seam's H10
   ret.exists = true;
   return ret;
 }
@@ -2269,6 +2271,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     if (led) {
       ss.run_mag = *led;
     }
+    spire_mech_run_state_capture(c, l, ss); // the seam's H10
     ss.values = std::move(values);
     ss.time_usecs = phosg::now();
     // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
@@ -2517,6 +2520,7 @@ static void spire_resume_answer(std::shared_ptr<Client> c, std::shared_ptr<const
     cr->resume_full_text_sent = false;
     cr->savestate = std::move(own);
     spire_run_mag_adopt(c, run->run_id, cr->savestate.run_mag); // F6
+    spire_mech_run_state_resume(c, l, cr->savestate); // the seam's H10
     for (const auto& [index, reg] : SPIRE_RESUME_HEADER) {
       spire_send_register(c, reg, cr->savestate.values[index]);
     }
@@ -4419,6 +4423,7 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
   }
   uint32_t trede = spire_reward_trede_for(c, l, serial_number, table);
   uint32_t room_index = spire_reward_room_index(k);
+  spire_mech_reward_room({c, l, serial_number, entry, k, elite}, room_index, trede); // the seam's H2
   uint8_t rung = l->quest ? spire_meta_ladder_quest_rung(l->quest->meta.quest_number) : 0; // the quest's difficulty
   auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
@@ -5068,6 +5073,7 @@ bool spire_bridge_handle_register(
         // shows no wave text), so it goes to every client in the game, like 'ROOM'
         size_t sent = 0;
         if ((value >> 24) == SPIRE_BRIDGE_MSG_WAVE) {
+          spire_mech_wave_start(c, l, serial_number, quest_number, (value >> 8) & 0xFF, value & 0xFF); // the seam's H8
           for (const auto& lc : l->clients) {
             if (lc) {
               spire_send_ticker(lc, msg);
@@ -6207,6 +6213,7 @@ static std::unordered_set<const Client*> spire_guard_base_follow_pending;
 static std::unordered_set<const Client*> spire_guard_base_exit_pending;
 
 void spire_guard_end_run(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l) {
+  spire_mech_run_end(c, l, SpireMechRunEnd::GAME_EXIT); // the seam's H9
   spire_guard_follow_pending.erase(c.get());
   spire_guard_base_exit_pending.erase(c.get());
   spire_guard_base_follow_pending.erase(c.get());
@@ -7392,6 +7399,7 @@ static asio::awaitable<void> spire_base_return(
       }
     }
   } else if (refusal == R::NONE) {
+    spire_mech_run_end(c, l, SpireMechRunEnd::BASE_RETURN); // the seam's H9
     c->log.info_f("Spire base return: OK for serial {:010} in q{}: the real character is back, the quest may warp to Pioneer 2 (r{}={:08X}); marker unchanged",
         serial_number, quest_number, SPIRE_BASE_RETURN_ANSWER_REGISTER, answer);
   } else {
@@ -7910,6 +7918,7 @@ static asio::awaitable<void> spire_run_again(
     } catch (const std::exception& e) {
       c->log.warning_f("Spire run again: failed to forget the earlier run: {}", e.what());
     }
+    spire_mech_run_end(c, l, SpireMechRunEnd::RUN_AGAIN); // the seam's H9
   }
 
   uint32_t answer = spire_run_again_answer(refusal);

@@ -22,6 +22,7 @@
 #include "SendCommands.hh"
 #include "SpireDrops.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMechanics.hh"
 #include "StaticGameData.hh"
 #include "Text.hh"
 
@@ -1734,6 +1735,7 @@ static void on_player_died(std::shared_ptr<Client> c, SubcommandMessage& msg) {
   }
   // veilig-1: a sign of a fight for the Spire nets; r2: from the players' side, so not for the enemies' side clock
   spire_bridge_note_fight(l, c->floor, false);
+  spire_mech_player_died(c, l); // the seam's H5 (SpireMechanics.hh)
 
   // Decrease MAG's synchro
   try {
@@ -1819,6 +1821,7 @@ static asio::awaitable<void> on_change_hp(std::shared_ptr<Client> c, SubcommandM
   // r2: the players' side only; an enemy out of reach that shoots keeps the floor clock young, not the enemies' one
   if constexpr (std::is_same_v<CmdT, G_ClientIDHeader>) {
     spire_bridge_note_fight(l, c->floor, false);
+    spire_mech_player_hp(c, l, cmd.subcommand); // the seam's H4 (SpireMechanics.hh)
   }
 
   forward_subcommand(c, msg);
@@ -1834,6 +1837,7 @@ static void on_cast_technique_finished(std::shared_ptr<Client> c, SubcommandMess
   auto l = c->require_lobby();
   if (l->is_game() && (cmd.header.client_id == c->lobby_client_id)) {
     forward_subcommand(c, msg);
+    spire_mech_tech_done(c, l, cmd.technique_number, cmd.level); // the seam's H6 (SpireMechanics.hh)
     bool player_cheats_enabled = !is_v1(c->version()) &&
         (l->check_flag(Lobby::Flag::CHEATS_ENABLED) || (c->login->account->check_flag(Account::Flag::CHEAT_ANYWHERE)));
     if (player_cheats_enabled && c->check_flag(Client::Flag::INFINITE_TP_ENABLED)) {
@@ -3041,6 +3045,7 @@ static void on_entity_drop_item_request(std::shared_ptr<Client> c, SubcommandMes
   // enemies and objects as having dropped their items in persistent games.
   G_SpecializableItemDropRequest_6xA2 cmd = normalize_drop_request(msg.data, msg.size);
   auto rec = reconcile_drop_request_with_map(c, cmd, l->difficulty, l->event, l->map_state, true);
+  spire_mech_enemy_killed(c, l, rec, cmd.floor); // the seam's H7 (SpireMechanics.hh)
 
   ServerDropMode drop_mode = l->drop_mode;
   switch (drop_mode) {
