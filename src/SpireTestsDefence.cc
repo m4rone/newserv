@@ -25,6 +25,7 @@
 #include "SpireFlagBridge.hh"
 #include "SpireMechanics.hh"
 #include "SpireRewards.hh"
+#include "SpireTestSupport.hh"
 
 // The tests of reward kind 5 (a unit) and of the frame with four slots it goes into.
 // Moved literally out of run_static_tests() in StaticTests.cc (the seam, docs/review-loop/goals/naad.md point 1): the
@@ -145,6 +146,21 @@ void spire_tests_defence() {
   expect(spire_reward_free_unit_slot(0x01, 1) == std::nullopt);
   expect(spire_reward_free_unit_slot(0x00, 9) == std::optional<uint8_t>(0)); // a slot byte past 4 gives no fifth slot
   expect(spire_reward_free_unit_slot(0x0F, 9) == std::nullopt);
+
+  // Moved by review r1 of the seam: the test of kind 5's own section of the grid (SpireRewardUnit.cc
+  // spire_reward_unit_parse), as it stood in run_static_tests()
+  {
+    // review r1: a Units item that is not a unit (here a Saber, 000100) is refused at load, never offered as one
+    std::string grid_text = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE));
+    size_t units_at = grid_text.find("\"Units\"");
+    size_t items_at = (units_at == std::string::npos) ? units_at : grid_text.find("\"Items\"", units_at);
+    size_t brace_at = (items_at == std::string::npos) ? items_at : grid_text.find('{', items_at);
+    expect(brace_at != std::string::npos);
+    std::string not_a_unit = grid_text;
+    not_a_unit.insert(brace_at + 1, "\"000100\":{\"Name\":\"Saber\",\"Stars\":1,\"Stat\":0,\"Amount\":0},");
+    expect_eq(rewards.units.size(), spire_rewards_parse(grid_text).units.size());
+    expect_raises(std::runtime_error, [&]() { spire_rewards_parse(not_a_unit); });
+  }
 }
 
 [[maybe_unused]] const bool registered = spire_mech_register_tests("defence", spire_tests_defence);

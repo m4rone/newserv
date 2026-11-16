@@ -24,6 +24,7 @@
 #include "SpireMag.hh"
 #include "SpireMechanics.hh"
 #include "SpireRewards.hh"
+#include "SpireTestSupport.hh"
 
 // The tests of reward kind 4 (a technique disk) and of the level the disk teaches.
 // Moved literally out of run_static_tests() in StaticTests.cc (the seam, docs/review-loop/goals/naad.md point 1): the
@@ -347,6 +348,21 @@ void spire_tests_force() {
   expect((spire_reward_need_with_disk(SpireMagNeed{160, 0, 0}, 50) == SpireMagNeed{160, 0, 40}));
   expect((spire_reward_need_with_disk(SpireMagNeed{150, 60, 0}, 50) == SpireMagNeed{150, 60, 0}));
   expect((spire_reward_need_with_disk(SpireMagNeed{0, 0, 180}, 50) == SpireMagNeed{0, 0, 180}));
+
+  // Moved by review r1 of the seam: the test of kind 4's own section of the grid (SpireRewardDisk.cc
+  // spire_reward_disk_parse), as it stood in run_static_tests(), with the line above it there that read the grid's text
+  {
+    std::string grid_text = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE));
+    // a grid with a disk level past 30 is refused at load
+    {
+      std::string bad_level = grid_text;
+      size_t disks_at = bad_level.find("\"Disks\"");
+      size_t row_at = (disks_at == std::string::npos) ? disks_at : bad_level.find("[[1,8,13,18]", disks_at);
+      expect(row_at != std::string::npos);
+      bad_level.replace(row_at, 12, "[[1,8,13,31]");
+      expect_raises(std::runtime_error, [&]() { spire_rewards_parse(bad_level); });
+    }
+  }
 }
 
 [[maybe_unused]] const bool registered = spire_mech_register_tests("force", spire_tests_force);

@@ -6879,27 +6879,6 @@ void run_static_tests() {
       expect_raises(std::runtime_error, [&]() { spire_rewards_parse(three_rungs); });
     }
 
-    {
-      // review r1: a Units item that is not a unit (here a Saber, 000100) is refused at load, never offered as one
-      std::string grid_text = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE));
-      size_t units_at = grid_text.find("\"Units\"");
-      size_t items_at = (units_at == std::string::npos) ? units_at : grid_text.find("\"Items\"", units_at);
-      size_t brace_at = (items_at == std::string::npos) ? items_at : grid_text.find('{', items_at);
-      expect(brace_at != std::string::npos);
-      std::string not_a_unit = grid_text;
-      not_a_unit.insert(brace_at + 1, "\"000100\":{\"Name\":\"Saber\",\"Stars\":1,\"Stat\":0,\"Amount\":0},");
-      expect_eq(rewards.units.size(), spire_rewards_parse(grid_text).units.size());
-      expect_raises(std::runtime_error, [&]() { spire_rewards_parse(not_a_unit); });
-      // a grid with a disk level past 30 is refused at load
-      {
-        std::string bad_level = grid_text;
-        size_t disks_at = bad_level.find("\"Disks\"");
-        size_t row_at = (disks_at == std::string::npos) ? disks_at : bad_level.find("[[1,8,13,18]", disks_at);
-        expect(row_at != std::string::npos);
-        bad_level.replace(row_at, 12, "[[1,8,13,31]");
-        expect_raises(std::runtime_error, [&]() { spire_rewards_parse(bad_level); });
-      }
-    }
     // a draw table's srv: the kinds this server gives (4 is the disk), and nothing else
     expect(spire_reward_kind_known(1) && spire_reward_kind_known(2) && spire_reward_kind_known(3) && spire_reward_kind_known(4) &&
         spire_reward_kind_known(5));
