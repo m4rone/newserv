@@ -13,9 +13,11 @@
 #include <vector>
 
 #include "Client.hh"
+#include "ItemParameterTable.hh"
 #include "Lobby.hh"
 #include "SpireMag.hh"
 #include "SpireMeta.hh"
+#include "SpireRewards.hh"
 #include "StaticGameData.hh"
 
 // Spire flag bridge (GC V3 only).
@@ -440,6 +442,18 @@ std::vector<SpireResumeEquipSend> spire_resume_equip_plan(
 // ux-1: whether newserv's copy has a frame equipped, which every unit send waits for (a unit without a frame is no
 // state the game makes; the units then stay the player's, with one line)
 bool spire_resume_frame_equipped(const PlayerInventory& inventory);
+// Part B: the worn frame and units of an inventory as newserv's copy has them: the frame's slots (data1[5], at most 4),
+// the unit slots taken (bit n: a unit equipped with data1[4] = n, as on_equip_item writes it) and what the equipped units
+// add to ATP and MST by the item parameter table (SpireUnitBonus; a unit the table does not know adds nothing, and so
+// does every unit without a table). Read at a reward pick (a weapon's requirement) and after a reward unit's RESULT (its
+// slot).
+struct SpireRewardWorn {
+  bool frame = false;
+  uint8_t frame_slots = 0;
+  uint8_t occupied = 0;
+  SpireUnitBonus bonus;
+};
+SpireRewardWorn spire_reward_worn(std::shared_ptr<const ItemParameterTable> ipt, const PlayerInventory& inventory);
 // kwaliteit-1: what the resume start line asks the player to equip: " Equip your gear." when newserv equips nothing
 // (server_equips false: r143 = 0 for the client) or the savestate does not say what was equipped (a file from before);
 // else only the equipped items newserv cannot equip, by kind (" Equip your armor, shield and units."), or "" when

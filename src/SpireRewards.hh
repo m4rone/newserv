@@ -212,8 +212,9 @@ constexpr std::optional<uint8_t> spire_reward_free_unit_slot(uint8_t occupied, u
   return std::nullopt;
 }
 
-// What the player reads when a reward unit stays in the pack (no % and no < >: a ticker line)
-constexpr const char* SPIRE_REWARD_UNIT_NO_SLOT_TEXT = "Unit slots full: the unit is in your Item Pack.";
+// What the player reads when a reward unit stays in the pack (no % and no < >: a ticker line). review r1 B4: "no free
+// slot" covers a full frame and a frame without slots (the kit frame at r143 = 0, which equip_item makes)
+constexpr const char* SPIRE_REWARD_UNIT_NO_SLOT_TEXT = "No free unit slot: the unit is in your Item Pack.";
 constexpr const char* SPIRE_REWARD_UNIT_NO_FRAME_TEXT = "No frame worn: the unit is in your Item Pack.";
 
 // When SpireEquipItem goes out for a reward weapon. The game holds a weapon's requirement also when the server equips

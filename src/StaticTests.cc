@@ -7929,6 +7929,74 @@ void run_static_tests() {
       }
       phosg::log_info_f("   rewards: {} units, {} unit offers checked", rewards.units.size(), unit_offers);
       expect(unit_offers >= 12 * 4);
+
+      // review r1 B3: the run copy's worn frame and units as a pick (a weapon's requirement) and a reward unit's equip
+      // (its slot) read them: only equipped units count, by the table's stat and amount, in the slot their data1[4]
+      // names; the frame's slots are its data1[5], at most 4; without a table the slots still count, the stats not
+      PlayerInventory inv;
+      auto put = [&](size_t z, std::initializer_list<uint8_t> data1, uint32_t flags) {
+        auto& it = inv.items[z];
+        it = PlayerInventoryItem();
+        it.state = 1;
+        size_t x = 0;
+        for (uint8_t b : data1) {
+          it.data.data1[x++] = b;
+        }
+        it.data.id = 0x00810100 + z;
+        it.flags = flags;
+        inv.num_items = std::max<size_t>(inv.num_items, z + 1);
+      };
+      put(0, {0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, 0x0000000C); // the kit frame with four slots, worn
+      put(1, {0x01, 0x03, 0x03, 0x00, 0x00}, 0x0000000C); // God/Power in slot 0
+      put(2, {0x01, 0x03, 0x07, 0x00, 0x02}, 0x0000000C); // God/Mind in slot 2
+      put(3, {0x01, 0x03, 0x00}, 0x00000004); // Knight/Power in the pack: no slot, no stats
+      put(4, {0x00, 0x01, 0x00}, 0x0000000C); // a weapon
+      auto worn = spire_reward_worn(ipt, inv);
+      expect(worn.frame);
+      expect_eq(4, worn.frame_slots);
+      expect_eq(0x05, worn.occupied);
+      expect_eq(static_cast<uint32_t>(ipt->get_unit(0x03).amount), worn.bonus.atp);
+      expect_eq(static_cast<uint32_t>(ipt->get_unit(0x07).amount), worn.bonus.mst);
+      expect(worn.bonus.atp > 0 && worn.bonus.mst > 0);
+      expect(spire_reward_free_unit_slot(worn.occupied, worn.frame_slots) == std::optional<uint8_t>(1));
+      auto bare = spire_reward_worn(nullptr, inv);
+      expect(bare.frame && (bare.occupied == 0x05) && !bare.bonus.atp && !bare.bonus.mst);
+      inv.items[0].data.data1[5] = 9; // a slot byte past 4 gives no fifth slot
+      expect_eq(4, spire_reward_worn(ipt, inv).frame_slots);
+      inv.items[0].flags = 0x00000004; // the frame in the pack: no frame worn
+      inv.items[1].flags = inv.items[2].flags = 0x00000004;
+      auto none = spire_reward_worn(ipt, inv);
+      expect(!none.frame && !none.frame_slots && !none.occupied && !none.bonus.atp && !none.bonus.mst);
+
+      // review r1 B2: the kit frame 'C' 13 equips (part B): the newest unequipped, unwrapped frame with slots; none when
+      // it has no slots or is wrapped, or when a frame is worn already (a quest that equips its frame itself)
+      inv = PlayerInventory();
+      put(0, {0x00, 0x01, 0x00}, 0x00000004); // the kit weapon, made with its grind, not equipped
+      put(1, {0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, 0x00000004);
+      expect(spire_equip_find_kit_frame(inv) == std::optional<uint32_t>(0x00810101));
+      put(2, {0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, 0x00000004); // a second one: the newest
+      expect(spire_equip_find_kit_frame(inv) == std::optional<uint32_t>(0x00810102));
+      inv.items[2].flags = 0x00000404; // wrapped: the one before it
+      expect(spire_equip_find_kit_frame(inv) == std::optional<uint32_t>(0x00810101));
+      inv.items[1].data.data1[5] = 0; // no slots: equip_item's frame, not the one item_create2 made for its slots
+      expect(spire_equip_find_kit_frame(inv) == std::nullopt);
+      inv.items[1].data.data1[5] = 4;
+      inv.items[0] = inv.items[2];
+      inv.items[0].data.data1[5] = 0;
+      inv.items[0].flags = 0x0000000C; // a frame worn before the one with slots
+      inv.items[2].flags = 0x00000004;
+      expect(spire_equip_find_kit_frame(inv) == std::nullopt);
+
+      // review r1: a Units item that is not a unit (here a Saber, 000100) is refused at load, never offered as one
+      std::string grid_text = phosg::load_file(SPIRE_REWARDS_FILE);
+      size_t units_at = grid_text.find("\"Units\"");
+      size_t items_at = (units_at == std::string::npos) ? units_at : grid_text.find("\"Items\"", units_at);
+      size_t brace_at = (items_at == std::string::npos) ? items_at : grid_text.find('{', items_at);
+      expect(brace_at != std::string::npos);
+      std::string not_a_unit = grid_text;
+      not_a_unit.insert(brace_at + 1, "\"000100\":{\"Name\":\"Saber\",\"Stars\":1,\"Stat\":0,\"Amount\":0},");
+      expect_eq(rewards.units.size(), spire_rewards_parse(grid_text).units.size());
+      expect_raises(std::runtime_error, [&]() { spire_rewards_parse(not_a_unit); });
     }
     // what worn units add to a weapon's requirement: ATP, MST, both from God/Ability (stat 8); nothing from the rest
     {
@@ -8572,10 +8640,14 @@ void run_static_tests() {
       const B8Entries srv = {{"\"Weapon\",\"srv\":1,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false},
           {"\"New line\",\"srv\":2", false}, {"\"Mag food\",\"srv\":3,\"bytes\":\"01 01 00 00 00 00 06 00 00 00 00 00\"", false},
           {"\"Odd\",\"srv\":4,\"bytes\":\"00 01 00 08 00 00 00 00 00 00 00 00\"", false}, {"\"Bad\",\"srv\":\"x\"", false},
-          {"\"Short\",\"srv\":1,\"bytes\":\"00 01\"", false}};
+          {"\"Short\",\"srv\":1,\"bytes\":\"00 01\"", false},
+          {"\"Unit\",\"srv\":5,\"bytes\":\"03 0B 01 00 00 00 00 00 00 00 00 00\"", false}};
       auto t = b8_load(b8_table_json({srv, srv, srv}, ""));
       const auto& e = t.archetypes.at(0).entries;
-      expect_eq(6u, e.size());
+      expect_eq(7u, e.size());
+      // review r1 B1 (part B): kind 5, Kracht, is a server reward with its own item (a material)
+      expect_eq(5, e[6].srv_kind);
+      expect(e[6].has_own_bytes && (e[6].own_bytes == std::array<uint8_t, 12>{0x03, 0x0B, 0x01}));
       expect_eq(1, e[0].srv_kind);
       expect(e[0].has_own_bytes);
       expect((e[0].own_bytes == std::array<uint8_t, 12>{0x00, 0x01, 0x00, 0x08}));
@@ -10985,6 +11057,182 @@ void run_static_tests() {
       must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43001300), "the Skip bonus 'C' 19");
       drive_clock(w, p, seen, [&]() { return line_sent(sent_from, "You did not choose: you got the Skip bonus."); },
           "the auto take's Skip bonus line");
+      spire_static_test_forget(p.c, r.l);
+      p.c->lobby.reset();
+      r.l->clients.fill(nullptr);
+    });
+
+    // review r1 B1/B4 (part B, played through the bridge as the quest plays it): a force's Unit pick (kind 5 in the draw
+    // table) answers a unit of the FO lists; its RESULT leaves it in the pack with the line that says why (r143 = 0 here:
+    // "equip it" with a free slot, "no frame worn", "no free slot"); and the units worn count for a weapon's ATP and MST
+    // requirement at the pick (Marck, 16 Nov 2026), so rule B owes no mag while they carry it and one without them
+    e2e_case("review r1 (part B): a Unit reward through the bridge, its line, and worn units in a weapon's requirement", [&]() {
+      TempCwd temp_cwd;
+      phosg::save_file(SPIRE_REWARDS_FILE, rewards_json_e2e);
+      phosg::save_file(SPIRE_RUN_MAG_FILE, mags_json_e2e);
+      // the quest's draw table: per archetype three weapon entries and the Unit entry (its own item a Mind Material)
+      std::string entries;
+      for (size_t z = 0; z < 4; z++) {
+        entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,"
+                               "\"glass_ok\":false,\"name\":\"Entry {}\",\"srv\":{},\"bytes\":\"{}\"}}",
+            z ? "," : "", z + 1, (z == 3) ? 5 : 1,
+            (z == 3) ? "03 0B 01 00 00 00 00 00 00 00 00 00" : "00 01 00 08 00 00 00 00 00 00 00 00");
+      }
+      const std::string row = "[0,1,2,3]";
+      std::string arch = std::format("{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{},{},{},{}]}},"
+                                     "\"slot_c_zero_tags\":[]}}",
+          entries, row, row, row, row, row, row, row);
+      std::filesystem::create_directories(SPIRE_BRIDGE_DRAW_DIRECTORY);
+      phosg::save_file(std::format("{}/q{}.json", SPIRE_BRIDGE_DRAW_DIRECTORY, QUEST),
+          std::format("{{\"num_tags\":2,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,"
+                      "\"max_attempts\":8,\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,"
+                      "\"relic_bit_r14\":16,\"archetypes\":[{},{},{}]}}",
+              arch, arch, arch));
+      auto w = make_world();
+      w.s->data->item_parameter_tables[static_cast<size_t>(Version::GC_V3)] = pmt_v3;
+      w.s->data->item_stack_limits_tables[static_cast<size_t>(Version::GC_V3)] =
+          std::make_shared<ItemData::StackLimits>(ItemData::StackLimits::DEFAULT_STACK_LIMITS_V3_V4);
+      w.s->data->spire_equip_item_patch = false; // r143 = 0: newserv equips nothing, so every outcome is a line
+      GCCharacter real = real_character();
+      real.disp.visual.sh.char_class = 6; // FOmarl: the FO unit lists, and the Cane line asks MST
+      auto r = start_run(w, real);
+      auto& p = r.p;
+      ServerWrote seen;
+      p.c->floor = 1;
+      spire_checkpoint_run_started(p.c);
+      spire_static_test_run_state(p.c, r.l, true, false);
+      auto overlay = p.c->character_file(false, true);
+      auto& inv = overlay->inventory;
+      auto& stats = overlay->disp.stats.char_stats;
+      auto item_answer = [&](size_t from) {
+        SpireMagBytes b{};
+        for (size_t z = from; z < seen.registers.size(); z++) {
+          auto [reg, value] = seen.registers[z];
+          if ((reg >= SPIRE_RUN_MAG_ITEM_FIRST_REGISTER) && (reg < SPIRE_RUN_MAG_ITEM_FIRST_REGISTER + 12)) {
+            b[reg - SPIRE_RUN_MAG_ITEM_FIRST_REGISTER] = value;
+          }
+        }
+        return b;
+      };
+      auto line_sent = [&](size_t from, const std::string& text) {
+        for (size_t z = from; z < seen.sent.size(); z++) {
+          if (seen.sent[z].find(text) != std::string::npos) {
+            return true;
+          }
+        }
+        return false;
+      };
+      auto z_word = [](uint8_t sub, uint32_t low) {
+        return SPIRE_RUN_MAG_TAG | (static_cast<uint32_t>(sub) << 16) | low;
+      };
+      // an item the quest made (item_create2 appends it), with its flags
+      auto add = [&](std::initializer_list<uint8_t> data1, uint32_t flags) -> size_t {
+        size_t z = inv.num_items;
+        inv.items[z] = PlayerInventoryItem();
+        inv.items[z].state = 1;
+        size_t x = 0;
+        for (uint8_t b : data1) {
+          inv.items[z].data.data1[x++] = b;
+        }
+        inv.items[z].data.id = 0x00810040 + z;
+        inv.items[z].flags = flags;
+        inv.num_items = z + 1;
+        return z;
+      };
+
+      // the kit's mag (step 0: MIND 0), created and confirmed
+      size_t from = seen.registers.size();
+      expect_eq(1u, quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_ASK, 1), "the kit's mag") & 1);
+      SpireMagBytes mag = item_answer(from);
+      auto& mag_item = inv.items[1];
+      expect_eq(0x02, mag_item.data.data1[0]);
+      for (size_t z = 0; z < 12; z++) {
+        mag_item.data.data1[z] = mag[z];
+      }
+      mag_item.flags = 0x0000000C;
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_RESULT, 1)), "the kit's RESULT");
+      expect_eq(0u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e)); // no Legendary in this run yet
+
+      // the Unit pick (entry 4): a unit of the FO lists as data1 01 03 xx and nothing else, no mag follows; the quest's
+      // item_create2 puts it in the pack, then its RESULT and the line that says why it stays there
+      std::set<uint32_t> fo_units;
+      for (const auto& codes : rewards_e2e.unit_tiers.at("FO")) {
+        fo_units.insert(codes.begin(), codes.end());
+      }
+      auto unit_pick = [&](uint8_t slot, const std::string& text) {
+        size_t from_u = seen.registers.size();
+        expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM,
+            quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (static_cast<uint32_t>(slot) << 8) | 4), "the Unit pick"));
+        SpireMagBytes u = item_answer(from_u);
+        expect(fo_units.count((u[0] << 16) | (u[1] << 8) | u[2]));
+        for (size_t z = 3; z < 12; z++) {
+          expect_eq(0, u[z]);
+        }
+        add({u[0], u[1], u[2]}, 0x00000004);
+        size_t sent_u = seen.sent.size();
+        must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_REWARD_RESULT, 1)),
+            "the Unit's RESULT");
+        drive_clock(w, p, seen, [&]() { return line_sent(sent_u, text); }, "the Unit's line");
+      };
+      size_t frame = add({0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, 0x0000000C); // a frame with four slots, worn
+      unit_pick(2, SPIRE_EQUIP_UNITS_MISSING_TEXT); // a free slot: the player's to equip at r143 = 0
+      inv.items[frame].flags = 0x00000004;
+      unit_pick(3, SPIRE_REWARD_UNIT_NO_FRAME_TEXT);
+      inv.items[frame].flags = 0x0000000C;
+      std::array<size_t, 4> worn_units;
+      for (uint8_t n = 0; n < 4; n++) { // God/Power, God/Mind, Knight/Power, Priest/Mind in slots 0-3
+        const uint8_t code[4] = {0x03, 0x07, 0x00, 0x04};
+        worn_units[n] = add({0x01, 0x03, code[n], 0x00, n}, 0x0000000C);
+      }
+      unit_pick(4, SPIRE_REWARD_UNIT_NO_SLOT_TEXT);
+
+      // a weapon's requirement: the held line's W2 cells (room 1, Normal to Epic) ask ATP (Saber) or MST (Cane); the run
+      // copy is that much short of the least of them without its worn unit, and meets the most with it
+      const auto& cls = rewards_e2e.classes.at(6);
+      auto requirement = [&](const std::string& ln, bool mst) {
+        const auto& cells = cls.lines.at(ln).w.at(spire_reward_w(rewards_e2e, spire_reward_room_index(1))).tiers;
+        uint32_t least = 0xFFFFFFFF, most = 0;
+        for (size_t t = 0; t < 3; t++) {
+          const auto& info = rewards_e2e.items.at(cells[t].code);
+          least = std::min(least, mst ? info.mst : info.atp);
+          most = std::max(most, mst ? info.mst : info.atp);
+        }
+        return std::make_pair(least, most);
+      };
+      auto weapon_pick = [&](const char* what) {
+        return quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (5u << 8) | 1), what);
+      };
+      auto wear_only = [&](size_t n) { // the frame, and of the four units only worn_units[n]
+        for (size_t z = 0; z < 4; z++) {
+          inv.items[worn_units[z]].flags = (z == n) ? 0x0000000C : 0x00000004;
+        }
+      };
+      auto& held = inv.items[0];
+      expect(held.is_equipped() && (held.data.data1[0] == 0x00));
+      held.data.data1[1] = 0x01; // a Saber: the Saber line
+      held.data.data1[2] = 0x00;
+      auto [atp_least, atp_most] = requirement("Saber", false);
+      uint32_t power = pmt_v3->get_unit(0x03).amount; // God/Power
+      uint32_t knight = pmt_v3->get_unit(0x00).amount; // Knight/Power
+      expect((atp_most >= power) && (atp_least + power > atp_most + knight));
+      stats.atp = atp_most - power;
+      stats.ata = 999;
+      stats.mst = 999;
+      wear_only(0);
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, weapon_pick("a Saber pick with God/Power worn"));
+      wear_only(2); // Knight/Power instead: too little
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS, weapon_pick("a Saber pick without it"));
+      held.data.data1[1] = 0x0A; // a Cane: the Cane line asks MST
+      auto [mst_least, mst_most] = requirement("Cane", true);
+      uint32_t mind = pmt_v3->get_unit(0x07).amount; // God/Mind
+      uint32_t priest = pmt_v3->get_unit(0x04).amount; // Priest/Mind
+      expect((mst_most >= mind) && (mst_least + mind > mst_most + priest));
+      stats.atp = 999;
+      stats.mst = mst_most - mind;
+      wear_only(1);
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, weapon_pick("a Cane pick with God/Mind worn"));
+      wear_only(3); // Priest/Mind instead: too little
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS, weapon_pick("a Cane pick without it"));
       spire_static_test_forget(p.c, r.l);
       p.c->lobby.reset();
       r.l->clients.fill(nullptr);

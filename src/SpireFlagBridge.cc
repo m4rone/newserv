@@ -4335,18 +4335,9 @@ static std::optional<SpireMagBytes> spire_reward_run_mag(const PlayerInventory& 
   return ret;
 }
 
-// Part B: the run copy's worn frame and units as newserv's copy has them: the frame's slots (data1[5]), the unit slots
-// taken (bit n: a unit equipped with data1[4] = n, as on_equip_item writes it) and what the worn units add to ATP and
-// MST (SpireRewards.hh SpireUnitBonus)
-struct SpireRewardWorn {
-  bool frame = false;
-  uint8_t frame_slots = 0;
-  uint8_t occupied = 0;
-  SpireUnitBonus bonus;
-};
-static SpireRewardWorn spire_reward_worn(std::shared_ptr<Client> c, const PlayerInventory& inventory) {
+// Part B: the run copy's worn frame and units (SpireFlagBridge.hh)
+SpireRewardWorn spire_reward_worn(std::shared_ptr<const ItemParameterTable> ipt, const PlayerInventory& inventory) {
   SpireRewardWorn ret;
-  auto ipt = c->require_server_state()->data->item_parameter_table(Version::GC_V3);
   for (size_t z = 0; (z < inventory.num_items) && (z < inventory.items.size()); z++) {
     const auto& item = inventory.items[z];
     const auto& d = item.data.data1;
@@ -4604,7 +4595,7 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
   p.offer = *offer;
   p.server_offer = true;
   // part B: what the worn units give counts for a weapon's requirement, as in the game (Marck, 16 Nov 2026)
-  auto worn = spire_reward_worn(c, overlay->inventory);
+  auto worn = spire_reward_worn(c->require_server_state()->data->item_parameter_table(Version::GC_V3), overlay->inventory);
   p.atp = stats.atp + worn.bonus.atp;
   p.ata = stats.ata;
   p.mst = stats.mst + worn.bonus.mst;
@@ -4787,8 +4778,9 @@ static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, st
 }
 
 // After the RESULT of a server reward unit (part B): SpireEquipItem puts it in the first free slot of the worn frame,
-// once newserv's copy holds it. Without the function on this client (r143 = 0) it is the player's to equip; without a
-// worn frame or with every slot taken it stays in the pack and the player reads why. Then the journal line of the pick.
+// once newserv's copy holds it. Without a worn frame or without a free slot it stays in the pack and the player reads
+// why; review r1 B4: also on a client without the function (r143 = 0), whose kit frame has no slots, and there a free
+// slot gets the units' "equip it" line in its turn (as the weapon's line at r143 = 0). Then the journal line of the pick.
 static asio::awaitable<void> spire_reward_equip_unit(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
     SpireRewardPending p, uint32_t serial_number) {
   std::optional<uint32_t> item_id;
@@ -4811,7 +4803,7 @@ static asio::awaitable<void> spire_reward_equip_unit(std::weak_ptr<Client> weak_
         item_id = it.data.id.load();
       }
     }
-    worn = spire_reward_worn(c, inv);
+    worn = spire_reward_worn(c->require_server_state()->data->item_parameter_table(Version::GC_V3), inv);
   }
   auto c = weak_c.lock();
   auto l = weak_l.lock();
@@ -4822,11 +4814,12 @@ static asio::awaitable<void> spire_reward_equip_unit(std::weak_ptr<Client> weak_
   std::string outcome;
   if (!item_id) {
     outcome = "NOT FOUND in the run copy";
-  } else if (!spire_equip_item_available_for(c)) {
-    outcome = std::format("in the pack (r{} = 0, the player's own)", SPIRE_EQUIP_REGISTER);
   } else if (!free_slot) {
     outcome = worn.frame ? "in the pack (no free slot)" : "in the pack (no frame worn)";
     spire_send_ticker(c, worn.frame ? SPIRE_REWARD_UNIT_NO_SLOT_TEXT : SPIRE_REWARD_UNIT_NO_FRAME_TEXT);
+  } else if (!spire_equip_item_available_for(c)) {
+    outcome = std::format("in the pack (r{} = 0, the player's own; free slot {})", SPIRE_EQUIP_REGISTER, *free_slot + 1);
+    spire_equip_missing_line_in_turn(c, l, SPIRE_EQUIP_RESUME_UNIT, *item_id);
   } else {
     co_await spire_equip_item_send(c, l, *item_id, "reward unit", SPIRE_EQUIP_RESUME_UNIT,
         SPIRE_EQUIP_UNIT_SLOT_FIRST + *free_slot);
