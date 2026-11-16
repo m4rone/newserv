@@ -7,7 +7,7 @@
     "`build/newserv run-static-tests`",
     "`sh tests/spire-follow-city.test.sh build/newserv`",
     "quest-build: `D=$(mktemp -d) && ln -s /home/m4rck/code/worktrees/newserv/beloningen-a/build/newserv /home/m4rck/code/worktrees/newserv/beloningen-a/src /home/m4rck/code/worktrees/newserv/beloningen-a/system \"$D\"/ && NEWSERV_DIR=\"$D\" bash /home/m4rck/code/worktrees/pso-roguelike/beloningen-a/quests/spire/build.sh` (alle selftest-gates groen, bytes en labels binnen de grens)",
-    "grid: `cd /home/m4rck/code/worktrees/pso-roguelike/beloningen-a && python3 quests/spire/make_spire_rewards.py --check` (meldt dat het grid klopt met system/spire-rewards.json)"
+    "grid: `cd /home/m4rck/code/worktrees/pso-roguelike/beloningen-a && NEWSERV_DIR=/home/m4rck/code/worktrees/newserv/beloningen-a python3 quests/spire/make_spire_rewards.py --check` (meldt dat het grid klopt met system/spire-rewards.json)"
   ],
   "rules": [
     "De wijziging beslaat twee repos: newserv in /home/m4rck/code/worktrees/newserv/beloningen-a en de quest-repo in /home/m4rck/code/worktrees/pso-roguelike/beloningen-a, beide op tak feature/beloningen. Werk uitsluitend daar, met absolute paden of cd in elk commando. Een fix in de quest-repo krijgt een eigen fix(review)-commit in die repo.",
