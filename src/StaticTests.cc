@@ -8114,6 +8114,83 @@ void run_static_tests() {
         expect_eq(3, offer.tech);
         expect_eq(st.class_max[3] + 1, offer.tech_level);
       }
+      {
+        // a line that names a disk of its own (the FO lines that were a fixed disk, "Foie Lv3"): its technique, at
+        // the line's own level or Sega's when that is higher, two above what the copy knows, a drawn curse's two
+        // levels on top; another technique only when the copy cannot grow in the line's own
+        SpireRewardDiskState st;
+        st.mst = 5000;
+        for (size_t x = 0; x < SPIRE_TECH_COUNT; x++) {
+          st.class_max[x] = ipt->get_max_tech_level(6, x); // FOmarl
+        }
+        const auto& row = rewards.disk_levels.at(1);
+        expect_eq(1, row[0][0]); // Sega's Normal Foie in room 1
+        expect(row[0][1] > 3); // and its Rare one
+        expect_eq(0, row[9][0]); // no Normal Grants there
+        auto only = [&](uint32_t n) -> uint32_t {
+          expect_eq(1u, n); // the line's technique is the one candidate
+          return 0;
+        };
+        auto line_offer = [&](SpireRewardTier tier) {
+          return spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 1, tier, only, &st);
+        };
+        st.line_tech = 0;
+        st.line_level = 3;
+        auto offer = line_offer(SpireRewardTier::NORMAL);
+        expect_eq(0, offer.tech);
+        expect_eq(3, offer.tech_level); // the line's own level, above Sega's Lv1
+        expect_eq(std::string("NORMAL Foie Lv3"), offer.label);
+        expect((offer.item == SpireMagBytes{0x03, 0x02, 0x02, 0x00, 0x00}));
+        expect_eq(row[0][1], line_offer(SpireRewardTier::RARE).tech_level); // Sega's level when it is the higher one
+        st.known[0] = 4; // the copy knows Foie Lv5: two above
+        expect_eq(7, line_offer(SpireRewardTier::NORMAL).tech_level);
+        st.extra_levels = spire_reward_curse_disk_levels(3); // Glass on the pick: two more
+        expect_eq(9, line_offer(SpireRewardTier::NORMAL).tech_level);
+        st.known[0] = 27; // Lv28: the class's highest holds the curse's levels too
+        expect_eq(30, line_offer(SpireRewardTier::NORMAL).tech_level);
+        st.known[0] = 0xFF;
+        st.mst = 100;
+        st.mind_room = 20; // the copy reaches MST 140: Foie Lv6, with or without the curse
+        st.line_level = 8;
+        expect_eq(6, line_offer(SpireRewardTier::NORMAL).tech_level);
+        st.extra_levels = 0;
+        expect_eq(6, line_offer(SpireRewardTier::NORMAL).tech_level);
+        st.mst = 5000;
+        st.mind_room = 200;
+        st.line_tech = 9; // a line of a technique Sega drops none of in this room and tier still gives its own
+        st.line_level = 3;
+        offer = line_offer(SpireRewardTier::NORMAL);
+        expect_eq(9, offer.tech);
+        expect_eq(3, offer.tech_level);
+        // the copy knows the class's highest Foie: the Foie line gives another technique of the tier, as "Disk" does
+        st.line_tech = 0;
+        st.known[0] = st.class_max[0];
+        size_t others = 0;
+        for (size_t x = 1; x < SPIRE_TECH_COUNT; x++) {
+          others += (row[x][1] && (st.class_max[x] != 0xFF));
+        }
+        expect(others >= 2);
+        offer = spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 1, SpireRewardTier::RARE,
+            [&](uint32_t n) -> uint32_t {
+              expect_eq(others, n);
+              return n - 1;
+            },
+            &st);
+        expect(offer.tech != 0);
+        expect_eq(std::min<uint8_t>(row[offer.tech][1], st.class_max[offer.tech] + 1), offer.tech_level);
+        // a line of a technique the class cannot learn (never in a pool the quest builds) gives another one as well
+        st.known[0] = 0xFF;
+        st.line_tech = 0;
+        st.class_max[0] = 0xFF;
+        expect(spire_reward_offer(rewards, SpireRewardKind::DISK, 6, nullptr, 1, SpireRewardTier::RARE,
+                   [](uint32_t) -> uint32_t { return 0; }, &st)
+                   .tech != 0);
+      }
+      // what a drawn curse pays on a disk: Cursed Chest and Glass two levels, Jellen Mark and no curse none
+      expect_eq(0, spire_reward_curse_disk_levels(0));
+      expect_eq(2, spire_reward_curse_disk_levels(1));
+      expect_eq(0, spire_reward_curse_disk_levels(2));
+      expect_eq(2, spire_reward_curse_disk_levels(3));
       // rule B's need with a disk in the run: per stat the highest, so the weapon's POW and DEX stay
       expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 10}, 25) == SpireMagNeed{40, 30, 25}));
       expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 50}, 25) == SpireMagNeed{40, 30, 50}));
@@ -8814,6 +8891,17 @@ void run_static_tests() {
           spire_draw_overview_line(named, 0, drawn));
       expect_eq(std::string("Rewards: $C6EPIC Musashi$C7, Monomate x3, NORMAL Brand +3. Walk to choose."),
           spire_draw_overview_line(named, 0, drawn, {{3, "$C6EPIC Musashi$C7"}, {2, "NORMAL Brand +3"}}));
+      // a rare line with a server offer (a disk line): the offer's tier word says it, so no "(rare)" after it; its
+      // drawn curse is still named
+      uint32_t rare_drawn = drawn_of(0, 3, 1, 0, 0, 0); // slot 3 Lavis Cannon (a rare entry), slot 4 Saber
+      expect_eq(std::string("Rewards: Lavis Cannon (rare), Saber. Walk to choose."), spire_draw_overview_line(named, 0, rare_drawn));
+      expect_eq(std::string("Rewards: $C1RARE Foie Lv9$C7, Saber. Walk to choose."),
+          spire_draw_overview_line(named, 0, rare_drawn, {{3, "$C1RARE Foie Lv9$C7"}}));
+      expect_eq(std::string("Rewards: $C1RARE Foie Lv11$C7 (cursed: Glass), Saber. Walk to choose."),
+          spire_draw_overview_line(named, 0, drawn_of(0, 3, 1, 0, 3, 0), {{3, "$C1RARE Foie Lv11$C7"}}));
+      expect_eq(3u, spire_draw_slot_curse(drawn_of(0, 3, 1, 0, 3, 0), 3));
+      expect_eq(0u, spire_draw_slot_curse(drawn_of(0, 3, 1, 0, 3, 0), 4));
+      expect_eq(0u, spire_draw_slot_curse(0xFFFFFFFF, 6)); // no such board slot
       // a table without names: the offers alone name the line, and a drawn slot without either name gives no line
       const std::map<uint32_t, std::string> all_named = {{2, "A"}, {3, "B"}, {4, "C"}};
       expect_eq(std::string("Rewards: B, C, A. Walk to choose."), spire_draw_overview_line(old, 0, drawn, all_named));
@@ -11444,13 +11532,17 @@ void run_static_tests() {
       TempCwd temp_cwd;
       phosg::save_file(SPIRE_REWARDS_FILE, rewards_json_e2e);
       phosg::save_file(SPIRE_RUN_MAG_FILE, mags_json_e2e);
-      // the quest's draw table: per archetype three weapon entries and the Disk entry (its own item two Trifluids)
+      // the quest's draw table: per archetype three weapon entries, the Disk entry (its own item two Trifluids) and
+      // two disk lines that name their own disk, never drawn here: entry 5 a rare one (Foie Lv3), entry 6 a plain
+      // one (Barta Lv3)
+      static const char* const own_items[6] = {"00 01 00 08 00 00 00 00 00 00 00 00", "00 01 00 08 00 00 00 00 00 00 00 00",
+          "00 01 00 08 00 00 00 00 00 00 00 00", "03 01 02 00 00 02 00 00 00 00 00 00",
+          "03 02 02 00 00 00 00 00 00 00 00 00", "03 02 02 00 03 00 00 00 00 00 00 00"};
       std::string entries;
-      for (size_t z = 0; z < 4; z++) {
-        entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,"
+      for (size_t z = 0; z < 6; z++) {
+        entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":{},\"own_curse\":false,"
                                "\"glass_ok\":false,\"name\":\"Entry {}\",\"srv\":{},\"bytes\":\"{}\"}}",
-            z ? "," : "", z + 1, (z == 3) ? 4 : 1,
-            (z == 3) ? "03 01 02 00 00 02 00 00 00 00 00 00" : "00 01 00 08 00 00 00 00 00 00 00 00");
+            z ? "," : "", (z == 4) ? "true" : "false", z + 1, (z >= 3) ? 4 : 1, own_items[z]);
       }
       const std::string row = "[0,1,2,3]";
       std::string arch = std::format("{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{},{},{},{}]}},"
@@ -11537,6 +11629,33 @@ void run_static_tests() {
       stats.atp = 999;
       stats.ata = 999;
       stats.mst = 0;
+
+      // a disk line (entry 5, a rare line that was "Foie Lv3"; entry 6, a plain one that was "Barta Lv3"): the pick
+      // answers the line's own technique. No 'Q' came, so every pick makes its offer now and rolls its tier: over
+      // twelve picks the lowest level is the lowest tier's. A rare line is never below Rare; the pick's drawn curse
+      // (bits 6-7 of the entry byte) adds two levels for Cursed Chest and Glass, none for Jellen Mark, and none on a
+      // plain line, where no curse rides
+      const auto& disk_row = rewards_e2e.disk_levels.at(1);
+      auto lowest_level = [&](uint32_t entry_byte, uint8_t want_tech) {
+        uint8_t lowest = 0xFF;
+        for (size_t n = 0; n < 12; n++) {
+          size_t at = seen.registers.size();
+          expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS,
+              quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (2u << 8) | entry_byte), "a disk line's pick"));
+          SpireMagBytes b = item_answer(at);
+          expect_eq(0x03, b[0]);
+          expect_eq(0x02, b[1]);
+          expect_eq(want_tech, b[4]);
+          lowest = std::min<uint8_t>(lowest, b[2] + 1);
+        }
+        return lowest;
+      };
+      uint8_t foie_rare = std::max<uint8_t>(disk_row[0][1], 3); // the copy knows Foie Lv1: Lv3 at least
+      expect_eq(foie_rare, lowest_level(5, 0));
+      expect_eq(foie_rare + 2, lowest_level(5 | (1u << 6), 0));
+      expect_eq(foie_rare, lowest_level(5 | (2u << 6), 0));
+      expect_eq(foie_rare + 2, lowest_level(5 | (3u << 6), 0));
+      expect_eq(std::max<uint8_t>(disk_row[3][0], 3), lowest_level(6 | (3u << 6), 3));
 
       // the Disk pick (entry 4): a disk as data1 03 02 level-1 00 technique and nothing else, and the mag follows
       from = seen.registers.size();

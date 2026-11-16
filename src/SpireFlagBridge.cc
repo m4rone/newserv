@@ -4431,10 +4431,13 @@ void spire_static_test_run_boss(std::shared_ptr<Client> c, std::shared_ptr<const
   spire_run_rooms_for(c, l->lobby_id).boss_rooms.emplace(k);
 }
 
-// One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4
+// One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4; a rare line of the pool is
+// never below Rare. curse: the drawn curse code of the slot (1 Cursed Chest, 2 Jellen Mark, 3 Glass; 0 none), which
+// rides only on a rare line and pays a disk in levels (spire_reward_curse_disk_levels).
 static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
-    uint32_t serial_number, const SpireRewardTable& table, SpireRewardKind kind, uint32_t k, bool elite,
-    uint32_t rare_bonus, const std::function<uint32_t(uint32_t)>& rnd, std::string* why) {
+    uint32_t serial_number, const SpireRewardTable& table, const SpireDrawEntry& entry, uint32_t curse, uint32_t k,
+    bool elite, uint32_t rare_bonus, const std::function<uint32_t(uint32_t)>& rnd, std::string* why) {
+  auto kind = static_cast<SpireRewardKind>(entry.srv_kind);
   auto character = c->character_file(false, false);
   auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
   if (!character || !overlay) {
@@ -4445,6 +4448,9 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
   uint32_t room_index = spire_reward_room_index(k);
   auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
+  if (entry.rare && (tier < SpireRewardTier::RARE)) {
+    tier = SpireRewardTier::RARE;
+  }
   try {
     std::optional<SpireRewardDiskState> disk;
     if (kind == SpireRewardKind::DISK) { // part B: what the run copy knows, may learn and can reach with its mag
@@ -4462,12 +4468,23 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
       auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
       uint32_t asked = led ? (led->need.pow + led->need.dex) : 0; // the reward weapon's POW and DEX stay (rule B)
       disk->mind_room = (asked < 200) ? (200 - asked) : 0;
+      // a line that was a fixed disk ("Foie Lv3"): its own item names the technique and the level it starts from
+      if (entry.has_own_bytes && (entry.own_bytes[0] == 0x03) && (entry.own_bytes[1] == 0x02)) {
+        disk->line_tech = entry.own_bytes[4];
+        disk->line_level = entry.own_bytes[2] + 1;
+      }
+      disk->extra_levels = entry.rare ? spire_reward_curse_disk_levels(curse) : 0;
     }
     auto offer = spire_reward_offer(table, kind, character->disp.visual.sh.char_class,
         spire_reward_held_weapon(overlay->inventory), room_index, tier, rnd, disk ? &*disk : nullptr);
-    c->log.info_f("Spire reward: offer {} {} for room {} (index {}, W{}, trede {}, odds L<{} E<{} R<{}{}): {}",
+    c->log.info_f("Spire reward: offer {} {} for room {} (index {}, W{}, trede {}, odds L<{} E<{} R<{}{}{}): {}{}",
         spire_reward_kind_name(kind), spire_reward_tier_name(tier), k, room_index, offer.w, trede, odds.legendary,
-        odds.epic, odds.rare, elite ? ", elite" : "", offer.label);
+        odds.epic, odds.rare, elite ? ", elite" : "", entry.rare ? ", a rare line" : "", offer.label,
+        !disk ? std::string()
+        : std::format(" (the line's own disk: {}; a curse adds {} level(s))",
+              (disk->line_tech < SPIRE_TECH_COUNT) ? std::format("{} Lv{}", table.techs[disk->line_tech].name, disk->line_level)
+                                                   : std::string("none"),
+              disk->extra_levels));
     return offer;
   } catch (const std::exception& e) {
     *why = e.what();
@@ -4508,7 +4525,7 @@ static std::map<uint32_t, std::string> spire_reward_draw_offers(std::shared_ptr<
       continue;
     }
     std::string offer_why;
-    auto offer = spire_reward_make_offer(c, l, serial_number, *table, static_cast<SpireRewardKind>(entries[id - 1].srv_kind),
+    auto offer = spire_reward_make_offer(c, l, serial_number, *table, entries[id - 1], spire_draw_slot_curse(drawn, slot),
         in.k, in.path == 1, (in.state >> 8) & 0xFF, rnd, &offer_why);
     if (!offer) {
       c->log.warning_f("Spire reward: slot {} entry {}: no offer ({}); the entry's own item", slot, id, offer_why);
@@ -4538,10 +4555,14 @@ static void spire_reward_answer(std::shared_ptr<Client> c, const SpireMagBytes* 
 
 // 'Z' sub 6: the pick of a server reward entry. Answers the offer of its slot (made at the 'Q'), or one made now (a
 // quest's own draw); the entry's own item when the server has no reward to give; never more than one item per pick.
+// value: bits 8-15 the board slot, bits 0-5 the entry id (pool index + 1, as in r181), bits 6-7 the drawn curse of the
+// pick, which a rare disk line sends (0 from every other line and from a quest built before it): an offer made now
+// needs it, the offer of the 'Q' holds the server's own draw of it.
 static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     uint32_t quest_number, uint32_t value) {
   uint8_t slot = (value >> 8) & 0xFF;
-  uint8_t entry_id = value & 0xFF;
+  uint8_t entry_id = value & 0x3F;
+  uint32_t pick_curse = (value >> 6) & 3;
   auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
   auto character = c->character_file(false, false);
   auto& offers = spire_reward_offers_for(c, l->lobby_id);
@@ -4601,8 +4622,8 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
     auto* cr = spire_client_run_for(c, l, false);
     uint32_t k = (cr && cr->v_room) ? cr->v_room : 1;
     std::string offer_why;
-    offer = spire_reward_make_offer(c, l, serial_number, *table, static_cast<SpireRewardKind>(entry->srv_kind), k, false,
-        0, [](uint32_t n) -> uint32_t { return n ? (phosg::random_object<uint32_t>() % n) : 0; }, &offer_why);
+    offer = spire_reward_make_offer(c, l, serial_number, *table, *entry, pick_curse, k, false, 0,
+        [](uint32_t n) -> uint32_t { return n ? (phosg::random_object<uint32_t>() % n) : 0; }, &offer_why);
     if (!offer) {
       own_item(std::format("no offer ({})", offer_why));
       return;

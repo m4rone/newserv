@@ -201,22 +201,39 @@ struct SpireRewardOffer {
 //   mst        the copy's MST with the worn units, without the mag (as a weapon's MST requirement reads it)
 //   mst_cap    the class's highest MST (the client caps the total there); 0 = not known, no cap
 //   mind_room  the MIND levels rule B's mag can carry: 200 less the POW and DEX the reward weapon asks
+// and of its draw entry:
+//   line_tech, line_level  the disk the entry names itself (a line that was a fixed disk, "Foie Lv3": its own item
+//              03 02 level-1 00 tech), 0xFF and 0 for a line without one ("Disk"). The offer keeps that technique while
+//              the copy can still grow in it, at the line's own level or higher when the copy can reach that (Marck,
+//              16 Nov 2026: "the reward must simply be a spell a force can use"); else any technique, as "Disk"
+//   extra_levels  what a drawn curse on the pick adds to the disk (spire_reward_curse_disk_levels), as far as the
+//              class's highest level and the copy's MST go
 struct SpireRewardDiskState {
   std::array<uint8_t, SPIRE_TECH_COUNT> known;
   std::array<uint8_t, SPIRE_TECH_COUNT> class_max;
   uint32_t mst = 0;
   uint32_t mst_cap = 0;
   uint16_t mind_room = 200;
+  uint8_t line_tech = 0xFF;
+  uint8_t line_level = 0;
+  uint8_t extra_levels = 0;
   SpireRewardDiskState() {
     this->known.fill(0xFF);
     this->class_max.fill(0xFF);
   }
 };
+// The levels a drawn curse adds to a technique disk (pso-roguelike rewards.py curse_extra, which adds them to a disk
+// of the quest's own): Cursed Chest (code 1, R12_DISK_LEVELS) and Glass (3, GLASS_DISK_LEVELS) two each; Jellen Mark
+// (2) pays in grind, on a weapon only.
+constexpr uint8_t spire_reward_curse_disk_levels(uint32_t curse) {
+  return ((curse == 1) || (curse == 3)) ? 2 : 0;
+}
 // The level of a DISK offer for one technique, 0 for none. Sega's level for the room and tier (the grid), at most the
 // class's highest; for a technique the copy knows at least two levels above what it knows (pso-roguelike
 // design/kracht-voorbij-normaal.md par. 4: "disk +2 levels"; one level when that is the class's highest), so a disk
-// always teaches something. Then down, never to what the copy knows, until the copy can meet the MST the client
-// asks: the requirement at most mst_cap, and the MIND it takes within mind_room.
+// always teaches something; state.extra_levels on top, within the class's highest. Then down, never to what the copy
+// knows, until the copy can meet the MST the client asks: the requirement at most mst_cap, and the MIND it takes
+// within mind_room.
 uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level, uint8_t known, uint8_t class_max,
     const SpireRewardDiskState& state);
 // rnd(n): uniform 0..n-1. held: data1 of the weapon the player holds (nullptr: none, the class's first line). The tier is

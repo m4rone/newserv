@@ -96,6 +96,9 @@ SpireDrawInput spire_draw_input_from_values(const std::vector<uint32_t>& values)
 // reserve draw in rewards.py does not do this).
 uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const std::function<uint32_t(uint32_t)>& rnd);
 
+// The drawn curse code of board slot 2-5 in r181 as spire_draw returns it: 0 none, 1 R12, 2 R13, 3 Glass
+uint32_t spire_draw_slot_curse(uint32_t drawn, uint32_t slot);
+
 // v62 (B-REGIE-16-13, ROUTEB8-PROTOCOL.md § 2): the one-line overview of a draw (r181 as spire_draw returns it) for
 // archetype: "Rewards: <n1>, <n2>, <n3>. Walk to choose." in the order of the reward pages (board slot 3, 4, 5, then
 // slot 2 of R14), each name followed by " (rare)" for a rare entry and, with a curse (drawn, or the entry's own
@@ -106,7 +109,8 @@ uint32_t spire_draw(const SpireDrawTable& table, const SpireDrawInput& in, const
 constexpr size_t SPIRE_DRAW_OVERVIEW_MAX = 90;
 // Fase 1 part A: slot_names (board slot -> text) replaces a drawn entry's name, the server's offer with its tier
 // ("$C6EPIC Musashi$C7"); a colour code ($C<n>) does not count against SPIRE_DRAW_OVERVIEW_MAX
-// (spire_draw_visible_size).
+// (spire_draw_visible_size). Such a name says its tier itself, so a rare line gets no " (rare)" after it ("RARE Foie
+// Lv9", and with a curse "RARE Foie Lv11 (cursed: Glass)").
 std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn,
     const std::map<uint32_t, std::string>& slot_names = {});
 size_t spire_draw_visible_size(const std::string& line);

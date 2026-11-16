@@ -425,6 +425,7 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level,
   if (level <= known_level) {
     return 0; // the copy knows the class's highest already
   }
+  level = std::min<uint8_t>(level + state.extra_levels, max_level); // a drawn curse's levels
   for (; level > known_level; level--) {
     uint32_t mst = spire_reward_disk_mst(tech, level);
     if ((!state.mst_cap || (mst <= state.mst_cap)) && (spire_reward_disk_mind(mst, state.mst) <= state.mind_room)) {
@@ -505,12 +506,25 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
     if (r_it != table.disk_levels.begin()) {
       r_it--;
     }
-    std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
-    for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-      uint8_t level = spire_reward_disk_level(table.techs[t], r_it->second[t][static_cast<size_t>(tier) & 3],
+    auto level_of = [&](size_t t, uint8_t at_least) -> uint8_t {
+      return spire_reward_disk_level(table.techs[t], std::max(r_it->second[t][static_cast<size_t>(tier) & 3], at_least),
           disk->known[t], disk->class_max[t], *disk);
+    };
+    std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
+    // a line that names a disk of its own keeps that technique, at the line's level or higher, while the copy can
+    // still grow in it and reach it; only then any technique of the tier
+    if (disk->line_tech < SPIRE_TECH_COUNT) {
+      uint8_t level = level_of(disk->line_tech, std::min<uint8_t>(disk->line_level, 30));
       if (level) {
-        can.emplace_back(static_cast<uint8_t>(t), level);
+        can.emplace_back(disk->line_tech, level);
+      }
+    }
+    if (can.empty()) {
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        uint8_t level = level_of(t, 0);
+        if (level) {
+          can.emplace_back(static_cast<uint8_t>(t), level);
+        }
       }
     }
     if (can.empty()) {

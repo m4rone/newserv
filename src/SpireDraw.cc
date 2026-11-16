@@ -442,6 +442,10 @@ size_t spire_draw_visible_size(const std::string& line) {
   return ret;
 }
 
+uint32_t spire_draw_slot_curse(uint32_t drawn, uint32_t slot) {
+  return ((slot >= 2) && (slot <= 5)) ? ((drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3) : 0;
+}
+
 std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t archetype, uint32_t drawn,
     const std::map<uint32_t, std::string>& slot_names) {
   if (archetype >= table.archetypes.size()) {
@@ -471,7 +475,7 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
     bool cursed = e.own_curse;
     uint32_t curse = e.own_curse_code;
     if (!cursed && rare) {
-      curse = (drawn >> ((slot - 2) * 2 + CURSE_BASE_SHIFT)) & 3;
+      curse = spire_draw_slot_curse(drawn, slot);
       cursed = (curse != 0);
     }
     std::string curse_tag;
@@ -479,8 +483,10 @@ std::string spire_draw_overview_line(const SpireDrawTable& table, uint32_t arche
       const char* curse_name = spire_draw_curse_name(curse);
       curse_tag = *curse_name ? std::format("cursed: {}", curse_name) : "cursed";
     }
-    std::string full = rare ? (cursed ? " (rare, " + curse_tag + ")" : " (rare)") : (cursed ? " (" + curse_tag + ")" : "");
-    list.emplace_back(Drawn{(named != slot_names.end()) ? &named->second : &e.name, std::move(full),
+    bool tiered = named != slot_names.end(); // the server's offer starts with its tier word
+    std::string full = (rare && !tiered) ? (cursed ? " (rare, " + curse_tag + ")" : " (rare)")
+                                         : (cursed ? " (" + curse_tag + ")" : "");
+    list.emplace_back(Drawn{tiered ? &named->second : &e.name, std::move(full),
         cursed ? " (" + curse_tag + ")" : ""});
   }
   if (list.empty()) {
