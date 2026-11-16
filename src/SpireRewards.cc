@@ -450,9 +450,27 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
   if (cls.line_order.empty()) {
     throw std::runtime_error(std::format("class {} has no line", cls.name));
   }
+  // A force's strength is its techniques and MST (Marck, 16 Nov 2026): the reward grid never hands the FO archetype a
+  // saber, slicer or gun by itself. Its own lines are the ones whose weapons ask MST (Cane, Rod, Wand: the kit's
+  // requirement in the grid). A force that holds a weapon of another line still gets that line (the reward follows the
+  // weapon in use).
+  auto own_line = [&](const std::string& ln) -> bool {
+    if (cls.archetype != "FO") {
+      return true;
+    }
+    auto item_it = table.items.find(cls.lines.at(ln).kit);
+    return (item_it != table.items.end()) && (item_it->second.mst > 0);
+  };
   ret.from_line = spire_reward_line_of(table, cls, held);
   if (ret.from_line.empty()) {
-    ret.from_line = cls.line_order.front(); // no weapon of a known line: the class's first line (Saber for all)
+    // no weapon of a known line: the class's first line (Saber), for a force its first MST line (Cane)
+    ret.from_line = cls.line_order.front();
+    for (const auto& ln : cls.line_order) {
+      if (own_line(ln)) {
+        ret.from_line = ln;
+        break;
+      }
+    }
   }
   const std::string tier_label = spire_reward_tier_label(tier);
   if (kind == SpireRewardKind::MAG_FOOD) {
@@ -516,7 +534,7 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
   if (kind == SpireRewardKind::NEW_LINE) {
     std::vector<std::string> others;
     for (const auto& ln : cls.line_order) {
-      if (ln != ret.from_line) {
+      if ((ln != ret.from_line) && own_line(ln)) { // a force: another MST line, never a saber, slicer or gun
         others.emplace_back(ln);
       }
     }

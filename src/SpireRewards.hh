@@ -232,10 +232,14 @@ SpireMagBytes spire_reward_weapon_bytes(const SpireRewardTable& table, const Spi
 // model): the levels each stat must have, rounded up
 SpireMagNeed spire_reward_mag_need(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst,
     SpireAtaModel model);
-// Rule B's need with a reward disk in the run: per stat the highest of what the weapon asks and what the disks ask
-// (MIND only), so a disk never drops the weapon's POW and DEX and a later weapon never drops the disk's MIND
+// Rule B's need with a reward disk in the run: the weapon's POW and DEX always stand, and the disks' MIND takes what
+// they leave of the mag's 200 levels. So a disk never drops the weapon's POW and DEX, and a reward weapon can be worn
+// when it is given (Marck's rule for every reward) even when it and the run's disks ask more than 200 together: the
+// disks are learned by then, their MIND gives way. The weapon's own MIND (a cane) stands.
 constexpr SpireMagNeed spire_reward_need_with_disk(const SpireMagNeed& weapon, uint16_t disk_mind) {
-  return SpireMagNeed{weapon.pow, weapon.dex, std::max<uint16_t>(weapon.mind, disk_mind)};
+  uint32_t asked = static_cast<uint32_t>(weapon.pow) + weapon.dex;
+  uint16_t room = (asked < 200) ? static_cast<uint16_t>(200 - asked) : 0;
+  return SpireMagNeed{weapon.pow, weapon.dex, std::max<uint16_t>(weapon.mind, std::min<uint16_t>(disk_mind, room))};
 }
 // Whether stats plus a mag (the same assumed rates) meet a weapon's requirement under a model (the log's measurement)
 bool spire_reward_meets(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst, const SpireMagBytes* mag,

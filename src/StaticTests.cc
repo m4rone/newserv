@@ -8117,6 +8117,69 @@ void run_static_tests() {
       // rule B's need with a disk in the run: per stat the highest, so the weapon's POW and DEX stay
       expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 10}, 25) == SpireMagNeed{40, 30, 25}));
       expect((spire_reward_need_with_disk(SpireMagNeed{40, 30, 50}, 25) == SpireMagNeed{40, 30, 50}));
+      // a reward weapon can be worn when it is given, also after a disk: the weapon's POW and DEX stand and the disks'
+      // MIND takes what they leave of 200; the weapon's own MIND (a cane) stands
+      expect((spire_reward_need_with_disk(SpireMagNeed{160, 0, 0}, 50) == SpireMagNeed{160, 0, 40}));
+      expect((spire_reward_need_with_disk(SpireMagNeed{150, 60, 0}, 50) == SpireMagNeed{150, 60, 0}));
+      expect((spire_reward_need_with_disk(SpireMagNeed{0, 0, 180}, 50) == SpireMagNeed{0, 0, 180}));
+      {
+        // the mag holds a learned disk's MIND 50 and rule B raised POW to the weapon's 160: the MIND above the need
+        // gives way (to 40) before POW goes below the weapon's need. A force: MIND is the main stat, cut last.
+        auto set = [](SpireMagBytes& b, size_t which, uint16_t v) {
+          b[4 + which * 2] = v & 0xFF;
+          b[5 + which * 2] = v >> 8;
+        };
+        SpireMagBytes current{0x02};
+        set(current, 0, 500); // DEF 5
+        set(current, 1, 10000); // POW 100
+        set(current, 3, 5000); // MIND 50
+        SpireMagBytes raised = current;
+        set(raised, 1, 16000);
+        auto fit = spire_mag_fit_200(raised, current, spire_reward_need_with_disk(SpireMagNeed{160, 0, 0}, 50), 3);
+        expect_eq(16000, spire_mag_stat_word(fit, 1));
+        expect_eq(4000, spire_mag_stat_word(fit, 3));
+        expect_eq(200u, spire_mag_level_of(fit));
+        // the need alone above 200 (no room at all): the asked stats are cut as before, the main stat last
+        auto over = spire_mag_fit_200(raised, current, SpireMagNeed{160, 0, 50}, 3);
+        expect_eq(200u, spire_mag_level_of(over));
+        expect_eq(5000, spire_mag_stat_word(over, 3));
+      }
+      // a force's own lines (Marck, 16 Nov 2026: a force's strength is its spells and MST): without a weapon of a known
+      // line the reward follows its first MST line (Cane), and a new line is another MST line, never a saber, slicer or
+      // gun; a force that holds a saber still gets the saber line. Hunters and rangers keep Saber and all lines.
+      {
+        const uint8_t saber[12] = {0x00, 0x01, 0x00};
+        auto first = [](uint32_t) -> uint32_t { return 0; };
+        size_t forces = 0;
+        for (const auto& [char_class, cls] : rewards.classes) {
+          auto mst_line = [&](const std::string& ln) { return rewards.items.at(cls.lines.at(ln).kit).mst > 0; };
+          bool fo = cls.archetype == "FO";
+          forces += fo ? 1 : 0;
+          auto bare = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, nullptr, 5, SpireRewardTier::NORMAL, first);
+          expect_eq(std::string(fo ? "Cane" : "Saber"), bare.line);
+          size_t other_lines = 0;
+          for (const auto& ln : cls.line_order) {
+            other_lines += (!fo && (ln != "Saber")) ? 1 : 0;
+          }
+          std::set<std::string> seen;
+          for (uint32_t r = 0; r < cls.lines.size() + 2; r++) {
+            auto pick = [r](uint32_t n) -> uint32_t { return n ? (r % n) : 0; };
+            for (const uint8_t* held : {static_cast<const uint8_t*>(nullptr), static_cast<const uint8_t*>(saber)}) {
+              auto offer = spire_reward_offer(rewards, SpireRewardKind::NEW_LINE, char_class, held, 5, SpireRewardTier::RARE, pick);
+              expect(offer.line != offer.from_line);
+              expect(!fo || mst_line(offer.line));
+              seen.emplace(offer.line);
+            }
+          }
+          if (fo) {
+            expect((seen == std::set<std::string>{"Cane", "Rod", "Wand"}));
+          } else {
+            expect_eq(other_lines, seen.size()); // every other line of a hunter or ranger is still offered
+          }
+          expect_eq(std::string("Saber"), spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, saber, 5, SpireRewardTier::NORMAL, first).line);
+        }
+        expect_eq(4u, forces);
+      }
       // a grid with a disk level past 30 is refused at load
       {
         std::string bad_level = grid_text;
@@ -8159,8 +8222,10 @@ void run_static_tests() {
       for (const uint8_t* held : {static_cast<const uint8_t*>(nullptr), unknown}) {
         auto bare = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, held, 1, SpireRewardTier::NORMAL,
             [](uint32_t) -> uint32_t { return 0; });
-        expect_eq(std::string("Saber"), bare.line);
-        expect_eq(std::string("Saber"), bare.from_line);
+        // a force falls back on its first MST line (Cane), every other class on Saber
+        std::string fallback = (cls.archetype == "FO") ? "Cane" : "Saber";
+        expect_eq(fallback, bare.line);
+        expect_eq(fallback, bare.from_line);
       }
     }
     // review r4: mag food goes on the stat of the lean (design par. 3): MIND for a force, POW for a hunter or a ranger,

@@ -128,8 +128,9 @@ uint16_t spire_mag_stat_word(const SpireMagBytes& b, size_t which);
 // Rule B's cut (design par. 3: "komt de som boven 200, dan kort de server eerst de stats in die het wapen niet vraagt"):
 // bytes above level 200 are cut back to 200, keeping as much of `current` (the mag the player holds) as it can. First the
 // rise over current of the stats the need does not ask (DEF, then the others, the main stat last), then the rise of the
-// asked stats above their need, then the current value of the stats not asked (same order), and the asked stats only if
-// the need alone is above 200. The level never ends below current's when current is at most 200. LL is recomputed.
+// asked stats above their need, then the current value of the stats not asked (same order), then what current holds of
+// an asked stat above its need, and an asked stat below its need only if the need alone is above 200. The level never
+// ends below current's when current is at most 200. LL is recomputed.
 SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMagBytes>& current,
     const SpireMagNeed& need, size_t main_stat);
 // Rule B: per stat the highest of the mag the player holds (current, with feed_levels added on the main stat), the step

@@ -220,7 +220,12 @@ SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMa
       cut_to(z, 0);
     }
   }
-  for (size_t z : order) { // 4: the need alone is above 200
+  for (size_t z : order) { // 4: what the mag holds of an asked stat above its need (the MIND of a learned disk, when a
+    if (asked(z)) { // later reward weapon asks POW or DEX), before any asked stat goes below its need
+      cut_to(z, need.of(z) * 100);
+    }
+  }
+  for (size_t z : order) { // 5: the need alone is above 200
     if (asked(z)) {
       cut_to(z, std::min<uint32_t>(now(z), need.of(z) * 100));
     }
