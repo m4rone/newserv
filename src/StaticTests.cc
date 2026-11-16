@@ -10778,6 +10778,18 @@ void run_static_tests() {
         spire_meta_save_file(meta_name, SERIAL, meta);
         expect_eq(2u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
       }
+      // B-E02-16 (review volger-beloning r1 B5): the follower's auto take ('C' 19) reaches the writer as one line that
+      // names the entry the quest gave, read from this quest's draw table with the writer's archetype (bits 16-22 =
+      // entry index + 1), or the Skip bonus (0). The direct tests of spire_bridge_message_text pass a context by hand;
+      // this one goes through spire_bridge_handle_register, so a 'C' 19 left out of the context gets the generic line.
+      sent_from = seen.sent.size();
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43021300), "the auto take's 'C' 19");
+      drive_clock(w, p, seen, [&]() { return line_sent(sent_from, "You did not choose: Entry 2 was taken for you."); },
+          "the auto take's line with the entry's name");
+      sent_from = seen.sent.size();
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43001300), "the Skip bonus 'C' 19");
+      drive_clock(w, p, seen, [&]() { return line_sent(sent_from, "You did not choose: you got the Skip bonus."); },
+          "the auto take's Skip bonus line");
       spire_static_test_forget(p.c, r.l);
       p.c->lobby.reset();
       r.l->clients.fill(nullptr);
