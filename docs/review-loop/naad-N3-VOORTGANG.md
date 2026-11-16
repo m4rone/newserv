@@ -14,3 +14,8 @@ Start 2026-11-16, kop 80c2046, tak feature/beloningen-b (schoon bij aanvang).
 - [af] commit 0ffde50 (schijf); soort 5 in src/SpireRewardUnit.cc (schakelaar verdediging.units): bouw exit 0, All static tests passed, vingerafdruk groen, ok: spire-lives-check
 - [af] src/SpireTestsMechanics.cc geschreven; de toets bijt: met de schakelaartoets in de verdeling uit ('if (false && ...') faalt run-static-tests op SpireTestsMechanics.cc:139 (exit 1); teruggezet uit een kopie (cmp gelijk)
 - [af] eindbouw na terugzetten: bouw exit 0 (0 waarschuwingen), All static tests passed (testbestand mechanics tussen mags en seam, vingerafdruk groen), ok: spire-lives-check; verify.py (scratch): alle 30 blokken aaneengesloten teruggevonden, 31 regels verdwenen zonder verhuizing (in het rapport)
+- [af] rapport geschreven: docs/review-loop/naad-N3-rapport.md
+
+## Stand
+
+De fase is af: zes commits 1a931b1..4887824 en het rapport. Beslissingen, wat bewust niet verhuisd is en wat gezien maar niet gebouwd is staan in het rapport. De volgende fase (haken H1-H11, run-mag in de savestate) breidt src/SpireMechanics.hh/.cc uit onder een eigen kopje; spire_mech_enabled is de vraagfunctie voor de schakelaars.
