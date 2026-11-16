@@ -4658,8 +4658,9 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
     return;
   }
 
-  // part B, the disk: rule B's need is per stat the highest of what the weapon asks and what the run's disks ask, so
-  // a disk keeps the weapon's POW and DEX and a later weapon keeps the disks' MIND (spire_reward_need_with_disk)
+  // part B, the disk: rule B's need keeps the weapon's POW and DEX, and the run's disks' MIND takes what they leave of
+  // the mag's 200 levels (spire_reward_need_with_disk). So a disk never costs the weapon its requirement, and a later
+  // reward weapon can be worn when it is given (the disks are learned by then).
   bool is_disk = offer->kind == SpireRewardKind::DISK;
   if (is_disk) {
     // never a disk newserv itself refuses when it is used (Items.cc throws on a level above the class's highest)
@@ -4932,7 +4933,7 @@ static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const
   auto* run = spire_game_run_for(l);
   auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
   if (led) {
-    if (p.offer.kind == SpireRewardKind::DISK) { // part B: the run's disks keep their MIND past a later weapon
+    if (p.offer.kind == SpireRewardKind::DISK) { // part B: a later weapon's need gives this MIND what POW and DEX leave
       led->disk_mind = std::max(led->disk_mind, p.disk_mind);
     }
     led->need = p.need; // rule B: every later mag keeps what this weapon and the run's disks ask
