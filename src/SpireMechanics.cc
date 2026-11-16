@@ -7,6 +7,7 @@
 #include <phosg/Strings.hh>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <map>
@@ -28,9 +29,11 @@ TestRegistry& test_registry() {
 }
 
 // The switches as last read well. Read again only when the file's time changes, as the reward grid is
-// (SpireFlagBridge.cc spire_rewards_table_cached).
+// (SpireFlagBridge.cc spire_rewards_table_cached), and the file's time is asked once per SPIRE_SWITCHES_LOOK_USECS.
 struct SwitchState {
   std::string path = SPIRE_SWITCHES_FILE;
+  bool looked = false; // the file was looked at, at looked_usecs
+  uint64_t looked_usecs = 0;
   std::map<std::string, bool> values; // the last good state; empty without a file
   bool loaded = false;
   std::filesystem::file_time_type loaded_time{};
@@ -43,8 +46,24 @@ SwitchState& switch_state() {
   return state;
 }
 
+uint64_t (*switch_clock)() = nullptr; // tests only; nullptr: the steady clock
+
+uint64_t switch_now_usecs() {
+  if (switch_clock) {
+    return switch_clock();
+  }
+  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 const std::map<std::string, bool>& switches() {
   auto& st = switch_state();
+  uint64_t now = switch_now_usecs();
+  if (st.looked && ((now - st.looked_usecs) < SPIRE_SWITCHES_LOOK_USECS)) {
+    return st.values; // within the second: the state of the last look
+  }
+  st.looked = true;
+  st.looked_usecs = now;
   std::filesystem::file_time_type t;
   try {
     if (!std::filesystem::is_regular_file(st.path)) {
@@ -207,6 +226,11 @@ void spire_mech_set_switches_file(const std::string& path) {
   if (!path.empty()) {
     st.path = path;
   }
+}
+
+void spire_mech_set_switches_clock(uint64_t (*now_usecs)()) {
+  switch_clock = now_usecs;
+  switch_state().looked = false;
 }
 
 bool spire_mech_register_kind(const SpireMechKind& reg) {

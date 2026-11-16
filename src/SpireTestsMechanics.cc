@@ -32,6 +32,13 @@
 
 namespace {
 
+// The clock of the switches in these tests: a test that writes the switches file moves it on by the second the reader
+// waits between two looks, so the next question reads the file
+uint64_t test_clock_usecs = 1;
+uint64_t test_clock() {
+  return test_clock_usecs;
+}
+
 // A kind of this file only, registered while the test runs: a new kind reads its own section, keeps it, and makes its
 // offer from what the core hands it, without a line in the core
 constexpr SpireRewardKind TEST_KIND = static_cast<SpireRewardKind>(250);
@@ -280,6 +287,7 @@ void spire_tests_hooks() {
   std::function<void(const std::string&)> write = [&](const std::string& text) {
     phosg::save_file(file, text);
     std::filesystem::last_write_time(file, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(++writes));
+    test_clock_usecs += SPIRE_SWITCHES_LOOK_USECS; // the reader's second is over
   };
   spire_mech_set_switches_file(file);
   expect(spire_mech_hook_conflicts().empty());
@@ -676,11 +684,16 @@ void spire_tests_mechanics() {
   std::filesystem::create_directories(dir);
   std::string file = (dir / "spire-schakelaars.json").string();
   uint32_t writes = 0;
-  auto write = [&](const std::string& text) {
+  auto put = [&](const std::string& text) {
     phosg::save_file(file, text);
     // a time of its own for every write: two writes within one tick of the file system's clock would read as one
     std::filesystem::last_write_time(file, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(++writes));
   };
+  auto write = [&](const std::string& text) {
+    put(text);
+    test_clock_usecs += SPIRE_SWITCHES_LOOK_USECS;
+  };
+  spire_mech_set_switches_clock(test_clock);
   spire_mech_set_switches_file(file);
 
   // without a switches file everything is on, except what its asker names "default off"
@@ -733,7 +746,21 @@ void spire_tests_mechanics() {
   // the file gone: everything on again
   write(R"({"aanval": false})");
   expect(!spire_mech_enabled("aanval"));
+
+  // the file is looked at once a second at most: a change within the second of the last look is not read yet, one
+  // microsecond before the second is over neither, and at the second it is
+  put(R"({"aanval": true, "mags": false})");
+  expect(!spire_mech_enabled("aanval") && spire_mech_enabled("mags"));
+  test_clock_usecs += SPIRE_SWITCHES_LOOK_USECS - 1;
+  expect(!spire_mech_enabled("aanval") && spire_mech_enabled("mags"));
+  test_clock_usecs += 1;
+  expect(spire_mech_enabled("aanval") && !spire_mech_enabled("mags"));
+  write(R"({"aanval": false})");
+  expect(!spire_mech_enabled("aanval"));
+
   std::filesystem::remove(file);
+  expect(!spire_mech_enabled("aanval")); // also a file that went is seen at the next look
+  test_clock_usecs += SPIRE_SWITCHES_LOOK_USECS;
   expect(spire_mech_enabled("aanval"));
   for (size_t z = 0; z < plain.size(); z++) {
     expect_as_before(z);
@@ -779,6 +806,7 @@ void spire_tests_mechanics() {
   expect(spire_mech_enabled("aanval"));
 
   spire_tests_hooks();
+  spire_mech_set_switches_clock(nullptr);
 }
 
 [[maybe_unused]] const bool registered = spire_mech_register_tests("mechanics", spire_tests_mechanics);

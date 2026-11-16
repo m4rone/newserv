@@ -38,18 +38,23 @@ std::vector<std::string> spire_mech_test_names();
 // --- Switches ---
 //
 // system/spire-schakelaars.json: one JSON object, key -> true or false (pso-roguelike integratie.md par. 7; the quest
-// repo's quests/spire/data/schakelaars.json, installed by apply-on-pc.sh). Read again whenever the file changes. A
+// repo's quests/spire/data/schakelaars.json, installed by apply-on-pc.sh). The file is looked at once a second at
+// most (a hook that asks at every hit costs no file question per hit), so a change is read within a second. A
 // missing file or a missing key is ON, unless the asker names its key "default off". An unreadable file (no JSON, no
 // object, a value that is no boolean) leaves the last good state standing and logs one line.
 
 constexpr const char* SPIRE_SWITCHES_FILE = "system/spire-schakelaars.json";
+constexpr uint64_t SPIRE_SWITCHES_LOOK_USECS = 1000000; // between two looks at the file
 
 // Whether the mechanic behind this key is on. For a reward kind, off means: no offer, so the entry's own item. For a
 // hook: not registered. A mechanic also needs the Enabled of its own table.
 bool spire_mech_enabled(const std::string& key, bool default_off = false);
 
-// Tests only: reads the switches from another file ("" = SPIRE_SWITCHES_FILE again) and forgets what was read
+// Tests only: reads the switches from another file ("" = SPIRE_SWITCHES_FILE again) and forgets what was read and
+// when it last looked
 void spire_mech_set_switches_file(const std::string& path);
+// Tests only: the clock the second between two looks is measured on, in microseconds (nullptr: the server's own)
+void spire_mech_set_switches_clock(uint64_t (*now_usecs)());
 
 // --- Reward kinds ---
 //
