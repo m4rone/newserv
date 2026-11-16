@@ -339,32 +339,6 @@ std::string spire_reward_line_of(const SpireRewardTable& table, const SpireRewar
   return cls.lines.count(ret) ? ret : "";
 }
 
-SpireMagBytes spire_reward_weapon_bytes(const SpireRewardTable& table, const SpireRewardCell& cell, uint8_t special) {
-  SpireMagBytes ret{};
-  ret[0] = (cell.code >> 16) & 0xFF;
-  ret[1] = (cell.code >> 8) & 0xFF;
-  ret[2] = cell.code & 0xFF;
-  uint32_t max_grind = table.items.at(cell.code).max_grind;
-  ret[3] = std::min<uint32_t>(cell.grind, max_grind);
-  ret[4] = special;
-  if (cell.hit) {
-    ret[6] = 0x05; // attribute 5: Hit
-    ret[7] = cell.hit;
-  }
-  return ret;
-}
-
-static std::string spire_reward_weapon_name(const SpireRewardCell& cell, const SpireMagBytes& bytes, const std::string& special) {
-  std::string ret = cell.name;
-  if (bytes[3]) {
-    ret += std::format(" +{}", bytes[3]);
-  }
-  if (!special.empty()) {
-    ret += " " + special;
-  }
-  return ret;
-}
-
 uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, uint8_t known, uint8_t class_max,
     const SpireRewardDiskState& state) {
   if (class_max == 0xFF) {
@@ -396,47 +370,6 @@ uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, ui
 
 // ---- The seam, step a: the kinds' own halves of the grid and the offer, still in this file. Each moves to its own
 // file (src/SpireReward*.cc) and registers there; the registration is in SpireFlagBridge.cc until then.
-
-// The offer of kind 1 and kind 2: the weapon of the cell (line, W, tier), with one of the cell's specials
-std::optional<SpireRewardOffer> spire_reward_weapon_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
-  const auto& table = in.table;
-  const auto& kind = in.kind;
-  const auto& cls = in.cls;
-  const auto& tier = in.tier;
-  const auto& tier_label = in.tier_label;
-  const auto& rnd = in.rnd;
-  const auto& own_line = in.own_line;
-  ret.line = ret.from_line;
-  if (kind == SpireRewardKind::NEW_LINE) {
-    std::vector<std::string> others;
-    for (const auto& ln : cls.line_order) {
-      if ((ln != ret.from_line) && own_line(ln)) { // a force: another MST line, never a saber, slicer or gun
-        others.emplace_back(ln);
-      }
-    }
-    if (!others.empty()) {
-      ret.line = others[rnd(others.size()) % others.size()];
-    }
-  }
-  const auto& line = cls.lines.at(ret.line);
-  auto w_it = line.w.find(ret.w);
-  if (w_it == line.w.end()) {
-    throw std::runtime_error(std::format("{} {} has no W{}", cls.name, ret.line, ret.w));
-  }
-  const auto& cell = w_it->second.tiers[static_cast<size_t>(tier)];
-  std::string special_name;
-  uint8_t special = 0;
-  if (!cell.specials.empty()) {
-    const auto& sp = cell.specials[rnd(cell.specials.size()) % cell.specials.size()];
-    special = sp.id;
-    special_name = sp.name;
-  }
-  ret.item = spire_reward_weapon_bytes(table, cell, special);
-  ret.info = table.items.at(cell.code);
-  ret.item_name = spire_reward_weapon_name(cell, ret.item, special_name);
-  ret.label = tier_label + " " + ret.item_name;
-  return ret;
-}
 
 // The section of kind 3: MagFood, the levels per tier
 void spire_reward_mag_food_parse(const phosg::JSON& json, SpireRewardTable& ret) {
