@@ -1,0 +1,24 @@
+{
+  "RunMag": {
+    "FeedLevels": 200,
+    "Need": [0, 0, 200],
+    "LastMirrored": "02050D00E8030A00C8000000",
+    "Lean": 2,
+    "StartStep": 0,
+    "BossRooms": [4],
+    "IssuedStep": 0,
+    "RunId": 4100
+  },
+  "Time": 1794405147991074,
+  "GlassIndex": -1,
+  "Items": ["02050D00E8030A00C80000000001000300000000"],
+  "Values": [3, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "Room": 3,
+  "Practice": false,
+  "StartRoom": 1,
+  "Equipped": [0],
+  "Quest": 2921,
+  "Episode": 1,
+  "RunId": 4100,
+  "SerialNumber": 5200
+}

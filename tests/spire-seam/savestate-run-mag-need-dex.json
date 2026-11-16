@@ -1,0 +1,24 @@
+{
+  "RunMag": {
+    "FeedLevels": 1,
+    "DiskMind": 1,
+    "Need": [0, 1, 0],
+    "Lean": 0,
+    "StartStep": 0,
+    "BossRooms": [],
+    "IssuedStep": 2,
+    "RunId": 4102
+  },
+  "Time": 1794405147991074,
+  "GlassIndex": -1,
+  "Items": [],
+  "Values": [3, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "Room": 3,
+  "Practice": false,
+  "StartRoom": 1,
+  "Quest": 2921,
+  "Episode": 1,
+  "RunId": 4102,
+  "RestRooms": 15,
+  "SerialNumber": 5200
+}

@@ -36,6 +36,8 @@
 #include "ServerState.hh"
 
 void run_static_tests() {
+  void spire_seam_run_tests(); // SpireTestsSeam.cc: the seam's guard, first, on the files as they are in the repo
+  spire_seam_run_tests();
   phosg::log_info_f("-- Quest opcode definitions");
   check_default_quest_opcode_definitions();
 

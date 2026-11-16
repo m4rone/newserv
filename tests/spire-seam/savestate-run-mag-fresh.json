@@ -1,0 +1,16 @@
+{
+  "RunMag": {"Lean": 0, "StartStep": 0, "BossRooms": [], "IssuedStep": -1, "RunId": 4098},
+  "RunId": 4098,
+  "Episode": 1,
+  "Equipped": [],
+  "StartRoom": 1,
+  "Quest": 2921,
+  "Practice": false,
+  "Level": 0,
+  "Room": 3,
+  "Values": [3, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "Items": [],
+  "GlassIndex": -1,
+  "SerialNumber": 5200,
+  "Time": 1794405147991074
+}

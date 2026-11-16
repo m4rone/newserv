@@ -1,0 +1,24 @@
+{
+  "RunMag": {
+    "DiskMind": 200,
+    "Need": [200, 0, 0],
+    "BoostDue": true,
+    "Lean": 0,
+    "StartStep": 1,
+    "BossRooms": [4, 8],
+    "IssuedStep": 1,
+    "RunId": 4101
+  },
+  "Time": 1794405147991074,
+  "GlassIndex": -1,
+  "Items": [],
+  "Values": [3, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "Room": 3,
+  "Practice": false,
+  "StartRoom": 1,
+  "Quest": 2921,
+  "Episode": 1,
+  "RunId": 4101,
+  "StartBonus": 0,
+  "SerialNumber": 5200
+}
