@@ -90,5 +90,52 @@
       ]
     }
   },
-  "BossRooms": [4, 8, 11, 15, 18, 21, 27, 30]
+  "BossRooms": [4, 8, 11, 15, 18, 21, 27, 30],
+  "_growth": "Mags, the first piece (pso-roguelike new-features/roguelike/design/mechanics/mags.md par. 2, 3 and 7; SpireMag.hh SpireMagGrowth). The keys Feed, Lines, Classic and Forms are optional as a whole: missing or unreadable they are off and the run mag is not touched (never NO_TABLE). No 'Z' request reads them yet: the mag food branch of the rewards calls them after the seam. Feed: Enabled false is its own kill switch (mag food goes to the main stat and is named 'Mag food +N', as before); MainShare percent of the mag food goes to the main stat of the run's direction, the rest to one of the other stats the class's Classic row gives a weight (an android never MIND). The levels per tier stay where they are: MagFood in spire-rewards.json. Lines: the directions of the kit choice per archetype, by the number the quest will send (Lean 2 the main line, 3 the second line, 4 Shield; 1 and no choice are the class's Classic row). Weights is the mag at level 200 (DEF/POW/DEX/MIND, the four sum to 200); First are the levels filled before anything else: DEF 5 is Sega's start mag, and a force's Shield fills DEF to 45 first, the DEF from which Sega's force evolution gives Bana (Items.cc apply_mag_evolution), then MIND and DEX 3:1. Main is the stat the direction is named for. The lines of HU and RA carry no MIND: their androids share them. Classic: per class the split the community advises (the Google Doc 'Class Base/Max Stats', Recommended Mag Levels Per Class; mags.md par. 3d and 4). Forms: Sega's rare forms as a reward; Enabled false is its own kill switch (Epic and Legendary mag food always give their levels). MinLevel: the mag level from which a form is offered, and only to a mag whose kind Sega's evolution still renames (evolution number below 4; a form itself is 4 and stays). Odds, in percent: Epic and Legendary the share of such mag food that is a form; Heart the share of the Legendary forms that is a heart form instead of the fourth form of the class (which Sega's own level 100 rule names: by class, sex and section id group, not listed here). Cells: Sega's mag cells, the kind by the section id's parity as Items.cc gives it (Cell of MAG 502: odd Pitri 29, even Soniti 33; Cell of MAG 213: odd Churel 39, even Preta 34). Hearts: Chu Chu 44 and Kapu Kapu 45, each only from a kind and at a level for which the item parameter table's ItemCombinations has the heart; Elenor 48 is Direct: Sega's table has no item that makes it, the run gives it to the classes Sega lets wear it (androids). Id's are data1[1], decimal.",
+  "Feed": {"Enabled": true, "MainShare": 60},
+  "Lines": {
+    "HU": [
+      {"Lean": 2, "Name": "Power", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 140, "Dex": 55, "Mind": 0}},
+      {"Lean": 3, "Name": "Hit", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 60, "Dex": 135, "Mind": 0}},
+      {"Lean": 4, "Name": "Shield", "Main": "Def", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 100, "Pow": 70, "Dex": 30, "Mind": 0}}
+    ],
+    "RA": [
+      {"Lean": 2, "Name": "Power", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 140, "Dex": 55, "Mind": 0}},
+      {"Lean": 3, "Name": "Hit", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 60, "Dex": 135, "Mind": 0}},
+      {"Lean": 4, "Name": "Shield", "Main": "Def", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 100, "Pow": 70, "Dex": 30, "Mind": 0}}
+    ],
+    "FO": [
+      {"Lean": 2, "Name": "Mind", "Main": "Mind", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 0, "Dex": 45, "Mind": 150}},
+      {"Lean": 3, "Name": "Power", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 120, "Dex": 45, "Mind": 30}},
+      {"Lean": 4, "Name": "Shield", "Main": "Def", "First": {"Def": 45, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 45, "Pow": 0, "Dex": 39, "Mind": 116}}
+    ]
+  },
+  "Classic": {
+    "HUmar": {"Name": "Classic", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 50, "Dex": 115, "Mind": 30}},
+    "HUnewearl": {"Name": "Classic", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 50, "Dex": 100, "Mind": 45}},
+    "HUcast": {"Name": "Classic", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 65, "Dex": 130, "Mind": 0}},
+    "HUcaseal": {"Name": "Classic", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 100, "Dex": 95, "Mind": 0}},
+    "RAmar": {"Name": "Classic", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 120, "Dex": 50, "Mind": 25}},
+    "RAmarl": {"Name": "Classic", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 100, "Dex": 50, "Mind": 45}},
+    "RAcast": {"Name": "Classic", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 130, "Dex": 65, "Mind": 0}},
+    "RAcaseal": {"Name": "Classic", "Main": "Pow", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 145, "Dex": 50, "Mind": 0}},
+    "FOmar": {"Name": "Classic", "Main": "Dex", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 60, "Dex": 70, "Mind": 65}},
+    "FOmarl": {"Name": "Classic", "Main": "Mind", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 65, "Dex": 50, "Mind": 80}},
+    "FOnewm": {"Name": "Classic", "Main": "Mind", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 20, "Dex": 50, "Mind": 125}},
+    "FOnewearl": {"Name": "Classic", "Main": "Mind", "First": {"Def": 5, "Pow": 0, "Dex": 0, "Mind": 0}, "Weights": {"Def": 5, "Pow": 15, "Dex": 30, "Mind": 150}}
+  },
+  "Forms": {
+    "Enabled": true,
+    "MinLevel": 50,
+    "Odds": {"Epic": 100, "Legendary": 100, "Heart": 25},
+    "Cells": [
+      {"Name": "Cell of MAG 502", "Even": 33, "Odd": 29},
+      {"Name": "Cell of MAG 213", "Even": 34, "Odd": 39}
+    ],
+    "Hearts": [
+      {"Id": 44},
+      {"Id": 45},
+      {"Id": 48, "Direct": true}
+    ]
+  }
 }

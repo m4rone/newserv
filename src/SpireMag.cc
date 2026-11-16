@@ -5,6 +5,13 @@
 #include <phosg/JSON.hh>
 #include <stdexcept>
 
+#include "ItemData.hh"
+#include "ItemParameterTable.hh"
+#include "Items.hh"
+#include "MagMetadataTable.hh"
+#include "SpireDrops.hh"
+#include "StaticGameData.hh"
+
 static SpireMagRow spire_mag_parse_row(const phosg::JSON& json, const std::string& where) {
   SpireMagRow row;
   int64_t id = json.get_int("Id");
@@ -27,6 +34,122 @@ static SpireMagRow spire_mag_parse_row(const phosg::JSON& json, const std::strin
     throw std::runtime_error(std::format("{}: level {} above 200", where, sum));
   }
   return row;
+}
+
+static const char* const SPIRE_MAG_STAT_KEYS[4] = {"Def", "Pow", "Dex", "Mind"};
+
+static SpireMagLevels spire_mag_parse_levels(const phosg::JSON& json, const std::string& where) {
+  SpireMagLevels ret{};
+  for (size_t z = 0; z < 4; z++) {
+    int64_t v = json.get_int(SPIRE_MAG_STAT_KEYS[z]);
+    if ((v < 0) || (v > 200)) {
+      throw std::runtime_error(std::format("{}: {} {} outside 0-200", where, SPIRE_MAG_STAT_KEYS[z], v));
+    }
+    ret[z] = v;
+  }
+  return ret;
+}
+
+static SpireMagDirection spire_mag_parse_direction(const phosg::JSON& json, const std::string& where) {
+  SpireMagDirection ret;
+  ret.name = json.get_string("Name");
+  ret.weights = spire_mag_parse_levels(json.at("Weights"), where + " Weights");
+  ret.first = spire_mag_parse_levels(json.at("First"), where + " First");
+  uint32_t sum = 0;
+  for (size_t z = 0; z < 4; z++) {
+    sum += ret.weights[z];
+    if (ret.first[z] > ret.weights[z]) {
+      throw std::runtime_error(std::format("{}: First {} {} above its weight {}", where, SPIRE_MAG_STAT_KEYS[z],
+          ret.first[z], ret.weights[z]));
+    }
+  }
+  if (sum != 200) {
+    throw std::runtime_error(std::format("{}: Weights sum to {}, not 200", where, sum));
+  }
+  const std::string& main = json.get_string("Main");
+  ret.main = 4;
+  for (size_t z = 0; z < 4; z++) {
+    if (main == SPIRE_MAG_STAT_KEYS[z]) {
+      ret.main = z;
+    }
+  }
+  if ((ret.main > 3) || !ret.weights[ret.main]) {
+    throw std::runtime_error(std::format("{}: Main {} is not a stat the direction gives", where, main));
+  }
+  return ret;
+}
+
+static int64_t spire_mag_parse_range(const phosg::JSON& json, const char* key, int64_t low, int64_t high,
+    const std::string& where) {
+  int64_t v = json.get_int(key);
+  if ((v < low) || (v > high)) {
+    throw std::runtime_error(std::format("{}: {} {} outside {}-{}", where, key, v, low, high));
+  }
+  return v;
+}
+
+static SpireMagGrowth spire_mag_growth_from(const phosg::JSON& json) {
+  SpireMagGrowth ret;
+  const auto& feed = json.at("Feed");
+  ret.feed_enabled = feed.get_bool("Enabled");
+  ret.main_share = spire_mag_parse_range(feed, "MainShare", 0, 100, "Feed");
+
+  const auto& lines = json.at("Lines");
+  for (const char* arch : {"HU", "RA", "FO"}) {
+    auto& by_number = ret.lines[arch];
+    for (const auto& line_json : lines.get_list(arch)) {
+      int64_t number = spire_mag_parse_range(*line_json, "Lean", SPIRE_MAG_DIRECTION_MAIN, SPIRE_MAG_DIRECTION_SHIELD,
+          std::format("Lines {}", arch));
+      auto dir = spire_mag_parse_direction(*line_json, std::format("Lines {} {}", arch, number));
+      // the lines of HU and RA are also their androids': an android never gets MIND (mags.md par. 3a)
+      if ((std::string(arch) != "FO") && dir.weights[SPIRE_MAG_MIND]) {
+        throw std::runtime_error(std::format("Lines {} {}: MIND {} on a line the androids share", arch, number,
+            dir.weights[SPIRE_MAG_MIND]));
+      }
+      if (!by_number.emplace(number, std::move(dir)).second) {
+        throw std::runtime_error(std::format("Lines {}: Lean {} twice", arch, number));
+      }
+    }
+    if (by_number.size() != 3) {
+      throw std::runtime_error(std::format("Lines {} has {} lines, not Lean 2, 3 and 4", arch, by_number.size()));
+    }
+  }
+
+  const auto& classic = json.at("Classic");
+  for (uint8_t cls = 0; cls < 12; cls++) {
+    const char* name = name_for_char_class(cls);
+    auto dir = spire_mag_parse_direction(classic.at(name), std::format("Classic {}", name));
+    if (spire_mag_class_is_android(cls) && dir.weights[SPIRE_MAG_MIND]) {
+      throw std::runtime_error(std::format("Classic {}: MIND {} for an android", name, dir.weights[SPIRE_MAG_MIND]));
+    }
+    ret.classic.emplace(cls, std::move(dir));
+  }
+
+  const auto& forms = json.at("Forms");
+  ret.forms.enabled = forms.get_bool("Enabled");
+  ret.forms.min_level = spire_mag_parse_range(forms, "MinLevel", 1, 200, "Forms");
+  const auto& odds = forms.at("Odds");
+  ret.forms.epic_odds = spire_mag_parse_range(odds, "Epic", 0, 100, "Forms Odds");
+  ret.forms.legendary_odds = spire_mag_parse_range(odds, "Legendary", 0, 100, "Forms Odds");
+  ret.forms.heart_odds = spire_mag_parse_range(odds, "Heart", 0, 100, "Forms Odds");
+  for (const auto& cell_json : forms.get_list("Cells")) {
+    SpireMagForms::Cell cell;
+    cell.name = cell_json->get_string("Name");
+    cell.even = spire_mag_parse_range(*cell_json, "Even", 1, 0xFF, "Forms Cells " + cell.name);
+    cell.odd = spire_mag_parse_range(*cell_json, "Odd", 1, 0xFF, "Forms Cells " + cell.name);
+    ret.forms.cells.emplace_back(std::move(cell));
+  }
+  for (const auto& heart_json : forms.get_list("Hearts")) {
+    SpireMagForms::Heart heart;
+    heart.id = spire_mag_parse_range(*heart_json, "Id", 1, 0xFF, "Forms Hearts");
+    heart.direct = heart_json->get_bool("Direct", false);
+    ret.forms.hearts.emplace_back(heart);
+  }
+  return ret;
+}
+
+SpireMagGrowth spire_mag_parse_growth(const std::string& json_text) {
+  return spire_mag_growth_from(phosg::JSON::parse(json_text));
 }
 
 SpireMagTable spire_mag_parse(const std::string& json_text) {
@@ -83,6 +206,14 @@ SpireMagTable spire_mag_parse(const std::string& json_text) {
       throw std::runtime_error(std::format("boss room {} outside 1-255", v));
     }
     ret.boss_rooms.emplace(v);
+  }
+  // The first piece of mags.md: optional, and never fatal (as ShellSteps: a missing or broken key must not take the run
+  // mag away)
+  try {
+    ret.growth = spire_mag_growth_from(json);
+  } catch (const std::exception& e) {
+    ret.growth = SpireMagGrowth{};
+    ret.growth.note = std::format("growth keys unusable: {}", e.what());
   }
   return ret;
 }
@@ -237,17 +368,26 @@ SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMa
   return bytes;
 }
 
-SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
     const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, uint16_t feed_levels, size_t main_stat) {
+  SpireMagLevels feed{};
+  if (main_stat < feed.size()) {
+    feed[main_stat] = feed_levels;
+  }
+  return spire_mag_rule_b_fed(line, step, used_start_bonus, current, need, feed, main_stat);
+}
+
+SpireMagBytes spire_mag_rule_b_fed(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
+    const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, const SpireMagLevels& feed, size_t main_stat) {
   if (line.steps.empty()) {
     throw std::logic_error("run mag line has no steps");
   }
   const auto& step_row = line.steps[std::min<size_t>(step, line.steps.size() - 1)];
   auto ret = spire_mag_row_bytes(step_row);
-  // the highest floor the start bonus reaches
+  // the highest floor the start bonus this run uses reaches (B-ONTWERP-8: never the highest bought)
   const SpireMagFloor* floor = nullptr;
   for (const auto& f : line.floors) {
-    if (start_bonus >= f.min_bonus) {
+    if (used_start_bonus >= f.min_bonus) {
       floor = &f;
     }
   }
@@ -260,12 +400,16 @@ SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t
       ret[1] = floor->row.id;
     }
   }
-  // the mag the player holds, with the mag food on its main stat (on the step row when there is none yet)
+  // the mag the player holds, with the mag food on its stats (on the step row when there is none yet)
   std::optional<SpireMagBytes> held = current;
-  if (feed_levels) {
+  if (std::any_of(feed.begin(), feed.end(), [](uint16_t v) { return v != 0; })) {
     SpireMagBytes fed = current ? *current : ret;
-    uint32_t w = spire_mag_word(fed, main_stat) + feed_levels * 100u;
-    spire_mag_set_word(fed, main_stat, std::min<uint32_t>(w, 20000));
+    for (size_t z = 0; z < 4; z++) {
+      if (feed[z]) {
+        uint32_t w = spire_mag_word(fed, z) + feed[z] * 100u;
+        spire_mag_set_word(fed, z, std::min<uint32_t>(w, 20000));
+      }
+    }
     held = fed;
   }
   for (size_t z = 0; z < 4; z++) {
@@ -280,9 +424,9 @@ SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t
   return spire_mag_fit_200(ret, current, need, main_stat);
 }
 
-SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
     const std::optional<SpireMagBytes>& last_mirrored) {
-  return spire_mag_rule_b(line, step, start_bonus, last_mirrored, SpireMagNeed{}, 0, 1);
+  return spire_mag_rule_b(line, step, used_start_bonus, last_mirrored, SpireMagNeed{}, 0, 1);
 }
 
 uint8_t spire_mag_evolve_id(const SpireMagBytes& bytes, uint8_t from_id, const SpireMagEvolveAt& evolve_at) {
@@ -303,6 +447,284 @@ uint8_t spire_mag_evolve_id(const SpireMagBytes& bytes, uint8_t from_id, const S
     b[1] = evolve_at(b, at);
   }
   return b[1];
+}
+
+// ---- Mags, the first piece (SpireMag.hh)
+
+const char* spire_mag_stat_name(size_t which) {
+  static constexpr const char* names[4] = {"DEF", "POW", "DEX", "MIND"};
+  return (which < 4) ? names[which] : "?";
+}
+
+bool spire_mag_class_is_android(uint8_t char_class) {
+  return (char_class < 12) && char_class_is_android(char_class);
+}
+
+SpireMagSega spire_mag_sega_for(std::shared_ptr<const ItemParameterTable> item_parameter_table,
+    std::shared_ptr<const MagMetadataTable> mag_metadata_table, uint8_t char_class, uint8_t section_id) {
+  SpireMagSega ret;
+  auto ipt = item_parameter_table;
+  auto mmt = mag_metadata_table;
+  ret.evolve_at = [ipt, mmt, char_class, section_id](const SpireMagBytes& bytes, uint8_t level) -> uint8_t {
+    if (!ipt || !mmt) {
+      return bytes[1];
+    }
+    ItemData item;
+    for (size_t z = 0; z < 12; z++) {
+      item.data1[z] = bytes[z];
+    }
+    try {
+      apply_mag_evolution(item, ipt, mmt, char_class, section_id, true, level);
+    } catch (const std::exception&) {
+      return bytes[1]; // no evolution known for this kind: it stays
+    }
+    return item.data1[1];
+  };
+  ret.evolution_number = [mmt](uint8_t id) -> uint8_t {
+    try {
+      return mmt ? mmt->get_evolution_number(id) : 0xFF;
+    } catch (const std::exception&) {
+      return 0xFF;
+    }
+  };
+  ret.usable = [ipt, char_class](uint8_t id) -> bool {
+    try {
+      uint8_t bits = spire_weapon_usability_bits(char_class);
+      return ipt && ((ipt->get_mag(id).usability_flags & bits) == bits);
+    } catch (const std::exception&) {
+      return false;
+    }
+  };
+  ret.item_level = [ipt, char_class](uint8_t form, uint8_t from) -> std::optional<uint8_t> {
+    std::optional<uint8_t> at;
+    try {
+      for (size_t z = 0; ipt && (z < ipt->num_item_combinations()); z++) {
+        const auto& combo = ipt->get_item_combination(z);
+        // a used item that turns the worn mag `from` into `form`, asking only a mag level (a combination that asks a
+        // character level is not counted: the level of the run copy is not Sega's condition for a heart)
+        if ((combo.result_item[0] != 0x02) || (combo.result_item[1] != form) || (combo.equipped_item[0] != 0x02) ||
+            ((combo.equipped_item[1] != from) && (combo.equipped_item[1] != 0xFF)) ||
+            ((combo.char_class != 0xFF) && (combo.char_class != char_class)) || (combo.level != 0xFF)) {
+          continue;
+        }
+        uint8_t mag_level = (combo.mag_level == 0xFF) ? 0 : combo.mag_level;
+        at = at ? std::min(*at, mag_level) : mag_level;
+      }
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    return at;
+  };
+  return ret;
+}
+
+const SpireMagDirection* spire_mag_direction(const SpireMagGrowth& growth, uint8_t char_class, uint8_t direction) {
+  if (!growth.note.empty()) {
+    return nullptr;
+  }
+  if ((direction >= SPIRE_MAG_DIRECTION_MAIN) && (direction <= SPIRE_MAG_DIRECTION_SHIELD)) {
+    auto arch_it = growth.lines.find(spire_mag_archetype(char_class));
+    if (arch_it != growth.lines.end()) {
+      auto dir_it = arch_it->second.find(direction);
+      if (dir_it != arch_it->second.end()) {
+        return &dir_it->second;
+      }
+    }
+  }
+  auto classic_it = growth.classic.find(char_class);
+  return (classic_it != growth.classic.end()) ? &classic_it->second : nullptr;
+}
+
+uint8_t spire_mag_direction_of_lean(uint8_t lean) {
+  return (lean == SPIRE_RUN_MAG_LEAN_SHELL) ? SPIRE_MAG_DIRECTION_SHIELD : SPIRE_MAG_DIRECTION_MAIN;
+}
+
+SpireMagLevels spire_mag_spread(const SpireMagDirection& direction, uint32_t level) {
+  SpireMagLevels ret{};
+  uint32_t left = std::min<uint32_t>(level, 200);
+  SpireMagLevels rest{};
+  uint32_t total = 0;
+  for (size_t z = 0; z < 4; z++) {
+    uint16_t first = std::min(direction.first[z], direction.weights[z]);
+    ret[z] = std::min<uint32_t>(first, left);
+    left -= ret[z];
+    rest[z] = direction.weights[z] - first;
+    total += rest[z];
+  }
+  // one level at a time, to the stat that lags its share of the rest most (the larger share first on a tie): the same
+  // order for every level, so a higher level never has less of a stat
+  SpireMagLevels given{};
+  for (uint32_t n = 1; (n <= left) && total; n++) {
+    size_t best = 4;
+    int64_t best_lag = 0;
+    for (size_t z = 0; z < 4; z++) {
+      if (given[z] >= rest[z]) {
+        continue;
+      }
+      int64_t lag = static_cast<int64_t>(rest[z]) * n - static_cast<int64_t>(given[z]) * total;
+      if ((best > 3) || (lag > best_lag) || ((lag == best_lag) && (rest[z] > rest[best]))) {
+        best = z;
+        best_lag = lag;
+      }
+    }
+    if (best > 3) {
+      break; // the weights are spent
+    }
+    given[best]++;
+  }
+  for (size_t z = 0; z < 4; z++) {
+    ret[z] += given[z];
+  }
+  return ret;
+}
+
+SpireMagBytes spire_mag_levels_bytes(const SpireMagLevels& levels, uint8_t id) {
+  SpireMagRow row;
+  row.id = id;
+  row.def = levels[SPIRE_MAG_DEF];
+  row.pow = levels[SPIRE_MAG_POW];
+  row.dex = levels[SPIRE_MAG_DEX];
+  row.mind = levels[SPIRE_MAG_MIND];
+  return spire_mag_row_bytes(row);
+}
+
+SpireMagBytes spire_mag_feed(SpireMagBytes mag, size_t which, uint16_t levels) {
+  uint32_t level = spire_mag_level_of(mag);
+  if ((which < 4) && (level < 200)) {
+    uint32_t add = std::min<uint32_t>(levels, 200 - level);
+    spire_mag_set_word(mag, which, spire_mag_word(mag, which) + add * 100);
+  }
+  mag[2] = spire_mag_level_of(mag);
+  return mag;
+}
+
+uint8_t spire_mag_fourth_form(const SpireMagSega& sega) {
+  if (!sega.evolve_at || !sega.evolution_number) {
+    return 0;
+  }
+  // A level 100 mag with four equal stats meets the rule of every section id group (POW + MIND = DEF + DEX, POW + DEX =
+  // MIND + DEF, POW + DEF = MIND + DEX), and the kind 00 is one Sega's evolution still renames
+  uint8_t id = sega.evolve_at(spire_mag_levels_bytes({25, 25, 25, 25}, 0x00), 100);
+  return (id && (sega.evolution_number(id) == 4)) ? id : 0;
+}
+
+std::vector<size_t> spire_mag_food_stats(const SpireMagGrowth& growth, uint8_t char_class) {
+  std::vector<size_t> ret;
+  const auto* classic = spire_mag_direction(growth, char_class, SPIRE_MAG_DIRECTION_CLASSIC);
+  for (size_t z = 0; classic && (z < 4); z++) {
+    if (classic->weights[z] && !((z == SPIRE_MAG_MIND) && spire_mag_class_is_android(char_class))) {
+      ret.emplace_back(z);
+    }
+  }
+  return ret;
+}
+
+SpireMagFoodOffer spire_mag_food_offer(const SpireMagGrowth& growth, uint8_t char_class, uint8_t section_id,
+    uint8_t direction, uint8_t tier, uint16_t tier_levels, const std::optional<SpireMagBytes>& mag, size_t stat_before,
+    const SpireMagSega& sega, const std::function<uint32_t(uint32_t)>& rnd) {
+  SpireMagFoodOffer ret;
+  ret.stat = (stat_before < 4) ? stat_before : SPIRE_MAG_POW;
+  ret.levels = tier_levels;
+  auto roll = [&](uint32_t n) -> uint32_t { return rnd(n) % n; };
+
+  // the levels: the direction's main stat, or another stat the class uses
+  const auto* dir = growth.feed_enabled ? spire_mag_direction(growth, char_class, direction) : nullptr;
+  auto stats = spire_mag_food_stats(growth, char_class);
+  if (dir && !stats.empty()) {
+    ret.directed = true;
+    std::vector<size_t> others;
+    for (size_t z : stats) {
+      if (z != dir->main) {
+        others.emplace_back(z);
+      }
+    }
+    bool has_main = others.size() != stats.size();
+    if (has_main && (others.empty() || (roll(100) < growth.main_share))) {
+      ret.stat = dir->main;
+    } else {
+      ret.stat = others[roll(others.size())];
+    }
+  }
+
+  // a form instead of the levels
+  const auto& forms = growth.forms;
+  if (!growth.note.empty() || !forms.enabled || !mag || (tier < SPIRE_MAG_TIER_EPIC) ||
+      (spire_mag_level_of(*mag) < forms.min_level) || !sega.evolution_number || !sega.usable ||
+      (sega.evolution_number((*mag)[1]) >= 4)) {
+    return ret;
+  }
+  uint8_t held = (*mag)[1];
+  auto can = [&](uint8_t id) -> bool {
+    return id && (id != held) && sega.usable(id) && (sega.evolution_number(id) == 4);
+  };
+  auto give = [&](SpireMagFormSource source, uint8_t id) {
+    ret.form = source;
+    ret.form_id = id;
+    ret.levels = 0;
+  };
+  if (tier == SPIRE_MAG_TIER_EPIC) {
+    if (roll(100) >= forms.epic_odds) {
+      return ret;
+    }
+    std::vector<uint8_t> ids;
+    for (const auto& cell : forms.cells) {
+      uint8_t id = (section_id & 1) ? cell.odd : cell.even;
+      if (can(id)) {
+        ids.emplace_back(id);
+      }
+    }
+    if (!ids.empty()) {
+      give(SpireMagFormSource::CELL, ids[roll(ids.size())]);
+    }
+    return ret;
+  }
+  if (roll(100) >= forms.legendary_odds) {
+    return ret;
+  }
+  uint32_t level = spire_mag_level_of(*mag);
+  std::vector<uint8_t> hearts;
+  for (const auto& heart : forms.hearts) {
+    if (!can(heart.id)) {
+      continue;
+    }
+    auto at = (!heart.direct && sega.item_level) ? sega.item_level(heart.id, held) : std::nullopt;
+    if (heart.direct || (at && (level >= *at))) {
+      hearts.emplace_back(heart.id);
+    }
+  }
+  uint8_t fourth = spire_mag_fourth_form(sega);
+  if (!can(fourth)) {
+    fourth = 0;
+  }
+  if (!hearts.empty() && (!fourth || (roll(100) < forms.heart_odds))) {
+    give(SpireMagFormSource::HEART, hearts[roll(hearts.size())]);
+  } else if (fourth) {
+    give(SpireMagFormSource::FOURTH, fourth);
+  }
+  return ret;
+}
+
+std::string spire_mag_food_name(const SpireMagFoodOffer& offer, const std::string& form_name) {
+  if (offer.form != SpireMagFormSource::NONE) {
+    return std::format("Mag form {}", form_name.empty() ? std::format("{:02X}", offer.form_id) : form_name);
+  }
+  if (!offer.directed) {
+    return std::format("Mag food +{}", offer.levels);
+  }
+  return std::format("Mag {} +{}", spire_mag_stat_name(offer.stat), offer.levels);
+}
+
+SpireMagBytes spire_mag_food_apply(const SpireMagBytes& mag, const SpireMagFoodOffer& offer, const SpireMagSega& sega) {
+  if (offer.form != SpireMagFormSource::NONE) {
+    auto ret = mag;
+    ret[1] = offer.form_id;
+    return ret;
+  }
+  auto ret = spire_mag_feed(mag, offer.stat, offer.levels);
+  if (sega.evolve_at) {
+    ret[1] = spire_mag_evolve_id(ret, mag[1], sega.evolve_at);
+  }
+  return ret;
 }
 
 SpireRunMagRefusal spire_run_mag_refusal(const SpireRunMagState& st) {
@@ -380,7 +802,7 @@ uint32_t spire_run_mag_answer(uint32_t tag, uint8_t old_type, bool result) {
 }
 
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
-    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus, size_t main_stat,
+    const std::set<uint8_t>& server_boss_rooms, uint32_t used_start_bonus, size_t main_stat,
     const SpireMagEvolveAt& evolve_at) {
   SpireRunMagDecision ret;
   ledger.boss_rooms.insert(server_boss_rooms.begin(), server_boss_rooms.end());
@@ -393,7 +815,7 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   bool new_step = ledger.issued_step < static_cast<int32_t>(ret.expected_step);
   if (new_step || ledger.boost_due) {
     ret.result = true;
-    ret.bytes = spire_mag_rule_b(line, std::max<int64_t>(ret.expected_step, ledger.issued_step), start_bonus,
+    ret.bytes = spire_mag_rule_b(line, std::max<int64_t>(ret.expected_step, ledger.issued_step), used_start_bonus,
         ledger.last_mirrored, ledger.need, ledger.feed_levels, main_stat);
     if (ledger.boost_due && evolve_at) {
       uint8_t from = ledger.last_mirrored ? (*ledger.last_mirrored)[1] : ret.bytes[1];
@@ -448,7 +870,7 @@ const char* spire_run_mag_lean_store_name(SpireRunMagLeanStore r) {
 
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus, uint8_t lean_bits, const std::string& archetype, const SpireMagEvolveAt& evolve_at) {
+    uint32_t used_start_bonus, uint8_t lean_bits, const std::string& archetype, const SpireMagEvolveAt& evolve_at) {
   SpireRunMagHandled ret;
   if (ledger.issued_step < 0 && ledger.boss_rooms.empty() && !ledger.offered) {
     ledger.start_step = spire_mag_start_step(table, k);
@@ -461,7 +883,7 @@ SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMa
   auto column = spire_mag_column(line, ledger.lean);
   ret.shell = column.shell;
   ret.shell_fell_back = column.fell_back;
-  ret.decision = spire_run_mag_decide(ledger, column.line, sub, k, server_boss_rooms, start_bonus,
+  ret.decision = spire_run_mag_decide(ledger, column.line, sub, k, server_boss_rooms, used_start_bonus,
       spire_mag_main_stat(archetype, ledger.lean), evolve_at);
   if (ret.decision.result) {
     ledger.offered_shell = column.shell;

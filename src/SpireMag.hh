@@ -5,6 +5,7 @@
 #include <array>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -55,8 +56,14 @@ struct SpireMagRow {
   uint16_t dex = 0;
   uint16_t mind = 0;
 };
-// A start-level floor: from this start_level bonus on (SpireMeta's spire_start_level_bonus: +5, +10, +14), the run mag
-// starts at least at this Sega challenge template mag (PlayerSubordinates.cc v3 templates), merged per stat.
+// A start-level floor: from this start_level bonus on (+5, +10, +14), the run mag starts at least at this Sega challenge
+// template mag (PlayerSubordinates.cc v3 templates), merged per stat.
+// B-ONTWERP-8 (pso-roguelike new-features/roguelike/design/mechanics/decisions.md): the bonus every function here reads
+// (used_start_bonus) is the start_level step the player uses for this run, the levels the run copy starts above the
+// quest's own level, never the highest step the character ever bought (SpireMeta's spire_start_level_bonus of the owned
+// upgrade). The two are the same number until a run can start below its highest bought step; the caller passes the
+// run's own (SpireFlagBridge.cc spire_start_level_run_bonus). A run whose used step is not known reads 0: no floor, and
+// the mag the player holds is kept per stat anyway.
 struct SpireMagFloor {
   uint32_t min_bonus = 0;
   SpireMagRow row;
@@ -69,14 +76,80 @@ struct SpireMagLine {
   std::vector<SpireMagRow> shell_steps;
   std::string shell_note; // "" when shell_steps is usable
 };
+
+// ---- Mags, the first piece (pso-roguelike new-features/roguelike/design/mechanics/mags.md par. 2, 3 and 7): mag food
+// that names its stat and amount, the growth directions as data, and Sega's rare forms as a reward. Nothing of it is
+// called by the run mag yet: the mag food branch of the rewards (SpireRewardMagFood.cc) and the ledger in the savestate
+// (SpireMagState.cc) follow after the seam (integratie.md par. 5-6). Until then the run mag answers as before.
+
+// The four stats, in data1 word order
+constexpr size_t SPIRE_MAG_DEF = 0;
+constexpr size_t SPIRE_MAG_POW = 1;
+constexpr size_t SPIRE_MAG_DEX = 2;
+constexpr size_t SPIRE_MAG_MIND = 3;
+using SpireMagLevels = std::array<uint16_t, 4>; // levels per stat: DEF, POW, DEX, MIND
+const char* spire_mag_stat_name(size_t which); // "DEF", "POW", "DEX", "MIND"; "?" for any other value
+
+// The direction a run mag grows in (mags.md par. 3a): the four lines of the kit choice, by the number the quest will
+// send in the lean bits (list index + 1). The run mag of today still reads those bits as Fang/Mind (1) and Shell (2):
+// SPIRE_RUN_MAG_LEAN_*; spire_mag_direction_of_lean maps them until the kit choice sends the four.
+constexpr uint8_t SPIRE_MAG_DIRECTION_CLASSIC = 1; // what the community advises for the class (Classic, per class)
+constexpr uint8_t SPIRE_MAG_DIRECTION_MAIN = 2; // HU and RA: Power; FO: Mind
+constexpr uint8_t SPIRE_MAG_DIRECTION_SECOND = 3; // HU and RA: Hit; FO: Power
+constexpr uint8_t SPIRE_MAG_DIRECTION_SHIELD = 4;
+struct SpireMagDirection {
+  std::string name; // "Classic", "Power", "Hit", "Shield", "Mind"
+  SpireMagLevels weights{}; // the mag at level 200 (the four sum to 200)
+  SpireMagLevels first{}; // the levels filled before anything else: DEF 5 (Sega's start mag), a force's Shield DEF 45
+  size_t main = SPIRE_MAG_POW; // the stat the direction is named for: most of the mag food goes there
+};
+// Sega's rare forms as a reward (mags.md par. 3c). A form only changes the kind (data1[1]): the stats stay, the mag
+// keeps growing, and Sega's evolution never renames it again (evolution number 4).
+struct SpireMagForms {
+  bool enabled = false; // false: Epic and Legendary mag food always give their levels
+  uint16_t min_level = 50; // the mag level from which a form is offered instead of levels
+  uint8_t epic_odds = 100; // percent of the Epic mag food of a mag that can take a form that is a cell form
+  uint8_t legendary_odds = 100; // the same for Legendary: the fourth form of the class, or a heart form
+  uint8_t heart_odds = 25; // percent of those Legendary forms that is a heart form instead of the fourth form
+  // Sega's mag cells (Items.cc, "Non-combo mag cells"): the kind by the section id's parity
+  struct Cell {
+    std::string name; // "Cell of MAG 502"
+    uint8_t even = 0;
+    uint8_t odd = 0;
+  };
+  std::vector<Cell> cells;
+  // Sega's heart forms (the item parameter table's ItemCombinations). direct: Sega's table has no item that makes this
+  // kind (Elenor); the run gives it by its own rule, to the classes Sega lets wear it.
+  struct Heart {
+    uint8_t id = 0;
+    bool direct = false;
+  };
+  std::vector<Heart> hearts;
+};
+// The keys Feed, Lines, Classic and Forms of spire-mag.json. Optional as a whole: missing or unreadable, note says why,
+// everything in it is off and a mag food is the food of before (spire_mag_food_offer); it never makes the table
+// unreadable (NO_TABLE), as ShellSteps.
+struct SpireMagGrowth {
+  bool feed_enabled = false; // false: mag food goes to the main stat and is named as before
+  uint8_t main_share = 60; // percent of the mag food that goes to the direction's main stat
+  std::map<std::string, std::map<uint8_t, SpireMagDirection>> lines; // "HU", "RA", "FO" -> direction 2-4
+  std::map<uint8_t, SpireMagDirection> classic; // character class (0-11) -> direction 1
+  SpireMagForms forms;
+  std::string note; // "" when the keys are usable
+};
+
 struct SpireMagTable {
   bool enabled = false; // false: every 'Z' answers 0 (the data-only kill switch)
   std::map<std::string, SpireMagLine> classes; // "HU", "RA", "FO"
   std::set<uint8_t> boss_rooms; // the boss rooms k (Episode 1 k4-k15, Episode 2 k18-k30: one room counter)
+  SpireMagGrowth growth; // the first piece of mags.md; read by no 'Z' request yet
 };
 // Strict: throws on a missing key, an empty line, a stat above 200, a row whose levels sum above 200. ShellSteps is the
-// one exception: a bad ShellSteps only empties that class's shell_steps (SpireMagLine::shell_note).
+// one exception: a bad ShellSteps only empties that class's shell_steps (SpireMagLine::shell_note). The growth keys are
+// the other: missing or bad, they only leave growth off (SpireMagGrowth::note).
 SpireMagTable spire_mag_parse(const std::string& json_text);
+// The growth keys alone; throws on a missing key or a value out of range (spire_mag_parse catches it into the note)
+SpireMagGrowth spire_mag_parse_growth(const std::string& json_text);
 
 // F10: the column a lean picks. Lean 2 with a usable ShellSteps (as long as Steps): the line with steps = shell_steps
 // (shell true). Lean 2 without one: the line as it is (fell_back true, the caller logs it). Any other lean: the line.
@@ -104,11 +177,12 @@ uint32_t spire_mag_expected_step(size_t num_steps, uint32_t start_step, size_t s
 // after a boss gets the mag of that point; a run from its first room starts at 0).
 uint32_t spire_mag_start_step(const SpireMagTable& table, uint8_t k);
 
-// The bytes of step `step` for a line: the step row, merged per stat with the highest floor the start bonus reaches and
-// with the mag the ledger last mirrored (so fed progress is never lost). The kind is the step row's, or the floor's
-// when the floor's level is above the step's. LL is recomputed as the sum; a merge past 200 is cut back by
-// spire_mag_fit_200 without a need (rule B: the rise over the mirrored mag goes first, DEF first, main stat POW last).
-SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+// The bytes of step `step` for a line: the step row, merged per stat with the highest floor the used start bonus
+// reaches (SpireMagFloor: the step this run uses, not the highest bought) and with the mag the ledger last mirrored (so
+// fed progress is never lost). The kind is the step row's, or the floor's when the floor's level is above the step's.
+// LL is recomputed as the sum; a merge past 200 is cut back by spire_mag_fit_200 without a need (rule B: the rise over
+// the mirrored mag goes first, DEF first, main stat POW last).
+SpireMagBytes spire_mag_step_bytes(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
     const std::optional<SpireMagBytes>& last_mirrored);
 
 // Fase 1 part A, rule B (pso-roguelike new-features/roguelike/design/beloningen-per-klasse.md par. 3): the mag levels a
@@ -134,15 +208,99 @@ uint16_t spire_mag_stat_word(const SpireMagBytes& b, size_t which);
 SpireMagBytes spire_mag_fit_200(SpireMagBytes bytes, const std::optional<SpireMagBytes>& current,
     const SpireMagNeed& need, size_t main_stat);
 // Rule B: per stat the highest of the mag the player holds (current, with feed_levels added on the main stat), the step
-// row, the start floor of the bought start level and what the weapon asks; then spire_mag_fit_200. The kind is the step
-// row's (or the floor's, as spire_mag_step_bytes); the caller renames it with Sega's evolution (spire_mag_evolve_id).
-SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t start_bonus,
+// row, the start floor of the start level this run uses (SpireMagFloor) and what the weapon asks; then
+// spire_mag_fit_200. The kind is the step row's (or the floor's, as spire_mag_step_bytes); the caller renames it with
+// Sega's evolution (spire_mag_evolve_id).
+SpireMagBytes spire_mag_rule_b(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
     const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, uint16_t feed_levels, size_t main_stat);
 // The mag kind Sega's own evolution gives a mag with these stats (Items.cc apply_mag_evolution): from `from_id`, the
 // rules of the levels a fed mag passes on its way up (10, 35, then the highest multiple of 5 from 50 on), each with the
 // final stats. evolve_at(bytes with data1[1] = the kind so far, level) returns the kind after that level's rule.
 using SpireMagEvolveAt = std::function<uint8_t(const SpireMagBytes&, uint8_t)>;
 uint8_t spire_mag_evolve_id(const SpireMagBytes& bytes, uint8_t from_id, const SpireMagEvolveAt& evolve_at);
+
+// ---- Mags, the first piece: the functions (the data is above SpireMagTable)
+
+// What Sega's own tables say for one character: its class and section id. The pure functions below ask these, so the
+// static tests can give their own; spire_mag_sega_for binds newserv's tables.
+struct SpireMagSega {
+  SpireMagEvolveAt evolve_at; // apply_mag_evolution (Items.cc) for the class and section id
+  std::function<uint8_t(uint8_t)> evolution_number; // of a kind (MagMetadataTable); 0xFF for a kind it does not know
+  std::function<bool(uint8_t)> usable; // whether the class may wear the kind (the mag's UsabilityFlags)
+  // The lowest mag level at which one of Sega's items turns kind `from` into kind `form` (the item parameter table's
+  // ItemCombinations); nullopt when no item does
+  std::function<std::optional<uint8_t>(uint8_t form, uint8_t from)> item_level;
+};
+class ItemParameterTable;
+class MagMetadataTable;
+// Sega's tables for a character (the GC v3 tables of ServerState). Any of its functions answers "nothing" on an error
+// (the kind stays, evolution number 0xFF, not usable, no item), so a form is never offered on a table it cannot read.
+SpireMagSega spire_mag_sega_for(std::shared_ptr<const ItemParameterTable> item_parameter_table,
+    std::shared_ptr<const MagMetadataTable> mag_metadata_table, uint8_t char_class, uint8_t section_id);
+
+// Whether the class is one of the four androids (HUcast, HUcaseal, RAcast, RAcaseal): they never get MIND
+bool spire_mag_class_is_android(uint8_t char_class);
+// The direction of a class for a direction number: 1 (and 0, no choice, and any number the table has no line for)
+// its Classic row, 2-4 the line of its archetype. nullptr when the growth keys are off or the class has no Classic row.
+const SpireMagDirection* spire_mag_direction(const SpireMagGrowth& growth, uint8_t char_class, uint8_t direction);
+// The direction number of a run that still carries a lean of before the kit choice of four (SPIRE_RUN_MAG_LEAN_*): Shell
+// is Shield, anything else the main line (Power for HU and RA, Mind for FO), the stat spire_mag_main_stat names.
+uint8_t spire_mag_direction_of_lean(uint8_t lean);
+// The stats of a mag of `level` levels (at most 200) grown along a direction: first the direction's first levels (in
+// word order), then one level at a time to the stat that lags its share of the weights most. Every level adds one level
+// to one stat (a higher level never has less of a stat), and level 200 is exactly the weights.
+SpireMagLevels spire_mag_spread(const SpireMagDirection& direction, uint32_t level);
+// The data1 bytes of a mag with these levels and kind (photon blasts 0, LL the sum)
+SpireMagBytes spire_mag_levels_bytes(const SpireMagLevels& levels, uint8_t id);
+// Mag food on one stat: `levels` more on word `which`, as far as Sega's 200 levels go (a mag never passes level 200, as
+// apply_mag_feed_result holds it). Hundredths the stat already carries stay; LL is recomputed; the kind is unchanged.
+SpireMagBytes spire_mag_feed(SpireMagBytes mag, size_t which, uint16_t levels);
+// The kind Sega's fourth evolution gives the character (Items.cc apply_mag_evolution, the level 100 rule: by class,
+// sex and section id group), asked from Sega's own rule with a mag that meets it; 0 when it names none.
+uint8_t spire_mag_fourth_form(const SpireMagSega& sega);
+// The stats a class's mag food can go to: those its Classic row gives a weight, an android never MIND. Empty when the
+// growth keys are off or the class has no Classic row.
+std::vector<size_t> spire_mag_food_stats(const SpireMagGrowth& growth, uint8_t char_class);
+
+// One mag food as the menu offers it (mags.md par. 2 and 3b-3c)
+constexpr uint8_t SPIRE_MAG_TIER_EPIC = 2; // the tiers in the reward grid's order: 0 Normal, 1 Rare, 2 Epic, 3 Legendary
+constexpr uint8_t SPIRE_MAG_TIER_LEGENDARY = 3;
+enum class SpireMagFormSource : uint8_t {
+  NONE = 0, // levels on a stat
+  CELL, // Epic: Sega's mag cells (Pitri, Soniti, Preta, Churel)
+  FOURTH, // Legendary: Sega's fourth evolution of the class
+  HEART, // Legendary: Sega's heart forms (Chu Chu, Kapu Kapu, Elenor)
+};
+struct SpireMagFoodOffer {
+  bool directed = false; // false: the food of before the mechanic (the main stat, named "Mag food +N")
+  size_t stat = SPIRE_MAG_POW; // the word the levels go to
+  uint16_t levels = 0; // 0 for a form
+  SpireMagFormSource form = SpireMagFormSource::NONE;
+  uint8_t form_id = 0; // the kind (data1[1]) of a form
+  bool operator==(const SpireMagFoodOffer&) const = default;
+};
+// The mag food of a draw. tier_levels: the levels of the tier (the reward grid's MagFood). direction: the run's
+// direction number (spire_mag_direction_of_lean for a lean of before). stat_before: the stat mag food went to before
+// the mechanic (spire_mag_main_stat), which it keeps while Feed is off or the class has no direction.
+// Levels: main_share percent the direction's main stat, else one of the class's other stats (spire_mag_food_stats).
+// A form instead of the levels: only for Epic and Legendary, with Forms on, a held mag of at least min_level whose
+// kind Sega's evolution still renames (evolution number below 4, as Sega's cells and evolutions ask), and a kind the
+// class may wear. Epic: one of the cells, by the section id's parity. Legendary: the class's fourth form, or with
+// heart_odds a heart form (one Sega's table makes from the held kind at that level, or a direct one).
+// rnd(n) gives 0 .. n-1, as spire_reward_offer's.
+SpireMagFoodOffer spire_mag_food_offer(const SpireMagGrowth& growth, uint8_t char_class, uint8_t section_id,
+    uint8_t direction, uint8_t tier, uint16_t tier_levels, const std::optional<SpireMagBytes>& mag, size_t stat_before,
+    const SpireMagSega& sega, const std::function<uint32_t(uint32_t)>& rnd);
+// The menu name of a mag food, without the tier word in front (SpireRewards.cc spire_reward_tier_label): "Mag DEX +10";
+// a form "Mag form Pitri" (form_name: Sega's name of the kind); the food of before "Mag food +10".
+std::string spire_mag_food_name(const SpireMagFoodOffer& offer, const std::string& form_name = "");
+// The mag after a taken mag food. Levels: spire_mag_feed, and the kind Sega's evolution gives the fed stats
+// (spire_mag_evolve_id from the held kind; a rare form stays). A form: only the kind changes.
+SpireMagBytes spire_mag_food_apply(const SpireMagBytes& mag, const SpireMagFoodOffer& offer, const SpireMagSega& sega);
+// Rule B with the mag food owed per stat (the ledger's food after the seam): spire_mag_rule_b, with every stat's food
+// added to the mag the player holds. spire_mag_rule_b is this with all the food on the main stat.
+SpireMagBytes spire_mag_rule_b_fed(const SpireMagLine& line, uint32_t step, uint32_t used_start_bonus,
+    const std::optional<SpireMagBytes>& current, const SpireMagNeed& need, const SpireMagLevels& feed, size_t main_stat);
 
 // The ledger of one run mag: per (serial, character id, run id), kept by run id and step, never by item id (item ids
 // change per game). Persisted in the savestate file ("RunMag").
@@ -237,7 +395,7 @@ struct SpireRunMagDecision {
 // even without a new step, and its kind follows evolve_at (spire_mag_evolve_id) when one is given. main_stat:
 // spire_mag_main_stat of the class and the ledger's lean.
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
-    const std::set<uint8_t>& server_boss_rooms, uint32_t start_bonus, size_t main_stat = 1,
+    const std::set<uint8_t>& server_boss_rooms, uint32_t used_start_bonus, size_t main_stat = 1,
     const SpireMagEvolveAt& evolve_at = nullptr);
 // The ledger step of an ASK or EXAM that no refusal stopped (the 'Z' handler in SpireFlagBridge.cc): the start step
 // from the asking room (only while the ledger has issued, counted and offered nothing, so a later ASK never moves it),
@@ -258,7 +416,8 @@ struct SpireRunMagHandled {
 };
 SpireRunMagHandled spire_run_mag_handle(SpireRunMagLedger& ledger, const SpireMagTable& table, const SpireMagLine& line,
     uint8_t sub, uint8_t k, const std::vector<SpireMagBytes>& overlay_mags, const std::set<uint8_t>& server_boss_rooms,
-    uint32_t start_bonus, uint8_t lean_bits, const std::string& archetype = "HU", const SpireMagEvolveAt& evolve_at = nullptr);
+    uint32_t used_start_bonus, uint8_t lean_bits, const std::string& archetype = "HU",
+    const SpireMagEvolveAt& evolve_at = nullptr);
 // The ledger step of a 'V' (savestate write): the ledger follows the overlay's fed mag (spire_run_mag_follow_mirror)
 // unless an in-game 61 refreshed the overlay in this game (amendment 3: it may hold the real mag then). False without
 // a ledger or when it did not follow.
