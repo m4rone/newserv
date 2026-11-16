@@ -9,6 +9,8 @@
 #include <vector>
 #include <stdint.h>
 
+#include <phosg/JSON.hh>
+
 #include "Client.hh"
 #include "Lobby.hh"
 
@@ -94,6 +96,11 @@ struct SpireMetaFile {
   // The seam (SpireMechanics.hh H11 char_meta): what a registrant of the hook read of its own key, under that key, so
   // every write of the file carries it; only the registrant's own file casts it back. Empty without such a registrant.
   std::map<std::string, std::shared_ptr<const void>> sections = {};
+  // The seam (SpireMechanics.hh H11): what stood in the file under a key of a registrant of the hook that has a
+  // switch, unread, by that key. A registrant whose switch is off is not called; its key is written back from here as
+  // it was read, so a mechanic that is off loses nothing. Keys no registrant names are not kept (an outdated key
+  // falls, as before the seam).
+  std::map<std::string, std::shared_ptr<const phosg::JSON>> carried = {};
 };
 SpireMetaFile spire_meta_load_file(const std::string& filename); // exists false (and no flags) if there is no file
 SpireMetaFlags spire_meta_load(const std::string& filename); // spire_meta_load_file(...).flags

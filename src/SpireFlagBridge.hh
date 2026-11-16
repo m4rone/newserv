@@ -408,6 +408,11 @@ struct SpireSavestate {
   // The seam (SpireMechanics.hh H10 run_state): what a registrant of the hook carries of its own key between the hook's
   // moments, under that key; only the registrant's own file casts it back. Empty without such a registrant.
   std::map<std::string, std::shared_ptr<const void>> sections = {};
+  // The seam (SpireMechanics.hh H10): what stood in the file under a key of a registrant of the hook that has a
+  // switch, unread, by that key. A registrant whose switch is off is not called; its key is written back from here as
+  // it was read, so a mechanic that is off loses nothing. Keys no registrant names are not kept (an outdated key
+  // falls, as before the seam).
+  std::map<std::string, std::shared_ptr<const phosg::JSON>> carried = {};
 };
 // The pure parts, for the static tests:
 // kwaliteit-3 3: takes the rest bits out of a 'V''s values (SPIRE_SS_VARIANT keeps bits 0-1) and returns them

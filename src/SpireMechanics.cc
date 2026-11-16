@@ -2,6 +2,7 @@
 
 #include "ReceiveSubcommands.hh"
 #include "SpireFlagBridge.hh"
+#include "SpireMeta.hh"
 
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
@@ -194,6 +195,63 @@ void each_hook(SpireMechHookId hook, bool guarded, CallT&& call) {
     } catch (const std::exception& ex) {
       phosg::log_warning_f("Spire hook {}: {} failed ({}); not called for this moment",
           hook_conflict_name(hook, e.name), e.name, ex.what());
+    }
+  }
+}
+
+// H10 and H11, a file being read: a registrant that is on reads its keys itself. What stands under the keys of a
+// registrant that has a switch is also kept as it is (carried), so it can be written back while that registrant is off.
+template <typename FnsT, typename FileT>
+void hook_file_read(SpireMechHookId hook, const phosg::JSON& json, FileT& ret) {
+  const auto& by_hook = hook_registry().by_hook;
+  auto it = by_hook.find(hook);
+  if (it == by_hook.end()) {
+    return;
+  }
+  const auto entries = it->second;
+  for (const auto& e : entries) {
+    const FnsT& fns = *static_cast<const FnsT*>(e.fn.get());
+    bool on = true;
+    if (!e.switch_key.empty()) {
+      on = spire_mech_enabled(e.switch_key, e.default_off);
+      for (const char* key : fns.keys) {
+        if (key && json.contains(key)) {
+          ret.carried[key] = std::make_shared<const phosg::JSON>(json.at(key));
+        }
+      }
+    }
+    if (on && fns.read) {
+      fns.read(json, ret);
+    }
+  }
+}
+
+// H10 and H11, a file being written: a registrant that is on writes its keys itself; for one that is off the core
+// puts back what was read under its keys, at the registrant's own place in the hook's order
+template <typename FnsT, typename FileT>
+void hook_file_write(SpireMechHookId hook, const FileT& file, phosg::JSON& json) {
+  const auto& by_hook = hook_registry().by_hook;
+  auto it = by_hook.find(hook);
+  if (it == by_hook.end()) {
+    return;
+  }
+  const auto entries = it->second;
+  for (const auto& e : entries) {
+    const FnsT& fns = *static_cast<const FnsT*>(e.fn.get());
+    if (e.switch_key.empty() || spire_mech_enabled(e.switch_key, e.default_off)) {
+      if (fns.write) {
+        fns.write(file, json);
+      }
+      continue;
+    }
+    for (const char* key : fns.keys) {
+      if (!key) {
+        continue;
+      }
+      auto c_it = file.carried.find(key);
+      if ((c_it != file.carried.end()) && !json.contains(key)) {
+        json.emplace(key, phosg::JSON(*c_it->second));
+      }
     }
   }
 }
@@ -505,7 +563,11 @@ bool spire_mech_register_run_state(const SpireMechHook<SpireMechRunState>& reg) 
   return register_hook(HookId::RUN_STATE, reg);
 }
 
-void spire_mech_run_state_capture(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireSavestate& ss) {
+void spire_mech_run_state_capture(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireSavestate& ss,
+    const SpireSavestate* resumed_from) {
+  if (resumed_from && (resumed_from->run_id == ss.run_id)) {
+    ss.carried = resumed_from->carried; // the keys of a registrant that is off go on through this run's 'V's
+  }
   each_hook<SpireMechRunState>(HookId::RUN_STATE, true, [&](const SpireMechRunState& fns) {
     if (fns.capture) {
       fns.capture(c, l, ss);
@@ -514,19 +576,11 @@ void spire_mech_run_state_capture(std::shared_ptr<Client> c, std::shared_ptr<con
 }
 
 void spire_mech_run_state_write(const SpireSavestate& ss, phosg::JSON& json) {
-  each_hook<SpireMechRunState>(HookId::RUN_STATE, false, [&](const SpireMechRunState& fns) {
-    if (fns.write) {
-      fns.write(ss, json);
-    }
-  });
+  hook_file_write<SpireMechRunState>(HookId::RUN_STATE, ss, json);
 }
 
 void spire_mech_run_state_read(const phosg::JSON& json, SpireSavestate& ret) {
-  each_hook<SpireMechRunState>(HookId::RUN_STATE, false, [&](const SpireMechRunState& fns) {
-    if (fns.read) {
-      fns.read(json, ret);
-    }
-  });
+  hook_file_read<SpireMechRunState>(HookId::RUN_STATE, json, ret);
 }
 
 void spire_mech_run_state_resume(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, const SpireSavestate& ss) {
@@ -543,17 +597,9 @@ bool spire_mech_register_char_meta(const SpireMechHook<SpireMechCharMeta>& reg) 
 }
 
 void spire_mech_char_meta_read(const phosg::JSON& json, SpireMetaFile& ret) {
-  each_hook<SpireMechCharMeta>(HookId::CHAR_META, false, [&](const SpireMechCharMeta& fns) {
-    if (fns.read) {
-      fns.read(json, ret);
-    }
-  });
+  hook_file_read<SpireMechCharMeta>(HookId::CHAR_META, json, ret);
 }
 
 void spire_mech_char_meta_write(const SpireMetaFile& file, phosg::JSON& json) {
-  each_hook<SpireMechCharMeta>(HookId::CHAR_META, false, [&](const SpireMechCharMeta& fns) {
-    if (fns.write) {
-      fns.write(file, json);
-    }
-  });
+  hook_file_write<SpireMechCharMeta>(HookId::CHAR_META, file, json);
 }

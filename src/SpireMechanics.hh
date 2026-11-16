@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -293,14 +294,23 @@ void spire_mech_run_end(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> 
 // before the seam, so the registrations' keys follow in their order of calls. read: the text becomes a savestate
 // (spire_savestate_from_json). resume: the client resumes from ss (the 'J' answered with it). What a registrant
 // carries between two moments it keeps in ss.sections under its own key.
+//
+// keys: the keys of the text the registrant writes and reads (at most four). While its switch is off it is not called,
+// and the core carries those keys unread: what stood under a key when the savestate was read stands there again,
+// exactly so, at the next write, and the 'V' of a run that resumed from that savestate carries it on. With the switch
+// on again the registrant reads its old value. A registrant that is on decides about its keys itself: what was
+// carried is not written for it. A registrant without a switch needs no keys.
 struct SpireMechRunState {
   void (*capture)(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireSavestate& ss) = nullptr;
   void (*write)(const SpireSavestate& ss, phosg::JSON& json) = nullptr;
   void (*read)(const phosg::JSON& json, SpireSavestate& ret) = nullptr;
   void (*resume)(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, const SpireSavestate& ss) = nullptr;
+  std::array<const char*, 4> keys = {};
 };
 bool spire_mech_register_run_state(const SpireMechHook<SpireMechRunState>& reg);
-void spire_mech_run_state_capture(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireSavestate& ss);
+// resumed_from: the savestate the client resumed from in this run (nullptr: none); its carried keys go on in ss
+void spire_mech_run_state_capture(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireSavestate& ss,
+    const SpireSavestate* resumed_from = nullptr);
 void spire_mech_run_state_write(const SpireSavestate& ss, phosg::JSON& json);
 void spire_mech_run_state_read(const phosg::JSON& json, SpireSavestate& ret);
 void spire_mech_run_state_resume(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, const SpireSavestate& ss);
@@ -308,10 +318,12 @@ void spire_mech_run_state_resume(std::shared_ptr<Client> c, std::shared_ptr<cons
 // H11 char_meta: the meta file per character (SpireMeta.cc), read (spire_meta_load_file, after the core's own keys) and
 // written (spire_meta_save, before the text is made). Every write of the file loads it first, so a registrant keeps
 // what it read in ret.sections under its own key and writes it back from there: a key nobody carries is gone at the
-// next write.
+// next write. keys: as for H10; while the registrant's switch is off the core carries them unread through every load
+// and write of the file.
 struct SpireMechCharMeta {
   void (*read)(const phosg::JSON& json, SpireMetaFile& ret) = nullptr;
   void (*write)(const SpireMetaFile& file, phosg::JSON& json) = nullptr;
+  std::array<const char*, 4> keys = {};
 };
 bool spire_mech_register_char_meta(const SpireMechHook<SpireMechCharMeta>& reg);
 void spire_mech_char_meta_read(const phosg::JSON& json, SpireMetaFile& ret);

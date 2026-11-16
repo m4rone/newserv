@@ -217,8 +217,10 @@ void t_run_state_resume(std::shared_ptr<Client>, std::shared_ptr<const Lobby>, c
   hook_calls += std::format("{}", ss.sections.count(std::string("Test") + TAG));
 }
 template <char TAG>
+constexpr char T_KEY[6] = {'T', 'e', 's', 't', TAG, 0}; // the key the registrant TAG names as its own
+template <char TAG>
 constexpr SpireMechRunState T_RUN_STATE = {t_run_state_capture<TAG>, t_run_state_write<TAG>, t_run_state_read<TAG>,
-    t_run_state_resume<TAG>};
+    t_run_state_resume<TAG>, {T_KEY<TAG>}};
 template <char TAG>
 void t_char_meta_read(const phosg::JSON& json, SpireMetaFile& ret) {
   hook_calls += TAG;
@@ -237,7 +239,7 @@ void t_char_meta_write(const SpireMetaFile& file, phosg::JSON& json) {
   }
 }
 template <char TAG>
-constexpr SpireMechCharMeta T_CHAR_META = {t_char_meta_read<TAG>, t_char_meta_write<TAG>};
+constexpr SpireMechCharMeta T_CHAR_META = {t_char_meta_read<TAG>, t_char_meta_write<TAG>, {T_KEY<TAG>}};
 
 // A server, a client and games of this test, for the hooks that reach a registrant only in a Spire run
 struct HookTestState : ServerState {
@@ -667,7 +669,8 @@ void spire_tests_hooks() {
   };
   expect_hook<SpireMechCharMeta>(
       H::CHAR_META, spire_mech_register_char_meta, T_CHAR_META<'L'>, T_CHAR_META<'E'>, T_CHAR_META<'O'>, meta_call, write,
-      "", "ErLrEwLw TestE=5 TestL=7", "ErOrLrEwOwLw TestE=5 TestO=6 TestL=7", "ErEw TestE=5");
+      // a registrant whose switch is off is not called, and the key it names is carried from the read to the write
+      "", "ErLrEwLw TestE=5 TestO=6 TestL=7", "ErOrLrEwOwLw TestE=5 TestO=6 TestL=7", "ErEw TestE=5 TestO=6 TestL=7");
 
   // The run mag's ledger is in the savestate whatever the switches say: its registration has no switch
   {
@@ -717,11 +720,33 @@ void spire_tests_hooks() {
     hook_calls.clear();
     expect_eq(ss_plain, spire_savestate_to_json(ss, 1));
     expect_eq(0u, spire_savestate_from_json(ss_with).sections.count("TestE"));
-    expect_eq(std::string(""), hook_calls);
-    write("{}");
+    // ... but the key it names is carried unread: what stood under it stands there again at the next write, exactly
+    auto off_back = spire_savestate_from_json(ss_with);
+    expect_eq(1u, off_back.carried.count("TestE"));
+    expect_eq(ss_with, spire_savestate_to_json(off_back, 1));
+    // and the 'V' of the run that resumed from it carries the key on (the hook's capture); another run's does not
+    SpireSavestate next_v = ss;
+    next_v.sections.clear();
+    spire_mech_run_state_capture(no_c, no_l, next_v, &off_back);
+    expect_eq(ss_with, spire_savestate_to_json(next_v, 1));
+    SpireSavestate other_run = ss;
+    other_run.sections.clear();
+    other_run.run_id = 79;
+    spire_mech_run_state_capture(no_c, no_l, other_run, &off_back);
+    expect(other_run.carried.empty());
+    expect_eq(std::string(""), hook_calls); // all of that without one call of the registrant
+    const std::string off_text = spire_savestate_to_json(next_v, 1); // written while the registrant is off
+    write("{}"); // on again: the registrant reads its old value from the text that was written without it
+    hook_calls.clear();
+    auto on_back = spire_savestate_from_json(off_text);
+    expect_eq(std::string("Er"), hook_calls);
+    expect_eq(5, *std::static_pointer_cast<const int64_t>(on_back.sections.at("TestE")));
   }
   expect_eq(ss_plain, spire_savestate_to_json(ss, 1));
   expect_eq(0u, spire_savestate_from_json(ss_with).sections.count("TestE"));
+  // a key no registrant names is not carried: it falls at the next write, as before the seam
+  expect(spire_savestate_from_json(ss_with).carried.empty());
+  expect_eq(ss_plain, spire_savestate_to_json(spire_savestate_from_json(ss_with), 1));
   expect_eq(ss_plain, spire_savestate_to_json(spire_savestate_from_json(ss_plain), 1));
 
   // H11 through the core: a registrant's key survives the file's load and save (every flag write loads the file first);
@@ -751,7 +776,28 @@ void spire_tests_hooks() {
     spire_meta_save_file(meta_file, 1, loaded); // the load and save of a flag write
     expect_eq(meta_with, phosg::load_file(meta_file));
     expect_eq(9, *std::static_pointer_cast<const int64_t>(spire_meta_load_file(meta_file).sections.at("TestE")));
+    // its switch off: not called, and its key is carried unread through the load and save of a flag write, twice
+    write(R"({"test.haak.aan": false})");
+    hook_calls.clear();
+    for (size_t z = 0; z < 2; z++) {
+      auto off_meta = spire_meta_load_file(meta_file);
+      expect_eq(0u, off_meta.sections.count("TestE"));
+      expect_eq(1u, off_meta.carried.count("TestE"));
+      spire_meta_save_file(meta_file, 1, off_meta);
+      expect_eq(meta_with, phosg::load_file(meta_file));
+    }
+    // the core's own change of the file while the mechanic is off keeps the key too
+    auto off_meta = spire_meta_load_file(meta_file);
+    off_meta.upgrades["hp_mat"] = 3;
+    spire_meta_save_file(meta_file, 1, off_meta);
+    expect_eq(std::string(""), hook_calls);
+    write("{}"); // on again: the registrant reads its old value
+    auto on_meta = spire_meta_load_file(meta_file);
+    expect_eq(9, *std::static_pointer_cast<const int64_t>(on_meta.sections.at("TestE")));
+    expect_eq(3u, on_meta.upgrades.at("hp_mat"));
   }
+  // a key no registrant names is not carried
+  expect(spire_meta_load_file(meta_file).carried.empty());
   expect_eq(0u, spire_meta_load_file(meta_file).sections.count("TestE"));
   spire_meta_save_file(meta_file, 1, meta);
   expect_eq(meta_plain, phosg::load_file(meta_file));

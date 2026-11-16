@@ -2208,7 +2208,7 @@ static void spire_savestate_write(std::shared_ptr<Client> c, std::shared_ptr<con
     if (led) {
       ss.run_mag = *led;
     }
-    spire_mech_run_state_capture(c, l, ss); // the seam's H10
+    spire_mech_run_state_capture(c, l, ss, cr->answered_resume ? &cr->savestate : nullptr); // the seam's H10
     ss.values = std::move(values);
     ss.time_usecs = phosg::now();
     // B-REGIE-18-6: the file of the quest's own difficulty rung; a run parked on another difficulty is not touched
