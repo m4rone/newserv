@@ -136,6 +136,25 @@ void expect_seam_invariants() {
   expect(std::count(run_state.begin(), run_state.end(), std::string("mags")) == 1);
 }
 
+// --- The silence of the static tests ---
+
+// Read by this file's static initialiser, so before run_static_tests(): the silence as a server has it
+const bool silence_at_start = spire_mech_tests_silence();
+
+// A mechanic registers from a static initialiser of its own file, outside the silence. A test that plays a mechanic
+// steps out of the silence for as long as this lives.
+struct OutsideSilence {
+  OutsideSilence() {
+    spire_mech_set_tests_silence(false);
+  }
+  ~OutsideSilence() {
+    spire_mech_set_tests_silence(true);
+  }
+};
+
+constexpr const char* SILENT_HOOK_KEY = "test.zwijg.haak";
+constexpr const char* SILENT_ROUTE_KEY = "test.zwijg.route";
+
 // --- The hooks H1-H11 ---
 //
 // Per hook three registrants of this file: 'L' ("aa", number 20, switch test.haak.aan) is registered first, then 'E'
@@ -151,6 +170,13 @@ struct HookGuard {
   const char* name;
   ~HookGuard() {
     spire_mech_forget_hook(hook, name);
+  }
+};
+struct KindGuard {
+  SpireRewardKind kind;
+  bool first;
+  ~KindGuard() {
+    spire_mech_forget_kind(kind, first);
   }
 };
 
@@ -883,6 +909,118 @@ void spire_tests_hooks() {
   spire_meta_save_file(meta_file, 1, meta);
   expect_eq(meta_plain, phosg::load_file(meta_file));
 
+  // The silence of the static tests (SpireMechanics.hh; docs/review-loop/goals/naad-testregel.md point 2). It was off
+  // when the process started and it is on in this run: only run_static_tests() turned it on.
+  expect(!silence_at_start);
+  expect(spire_mech_tests_silence());
+  write("{}");
+  {
+    HookGuard g1{H::PLAYER_DIED, "echt"}, g2{H::PLAYER_DIED, "vast"}, g3{H::TYPE_WEIGHT, "echt"}, g4{H::RUN_STATE, "echt"};
+    KindGuard k1{TEST_KIND, false}, k2{TEST_KIND, true};
+    {
+      // as a mechanic registers: outside the silence. On three hooks with a switch key that is on (a missing key),
+      // on one without a switch key, a kind, and a route before that kind under a key of its own
+      OutsideSilence outside;
+      spire_mech_register_player_died({"echt", SILENT_HOOK_KEY, 20, t_player_died<'L'>});
+      spire_mech_register_player_died({"vast", "", 10, t_player_died<'E'>});
+      spire_mech_register_type_weight({"echt", SILENT_HOOK_KEY, 20, t_type_weight<'L'>});
+      spire_mech_register_run_state({"echt", SILENT_HOOK_KEY, 99, T_RUN_STATE<'L'>});
+      spire_mech_register_kind({TEST_KIND, TEST_KEY, false, test_parse, test_offer, nullptr, nullptr});
+      spire_mech_register_kind_first({TEST_KIND, SILENT_ROUTE_KEY, false, nullptr, test_first_offer, nullptr, nullptr});
+      // outside the silence a test cannot name a key: no path of the server can lean on it
+      bool refused = false;
+      try {
+        spire_mech_test_only({SILENT_HOOK_KEY});
+      } catch (const std::logic_error&) {
+        refused = true;
+      }
+      expect(refused);
+    }
+    expect(spire_mech_hook_conflicts().empty() && spire_mech_kind_conflicts().empty());
+    auto died = [&]() {
+      hook_calls.clear();
+      spire_mech_player_died(run_c, run_l);
+      return hook_calls;
+    };
+    auto weighed = [&]() {
+      hook_calls.clear();
+      return weight_call();
+    };
+    auto run_state_read = [&]() {
+      auto json = phosg::JSON::dict({{"TestL", 7}});
+      SpireSavestate back;
+      hook_calls.clear();
+      spire_mech_run_state_read(json, back);
+      auto out = phosg::JSON::dict();
+      spire_mech_run_state_write(back, out);
+      return std::format("{} sections={} carried={} out={}", hook_calls, back.sections.count("TestL"),
+          back.carried.count("TestL"), out.contains("TestL") ? out.get_int("TestL") : -1);
+    };
+    auto silence_grid = spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE)); // with the test kind's section
+    auto first_draw = [](uint32_t) -> uint32_t { return 0; };
+    auto route_label = [&]() { // class 2 is the route's own (test_first_offer)
+      return spire_reward_offer(silence_grid, TEST_KIND, 2, nullptr, 3, SpireRewardTier::RARE, first_draw).label;
+    };
+    auto names_have = [](const std::vector<std::string>& names, const char* name) {
+      return std::count(names.begin(), names.end(), std::string(name)) == 1;
+    };
+
+    // (a) the hooks. Outside the silence, as on the server, the registrant with a switch key is reached ...
+    {
+      OutsideSilence outside;
+      expect_eq(std::string("EL"), died());
+      expect_eq(std::string("LLLL 2 4 4"), weighed());
+      expect_eq(std::string("LrLw sections=1 carried=1 out=7"), run_state_read());
+    }
+    // ... in the silence it is not: only the registrant without a switch key is called, H3 makes the plain draw
+    // without asking a candidate, and the key of H10 is carried unread as for a switch that is off
+    expect_eq(std::string("E"), died());
+    expect_eq(std::string(" 2 4 0"), weighed());
+    expect_eq(std::string(" sections=0 carried=1 out=7"), run_state_read());
+    // it stays registered, under its name
+    expect(names_have(spire_mech_hook_names(H::PLAYER_DIED), "echt"));
+    {
+      // a registration a test makes itself, in the silence, is reached, with the same switch key
+      HookGuard g{H::PLAYER_DIED, "test"};
+      spire_mech_register_player_died({"test", SILENT_HOOK_KEY, 15, t_player_died<'O'>});
+      expect_eq(std::string("EO"), died());
+      write(R"({"test.zwijg.haak": false})");
+      expect_eq(std::string("E"), died()); // and under its switch, as outside the silence
+      write("{}");
+    }
+
+    // (b) the route before a kind. Outside the silence it is asked first ...
+    {
+      OutsideSilence outside;
+      expect(spire_mech_kind(TEST_KIND, true) != nullptr);
+      expect_eq(std::string("RARE first"), route_label());
+    }
+    // ... in the silence it is not, and the kind itself is silent for nobody: its own offer
+    expect(!spire_mech_kind(TEST_KIND, true));
+    expect(spire_mech_kind(TEST_KIND) != nullptr);
+    expect_eq(std::string("RARE test"), route_label());
+    expect(names_have(spire_mech_kind_names(), "kind 250 (first route)") && names_have(spire_mech_kind_names(), "kind 250"));
+
+    // the test file that names a key gets the registrations under it, each key for itself, and their switches count
+    spire_mech_test_only({SILENT_HOOK_KEY});
+    expect_eq(std::string("EL"), died());
+    expect_eq(std::string("LLLL 2 4 4"), weighed());
+    expect_eq(std::string("LrLw sections=1 carried=1 out=7"), run_state_read());
+    expect_eq(std::string("RARE test"), route_label()); // the route's key was not named
+    write(R"({"test.zwijg.haak": false})");
+    expect_eq(std::string("E"), died());
+    write("{}");
+    spire_mech_test_only({SILENT_ROUTE_KEY});
+    expect(spire_mech_kind(TEST_KIND, true) != nullptr);
+    expect_eq(std::string("RARE first"), route_label());
+    write(R"({"test.zwijg.route": false})");
+    expect_eq(std::string("RARE test"), route_label());
+    write("{}");
+    // both keys stay named when this test file returns: the file after it tests that they are forgotten
+    // (spire_tests_mechanics_after)
+  }
+  expect(spire_mech_tests_silence());
+
   spire_mech_set_switches_file("");
   std::filesystem::remove_all(dir);
   expect(spire_mech_hook_conflicts().empty());
@@ -1060,6 +1198,35 @@ void spire_tests_mechanics() {
   expect(at_start == seam_snapshot());
 }
 
+// The test file after "mechanics" in the order of the names: what "mechanics" named with spire_mech_test_only is
+// forgotten when it returned, so a mechanic's registration under that key keeps silent again
+void spire_tests_mechanics_after() {
+  expect(spire_mech_tests_silence());
+  const SeamSnapshot at_start = seam_snapshot();
+  {
+    HookGuard g{SpireMechHookId::WAVE_START, "echt"};
+    KindGuard k1{TEST_KIND, false}, k2{TEST_KIND, true};
+    {
+      OutsideSilence outside;
+      spire_mech_register_wave_start({"echt", SILENT_HOOK_KEY, 20, t_wave_start<'L'>});
+      spire_mech_register_kind({TEST_KIND, TEST_KEY, false, nullptr, nullptr, nullptr, nullptr});
+      spire_mech_register_kind_first({TEST_KIND, SILENT_ROUTE_KEY, false, nullptr, test_first_offer, nullptr, nullptr});
+    }
+    auto wave = [&]() {
+      hook_calls.clear();
+      spire_mech_wave_start(nullptr, nullptr, 42, 929, 1, 3);
+      return hook_calls;
+    };
+    expect_eq(std::string(""), wave());
+    expect(!spire_mech_kind(TEST_KIND, true));
+    spire_mech_test_only({SILENT_HOOK_KEY, SILENT_ROUTE_KEY}); // the keys do work for the file that names them
+    expect_eq(std::string("L42.929.1.3"), wave());
+    expect(spire_mech_kind(TEST_KIND, true) != nullptr);
+  }
+  expect(at_start == seam_snapshot());
+}
+
 [[maybe_unused]] const bool registered = spire_mech_register_tests("mechanics", spire_tests_mechanics);
+[[maybe_unused]] const bool registered_after = spire_mech_register_tests("mechanics.after", spire_tests_mechanics_after);
 
 } // namespace

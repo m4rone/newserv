@@ -16,6 +16,7 @@
 #include <format>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -101,8 +102,24 @@ const std::map<std::string, bool>& switches() {
   return st.values;
 }
 
+// The silence of the static tests (SpireMechanics.hh). A plain bool with a constant initialiser: it is false before
+// the static initialiser of any file runs, so every registration made from one is a mechanic's own.
+bool tests_silence = false;
+
+// The switch keys the running test file named with spire_mech_test_only
+std::set<std::string>& test_only_keys() {
+  static std::set<std::string> keys;
+  return keys;
+}
+
+// Whether a registration keeps silent now. by_test: it was made while the silence was on (a test's own).
+bool silenced(const std::string& switch_key, bool by_test) {
+  return tests_silence && !by_test && !switch_key.empty() && !test_only_keys().count(switch_key);
+}
+
 struct KindRegistry {
   std::map<std::pair<uint8_t, bool>, SpireMechKind> by_kind; // (kind number, not the first route): the route sorts first
+  std::set<std::pair<uint8_t, bool>> by_test; // the keys of by_kind registered in the static tests' silence
   std::vector<std::string> conflicts;
 };
 
@@ -117,8 +134,11 @@ std::string conflict_name(SpireRewardKind kind, bool first) {
 
 bool register_kind(const SpireMechKind& reg, bool first) {
   auto& registry = kind_registry();
-  if (!registry.by_kind.emplace(std::make_pair(static_cast<uint8_t>(reg.kind), !first), reg).second) {
+  auto key = std::make_pair(static_cast<uint8_t>(reg.kind), !first);
+  if (!registry.by_kind.emplace(key, reg).second) {
     registry.conflicts.emplace_back(conflict_name(reg.kind, first));
+  } else if (tests_silence) {
+    registry.by_test.emplace(key);
   }
   return true;
 }
@@ -131,7 +151,14 @@ struct HookEntry {
   uint32_t order = 0;
   bool default_off = false;
   std::shared_ptr<const void> fn;
+  bool by_test = false; // registered in the static tests' silence: a test's own
 };
+
+// Whether a registration is called now: its switch is on (an empty key is no switch), and it does not keep silent in
+// the static tests
+bool hook_on(const HookEntry& e) {
+  return e.switch_key.empty() || (!silenced(e.switch_key, e.by_test) && spire_mech_enabled(e.switch_key, e.default_off));
+}
 
 struct HookRegistry {
   std::map<SpireMechHookId, std::vector<HookEntry>> by_hook;
@@ -159,7 +186,7 @@ template <typename FnT>
 bool register_hook(SpireMechHookId hook, const SpireMechHook<FnT>& reg) {
   auto& registry = hook_registry();
   auto& entries = registry.by_hook[hook];
-  HookEntry entry{reg.name, reg.switch_key, reg.order, reg.default_off, std::make_shared<const FnT>(reg.fn)};
+  HookEntry entry{reg.name, reg.switch_key, reg.order, reg.default_off, std::make_shared<const FnT>(reg.fn), tests_silence};
   for (const auto& e : entries) {
     if (e.name == entry.name) {
       registry.conflicts.emplace_back(hook_conflict_name(hook, entry.name));
@@ -184,7 +211,7 @@ void each_hook(SpireMechHookId hook, bool guarded, CallT&& call) {
   }
   const auto entries = it->second; // a copy: a registrant never changes the list under the calls
   for (const auto& e : entries) {
-    if (!e.switch_key.empty() && !spire_mech_enabled(e.switch_key, e.default_off)) {
+    if (!hook_on(e)) {
       continue;
     }
     const FnT& fn = *static_cast<const FnT*>(e.fn.get());
@@ -215,7 +242,7 @@ void hook_file_read(SpireMechHookId hook, const phosg::JSON& json, FileT& ret) {
     const FnsT& fns = *static_cast<const FnsT*>(e.fn.get());
     bool on = true;
     if (!e.switch_key.empty()) {
-      on = spire_mech_enabled(e.switch_key, e.default_off);
+      on = hook_on(e);
       for (const char* key : fns.keys) {
         if (key && json.contains(key)) {
           ret.carried[key] = std::make_shared<const phosg::JSON>(json.at(key));
@@ -240,7 +267,7 @@ void hook_file_write(SpireMechHookId hook, const FileT& file, phosg::JSON& json)
   const auto entries = it->second;
   for (const auto& e : entries) {
     const FnsT& fns = *static_cast<const FnsT*>(e.fn.get());
-    if (e.switch_key.empty() || spire_mech_enabled(e.switch_key, e.default_off)) {
+    if (hook_on(e)) {
       if (fns.write) {
         fns.write(file, json);
       }
@@ -272,7 +299,7 @@ bool hook_in_force(SpireMechHookId hook) {
     return false;
   }
   for (const auto& e : it->second) {
-    if (e.switch_key.empty() || spire_mech_enabled(e.switch_key, e.default_off)) {
+    if (hook_on(e)) {
       return true;
     }
   }
@@ -311,7 +338,14 @@ bool spire_mech_register_kind_first(const SpireMechKind& reg) {
 const SpireMechKind* spire_mech_kind(SpireRewardKind kind, bool first) {
   const auto& registry = kind_registry();
   auto it = registry.by_kind.find(std::make_pair(static_cast<uint8_t>(kind), !first));
-  return (it != registry.by_kind.end()) ? &it->second : nullptr;
+  if (it == registry.by_kind.end()) {
+    return nullptr;
+  }
+  // the static tests' silence: a route before a kind is not asked; the kind itself is silent for nobody
+  if (first && silenced(it->second.switch_key ? it->second.switch_key : "", registry.by_test.count(it->first))) {
+    return nullptr;
+  }
+  return &it->second;
 }
 
 std::vector<const SpireMechKind*> spire_mech_kinds() {
@@ -337,6 +371,7 @@ std::vector<std::string> spire_mech_kind_conflicts() {
 void spire_mech_forget_kind(SpireRewardKind kind, bool first) {
   auto& registry = kind_registry();
   registry.by_kind.erase(std::make_pair(static_cast<uint8_t>(kind), !first));
+  registry.by_test.erase(std::make_pair(static_cast<uint8_t>(kind), !first));
   std::erase(registry.conflicts, conflict_name(kind, first));
 }
 
@@ -366,8 +401,25 @@ void spire_mech_run_tests() {
   }
   for (const auto& [name, fn] : registry.by_name) {
     phosg::log_info_f("-- Spire test file: {}", name);
+    test_only_keys().clear(); // spire_mech_test_only holds for one test file
     fn();
+    test_only_keys().clear();
   }
+}
+
+bool spire_mech_tests_silence() {
+  return tests_silence;
+}
+
+void spire_mech_set_tests_silence(bool on) {
+  tests_silence = on;
+}
+
+void spire_mech_test_only(const std::vector<std::string>& keys) {
+  if (!tests_silence) {
+    throw std::logic_error("spire_mech_test_only outside the static tests");
+  }
+  test_only_keys().insert(keys.begin(), keys.end());
 }
 
 std::vector<std::string> spire_mech_hook_names(SpireMechHookId hook) {

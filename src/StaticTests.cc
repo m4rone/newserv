@@ -38,6 +38,7 @@
 #include "ServerState.hh"
 
 void run_static_tests() {
+  spire_mech_set_tests_silence(true); // SpireMechanics.hh: the mechanics' registrations keep silent for this whole run
   spire_mech_run_tests(); // SpireMechanics.cc: every registered Spire test file, once, in the order of their names
   phosg::log_info_f("-- Quest opcode definitions");
   check_default_quest_opcode_definitions();

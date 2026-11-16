@@ -57,6 +57,33 @@ void spire_mech_set_switches_file(const std::string& path);
 // Tests only: the clock the second between two looks is measured on, in microseconds (nullptr: the server's own)
 void spire_mech_set_switches_clock(uint64_t (*now_usecs)());
 
+// --- The silence of the static tests ---
+//
+// While run-static-tests runs, the mechanics' own registrations keep silent for the tests of the others
+// (docs/review-loop/goals/naad-testregel.md point 2). A mechanic that is on by default would otherwise shift what
+// another owner's test expects: a weight on H3 gives another unit, a route before kind 5 another offer, H2 another
+// room. In the silence the hooks H1-H11 and the routes before a kind reach only:
+//   - a registration without a switch key (the run mag's savestate key on H10);
+//   - a registration made while the silence is on, so one a test makes itself: it works in that test as outside it;
+//   - a registration whose switch key the running test file named with spire_mech_test_only.
+// Every other registration is as one whose switch is off: a hook's registrant is not called and its keys of H10 and
+// H11 are carried unread, a route before a kind is not asked (spire_mech_kind answers nullptr for it). The kinds
+// themselves are silent for nobody: their parse, offer, pick and result go on under their own switch.
+//
+// The silence is off from the start of the process and only run_static_tests() (StaticTests.cc) turns it on: the
+// server never runs in it. A silence that is on in production would switch every mechanic off without a line.
+
+// Whether the silence is on
+bool spire_mech_tests_silence();
+// For the first line of run_static_tests(), and for the test of the silence itself (SpireTestsMechanics.cc, which
+// steps out of it to register as a mechanic does). Nothing else calls this.
+void spire_mech_set_tests_silence(bool on);
+// Tests only: the registrations under these switch keys are reached in the silence, from this call until the calling
+// test file returns (spire_mech_run_tests forgets the keys before and after every test file; a test in StaticTests.cc
+// itself keeps them to the end of the run). Their switches in the switches file count as ever. Throws std::logic_error
+// outside the silence: no path of the server can lean on it.
+void spire_mech_test_only(const std::vector<std::string>& keys);
+
 // --- Reward kinds ---
 //
 // A reward kind (SpireRewardKind, the srv value of a draw entry) lives in a file of its own (src/SpireReward*.cc) and
@@ -102,9 +129,10 @@ bool spire_mech_register_kind(const SpireMechKind& reg);
 // this registration. Two points wait for one, nobody registers there yet: kind 4 (DISK) for the android route before
 // the disk, kind 5 (UNIT) for "power first" before the unit.
 bool spire_mech_register_kind_first(const SpireMechKind& reg);
-// The registration of a kind (first: the route before it), whatever its switch says; nullptr when nobody registered
+// The registration of a kind (first: the route before it), whatever its switch says; nullptr when nobody registered,
+// and for a route before a kind that keeps silent in the static tests (above)
 const SpireMechKind* spire_mech_kind(SpireRewardKind kind, bool first = false);
-// Every registration, by kind number, a kind's first route before the kind itself
+// Every registration, by kind number, a kind's first route before the kind itself; also a route that keeps silent
 std::vector<const SpireMechKind*> spire_mech_kinds();
 // "kind 4" or "kind 4 (first route)" for every registration, in the order of spire_mech_kinds
 std::vector<std::string> spire_mech_kind_names();
@@ -129,7 +157,8 @@ void spire_mech_forget_kind(SpireRewardKind kind, bool first = false);
 // (one per hook), a switch key and a fixed number: the registrations of a hook are called by that number, lower first
 // (the name breaks a tie), never by the order in which the translation units start. A registration whose switch is off
 // is not called (par. 7: off means not registered); an empty switch key is no switch (a fixed gate, par. 7). Without a
-// registration that is called, a hook changes nothing: the core does what it did before the seam.
+// registration that is called, a hook changes nothing: the core does what it did before the seam. In the static tests
+// a mechanic's registration with a switch key is as one whose switch is off (the silence, above).
 //
 // Only in a Spire run: H1, H4-H7 and H9 stand where every game passes (a quest load, the handlers of a hit, a death, a
 // technique and a drop request, every 98). Their call functions reach a registrant only when the client stands in a
