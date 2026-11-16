@@ -8,3 +8,9 @@ Start 2026-11-16, kop 2cfb90c, tak feature/beloningen-b (schoon bij aanvang).
 - [af] gebouwd (exit 0, geen waarschuwingen); run-static-tests groen met de vijf aangemelde testbestanden (attack, defence, force, mags, seam)
 - [af] bewijs: verify.py (scratch) alle controles ok; tellingen 4653 voor en 4653 na (StaticTests 4054 + Attack 35 + Defence 34 + Force 87 + Mags 443), wacht apart 17
 - [af] een verhuisde test bijt: 40u naar 41u in SpireTestsForce.cc:42 gaf exit 1 met "failure at ...SpireTestsForce.cc:42"; teruggezet (cmp gelijk), herbouwd
+- [af] de code van de fase staat in 060e346
+- [af] rapport geschreven: docs/review-loop/naad-N2-rapport.md
+
+## Stand
+
+De fase is af. Beslissingen, twijfelgevallen en wat gezien maar niet gebouwd is staan in het rapport. De volgende fase breidt `src/SpireMechanics.hh` en `.cc` uit (soorttabel, haken, schakelaars); de aanmelding van tests staat daar onder het kopje "Tests" en gebruikt een eigen static binnen `test_registry()`.
