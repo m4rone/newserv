@@ -3,15 +3,14 @@
   "reportDir": "docs/review-loop/reports",
   "scratch": "/tmp/review-loop",
   "verification": [
-    "`mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc) newserv` in de VOORGROND",
-    "`build/newserv run-static-tests`",
-    "`sh tests/spire-follow-city.test.sh build/newserv`",
-    "quest-build: `D=$(mktemp -d) && ln -s /home/m4rck/code/worktrees/newserv/beloningen-b/build/newserv /home/m4rck/code/worktrees/newserv/beloningen-b/src /home/m4rck/code/worktrees/newserv/beloningen-b/system \"$D\"/ && NEWSERV_DIR=\"$D\" bash /home/m4rck/code/worktrees/pso-roguelike/beloningen-b/quests/spire/build.sh` (alle selftest-gates groen, bytes en labels binnen de grens)",
+    "server bouwen en testen op de pc (de laptop draait op de accu; dit ene commando zet de laptopstand in een losse kopie op de pc en bouwt en test hem daar, ruim een minuut): `rsync -a --delete --exclude=/build --exclude=/.git --exclude=/.claude /home/m4rck/code/worktrees/newserv/beloningen-b/ pc:code/newserv-review-b/ && ssh pc 'bash -o pipefail -c \"cd ~/code/newserv-review-b && nice -n 15 make -C build -j8 newserv 2>&1 | tail -5 && nice -n 15 build/newserv run-static-tests 2>&1 | tail -3 && sh tests/spire-follow-city.test.sh build/newserv 2>&1 | tail -3\"'` in de VOORGROND (verwacht: `Built target newserv`, `All static tests passed`, `ok: spire-lives-check`; bij een fout de volledige uitvoer lezen door `| tail` weg te laten)",
+    "quest-build op de laptop, één keer: `D=$(mktemp -d) && ln -s /home/m4rck/code/worktrees/newserv/beloningen-b/build/newserv /home/m4rck/code/worktrees/newserv/beloningen-b/src /home/m4rck/code/worktrees/newserv/beloningen-b/system \"$D\"/ && NEWSERV_DIR=\"$D\" bash /home/m4rck/code/worktrees/pso-roguelike/beloningen-b/quests/spire/build.sh` (alle selftest-gates groen, bytes en labels binnen de grens). De binary `build/newserv` op de laptop is die van 3c6f250 en blijft dat: de questbouw gebruikt hem alleen als assembler en uitpakker, en die code raakt deze wijziging niet",
     "grid: `cd /home/m4rck/code/worktrees/pso-roguelike/beloningen-b && NEWSERV_DIR=/home/m4rck/code/worktrees/newserv/beloningen-b python3 quests/spire/make_spire_rewards.py --check` (meldt dat het grid klopt met system/spire-rewards.json)"
   ],
   "rules": [
     "De wijziging beslaat twee repos: newserv in /home/m4rck/code/worktrees/newserv/beloningen-b en de quest-repo in /home/m4rck/code/worktrees/pso-roguelike/beloningen-b, beide op tak feature/beloningen-b. Werk uitsluitend daar, met absolute paden of cd in elk commando. Een fix in de quest-repo krijgt een eigen fix(review)-commit in die repo.",
-    "Niets op de pc of in het lab uitrollen of herstarten; de draaiende newserv op de laptop niet aanraken. Geen ssh pc.",
+    "De laptop draait op de accu: bouw newserv niet op de laptop (geen cmake of make daar) en draai er geen servertests; dat loopt via het pc-commando uit de verificatielijst. Houd het laptopwerk licht: lezen, en aan het eind één questbouw.",
+    "ssh pc alleen voor dat ene bouw-en-testcommando, en alleen in ~/code/newserv-review-b. De dienst newserv op de pc, zijn boom ~/pso-tools/newserv en elk ander pad op de pc blijven onaangeroerd. Niets op de pc of in het lab uitrollen of herstarten; de draaiende newserv op de laptop niet aanraken.",
     "Nooit een geheugenkaart lezen, kopiëren of wijzigen.",
     "Processen nooit op naam stoppen.",
     "Niet pushen.",
