@@ -8338,6 +8338,11 @@ void run_static_tests() {
     b8_case("'C' 10 the exam reward, to the writer's archetype", [&]() {
       // rare entry 2 + 1 = 3, extra 0 + 1 = 1, n = 1
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon, Photon Drop x2."), spire_bridge_message_text(0x43030A21, with_names));
+      // B-E02-16: 'C' 19, the follower's reward decided for him at the leader's warp
+      expect_eq(std::string("You did not choose: Lavis Cannon was taken for you."), spire_bridge_message_text(0x43031300, with_names));
+      expect_eq(std::string("You did not choose: you got the Skip bonus."), spire_bridge_message_text(0x43001300, with_names));
+      expect_eq(std::string("You did not choose: a reward was taken for you."), spire_bridge_message_text(0x43031300)); // no table
+      expect_eq(std::string("You did not choose: a reward was taken for you."), spire_bridge_message_text(0x437F1300, with_names));
       // full: with the extra it would be 92 characters, so the extra goes and the rare with its note stays
       expect_eq(std::string("Exam reward: 600 meseta, Lavis Cannon. Inventory full: make room, it waits."),
           spire_bridge_message_text(0x43830A21, with_names));
@@ -10912,6 +10917,18 @@ void run_static_tests() {
         spire_static_test_run_boss(p.c, r.l, rewards_e2e.trede2_room);
         expect_eq(2u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
       }
+      // B-E02-16 (review volger-beloning r1 B5): the follower's auto take ('C' 19) reaches the writer as one line that
+      // names the entry the quest gave, read from this quest's draw table with the writer's archetype (bits 16-22 =
+      // entry index + 1), or the Skip bonus (0). The direct tests of spire_bridge_message_text pass a context by hand;
+      // this one goes through spire_bridge_handle_register, so a 'C' 19 left out of the context gets the generic line.
+      sent_from = seen.sent.size();
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43021300), "the auto take's 'C' 19");
+      drive_clock(w, p, seen, [&]() { return line_sent(sent_from, "You did not choose: Entry 2 was taken for you."); },
+          "the auto take's line with the entry's name");
+      sent_from = seen.sent.size();
+      must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, 0x43001300), "the Skip bonus 'C' 19");
+      drive_clock(w, p, seen, [&]() { return line_sent(sent_from, "You did not choose: you got the Skip bonus."); },
+          "the auto take's Skip bonus line");
       spire_static_test_forget(p.c, r.l);
       p.c->lobby.reset();
       r.l->clients.fill(nullptr);

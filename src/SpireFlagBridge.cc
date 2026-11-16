@@ -2824,6 +2824,16 @@ std::string spire_bridge_message_text(uint32_t value, const SpireBridgeTextConte
           return name.empty() ? std::string("Your waiting exam reward is now in your pack.")
                               : std::format("{} is now in your pack.", name);
         }
+        case 19: { // B-E02-16: the follower's open reward was decided for him when the leader took a warp (rewards.py
+          // auto_take); bits 16-22 the entry index + 1 of the writer's archetype that was given, 0 = the Skip bonus
+          uint32_t entry = (value >> 16) & 0x7F;
+          if (entry == 0) {
+            return "You did not choose: you got the Skip bonus.";
+          }
+          const std::string& name = spire_text_archetype_entry_name(ctx, entry);
+          return spire_text_first_fitting({name.empty() ? "" : std::format("You did not choose: {} was taken for you.", name),
+              "You did not choose: a reward was taken for you."});
+        }
         case 17: // ux-1 (observaties 172): the pipe guard put this player back (make_spire.py guard_say); the low byte
           // 1 = the room still runs, 2 = a reward is still to take (pause A/B). The quest showed these as board texts.
           return (b == 2) ? "The warps open once both of you took a reward." : "Clear the room first.";
@@ -4924,11 +4934,11 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
   uint32_t text_point = (value >> 8) & 0xFF;
   if ((text_kind == SPIRE_BRIDGE_MSG_APPROACH) ||
       ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 6) || (text_point == 10) || (text_point == 12) ||
-                                                     (text_point == 15)))) {
+                                                     (text_point == 15) || (text_point == 19)))) {
     text_table = spire_draw_table_for_text(c, quest_number);
     text_ctx.draw = text_table ? &*text_table : nullptr;
   }
-  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12))) {
+  if ((text_kind == SPIRE_BRIDGE_MSG_PROMPT) && ((text_point == 10) || (text_point == 12) || (text_point == 19))) {
     auto character = c->character_file(false, false);
     text_ctx.archetype = character ? spire_draw_archetype_for_class(character->disp.visual.sh.char_class) : -1;
   }
