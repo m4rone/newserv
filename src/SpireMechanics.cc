@@ -344,6 +344,7 @@ bool spire_mech_register_reward_room(const SpireMechHook<SpireMechRewardRoomFn>&
 }
 
 void spire_mech_reward_room(const SpireMechRewardRoom& at, uint32_t& room_index, uint32_t& trede) {
+  const uint32_t room_index_in = room_index, trede_in = trede;
   each_hook<SpireMechRewardRoomFn>(HookId::REWARD_ROOM, true, [&](SpireMechRewardRoomFn fn) {
     uint32_t room_index_before = room_index, trede_before = trede;
     try {
@@ -354,6 +355,25 @@ void spire_mech_reward_room(const SpireMechRewardRoom& at, uint32_t& room_index,
       throw;
     }
   });
+  // What the registrants gave back stays inside the grid; what none of them changed is the core's own and stays
+  if (room_index != room_index_in) {
+    uint32_t last = std::max<uint32_t>(at.table.room_w.empty() ? 0 : at.table.room_w.rbegin()->first,
+        at.table.disk_levels.empty() ? 0 : at.table.disk_levels.rbegin()->first);
+    uint32_t bounded = std::max<uint32_t>(last ? std::min(room_index, last) : room_index, 1);
+    if (bounded != room_index) {
+      phosg::log_warning_f("Spire hook H2 reward_room: room index {} for serial {:010} is outside the grid (1-{}); brought back to {}",
+          room_index, at.serial_number, last, bounded);
+      room_index = bounded;
+    }
+  }
+  if (trede != trede_in) {
+    uint32_t top = spire_reward_trede(at.table, {at.table.trede1_room, at.table.trede2_room}, {});
+    if (trede > top) {
+      phosg::log_warning_f("Spire hook H2 reward_room: rung {} for serial {:010} is outside the grid (0-{}); brought back to {}",
+          trede, at.serial_number, top, top);
+      trede = top;
+    }
+  }
 }
 
 // H3

@@ -116,10 +116,17 @@ std::shared_ptr<const std::string> t_quest_bin_null(std::shared_ptr<Client>, std
   return nullptr;
 }
 template <char TAG>
-void t_reward_room(const SpireMechRewardRoom& at, uint32_t& room_index, uint32_t& trede) {
+void t_reward_room(const SpireMechRewardRoom&, uint32_t& room_index, uint32_t& trede) {
   hook_calls += TAG;
-  room_index = (room_index * 100) + TAG;
-  trede += at.k;
+  hook_calls += std::to_string(room_index); // what the one before it left
+  room_index += 2;
+  trede = (TAG == 'L') ? 2 : 1;
+}
+uint32_t reward_room_far_room = 0, reward_room_far_trede = 0; // what t_reward_room_far gives back
+void t_reward_room_far(const SpireMechRewardRoom&, uint32_t& room_index, uint32_t& trede) {
+  hook_calls += 'f';
+  room_index = reward_room_far_room;
+  trede = reward_room_far_trede;
 }
 void t_reward_room_throws(const SpireMechRewardRoom&, uint32_t& room_index, uint32_t& trede) {
   hook_calls += 't';
@@ -321,22 +328,47 @@ void spire_tests_hooks() {
 
   // H2 reward_room: without a registrant the room index and the rung stay the quest's; a registrant that fails leaves
   // them as they were before it
+  auto grid = spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE));
   SpireDrawEntry entry;
-  auto room_call = [&]() {
-    uint32_t room_index = 3, trede = 1;
-    spire_mech_reward_room({no_c, no_l, 7, entry, 5, false}, room_index, trede);
+  auto room_call_from = [&](uint32_t room_index, uint32_t trede) {
+    spire_mech_reward_room({no_c, no_l, 7, grid, entry, 5, false}, room_index, trede);
     return std::format("{} {} {}", hook_calls, room_index, trede);
   };
+  auto room_call = [&]() { return room_call_from(3, 0); };
   expect_hook<SpireMechRewardRoomFn>(
       H::REWARD_ROOM, spire_mech_register_reward_room, t_reward_room<'L'>, t_reward_room<'E'>, t_reward_room<'O'>,
-      room_call, write, " 3 1", std::format("EL {} 11", ((3 * 100 + 'E') * 100) + 'L'),
-      std::format("EOL {} 16", ((((3 * 100 + 'E') * 100) + 'O') * 100) + 'L'), std::format("E {} 6", 3 * 100 + 'E'));
+      room_call, write, " 3 0", "E3L5 7 2", "E3O5L7 9 2", "E3 5 1");
   {
     HookGuard g1{H::REWARD_ROOM, "stuk"}, g2{H::REWARD_ROOM, "na"};
     spire_mech_register_reward_room({"stuk", "", 1, t_reward_room_throws});
     spire_mech_register_reward_room({"na", "", 2, t_reward_room<'E'>});
     hook_calls.clear();
-    expect_eq(std::format("tE {} 6", 3 * 100 + 'E'), room_call());
+    expect_eq(std::string("tE3 5 1"), room_call());
+  }
+  // H2's bounds: what a registrant gives back is brought to the nearest room index and rung of the grid; what no
+  // registrant changed stays the core's own, also a room index past the grid
+  uint32_t last_room = std::max<uint32_t>(grid.room_w.rbegin()->first, grid.disk_levels.rbegin()->first);
+  uint32_t top_trede = spire_reward_trede(grid, {grid.trede1_room, grid.trede2_room}, {});
+  expect((last_room >= 4) && (top_trede >= 1));
+  hook_calls.clear();
+  expect_eq(std::format(" {} {}", last_room + 10, top_trede + 5), room_call_from(last_room + 10, top_trede + 5));
+  {
+    HookGuard g{H::REWARD_ROOM, "ver"};
+    spire_mech_register_reward_room({"ver", "", 1, t_reward_room_far});
+    auto far = [&](uint32_t room, uint32_t trede, uint32_t room_in, uint32_t trede_in) {
+      reward_room_far_room = room;
+      reward_room_far_trede = trede;
+      hook_calls.clear();
+      return room_call_from(room_in, trede_in);
+    };
+    expect_eq(std::format("f {} {}", last_room, top_trede), far(last_room + 10, top_trede + 5, 3, 0)); // too far: the last
+    expect_eq(std::format("f {} {}", last_room, top_trede), far(0xFFFFFFFF, 0xFFFFFFFF, 3, 0));
+    expect_eq(std::string("f 1 0"), far(0, 0, 3, 1)); // no room 0: the first room
+    expect_eq(std::format("f {} {}", last_room, top_trede), far(last_room, top_trede, 3, 0)); // the edge itself stays
+    expect_eq(std::string("f 4 1"), far(4, 1, 3, 0)); // inside the grid: as given
+    // a value the registrant left as it came is the core's own, and stays
+    expect_eq(std::format("f {} {}", last_room + 10, top_trede + 5), far(last_room + 10, top_trede + 5, last_room + 10, top_trede + 5));
+    expect_eq(std::format("f {} {}", last_room + 10, top_trede), far(last_room + 10, top_trede + 6, last_room + 10, top_trede + 5));
   }
 
   // H3 type_weight, the hook alone: without a registrant one draw rnd(n) and no candidate is asked; with registrants

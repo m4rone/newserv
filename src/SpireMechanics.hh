@@ -192,11 +192,15 @@ std::shared_ptr<const std::string> spire_mech_quest_bin(std::shared_ptr<Client> 
 
 // H2 reward_room: at every offer (SpireFlagBridge.cc spire_reward_make_offer), the room index and the rung (trede) the
 // offer reckons with. They come in as the quest's room k gives them (spire_reward_room_index) and the client's ladder
-// (spire_reward_trede_for); a registrant changes them in place.
+// (spire_reward_trede_for); a registrant changes them in place. What the registrants gave back stays inside the grid:
+// a room index they changed is brought back to the nearest of the rooms the grid knows (1 to the last room of its
+// RoomW or its disks), a rung they changed to the nearest of the grid's rungs (0 to the rung with every boss of
+// TredeRooms beaten), with one line in the journal. Values no registrant changed stay the core's own.
 struct SpireMechRewardRoom {
   std::shared_ptr<Client> c;
   std::shared_ptr<const Lobby> l;
   uint32_t serial_number;
+  const SpireRewardTable& table; // the grid
   const SpireDrawEntry& entry; // the drawn entry
   uint32_t k; // the quest's room
   bool elite;

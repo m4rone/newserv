@@ -4360,7 +4360,7 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
   }
   uint32_t trede = spire_reward_trede_for(c, l, serial_number, table);
   uint32_t room_index = spire_reward_room_index(k);
-  spire_mech_reward_room({c, l, serial_number, entry, k, elite}, room_index, trede); // the seam's H2
+  spire_mech_reward_room({c, l, serial_number, table, entry, k, elite}, room_index, trede); // the seam's H2
   uint8_t rung = l->quest ? spire_meta_ladder_quest_rung(l->quest->meta.quest_number) : 0; // the quest's difficulty
   auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
