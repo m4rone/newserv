@@ -95,7 +95,7 @@ struct SpireRewardLine {
 struct SpireRewardClass {
   std::string name;
   std::string archetype;
-  std::vector<std::string> line_order;
+  std::vector<std::string> line_order; // sorted, Saber first: front() is the line without a known weapon held
   std::map<std::string, SpireRewardLine> lines;
 };
 struct SpireRewardTable {

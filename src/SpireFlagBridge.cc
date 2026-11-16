@@ -4350,6 +4350,10 @@ uint32_t spire_static_test_reward_trede(std::shared_ptr<Client> c, std::shared_p
   return spire_reward_trede_for(c, l, serial_number, table);
 }
 
+void spire_static_test_run_boss(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t k) {
+  spire_run_rooms_for(c, l->lobby_id).boss_rooms.emplace(k);
+}
+
 // One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4
 static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
     uint32_t serial_number, const SpireRewardTable& table, SpireRewardKind kind, uint32_t k, bool elite,

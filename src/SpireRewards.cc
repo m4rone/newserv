@@ -222,6 +222,12 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
       cls.line_order.emplace_back(ln);
       cls.lines.emplace(ln, std::move(line));
     }
+    // review r4: phosg's JSON dict is unordered, so the file's order of the lines is lost here; sorted, with Saber (the
+    // line every class carries, design par. 1) first, the class's fallback line is Saber and never the hash's pick
+    // (it was Mechgun for the hunters, Shot for the rangers, Wand for the forces)
+    std::sort(cls.line_order.begin(), cls.line_order.end(), [](const std::string& a, const std::string& b) {
+      return ((a == "Saber") != (b == "Saber")) ? (a == "Saber") : (a < b);
+    });
     ret.classes.emplace(index, std::move(cls));
   }
   return ret;

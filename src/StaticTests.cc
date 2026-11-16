@@ -7831,6 +7831,11 @@ void run_static_tests() {
             }
             auto offer = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, held, room, tier,
                 [](uint32_t) -> uint32_t { return 0; });
+            // review r4: the reward held keeps the line, up to a Legendary (Marck: "krijg je gewoon van die lijn. tot
+            // aan legendaries"): the next Wapen is of the same line, also for a rare with a group of its own (Musashi 89)
+            expect_eq(line_name, spire_reward_line_of(rewards, cls, offer.item.data()));
+            expect_eq(line_name, spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, offer.item.data(), room,
+                SpireRewardTier::NORMAL, [](uint32_t) -> uint32_t { return 0; }).line);
             auto need = spire_reward_mag_need(offer.info, wl.run_atp, wl.run_ata, wl.run_mst, SpireAtaModel::SAFE);
             if ((need.pow != cell.grid_mag[0]) || (need.dex != cell.grid_mag[1]) || (need.mind != cell.grid_mag[2])) {
               need_mismatches++;
@@ -7892,10 +7897,37 @@ void run_static_tests() {
     }
     expect_eq(5u, rewards.mag_food[0]);
     expect_eq(30u, rewards.mag_food[3]);
-    // the class's first line without a known weapon
-    auto bare = spire_reward_offer(rewards, SpireRewardKind::WEAPON, 0, nullptr, 1, SpireRewardTier::NORMAL,
-        [](uint32_t) -> uint32_t { return 0; });
-    expect_eq(rewards.classes.at(0).line_order.front(), bare.line);
+    // review r4: without a weapon of a known line (none held, or one outside the grid) every class gets the Saber line,
+    // the one every class carries (design par. 1), never the line a hash order put first
+    for (const auto& [char_class, cls] : rewards.classes) {
+      expect_eq(std::string("Saber"), cls.line_order.front());
+      const uint8_t unknown[12] = {0x00, 0xEE, 0x00};
+      for (const uint8_t* held : {static_cast<const uint8_t*>(nullptr), unknown}) {
+        auto bare = spire_reward_offer(rewards, SpireRewardKind::WEAPON, char_class, held, 1, SpireRewardTier::NORMAL,
+            [](uint32_t) -> uint32_t { return 0; });
+        expect_eq(std::string("Saber"), bare.line);
+        expect_eq(std::string("Saber"), bare.from_line);
+      }
+    }
+    // review r4: mag food goes on the stat of the lean (design par. 3): MIND for a force, POW for a hunter or a ranger,
+    // through the 'Z' ledger step as the bridge calls it with the class's archetype
+    for (const char* arch : {"HU", "RA", "FO"}) {
+      const auto& line = mags.classes.at(arch);
+      SpireRunMagLedger led;
+      led.run_id = 0x52;
+      led.issued_step = 0;
+      led.start_step = 0;
+      led.last_mirrored = spire_mag_step_bytes(line, 0, 0, std::nullopt);
+      led.feed_levels = 10;
+      led.boost_due = true;
+      auto h = spire_run_mag_handle(led, mags, line, SPIRE_RUN_MAG_ASK, 1, {*led.last_mirrored}, {}, 0, 0, arch);
+      expect(h.decision.result);
+      size_t main = (std::string(arch) == "FO") ? 3 : 1;
+      for (size_t z = 0; z < 4; z++) {
+        expect_eq(spire_mag_stat_word(*led.last_mirrored, z) + ((z == main) ? 1000 : 0),
+            spire_mag_stat_word(h.decision.bytes, z));
+      }
+    }
 
     // KV par. 4: no Legendary before trede 2 (De Rol Le, across runs or in this run), Rare and Epic as the room grows
     expect_eq(0u, spire_reward_trede(rewards, {}, {}));
@@ -10759,6 +10791,104 @@ void run_static_tests() {
       must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER, z_word(SPIRE_RUN_MAG_RESULT, 1)), "the fed mag's RESULT");
       // settled: the next ASK without a new step answers nothing
       expect_eq(0u, quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_ASK, 1), "an ASK with nothing owed") & 1);
+
+      // review r4: a 'Q' in room k (the reward line in *line_text) and its first drawn weapon entry (ids 1-3)
+      auto draw_at = [&](uint32_t k, std::string* line_text) -> std::pair<uint8_t, uint8_t> {
+        size_t from_q = seen.registers.size();
+        size_t sent_q = seen.sent.size();
+        for (size_t z = 0; z < SPIRE_DRAW_NUM_INPUTS; z++) {
+          must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == 2) ? k : 0), "a draw input");
+        }
+        must(spire_bridge_handle_register(p.c, r.l, SPIRE_BRIDGE_REQUEST_REGISTER,
+                 (static_cast<uint32_t>(SPIRE_BRIDGE_DRAW_REQUEST) << 24) | SPIRE_DRAW_NUM_INPUTS),
+            "the 'Q'");
+        drive_clock(w, p, seen, [&]() {
+          return std::find(seen.registers.begin() + from_q, seen.registers.end(), done_write) != seen.registers.end(); }, "the draw");
+        std::optional<uint32_t> d;
+        for (size_t z = from_q; z < seen.registers.size(); z++) {
+          if (seen.registers[z].first == SPIRE_BRIDGE_DRAW_RESULT_REGISTER) {
+            d = seen.registers[z].second;
+          }
+        }
+        expect(d.has_value());
+        line_text->clear();
+        for (size_t z = sent_q; z < seen.sent.size(); z++) {
+          size_t at = seen.sent[z].find("Rewards: ");
+          if (at != std::string::npos) {
+            *line_text = seen.sent[z].substr(at);
+          }
+        }
+        expect(!line_text->empty());
+        for (uint32_t s : {3u, 4u, 5u, 2u}) {
+          uint32_t id = (*d >> ((s - 2) * 6)) & 0x3F;
+          if ((id >= 1) && (id <= 3)) {
+            return std::make_pair(static_cast<uint8_t>(s), static_cast<uint8_t>(id));
+          }
+        }
+        throw std::runtime_error("no weapon entry drawn");
+      };
+      // the grid's Wapen offer of line ln in room k whose item is `bytes` (any tier, any special), or nullopt
+      auto grid_offer_of = [&](const std::string& ln, uint32_t k, const SpireMagBytes& bytes) -> std::optional<SpireRewardOffer> {
+        const auto& gl = cls.lines.at(ln);
+        const uint8_t kit[12] = {static_cast<uint8_t>(gl.kit >> 16), static_cast<uint8_t>(gl.kit >> 8), static_cast<uint8_t>(gl.kit)};
+        const auto& lw = gl.w.at(spire_reward_w(rewards_e2e, spire_reward_room_index(k)));
+        for (size_t t = 0; t < 4; t++) {
+          for (size_t sp = 0; sp < std::max<size_t>(lw.tiers[t].specials.size(), 1); sp++) {
+            auto o = spire_reward_offer(rewards_e2e, SpireRewardKind::WEAPON, 1, kit, spire_reward_room_index(k),
+                static_cast<SpireRewardTier>(t), [sp](uint32_t n) -> uint32_t { return n ? (sp % n) : 0; });
+            if (o.item == bytes) {
+              return o;
+            }
+          }
+        }
+        return std::nullopt;
+      };
+      // review r4: the pick answers the very offer the reward line named, at the W of the 'Q''s room: in room 11 (W6)
+      // a W6 weapon of the held line, whose tier and name were on the line
+      std::string line_text;
+      auto [w6_slot, w6_id] = draw_at(11, &line_text);
+      from = seen.registers.size();
+      uint32_t w6_answer = quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (w6_slot << 8) | w6_id), "the W6 pick");
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, w6_answer & ~SPIRE_REWARD_MAG_FOLLOWS);
+      auto w6_offer = grid_offer_of(line_name, 11, item_answer(from));
+      expect(w6_offer.has_value());
+      expect(line_text.find(w6_offer->label) != std::string::npos);
+      // review r4: the line follows the weapon taken up (a Handgun now), and the pick's rule B need follows the AtaModel
+      // key (design par. 3, one key): at ATA = the weapon's requirement "table" owes no mag, "screen_bare" owes DEX
+      auto& held_weapon = overlay->inventory.items[0];
+      held_weapon.data.data1[1] = 0x06;
+      held_weapon.data.data1[2] = 0x00;
+      expect(held_weapon.is_equipped());
+      auto [hg_slot, hg_id] = draw_at(1, &line_text);
+      stats.atp = 999;
+      stats.ata = 999;
+      stats.mst = 999;
+      const uint32_t hg_pick = z_word(SPIRE_RUN_MAG_REWARD, (hg_slot << 8) | hg_id);
+      from = seen.registers.size();
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, quest_asks(w, r, seen, hg_pick, "the Handgun pick"));
+      const SpireMagBytes hg = item_answer(from);
+      auto hg_offer = grid_offer_of("Handgun", 1, hg);
+      expect(hg_offer.has_value());
+      expect(line_text.find(hg_offer->label) != std::string::npos);
+      expect(hg_offer->info.ata >= 67); // 9 x requirement > 600: the bare screen model asks DEX at ATA = requirement
+      stats.ata = hg_offer->info.ata;
+      const std::string safe_key = "\"AtaModel\":\"safe\"";
+      size_t key_at = rewards_json_e2e.find(safe_key);
+      expect(key_at != std::string::npos);
+      uint32_t round = 0;
+      auto grid_with = [&](const char* model) {
+        std::string json = rewards_json_e2e;
+        json.replace(key_at, safe_key.size(), std::format("\"AtaModel\":\"{}\"", model));
+        phosg::save_file(SPIRE_REWARDS_FILE, json);
+        std::filesystem::last_write_time(SPIRE_REWARDS_FILE,
+            std::filesystem::file_time_type::clock::now() + std::chrono::seconds(++round));
+      };
+      grid_with("table");
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM, quest_asks(w, r, seen, hg_pick, "the Handgun pick, table"));
+      grid_with("screen_bare");
+      expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM | SPIRE_REWARD_MAG_FOLLOWS,
+          quest_asks(w, r, seen, hg_pick, "the Handgun pick, screen_bare"));
+      grid_with("safe");
       // the offers' trede (KV par. 5) reads the character's BossesBeaten across runs from its meta file: none 0, the
       // Dragon 1, De Rol Le 2, so Legendary opens after the first De Rol Le of any run (this run beat no boss)
       {
@@ -10771,6 +10901,15 @@ void run_static_tests() {
         expect_eq(1u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
         meta.bosses_beaten.emplace(rewards_e2e.trede2_room);
         spire_meta_save_file(meta_name, SERIAL, meta);
+        expect_eq(2u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
+        // review r4: De Rol Le beaten in this run opens Legendary in this run too, with no BossesBeaten in the meta file
+        // (a practice run records none)
+        meta.bosses_beaten.clear();
+        spire_meta_save_file(meta_name, SERIAL, meta);
+        expect_eq(0u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
+        spire_static_test_run_boss(p.c, r.l, rewards_e2e.trede1_room);
+        expect_eq(1u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
+        spire_static_test_run_boss(p.c, r.l, rewards_e2e.trede2_room);
         expect_eq(2u, spire_static_test_reward_trede(p.c, r.l, SERIAL, rewards_e2e));
       }
       spire_static_test_forget(p.c, r.l);

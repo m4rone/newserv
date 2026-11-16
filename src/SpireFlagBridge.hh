@@ -1314,6 +1314,9 @@ void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const L
 struct SpireRewardTable;
 uint32_t spire_static_test_reward_trede(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
     const SpireRewardTable& table);
+// For StaticTests only (review r4): a boss room this run beat, as a 'V' of the room after it records it, without the
+// meta file (a practice run records no BossesBeaten, so this run's set is the only one that has it)
+void spire_static_test_run_boss(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint8_t k);
 // For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
 void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped
