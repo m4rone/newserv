@@ -6795,7 +6795,7 @@ void run_static_tests() {
     // review r3 B1: the key is read, not assumed. In a temp directory the shipped grid with each AtaModel value (and
     // without the key, and without the file) gives that model to the grid parse and to spire_ata_model_configured
     {
-      const std::string grid_json = phosg::load_file(SPIRE_REWARDS_FILE);
+      const std::string grid_json = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE)); // SpireTestSupport.hh
       const std::string safe_key = "\"AtaModel\":\"safe\"";
       size_t key_at = grid_json.find(safe_key);
       expect(key_at != std::string::npos);
@@ -6870,7 +6870,7 @@ void run_static_tests() {
       expect_eq(saber.at(5).tiers[0].code, (on_ultimate.item[0] << 16) | (on_ultimate.item[1] << 8) | on_ultimate.item[2]);
       expect(saber.at(5).tiers[0].code != saber.at(2).tiers[0].code);
       // a grid file without the rungs' steps, or with a rung missing, is refused at load
-      const std::string grid_text = phosg::load_file(SPIRE_REWARDS_FILE);
+      const std::string grid_text = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE));
       const std::string steps_key = "\"RungWeaponSteps\":[0,1,2,3]";
       size_t steps_at = grid_text.find(steps_key);
       expect(steps_at != std::string::npos);
@@ -6881,7 +6881,7 @@ void run_static_tests() {
 
     {
       // review r1: a Units item that is not a unit (here a Saber, 000100) is refused at load, never offered as one
-      std::string grid_text = phosg::load_file(SPIRE_REWARDS_FILE);
+      std::string grid_text = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE));
       size_t units_at = grid_text.find("\"Units\"");
       size_t items_at = (units_at == std::string::npos) ? units_at : grid_text.find("\"Items\"", units_at);
       size_t brace_at = (items_at == std::string::npos) ? items_at : grid_text.find('{', items_at);
@@ -8739,7 +8739,7 @@ void run_static_tests() {
         phosg::JSON::parse(phosg::load_file("system/tables/level-table-v3.json")));
     auto functions = std::make_shared<ClientFunctionIndex>("system/client-functions", true);
     auto pmt_v3 = ItemParameterTable::from_json(phosg::JSON::parse(phosg::load_file("system/tables/item-parameter-table-gc-v3.json")));
-    const std::string rewards_json_e2e = phosg::load_file(SPIRE_REWARDS_FILE); // fase 1 part A
+    const std::string rewards_json_e2e = spire_test_compact_json(phosg::load_file(SPIRE_REWARDS_FILE)); // fase 1 part A
     const std::string mags_json_e2e = phosg::load_file(SPIRE_RUN_MAG_FILE);
     auto rewards_e2e = spire_rewards_parse(rewards_json_e2e);
     auto mags_e2e = spire_mag_parse(mags_json_e2e);
@@ -15309,7 +15309,7 @@ void run_static_tests() {
         }
       }
       expect(ranged.has_value());
-      std::string grid_json = phosg::load_file(std::string(temp_cwd.old_cwd / SPIRE_REWARDS_FILE));
+      std::string grid_json = spire_test_compact_json(phosg::load_file(std::string(temp_cwd.old_cwd / SPIRE_REWARDS_FILE)));
       const std::string safe_key = "\"AtaModel\":\"safe\"";
       size_t key_at = grid_json.find(safe_key);
       expect(key_at != std::string::npos);
