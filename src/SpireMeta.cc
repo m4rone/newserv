@@ -878,12 +878,16 @@ bool spire_meta_record_boss(
 }
 
 SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename) {
-  *filename = spire_meta_filename(c, serial_number);
-  if (filename->empty()) {
+  // review r3: the reward offer's trede passes nullptr (it needs no name); writing through it crashed the server at
+  // the first draw with a server reward entry
+  std::string own_filename;
+  std::string& name = filename ? *filename : own_filename;
+  name = spire_meta_filename(c, serial_number);
+  if (name.empty()) {
     return SpireMetaFile();
   }
   bool adopted;
-  return spire_meta_load_or_adopt(c, *filename, serial_number, &adopted);
+  return spire_meta_load_or_adopt(c, name, serial_number, &adopted);
 }
 
 void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file) {

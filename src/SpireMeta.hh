@@ -332,7 +332,7 @@ bool spire_meta_kit2_owned(const SpireMetaFile& file, uint8_t char_class);
 // the rung. Returns the price to debit.
 uint32_t spire_shop_apply_buy(const SpireShopCatalogue& cat, size_t index, SpireMetaFile& file);
 // The character's meta file for the shop: loaded, or adopted (and written) if it has none; *filename gets its name
-// ("" without character data: then nothing is loaded). Throws on a file error.
+// ("" without character data: then nothing is loaded); filename may be nullptr. Throws on a file error.
 SpireMetaFile spire_meta_load_for_client(std::shared_ptr<Client> c, uint32_t serial_number, std::string* filename);
 void spire_meta_save_file(const std::string& filename, uint32_t serial_number, const SpireMetaFile& file);
 std::vector<uint16_t> spire_meta_flags_for_finish(const SpireMetaFinish& f, uint8_t char_class, bool new_best_time);

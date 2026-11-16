@@ -1310,6 +1310,10 @@ SpireBridgeTextContext spire_bridge_text_context_for(std::shared_ptr<Client> c, 
 void spire_static_test_run_state(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, bool began, bool mag_issued);
 uint32_t spire_static_test_v_room(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
 void spire_static_test_forget(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l);
+// For StaticTests only (review r3): the trede this client's reward offers get (its BossesBeaten and this run's bosses)
+struct SpireRewardTable;
+uint32_t spire_static_test_reward_trede(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    const SpireRewardTable& table);
 // For StaticTests only: the run quest base game l came from, as spire_base_game_join records it when it makes the game
 void spire_static_test_base_run_quest(std::shared_ptr<const Lobby> l, uint32_t quest_number);
 // kwaliteit-2 275 / r2: the line of an item newserv asked the game to equip and that is still not equipped

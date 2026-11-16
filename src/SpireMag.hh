@@ -158,7 +158,7 @@ struct SpireRunMagLedger {
   std::optional<SpireMagBytes> offered; // the mag of the last answer with result 1, until its RESULT
   bool offered_shell = false; // F10: the offered mag came from the Shell column (the evolve text says so; in memory only)
   uint8_t lean = 0; // 0 none (default Fang/Mind), 1 Fang/Mind, 2 Shell
-  // Fase 1 part A, rule B (persisted "Need", "BoostDue", "Feed"): what the reward weapon taken last asks; whether a
+  // Fase 1 part A, rule B (persisted "Need", "BoostDue", "FeedLevels"): what the reward weapon taken last asks; whether a
   // reward weapon or mag food changed what the mag should be (the next ASK answers it, also without a new step); the
   // mag food levels owed on the main stat. A RESULT 1 settles both, a RESULT 0 leaves them owed.
   SpireMagNeed need;

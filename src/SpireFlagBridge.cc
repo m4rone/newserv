@@ -983,13 +983,14 @@ SpireSavestate spire_savestate_from_json(const std::string& data) {
     if (led_json.contains("Need")) {
       const auto& need = led_json.get_list("Need");
       if (need.size() == 3) {
-        led.need = SpireMagNeed{static_cast<uint16_t>(std::min<int64_t>(need[0]->as_int(), 200)),
-            static_cast<uint16_t>(std::min<int64_t>(need[1]->as_int(), 200)),
-            static_cast<uint16_t>(std::min<int64_t>(need[2]->as_int(), 200))};
+        // an edited file: 0-200, never a wrapped number (as "Lean", F10S critic N6)
+        led.need = SpireMagNeed{static_cast<uint16_t>(std::clamp<int64_t>(need[0]->as_int(), 0, 200)),
+            static_cast<uint16_t>(std::clamp<int64_t>(need[1]->as_int(), 0, 200)),
+            static_cast<uint16_t>(std::clamp<int64_t>(need[2]->as_int(), 0, 200))};
       }
     }
     led.boost_due = led_json.get_bool("BoostDue", false);
-    led.feed_levels = std::min<int64_t>(led_json.get_int("FeedLevels", 0), 200);
+    led.feed_levels = std::clamp<int64_t>(led_json.get_int("FeedLevels", 0), 0, 200);
     ret.run_mag = led;
   }
   ret.exists = true;
@@ -4327,16 +4328,10 @@ static SpireMagEvolveAt spire_reward_evolve_for(std::shared_ptr<Client> c) {
   };
 }
 
-// One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4
-static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
-    uint32_t serial_number, const SpireRewardTable& table, SpireRewardKind kind, uint32_t k, bool elite,
-    uint32_t rare_bonus, const std::function<uint32_t(uint32_t)>& rnd, std::string* why) {
-  auto character = c->character_file(false, false);
-  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
-  if (!character || !overlay) {
-    *why = "no run copy";
-    return std::nullopt;
-  }
+// The trede of this client's reward offers (KV par. 5): the character's BossesBeaten across runs (its meta file) and the
+// boss rooms of this run
+static uint32_t spire_reward_trede_for(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    const SpireRewardTable& table) {
   std::set<uint8_t> run_bosses;
   auto rr_it = spire_run_rooms.find(c.get());
   if ((rr_it != spire_run_rooms.end()) && (rr_it->second.client.lock() == c) && (rr_it->second.lobby_id == l->lobby_id)) {
@@ -4347,7 +4342,25 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
     beaten = spire_meta_load_for_client(c, serial_number, nullptr).bosses_beaten;
   } catch (const std::exception&) {
   }
-  uint32_t trede = spire_reward_trede(table, beaten, run_bosses);
+  return spire_reward_trede(table, beaten, run_bosses);
+}
+
+uint32_t spire_static_test_reward_trede(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,
+    const SpireRewardTable& table) {
+  return spire_reward_trede_for(c, l, serial_number, table);
+}
+
+// One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4
+static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    uint32_t serial_number, const SpireRewardTable& table, SpireRewardKind kind, uint32_t k, bool elite,
+    uint32_t rare_bonus, const std::function<uint32_t(uint32_t)>& rnd, std::string* why) {
+  auto character = c->character_file(false, false);
+  auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+  if (!character || !overlay) {
+    *why = "no run copy";
+    return std::nullopt;
+  }
+  uint32_t trede = spire_reward_trede_for(c, l, serial_number, table);
   uint32_t room_index = spire_reward_room_index(k);
   auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
