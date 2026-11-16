@@ -4581,6 +4581,17 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
     bool has = entry && entry->has_own_bytes;
     if (has) {
       memcpy(b.data(), entry->own_bytes.data(), 12);
+      // a rare disk line's own disk still pays the pick's drawn curse in levels, as the quest's own disk did before it
+      // was a server reward (rewards.py curse_extra), within the class's highest level
+      uint8_t extra = entry->rare ? spire_reward_curse_disk_levels(pick_curse) : 0;
+      if (extra && character && (b[0] == 0x03) && (b[1] == 0x02) && (b[4] < SPIRE_TECH_COUNT)) {
+        uint8_t class_max = c->require_server_state()->data->item_parameter_table(Version::GC_V3)->get_max_tech_level(
+            character->disp.visual.sh.char_class, b[4]);
+        if (class_max != 0xFF) {
+          uint32_t top = std::max<uint32_t>(b[2], std::min<uint8_t>(class_max, 29)); // never below the line's own
+          b[2] = std::min<uint32_t>(b[2] + extra, top);
+        }
+      }
       SpireRewardPending p;
       p.offer.slot = slot;
       p.offer.entry_id = entry_id;

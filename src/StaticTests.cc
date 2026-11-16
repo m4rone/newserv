@@ -11656,6 +11656,27 @@ void run_static_tests() {
       expect_eq(foie_rare, lowest_level(5 | (2u << 6), 0));
       expect_eq(foie_rare + 2, lowest_level(5 | (3u << 6), 0));
       expect_eq(std::max<uint8_t>(disk_row[3][0], 3), lowest_level(6 | (3u << 6), 3));
+      // nothing the copy can learn (it knows the class's highest of every technique): the line's own disk, and on the
+      // rare line the pick's drawn curse still pays its two levels as the quest's own disk did (Cursed Chest, Glass);
+      // none for Jellen Mark, none on the plain line
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        overlay->set_technique_level(t, pmt_v3->get_max_tech_level(6, t));
+      }
+      auto own_disk = [&](uint32_t entry_byte) {
+        size_t at = seen.registers.size();
+        expect_eq(SPIRE_REWARD_ANSWER_TAG | SPIRE_REWARD_ITEM,
+            quest_asks(w, r, seen, z_word(SPIRE_RUN_MAG_REWARD, (2u << 8) | entry_byte), "a disk line's own disk"));
+        return item_answer(at);
+      };
+      expect((own_disk(5) == SpireMagBytes{0x03, 0x02, 0x02, 0x00, 0x00}));
+      expect((own_disk(5 | (1u << 6)) == SpireMagBytes{0x03, 0x02, 0x04, 0x00, 0x00}));
+      expect((own_disk(5 | (2u << 6)) == SpireMagBytes{0x03, 0x02, 0x02, 0x00, 0x00}));
+      expect((own_disk(5 | (3u << 6)) == SpireMagBytes{0x03, 0x02, 0x04, 0x00, 0x00}));
+      expect((own_disk(6 | (3u << 6)) == SpireMagBytes{0x03, 0x02, 0x02, 0x00, 0x03}));
+      for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
+        overlay->set_technique_level(t, 0xFF);
+      }
+      overlay->set_technique_level(0, 0);
 
       // the Disk pick (entry 4): a disk as data1 03 02 level-1 00 technique and nothing else, and the mag follows
       from = seen.registers.size();
