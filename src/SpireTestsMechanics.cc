@@ -563,7 +563,7 @@ void spire_tests_hooks() {
     expect_eq(on, spire_savestate_to_json(with_mag, 1));
     auto back = spire_savestate_from_json(on);
     expect(back.run_mag.has_value());
-    expect_eq(2u, back.run_mag->issued_step);
+    expect_eq(2, back.run_mag->issued_step);
     write("{}");
   }
 
