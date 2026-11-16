@@ -47,6 +47,10 @@ add_custom_target(
 
 # Executable definition
 
+# Every Spire source, by its name: a new src/Spire*.cc builds without a line here. CONFIGURE_DEPENDS makes the build
+# look again at every run, so a file that appears or goes reconfigures by itself.
+file(GLOB SPIRE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/Spire*.cc)
+
 set(SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Revision.cc
     src/Account.cc
@@ -129,13 +133,7 @@ set(SOURCES
     src/ShellCommands.cc
     src/ShopRandomSets.cc
     src/SignalWatcher.cc
-    src/SpireDraw.cc
-    src/SpireDrops.cc
-    src/SpireFlagBridge.cc
-    src/SpireMag.cc
-    src/SpireMeta.cc
-    src/SpireRewards.cc
-    src/SpireTestsSeam.cc
+    ${SPIRE_SOURCES}
     src/StaticGameData.cc
     src/StaticTests.cc
     src/TeamIndex.cc

@@ -21,6 +21,7 @@
 #include "ItemParameterTable.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMag.hh"
+#include "SpireMechanics.hh"
 #include "SpireRewards.hh"
 
 // The seam's guard (pso-roguelike new-features/roguelike/design/mechanics/integratie.md par. 9; this repo's
@@ -811,3 +812,5 @@ void spire_seam_run_tests() {
   phosg::log_info_f("-- Spire seam: a savestate with the run mag loads and is written back the same");
   seam_test_savestates(dump_path);
 }
+
+[[maybe_unused]] static const bool spire_seam_registered = spire_mech_register_tests("seam", spire_seam_run_tests);
