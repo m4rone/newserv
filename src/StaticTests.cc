@@ -8147,9 +8147,10 @@ void run_static_tests() {
     expect(spire_reward_free_unit_slot(0x01, 1) == std::nullopt);
     expect(spire_reward_free_unit_slot(0x00, 9) == std::optional<uint8_t>(0)); // a slot byte past 4 gives no fifth slot
     expect(spire_reward_free_unit_slot(0x0F, 9) == std::nullopt);
-    // a draw table's srv: the kinds this server gives, and nothing else (4, the disk, is not built)
-    expect(spire_reward_kind_known(1) && spire_reward_kind_known(2) && spire_reward_kind_known(3) && spire_reward_kind_known(5));
-    expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(4) && !spire_reward_kind_known(6) && !spire_reward_kind_known(-1));
+    // a draw table's srv: the kinds this server gives (4 is the disk), and nothing else
+    expect(spire_reward_kind_known(1) && spire_reward_kind_known(2) && spire_reward_kind_known(3) && spire_reward_kind_known(4) &&
+        spire_reward_kind_known(5));
+    expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(6) && !spire_reward_kind_known(-1));
     // review r4: without a weapon of a known line (none held, or one outside the grid) every class gets the Saber line,
     // the one every class carries (design par. 1), never the line a hash order put first
     for (const auto& [char_class, cls] : rewards.classes) {
