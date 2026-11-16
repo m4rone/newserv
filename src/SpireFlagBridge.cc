@@ -4238,6 +4238,7 @@ struct SpireRewardOffers {
   uint32_t lobby_id = 0;
   std::map<uint8_t, SpireRewardOffer> by_slot;
   std::optional<SpireRewardPending> pending;
+  uint32_t equip_seq = 0; // counts the server weapons taken: a later one ends an earlier one's wait for its mag
 };
 static std::unordered_map<const Client*, SpireRewardOffers> spire_reward_offers;
 
@@ -4526,7 +4527,7 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
     offers.by_slot.erase(slot);
     spire_reward_answer(c, nullptr, true);
     c->log.info_f("Spire reward: pick {} {} slot {} for serial {:010} in q{}: {} on {}; run copy Lv{} ATP {} ATA {} MST {}; "
-        "mag now {}; owed food {} levels; the run mag follows at the next room clear (rule B)",
+        "mag now {}; owed food {} levels; the run mag follows in this room's pause B (rule B)",
         spire_reward_kind_name(offer->kind), spire_reward_tier_name(offer->tier), slot, serial_number, quest_number,
         offer->label, (main_stat == 0) ? "DEF" : (main_stat == 3) ? "MIND" : "POW", p.level + 1, p.atp, p.ata, p.mst,
         spire_reward_mag_text(p.mag_before), led->feed_levels);
@@ -4554,15 +4555,17 @@ static void spire_reward_pick(std::shared_ptr<Client> c, std::shared_ptr<const L
       (offer->line != offer->from_line) ? std::format(", held {}", offer->from_line) : "", p.need.pow, p.need.dex,
       p.need.mind, spire_ata_model_name(table->ata_model),
       !led ? std::format("no rule B ({})", (refusal == R::NONE) ? "no run or ledger" : spire_run_mag_refusal_name(refusal))
-      : p.mag_due ? std::string("rule B's run mag follows at the next room clear") : std::string("the run mag already meets it"));
+      : p.mag_due ? std::string("rule B's run mag follows in this room's pause B, the weapon's equip after it")
+                  : std::string("the run mag already meets it"));
 }
 
-// After the RESULT of a server reward weapon: SpireEquipItem for it as soon as newserv's copy holds it, then the journal
-// line the evening run answers design par. 7 with. Rule B's mag comes at the next room clear (the quest asks it there,
-// never in the pick's thread), so the equip goes on with the mag the player holds now: whether it lands while the
-// requirement is not met answers question 3 (does SpireEquipItem skip the requirement, as equip_item does).
+// After the RESULT of a server reward weapon: SpireEquipItem for it once newserv's copy holds it and, when rule B owes a
+// mag for it (p.mag_due), once that mag is on the client and equipped (spire_reward_equip_gate): the game holds the
+// weapon's requirement also when the server equips it (Marck, 16 Nov 2026), so the stats go first. The quest asks the
+// mag at the start of this room's pause B (never in the pick's thread); until then the player keeps the weapon held
+// before. A later server weapon (equip_seq) ends this one's wait. Then the journal line of the pick.
 static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, std::weak_ptr<const Lobby> weak_l,
-    SpireRewardPending p, uint32_t serial_number, uint32_t run_id) {
+    SpireRewardPending p, uint32_t serial_number, uint32_t run_id, uint32_t equip_seq) {
   std::optional<uint32_t> item_id;
   for (size_t z = 0; z < 16; z++) { // up to 8 s: the item in newserv's copy
     co_await async_sleep(std::chrono::milliseconds(500));
@@ -4584,6 +4587,42 @@ static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, st
       }
     }
     if (item_id) {
+      break;
+    }
+  }
+  const char* mag_wait = "";
+  uint32_t polls = 0;
+  if (item_id && p.mag_due) {
+    for (uint32_t since_landed = 0;; polls++) {
+      auto c = weak_c.lock();
+      auto l = weak_l.lock();
+      if (!c || !l || (c->lobby.lock() != l)) {
+        co_return;
+      }
+      auto overlay = c->has_overlay() ? c->character_file(false, true) : nullptr;
+      if (!overlay) {
+        co_return;
+      }
+      if (spire_reward_offers_for(c, l->lobby_id).equip_seq != equip_seq) {
+        c->log.info_f("Spire reward: the equip of {} {:08X} ends its wait for rule B's mag after {} s: a later reward "
+            "weapon was taken", p.offer.item_name, *item_id, polls);
+        co_return;
+      }
+      auto* led = spire_run_mag_ledger_for(c, run_id, false);
+      bool mag_equipped = false;
+      spire_reward_run_mag(overlay->inventory, &mag_equipped);
+      auto gate = spire_reward_equip_gate(true, led != nullptr, led && led->boost_due, mag_equipped, polls, since_landed);
+      if (gate == SpireRewardEquipGate::WAIT) {
+        if (!polls) {
+          c->log.info_f("Spire reward: the equip of {} {:08X} waits for rule B's mag", p.offer.item_name, *item_id);
+        }
+        since_landed += (led && !led->boost_due) ? 1 : 0;
+        c.reset(); // the wait holds neither the client nor its game
+        l.reset();
+        co_await async_sleep(SPIRE_REWARD_EQUIP_POLL_DELAY);
+        continue;
+      }
+      mag_wait = (gate == SpireRewardEquipGate::GO) ? "; rule B mag on" : "; rule B mag NOT on, the wait ran out";
       break;
     }
   }
@@ -4622,13 +4661,14 @@ static asio::awaitable<void> spire_reward_equip(std::weak_ptr<Client> weak_c, st
   };
   c->log.info_f("Spire reward: TAKEN serial {:010} run {:08X} class {} {} line {} W{} {} {} {} (req ATP {} ATA {} MST {}, "
       "weapon ATA {}); run copy Lv{} ATP {} ATA {} MST {}; mag before {}; mag now {} ({}); rule B need POW {} DEX {} "
-      "MIND {}{}; equip {} ({}); meets without mag table/screen_weapon/screen_bare {}/{}/{}, with mag {}/{}/{}",
+      "MIND {}{}{}; equip {} ({}); meets without mag table/screen_weapon/screen_bare {}/{}/{}, with mag {}/{}/{}",
       serial_number, run_id, p.class_name.empty() ? "?" : p.class_name,
       spire_reward_kind_name(p.offer.kind), p.offer.line, p.offer.w, spire_reward_tier_name(p.offer.tier),
       p.offer.item_name, spire_run_mag_bytes_hex(p.offer.item), p.offer.info.atp, p.offer.info.ata, p.offer.info.mst,
       p.offer.info.weapon_ata, p.level + 1, p.atp, p.ata, p.mst, spire_reward_mag_text(p.mag_before),
       spire_reward_mag_text(mag), mag_equipped ? "equipped" : "not equipped", p.need.pow, p.need.dex, p.need.mind,
-      p.mag_due ? " (rule B mag owed: the next room clear)" : "", !item_id ? "NOT FOUND in the run copy" : landed ? "LANDED" : "NOT LANDED",
+      p.mag_due ? std::format(" (rule B mag owed; the equip waited {} s)", polls) : std::string(), mag_wait,
+      !item_id ? "NOT FOUND in the run copy" : landed ? "LANDED" : "NOT LANDED",
       !item_id ? "no item" : available ? "SpireEquipItem sent" : std::format("r{} = 0, the player's own", SPIRE_EQUIP_REGISTER),
       meets(SpireAtaModel::TABLE, nullptr), meets(SpireAtaModel::SCREEN_WEAPON, nullptr),
       meets(SpireAtaModel::SCREEN_BARE, nullptr), meets(SpireAtaModel::TABLE, mag_p),
@@ -4666,10 +4706,11 @@ static void spire_reward_result(std::shared_ptr<Client> c, std::shared_ptr<const
       led->boost_due = true;
     }
   }
+  uint32_t equip_seq = ++offers.equip_seq;
   c->log.info_f("Spire reward: RESULT 1 for serial {:010} in q{} slot {}: {} created{}", serial_number, quest_number,
       p.offer.slot, p.offer.label, led ? (p.mag_due ? "; rule B mag owed" : "; the mag meets it") : "; no run mag ledger");
   asio::co_spawn(*c->require_server_state()->io_context,
-      spire_reward_equip(c, l, std::move(p), serial_number, run ? run->run_id : 0), asio::detached);
+      spire_reward_equip(c, l, std::move(p), serial_number, run ? run->run_id : 0, equip_seq), asio::detached);
 }
 
 static void spire_run_mag_handle(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, uint32_t serial_number,

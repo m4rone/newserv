@@ -7866,6 +7866,19 @@ void run_static_tests() {
       }
       expect(sum <= 200);
     }
+
+    // the reward weapon's equip waits for rule B's mag: on the client (boost_due cleared) and equipped, each bounded
+    {
+      using G = SpireRewardEquipGate;
+      expect(spire_reward_equip_gate(false, true, true, false, 0, 0) == G::GO); // the mag already meets the weapon
+      expect(spire_reward_equip_gate(true, false, false, false, 0, 0) == G::GO); // no ledger: no rule B
+      expect(spire_reward_equip_gate(true, true, true, true, 0, 0) == G::WAIT); // the old mag is equipped, the new owed
+      expect(spire_reward_equip_gate(true, true, true, false, SPIRE_REWARD_MAG_WAIT_POLLS - 1, 0) == G::WAIT);
+      expect(spire_reward_equip_gate(true, true, true, false, SPIRE_REWARD_MAG_WAIT_POLLS, 0) == G::GO_WITHOUT_MAG);
+      expect(spire_reward_equip_gate(true, true, false, false, 3, 0) == G::WAIT); // created, its equip under way
+      expect(spire_reward_equip_gate(true, true, false, true, 3, 1) == G::GO);
+      expect(spire_reward_equip_gate(true, true, false, false, 30, SPIRE_REWARD_MAG_EQUIP_POLLS) == G::GO_WITHOUT_MAG);
+    }
   }
 
   phosg::log_info_f("-- Spire bundle 8 (ux-pass): draw.json names, overview line, server texts (v62, B-REGIE-16-13)");

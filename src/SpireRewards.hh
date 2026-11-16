@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <array>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <optional>
@@ -164,3 +165,31 @@ SpireMagNeed spire_reward_mag_need(const SpireRewardItemInfo& info, uint32_t atp
 // Whether stats plus a mag (the same assumed rates) meet a weapon's requirement under a model (the log's measurement)
 bool spire_reward_meets(const SpireRewardItemInfo& info, uint32_t atp, uint32_t ata, uint32_t mst, const SpireMagBytes* mag,
     SpireAtaModel model);
+
+// When SpireEquipItem goes out for a reward weapon. The game holds a weapon's requirement also when the server equips
+// it (Marck, 16 Nov 2026), so a weapon that rule B's mag must carry (mag_due) waits until that mag is on the client
+// (the ledger's boost_due cleared by its RESULT 1) and equipped in newserv's copy. polls counts the waits so far,
+// polls_since_landed those since the mag's RESULT 1. A mag that never comes (pack full, the run over) or that the
+// game leaves unequipped ends the wait: the equip then goes as it did before, and the journal says so.
+constexpr auto SPIRE_REWARD_EQUIP_POLL_DELAY = std::chrono::milliseconds(1000);
+constexpr uint32_t SPIRE_REWARD_MAG_WAIT_POLLS = 1200; // 20 min: a busy lock leaves the mag owed for the next room clear
+constexpr uint32_t SPIRE_REWARD_MAG_EQUIP_POLLS = 8; // SPIRE_RUN_MAG_EQUIP_SENDS sends, each with its check delay
+enum class SpireRewardEquipGate {
+  GO, // no mag owed, or the mag is on and equipped
+  WAIT,
+  GO_WITHOUT_MAG, // the wait ran out
+};
+constexpr SpireRewardEquipGate spire_reward_equip_gate(bool mag_due, bool has_ledger, bool boost_due, bool mag_equipped,
+    uint32_t polls, uint32_t polls_since_landed) {
+  if (!mag_due || !has_ledger) {
+    return SpireRewardEquipGate::GO;
+  }
+  if (boost_due) {
+    return (polls < SPIRE_REWARD_MAG_WAIT_POLLS) ? SpireRewardEquipGate::WAIT : SpireRewardEquipGate::GO_WITHOUT_MAG;
+  }
+  if (mag_equipped) {
+    return SpireRewardEquipGate::GO;
+  }
+  return (polls_since_landed < SPIRE_REWARD_MAG_EQUIP_POLLS) ? SpireRewardEquipGate::WAIT
+                                                             : SpireRewardEquipGate::GO_WITHOUT_MAG;
+}
