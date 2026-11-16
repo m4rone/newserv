@@ -16,3 +16,13 @@ Start 2026-11-16, kop 655f1cd, tak feature/beloningen-b.
 ## Stand
 
 Alle vier de onderdelen af. Niets open voor een verse bouwer.
+
+## Vervolg (2026-11-17): vier punten uit Gezien, niet gebouwd
+
+- [af] punt 3, schakelaarbestand hoogstens eens per seconde: cffa87f, build 0 static 0 city 0
+- [af] punt 4, H2 begrenst kamerindex en trede van een aanmelder: b312e6e, build 0 static 0 city 0
+- [af] punt 2, H1, H4-H7 en H9 alleen in een Spire-spel (spire_game_is_spire): 2fbe372, build 0 static 0 city 0
+- [af] punt 1, de sleutel van een aanmelder met schakelaar uit wordt gedragen (savestate en meta): bca7769, build 0 static 0 city 0
+- [af] aanvulling onderaan het rapport
+
+Alle vier af. Niets open voor een verse bouwer.

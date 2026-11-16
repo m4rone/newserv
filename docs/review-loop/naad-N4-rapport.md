@@ -368,3 +368,111 @@ for l in dest_l:
         rest[l] -= 1
         print(f'  OWN: {l}')
 ```
+
+## Aanvulling (2026-11-17): vier punten uit "Gezien, niet gebouwd" gebouwd
+
+Vervolg op kop `9bcd7f3`, vier commits, één per punt. Elke commit is vóór het committen gebouwd en gedraaid met
+`build/n4-cycle.sh`; de regel is de letterlijke inhoud van het exit-bestand. In elk testlog staan
+`-- Spire seam: the reward offers are as before the seam` en
+`-- Spire seam: a savestate with the run mag loads and is written back the same`, en het eindigt op
+`-- All static tests passed`. `tests/`, `src/SpireTestsSeam.cc`, `src/ReceiveSubcommands.cc` en
+`src/ReceiveCommands.cc` zijn in dit vervolg niet gewijzigd (`git diff --stat 9bcd7f3 -- <die paden>` geeft niets).
+
+```
+cffa87f (punt 3, het schakelaarbestand)   build 0 static 0 city 0
+b312e6e (punt 4, de grenzen van H2)       build 0 static 0 city 0
+2fbe372 (punt 2, alleen in een Spire-run) build 0 static 0 city 0
+bca7769 (punt 1, de gedragen sleutel)     build 0 static 0 city 0
+```
+
+Staart van de laatste cyclus: build `[100%] Built target newserv` (0 regels met `warning: `), tests
+`-- All static tests passed`, city `ok: spire-lives-check`. De eerste cyclus van punt 1 faalde op een stap van de
+eigen test (`SpireTestsMechanics.cc:741`: de test schreef met de schakelaar al aan, zie de rand hieronder); de test
+is hersteld, de code niet gewijzigd.
+
+### Punt 1: een sleutel gaat niet verloren als zijn mechaniek uit staat (H10 en H11)
+
+Wat nu geldt: een aanmelder op H10 of H11 noemt in zijn aanmelding de sleutels die hij schrijft
+(`SpireMechRunState::keys`, `SpireMechCharMeta::keys`, hoogstens vier). Heeft hij een schakelaar, dan bewaart de kern
+bij elk lezen wat er onder die sleutels stond, ongelezen, in `SpireSavestate::carried` of `SpireMetaFile::carried`.
+Staat zijn schakelaar bij het schrijven uit, dan wordt hij niet aangeroepen en zet de kern die waarde terug, op zijn
+eigen plek in de volgorde van de haak. Bij de savestate neemt de 'V' van een run die uit zo'n savestate hervat is de
+gedragen sleutels mee (`spire_mech_run_state_capture` krijgt de savestate waaruit hervat is; alleen bij hetzelfde
+run-id). Sleutels die geen aanmelder noemt worden niet gedragen: een verouderde sleutel valt, zoals vóór de naad.
+`SpireMagState.cc` is niet gewijzigd: de run-mag heeft geen schakelaar en kan dus niet uit staan.
+
+De test (`spire_tests_hooks`, de blokken "H10 through the core" en "H11 through the core"): met de schakelaar uit
+wordt de aanmelder niet aangeroepen en is de tekst van de savestate na lezen en schrijven exact de tekst van ervoor;
+de 'V' van dezelfde run geeft dezelfde tekst, die van een andere run draagt niets; met de schakelaar weer aan leest
+de aanmelder zijn oude waarde (5). Voor de meta: twee keer laden en schrijven met de schakelaar uit geeft exact
+hetzelfde bestand; een eigen wijziging van de kern (een upgrade) behoudt de sleutel; weer aan leest de aanmelder 9.
+Zonder aanmelder: `carried` leeg en de tekst gelijk aan die zonder de sleutel.
+
+Twee randen die blijven:
+- Een aanmelder die bij het schrijven AAN staat beslist zelf over zijn sleutels; wat gedragen werd, wordt voor hem
+  niet geschreven. Gaat een schakelaar aan midden in een hervatte run (de aanmelder is dan niet hervat), dan bepaalt
+  zijn eigen stand de volgende 'V' en is de oude waarde weg. De uitrol zet schakelaars alleen om bij nul spelers.
+- Een 'V' van een run die NIET hervat is, terwijl de schakelaar tijdens die run uit ging, schrijft de sleutel niet:
+  er is dan geen gelezen savestate om uit te dragen. Zelfde voorwaarde (een schakelaar die omgaat terwijl er gespeeld
+  wordt).
+
+### Punt 2: een haak vuurt alleen in een Spire-run
+
+Het begrip: `spire_game_is_spire(c, l)` van de brug (`SpireFlagBridge.hh`): een spel waarvan de quest in
+`SpireGuardQuests` of `SpireBridgeQuests` staat. Het is het begrip waarmee de brug zelf al spelerschade weghaalt
+(`ReceiveSubcommands.cc:475`) en de drops regelt (`SpireDrops.cc`). De uitbetaalquest (`SpireMetaQuests`)
+is een eigen lijst en valt er niet onder; de basisquest is volgens het commentaar in `SpireFlagBridge.hh` geen
+bridged quest. Welke quests in de twee lijsten staan bepaalt de config van de server; die is hier niet gelezen.
+
+Wat nu geldt: de toets staat één keer, in de aanroepfunctie van de haak (`in_spire_run` in `SpireMechanics.cc`), voor
+H4, H5, H6, H7 en H9 (alle drie de einden, dus ook de 98). In een ander spel, in een spel zonder quest, in een lobby,
+en zonder spel of client wordt geen aanmelder bereikt. Er is niets gewijzigd op de aanroepplekken.
+
+Meer dan gevraagd, zelfde regel: **ook H1** (`quest_bin`) heeft de toets. H1 staat in `set_lobby_quest`, waar elke
+quest van elk spel langskomt; zonder toets kreeg een aanmelder de .bin van een gewone quest in handen. H2, H3, H8 en
+H10 worden alleen bereikt vanuit de afhandeling van een Spire-quest door de brug, H11 alleen voor het meta-bestand.
+
+De test (blok "Only in a Spire run"): een echte client, een spel met een quest uit `SpireBridgeQuests`, een spel met
+een andere quest, een spel zonder quest en een lobby. Met op elk van de zes haken een aanmelder: buiten het
+Spire-spel nul aanroepen en de .bin ongewijzigd (uitkomst `=`), in het Spire-spel alle aanroepen
+(`E*E4BE4CEE15.4E3.0E1E2E3`). Alle vijf de gevraagde haken zijn gebouwd; geen viel af.
+
+Niet gedekt: `spire_game_is_spire` zegt "dit spel draait een Spire-quest", niet "deze client heeft een run-kopie".
+Een client die in een Spire-spel staat nadat de run voorbij is, valt er nog onder. De 98 van een client die de
+verbinding verloor komt nooit; dat was al zo.
+
+### Punt 3: het schakelaarbestand hoogstens één keer per seconde
+
+Wat nu geldt: `switches()` vraagt de tijd van het bestand hoogstens eens per `SPIRE_SWITCHES_LOOK_USECS` (één
+seconde, steady clock); daartussen geldt de stand van de laatste blik. "Opnieuw gelezen zodra het bestand verandert"
+is "binnen een seconde". Voor tests: `spire_mech_set_switches_clock(fn)` zet de klok van de lezer; de tests die een
+schakelaar omzetten schuiven hun klok bij elke schrijf een seconde op.
+
+De test (`spire_tests_mechanics`): een wijziging binnen de seconde wordt niet gelezen, één microseconde vóór het
+einde ook niet, op de seconde wel; een bestand dat verdween wordt ook pas bij de volgende blik gezien.
+
+### Punt 4: H2 begrenst wat een aanmelder teruggeeft
+
+Wat nu geldt: een kamerindex die een aanmelder wijzigde wordt teruggebracht naar 1 tot en met de laatste kamer die het
+rooster kent (de hoogste sleutel van `RoomW` of van de schijven; in het rooster van nu 15), een trede naar 0 tot en
+met de trede met elke baas van `TredeRooms` verslagen (`spire_reward_trede`, nu 2), met één regel in het journaal.
+Een waarde die geen aanmelder wijzigde blijft die van de kern, ook buiten het rooster (kamer 40 geeft index 25, zoals
+vóór de naad). De haak krijgt daarvoor het rooster mee (`SpireMechRewardRoom::table`).
+
+De test (blok "H2's bounds"): te ver wordt de laatste kamer en de hoogste trede, ook bij 0xFFFFFFFF; kamer 0 wordt 1;
+de rand zelf en een waarde binnen het rooster blijven; een onaangeroerde waarde buiten het rooster blijft. Uit het
+testlog:
+
+```
+W ... Spire hook H2 reward_room: room index 25 for serial 0000000007 is outside the grid (1-15); brought back to 15
+W ... Spire hook H2 reward_room: rung 7 for serial 0000000007 is outside the grid (0-2); brought back to 2
+W ... Spire hook H2 reward_room: room index 0 for serial 0000000007 is outside the grid (1-15); brought back to 1
+```
+
+### Wat hierdoor in het rapport hierboven vervalt
+
+- Beslissing 11 ("de haken filteren niet op een Spire-run"): vervangen door punt 2.
+- "Gezien, niet gebouwd": de vijf regels zijn gebouwd (de twee over datakwaliteit samen in punt 1).
+- De tabel van de haken: H2 krijgt ook het rooster mee; H10's capture krijgt de savestate waaruit hervat is.
+- De dekkingsclaim blijft: geen van de aanroepplekken is met een live client gespeeld. De tests van punt 2 gebruiken
+  een echte `Client` en `Lobby`, maar roepen de aanroepfunctie van de haak aan, niet de handler van het spel.
