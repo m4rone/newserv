@@ -6,11 +6,13 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -89,6 +91,49 @@ std::string no_offer(FnT&& fn) {
     return e.what();
   }
   return "";
+}
+
+// What is registered on the server when this test file starts: the mechanics' own registrations, whoever they are and
+// however many. No test here asks for a fixed number of them (docs/review-loop/goals/naad-testregel.md point 1: the
+// first mechanic that registers must not turn this file red). The file compares with this at its end, so nothing of a
+// test is left behind, and tests the seam's invariants in between.
+struct SeamSnapshot {
+  std::vector<std::string> kind_names; // every kind and every route before a kind
+  std::vector<const SpireMechKind*> kinds; // the registrations themselves, in that order
+  std::vector<std::vector<std::string>> hook_names; // per hook H1-H11, in the order of the calls
+  bool operator==(const SeamSnapshot&) const = default;
+};
+
+SeamSnapshot seam_snapshot() {
+  SeamSnapshot ret;
+  ret.kind_names = spire_mech_kind_names();
+  ret.kinds = spire_mech_kinds();
+  for (uint8_t z = 1; z <= 11; z++) {
+    ret.hook_names.emplace_back(spire_mech_hook_names(static_cast<SpireMechHookId>(z)));
+  }
+  return ret;
+}
+
+// What holds for the registrations whoever registered: nothing is registered twice (a kind, a route before a kind, a
+// name on a hook), every kind has a number the draw table knows, and the run mag's savestate key stands on H10
+// (SpireMagState.cc)
+void expect_seam_invariants() {
+  expect(spire_mech_kind_conflicts().empty());
+  expect(spire_mech_hook_conflicts().empty());
+  const auto kind_names = spire_mech_kind_names();
+  const auto kinds = spire_mech_kinds();
+  expect_eq(kind_names.size(), kinds.size());
+  expect_eq(kind_names.size(), std::set<std::string>(kind_names.begin(), kind_names.end()).size());
+  for (const SpireMechKind* reg : kinds) {
+    expect(spire_reward_kind_known(static_cast<int64_t>(reg->kind)));
+    expect(reg->switch_key != nullptr);
+  }
+  for (uint8_t z = 1; z <= 11; z++) {
+    const auto names = spire_mech_hook_names(static_cast<SpireMechHookId>(z));
+    expect_eq(names.size(), std::set<std::string>(names.begin(), names.end()).size());
+  }
+  const auto run_state = spire_mech_hook_names(SpireMechHookId::RUN_STATE);
+  expect(std::count(run_state.begin(), run_state.end(), std::string("mags")) == 1);
 }
 
 // --- The hooks H1-H11 ---
@@ -359,11 +404,9 @@ void spire_tests_hooks() {
   expect(spire_game_is_spire(run_c, run_l));
   expect(!spire_game_is_spire(run_c, plain_l) && !spire_game_is_spire(run_c, free_l) && !spire_game_is_spire(run_c, lobby_l));
 
-  // Who is registered on the server: the run mag's savestate key on H10 (SpireMagState.cc), and nobody else anywhere
-  for (uint8_t z = 1; z <= 11; z++) {
-    auto names = spire_mech_hook_names(static_cast<H>(z));
-    expect(names == ((z == 10) ? std::vector<std::string>({"mags"}) : std::vector<std::string>()));
-  }
+  // Who is registered on the server is not asked here, nor how many: the invariants hold whoever registered, and
+  // every hook is compared with what stood on it before its own test (expect_hook)
+  expect_seam_invariants();
 
   // H1 quest_bin: without a registrant the client gets the very .bin the core handed in; each registrant gets what the
   // one before it answered
@@ -853,9 +896,12 @@ void spire_tests_mechanics() {
   };
   using K = SpireRewardKind;
 
-  // The table: the kinds 1-5 are registered, each under its owner's switch; 6-8 are known numbers nobody registered;
-  // the two points before a kind (4: the android route, 5: power first) are empty
-  expect(spire_mech_kind_conflicts().empty());
+  // The registrations as this file found them: compared with at its end
+  const SeamSnapshot at_start = seam_snapshot();
+  expect_seam_invariants();
+
+  // The table: the kinds 1-5 are registered, each under its owner's switch, and 1-8 are numbers the draw table knows.
+  // Who else registered (a kind 6-8, a route before a kind) is not asked: that is its owner's to test.
   const std::vector<std::pair<K, std::string>> keys = {{K::WEAPON, "aanval"}, {K::NEW_LINE, "aanval"}, {K::MAG_FOOD, "mags"},
       {K::DISK, "force.schijf"}, {K::UNIT, "verdediging.units"}};
   for (const auto& [kind, key] : keys) {
@@ -866,16 +912,19 @@ void spire_tests_mechanics() {
     expect(reg->offer && reg->pick);
     expect_eq(kind != K::MAG_FOOD, reg->result != nullptr); // mag food leaves no pick in flight
   }
-  expect_eq(5u, spire_mech_kinds().size());
   for (int64_t k = 1; k <= 8; k++) {
     expect(spire_reward_kind_known(k));
-    expect(!spire_mech_kind(static_cast<K>(k), true));
   }
   expect(!spire_reward_kind_known(0) && !spire_reward_kind_known(9));
-  for (K kind : {K::FOCUS, K::MANA, K::ARMOR}) {
-    expect(!spire_mech_kind(kind));
-    // a known kind nobody registered gives no offer: the entry's own item
-    expect_eq(std::format("reward kind {} is not registered", static_cast<uint32_t>(kind)), no_offer([&]() { offer_of(kind); }));
+  // a kind nobody registered gives no offer (the entry's own item): the number of this file before it registers, and
+  // every known number that has no registration at this moment
+  expect(!spire_mech_kind(TEST_KIND) && !spire_mech_kind(TEST_KIND, true));
+  expect_eq(std::string("reward kind 250 is not registered"), no_offer([&]() { offer_of(TEST_KIND); }));
+  for (int64_t k = 1; k <= 8; k++) {
+    K kind = static_cast<K>(k);
+    if (!spire_mech_kind(kind) && !spire_mech_kind(kind, true)) {
+      expect_eq(std::format("reward kind {} is not registered", k), no_offer([&]() { offer_of(kind); }));
+    }
   }
 
   // The switches, read from a file of this test
@@ -997,7 +1046,6 @@ void spire_tests_mechanics() {
   spire_mech_forget_kind(TEST_KIND);
   spire_mech_forget_kind(TEST_KIND, true);
   expect(!spire_mech_kind(TEST_KIND) && !spire_mech_kind(TEST_KIND, true));
-  expect_eq(5u, spire_mech_kinds().size());
   expect(spire_mech_kind_conflicts().empty());
   expect_eq(0u, spire_rewards_parse(phosg::load_file(SPIRE_REWARDS_FILE)).sections.count(TEST_KEY));
   spire_mech_set_switches_file("");
@@ -1006,6 +1054,10 @@ void spire_tests_mechanics() {
 
   spire_tests_hooks();
   spire_mech_set_switches_clock(nullptr);
+
+  // at the end of the file stands what stood at its start: every kind, every route before a kind, every name per hook
+  expect_seam_invariants();
+  expect(at_start == seam_snapshot());
 }
 
 [[maybe_unused]] const bool registered = spire_mech_register_tests("mechanics", spire_tests_mechanics);

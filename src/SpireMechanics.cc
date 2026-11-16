@@ -322,6 +322,14 @@ std::vector<const SpireMechKind*> spire_mech_kinds() {
   return ret;
 }
 
+std::vector<std::string> spire_mech_kind_names() {
+  std::vector<std::string> ret;
+  for (const auto& [key, reg] : kind_registry().by_kind) {
+    ret.emplace_back(conflict_name(reg.kind, !key.second));
+  }
+  return ret;
+}
+
 std::vector<std::string> spire_mech_kind_conflicts() {
   return kind_registry().conflicts;
 }

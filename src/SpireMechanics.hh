@@ -106,6 +106,8 @@ bool spire_mech_register_kind_first(const SpireMechKind& reg);
 const SpireMechKind* spire_mech_kind(SpireRewardKind kind, bool first = false);
 // Every registration, by kind number, a kind's first route before the kind itself
 std::vector<const SpireMechKind*> spire_mech_kinds();
+// "kind 4" or "kind 4 (first route)" for every registration, in the order of spire_mech_kinds
+std::vector<std::string> spire_mech_kind_names();
 // "kind 4" or "kind 4 (first route)" for every registration that came second; empty when all is well
 std::vector<std::string> spire_mech_kind_conflicts();
 // Tests only: takes a registration out again, with the conflicts named for it
