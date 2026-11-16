@@ -15,7 +15,11 @@
 #include <string>
 #include <vector>
 
+#include "Channel.hh"
+#include "DataIndex.hh"
+#include "GameServer.hh"
 #include "ReceiveSubcommands.hh"
+#include "ServerState.hh"
 #include "SpireDraw.hh"
 #include "SpireFlagBridge.hh"
 #include "SpireMechanics.hh"
@@ -235,6 +239,28 @@ void t_char_meta_write(const SpireMetaFile& file, phosg::JSON& json) {
 template <char TAG>
 constexpr SpireMechCharMeta T_CHAR_META = {t_char_meta_read<TAG>, t_char_meta_write<TAG>};
 
+// A server, a client and games of this test, for the hooks that reach a registrant only in a Spire run
+struct HookTestState : ServerState {
+  HookTestState() = default;
+};
+struct HookTestChannel : Channel {
+  HookTestChannel()
+      : Channel(Version::GC_V3, Language::ENGLISH, "static-test", phosg::TerminalFormat::END, phosg::TerminalFormat::END,
+            false, false) {}
+  virtual std::string default_name() const {
+    return "static-test";
+  }
+  virtual bool connected() const {
+    return true;
+  }
+  virtual void disconnect() {}
+  virtual void send_raw(std::string&&) {}
+  virtual asio::awaitable<void> recv_raw(void*, size_t) {
+    throw std::logic_error("a static test client sends nothing");
+    co_return;
+  }
+};
+
 constexpr const char* HOOK_KEY_ON = "test.haak.aan";
 constexpr const char* HOOK_KEY_OFF = "test.haak.uit";
 
@@ -301,6 +327,31 @@ void spire_tests_hooks() {
   std::shared_ptr<Client> no_c;
   std::shared_ptr<Lobby> no_l;
 
+  // A client in a Spire game (its quest is in SpireBridgeQuests), and where no registrant may be reached: a game with
+  // another quest, a game without a quest, a lobby
+  constexpr uint32_t SPIRE_QUEST = 987701, PLAIN_QUEST = 987702;
+  auto state = std::make_shared<HookTestState>();
+  state->data = std::make_shared<DataIndex>();
+  state->io_context = std::make_shared<asio::io_context>(1);
+  state->data->spire_bridge_quest_numbers.emplace(SPIRE_QUEST);
+  auto server = std::make_shared<GameServer>(state);
+  auto game_with = [&](uint32_t lobby_id, uint32_t quest_number) {
+    auto l = std::make_shared<Lobby>(state, lobby_id, true);
+    if (quest_number) {
+      auto vq = std::make_shared<VersionedQuest>();
+      vq->meta.quest_number = quest_number;
+      l->quest = std::make_shared<Quest>(vq);
+    }
+    return l;
+  };
+  auto run_l = game_with(0x7D01, SPIRE_QUEST);
+  auto plain_l = game_with(0x7D02, PLAIN_QUEST);
+  auto free_l = game_with(0x7D03, 0);
+  auto lobby_l = std::make_shared<Lobby>(state, 0x7D04, false);
+  auto run_c = std::make_shared<Client>(server, std::make_shared<HookTestChannel>(), ServerBehavior::GAME_SERVER);
+  expect(spire_game_is_spire(run_c, run_l));
+  expect(!spire_game_is_spire(run_c, plain_l) && !spire_game_is_spire(run_c, free_l) && !spire_game_is_spire(run_c, lobby_l));
+
   // Who is registered on the server: the run mag's savestate key on H10 (SpireMagState.cc), and nobody else anywhere
   for (uint8_t z = 1; z <= 11; z++) {
     auto names = spire_mech_hook_names(static_cast<H>(z));
@@ -310,11 +361,11 @@ void spire_tests_hooks() {
   // H1 quest_bin: without a registrant the client gets the very .bin the core handed in; each registrant gets what the
   // one before it answered
   auto bin = std::make_shared<const std::string>("bin");
-  expect(spire_mech_quest_bin(no_c, no_l, bin) == bin);
+  expect(spire_mech_quest_bin(run_c, run_l, bin) == bin);
   expect_hook<SpireMechQuestBinFn>(
       H::QUEST_BIN, spire_mech_register_quest_bin, t_quest_bin<'L'>, t_quest_bin<'E'>, t_quest_bin<'O'>,
       [&]() {
-        auto out = spire_mech_quest_bin(no_c, no_l, bin);
+        auto out = spire_mech_quest_bin(run_c, run_l, bin);
         return hook_calls + " " + *out;
       },
       write, " bin", "EL binEL", "EOL binEOL", "E binE");
@@ -322,7 +373,7 @@ void spire_tests_hooks() {
     HookGuard g{H::QUEST_BIN, "nul"};
     spire_mech_register_quest_bin({"nul", "", 1, t_quest_bin_null});
     hook_calls.clear();
-    expect(spire_mech_quest_bin(no_c, no_l, bin) == bin); // a registrant that answers nullptr leaves the .bin
+    expect(spire_mech_quest_bin(run_c, run_l, bin) == bin); // a registrant that answers nullptr leaves the .bin
     expect_eq(std::string("n"), hook_calls);
   }
 
@@ -475,10 +526,10 @@ void spire_tests_hooks() {
   expect_hook<SpireMechPlayerHPFn>(
       H::PLAYER_HP, spire_mech_register_player_hp, t_player_hp<'L'>, t_player_hp<'E'>, t_player_hp<'O'>,
       [&]() {
-        spire_mech_player_hp(no_c, no_l, 0x4A);
-        spire_mech_player_hp(no_c, no_l, 0x2F);
-        spire_mech_player_hp(no_c, no_l, 0x4B);
-        spire_mech_player_hp(no_c, no_l, 0x4C);
+        spire_mech_player_hp(run_c, run_l, 0x4A);
+        spire_mech_player_hp(run_c, run_l, 0x2F);
+        spire_mech_player_hp(run_c, run_l, 0x4B);
+        spire_mech_player_hp(run_c, run_l, 0x4C);
         return hook_calls;
       },
       write, "", "E4BL4BE4CL4C", "E4BO4BL4BE4CO4CL4C", "E4BE4C");
@@ -487,7 +538,7 @@ void spire_tests_hooks() {
   expect_hook<SpireMechPlayerDiedFn>(
       H::PLAYER_DIED, spire_mech_register_player_died, t_player_died<'L'>, t_player_died<'E'>, t_player_died<'O'>,
       [&]() {
-        spire_mech_player_died(no_c, no_l);
+        spire_mech_player_died(run_c, run_l);
         return hook_calls;
       },
       write, "", "EL", "EOL", "E");
@@ -496,7 +547,7 @@ void spire_tests_hooks() {
     spire_mech_register_player_died({"stuk", "", 1, t_player_died_throws});
     spire_mech_register_player_died({"na", "", 2, t_player_died<'E'>});
     hook_calls.clear();
-    spire_mech_player_died(no_c, no_l);
+    spire_mech_player_died(run_c, run_l);
     expect_eq(std::string("tE"), hook_calls);
   }
 
@@ -504,7 +555,7 @@ void spire_tests_hooks() {
   expect_hook<SpireMechTechDoneFn>(
       H::TECH_DONE, spire_mech_register_tech_done, t_tech_done<'L'>, t_tech_done<'E'>, t_tech_done<'O'>,
       [&]() {
-        spire_mech_tech_done(no_c, no_l, 15, 4);
+        spire_mech_tech_done(run_c, run_l, 15, 4);
         return hook_calls;
       },
       write, "", "E15.4L15.4", "E15.4O15.4L15.4", "E15.4");
@@ -517,8 +568,8 @@ void spire_tests_hooks() {
   expect_hook<SpireMechEnemyKilledFn>(
       H::ENEMY_KILLED, spire_mech_register_enemy_killed, t_enemy_killed<'L'>, t_enemy_killed<'E'>, t_enemy_killed<'O'>,
       [&]() {
-        spire_mech_enemy_killed(no_c, no_l, box, 2);
-        spire_mech_enemy_killed(no_c, no_l, rec, 3);
+        spire_mech_enemy_killed(run_c, run_l, box, 2);
+        spire_mech_enemy_killed(run_c, run_l, rec, 3);
         return hook_calls;
       },
       write, "", "E3.0L3.0", "E3.0O3.0L3.0", "E3.0");
@@ -536,12 +587,44 @@ void spire_tests_hooks() {
   expect_hook<SpireMechRunEndFn>(
       H::RUN_END, spire_mech_register_run_end, t_run_end<'L'>, t_run_end<'E'>, t_run_end<'O'>,
       [&]() {
-        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::BASE_RETURN);
-        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::RUN_AGAIN);
-        spire_mech_run_end(no_c, no_l, SpireMechRunEnd::GAME_EXIT);
+        spire_mech_run_end(run_c, run_l, SpireMechRunEnd::BASE_RETURN);
+        spire_mech_run_end(run_c, run_l, SpireMechRunEnd::RUN_AGAIN);
+        spire_mech_run_end(run_c, run_l, SpireMechRunEnd::GAME_EXIT);
         return hook_calls;
       },
       write, "", "E1L1E2L2E3L3", "E1O1L1E2O2L2E3O3L3", "E1E2E3");
+
+  // Only in a Spire run: H1, H4-H7 and H9 reach no registrant in a game with another quest, a game without a quest, a
+  // lobby, or without a game or a client; in the Spire game the same calls reach it
+  {
+    HookGuard g1{H::QUEST_BIN, "zz"}, g4{H::PLAYER_HP, "zz"}, g5{H::PLAYER_DIED, "zz"}, g6{H::TECH_DONE, "zz"},
+        g7{H::ENEMY_KILLED, "zz"}, g9{H::RUN_END, "zz"};
+    spire_mech_register_quest_bin({"zz", "", 10, t_quest_bin<'E'>});
+    spire_mech_register_player_hp({"zz", "", 10, t_player_hp<'E'>});
+    spire_mech_register_player_died({"zz", "", 10, t_player_died<'E'>});
+    spire_mech_register_tech_done({"zz", "", 10, t_tech_done<'E'>});
+    spire_mech_register_enemy_killed({"zz", "", 10, t_enemy_killed<'E'>});
+    spire_mech_register_run_end({"zz", "", 10, t_run_end<'E'>});
+    auto all_calls = [&](std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+      hook_calls.clear();
+      bool same_bin = (spire_mech_quest_bin(c, l, bin) == bin);
+      hook_calls += same_bin ? "=" : "*";
+      spire_mech_player_hp(c, l, 0x4B);
+      spire_mech_player_hp(c, l, 0x4C);
+      spire_mech_player_died(c, l);
+      spire_mech_tech_done(c, l, 15, 4);
+      spire_mech_enemy_killed(c, l, rec, 3);
+      spire_mech_run_end(c, l, SpireMechRunEnd::BASE_RETURN);
+      spire_mech_run_end(c, l, SpireMechRunEnd::RUN_AGAIN);
+      spire_mech_run_end(c, l, SpireMechRunEnd::GAME_EXIT);
+      return hook_calls;
+    };
+    for (const auto& l : std::vector<std::shared_ptr<Lobby>>{plain_l, free_l, lobby_l, no_l}) {
+      expect_eq(std::string("="), all_calls(run_c, l)); // nobody reached, the .bin is the one handed in
+    }
+    expect_eq(std::string("="), all_calls(no_c, run_l));
+    expect_eq(std::string("E*E4BE4CEE15.4E3.0E1E2E3"), all_calls(run_c, run_l));
+  }
 
   // H10 run_state, the hook alone: the four moments, each registrant with a key of its own carried in the sections
   auto state_call = [&]() {

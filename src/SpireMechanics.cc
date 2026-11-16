@@ -1,6 +1,7 @@
 #include "SpireMechanics.hh"
 
 #include "ReceiveSubcommands.hh"
+#include "SpireFlagBridge.hh"
 
 #include <phosg/Filesystem.hh>
 #include <phosg/JSON.hh>
@@ -197,6 +198,12 @@ void each_hook(SpireMechHookId hook, bool guarded, CallT&& call) {
   }
 }
 
+// Whether the client stands in a Spire run, for the hooks that stand where every game passes: the bridge's own notion
+// of a Spire game (spire_game_is_spire). Asked once here, in the hook's call function, never by a registrant.
+bool in_spire_run(const std::shared_ptr<Client>& c, const std::shared_ptr<const Lobby>& l) {
+  return c && l && spire_game_is_spire(c, l);
+}
+
 // Whether any registration of the hook would be called now
 bool hook_in_force(SpireMechHookId hook) {
   const auto& by_hook = hook_registry().by_hook;
@@ -329,6 +336,9 @@ bool spire_mech_register_quest_bin(const SpireMechHook<SpireMechQuestBinFn>& reg
 
 std::shared_ptr<const std::string> spire_mech_quest_bin(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
     std::shared_ptr<const std::string> bin) {
+  if (!in_spire_run(c, l)) {
+    return bin; // the quest of another game: nobody's to change
+  }
   each_hook<SpireMechQuestBinFn>(HookId::QUEST_BIN, true, [&](SpireMechQuestBinFn fn) {
     auto next = fn(c, l, bin);
     if (next) {
@@ -421,6 +431,9 @@ void spire_mech_player_hp(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, u
   if ((subcommand != 0x4B) && (subcommand != 0x4C)) {
     return; // 6x4A (a fully shielded attack) shares the handler and is no hit
   }
+  if (!in_spire_run(c, l)) {
+    return;
+  }
   each_hook<SpireMechPlayerHPFn>(HookId::PLAYER_HP, true, [&](SpireMechPlayerHPFn fn) { fn(c, l, subcommand); });
 }
 
@@ -430,6 +443,9 @@ bool spire_mech_register_player_died(const SpireMechHook<SpireMechPlayerDiedFn>&
 }
 
 void spire_mech_player_died(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l) {
+  if (!in_spire_run(c, l)) {
+    return;
+  }
   each_hook<SpireMechPlayerDiedFn>(HookId::PLAYER_DIED, true, [&](SpireMechPlayerDiedFn fn) { fn(c, l); });
 }
 
@@ -439,6 +455,9 @@ bool spire_mech_register_tech_done(const SpireMechHook<SpireMechTechDoneFn>& reg
 }
 
 void spire_mech_tech_done(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l, uint32_t technique, uint32_t level) {
+  if (!in_spire_run(c, l)) {
+    return;
+  }
   each_hook<SpireMechTechDoneFn>(HookId::TECH_DONE, true, [&](SpireMechTechDoneFn fn) { fn(c, l, technique, level); });
 }
 
@@ -451,6 +470,9 @@ void spire_mech_enemy_killed(std::shared_ptr<Client> c, std::shared_ptr<Lobby> l
     uint8_t floor) {
   if (!rec.target_ene_st) {
     return; // the drop request of a box
+  }
+  if (!in_spire_run(c, l)) {
+    return;
   }
   each_hook<SpireMechEnemyKilledFn>(HookId::ENEMY_KILLED, true, [&](SpireMechEnemyKilledFn fn) { fn(c, l, rec, floor); });
 }
@@ -472,6 +494,9 @@ bool spire_mech_register_run_end(const SpireMechHook<SpireMechRunEndFn>& reg) {
 }
 
 void spire_mech_run_end(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l, SpireMechRunEnd why) {
+  if (!in_spire_run(c, l)) {
+    return; // the 98 of another game, or of a lobby
+  }
   each_hook<SpireMechRunEndFn>(HookId::RUN_END, true, [&](SpireMechRunEndFn fn) { fn(c, l, why); });
 }
 

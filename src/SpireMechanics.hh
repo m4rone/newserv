@@ -128,9 +128,15 @@ void spire_mech_forget_kind(SpireRewardKind kind, bool first = false);
 // is not called (par. 7: off means not registered); an empty switch key is no switch (a fixed gate, par. 7). Without a
 // registration that is called, a hook changes nothing: the core does what it did before the seam.
 //
-// H4-H7 stand in handlers of every game and H9's game exit comes at every 98: a registrant asks itself whether the
-// game is a Spire run (spire_game_is_spire). A registrant that throws on H1-H9, or at H10's capture and resume, is
-// logged and counts as not registered for that call. H10's write and read and H11 are part of reading and writing a
+// Only in a Spire run: H1, H4-H7 and H9 stand where every game passes (a quest load, the handlers of a hit, a death, a
+// technique and a drop request, every 98). Their call functions reach a registrant only when the client stands in a
+// Spire game, the bridge's own notion (SpireFlagBridge.hh spire_game_is_spire: a game whose quest is listed in
+// SpireGuardQuests or SpireBridgeQuests); in any other game, in a lobby and without a client or a game they do what
+// they do without a registrant. No registrant has to ask, and none can forget. H2, H3, H8 and H10 are reached only
+// from the bridge's own handling of a Spire quest, H11 only for a character's Spire meta file.
+//
+// A registrant that throws on H1-H9, or at H10's capture and resume, is logged and counts as not registered for that
+// call. H10's write and read and H11 are part of reading and writing a
 // file: a throw there refuses the file as a whole, as an unreadable key did before the seam.
 
 enum class SpireMechHookId : uint8_t {
