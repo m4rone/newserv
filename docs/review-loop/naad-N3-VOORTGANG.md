@@ -11,3 +11,4 @@ Start 2026-11-16, kop 80c2046, tak feature/beloningen-b (schoon bij aanvang).
 - [af] soort 1 en 2 in src/SpireRewardWeapon.cc (schakelaar aanval): bouw exit 0, All static tests passed, vingerafdruk groen, ok: spire-lives-check
 - [af] commit 481f673 (wapen); soort 3 in src/SpireRewardMagFood.cc (schakelaar mags): bouw exit 0, All static tests passed, vingerafdruk groen, ok: spire-lives-check
 - [af] commit 5c33319 (mag-voer); soort 4 in src/SpireRewardDisk.cc (schakelaar force.schijf): bouw exit 0, All static tests passed, vingerafdruk groen, ok: spire-lives-check
+- [af] commit 0ffde50 (schijf); soort 5 in src/SpireRewardUnit.cc (schakelaar verdediging.units): bouw exit 0, All static tests passed, vingerafdruk groen, ok: spire-lives-check

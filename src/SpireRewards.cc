@@ -339,65 +339,6 @@ std::string spire_reward_line_of(const SpireRewardTable& table, const SpireRewar
   return cls.lines.count(ret) ? ret : "";
 }
 
-// ---- The seam, step a: the kinds' own halves of the grid and the offer, still in this file. Each moves to its own
-// file (src/SpireReward*.cc) and registers there; the registration is in SpireFlagBridge.cc until then.
-
-// The section of kind 5: Units, the units by code and per archetype and tier the codes an offer draws from
-void spire_reward_unit_parse(const phosg::JSON& json, SpireRewardTable& ret) {
-  if (json.contains("Units")) { // part B; a part A file has none
-    const auto& units = json.at("Units");
-    for (const auto& [code, u_json] : units.get_dict("Items")) {
-      SpireRewardUnit u;
-      u.name = u_json->get_string("Name");
-      u.stars = spire_get_u(*u_json, "Stars", 12);
-      u.stat = spire_get_u(*u_json, "Stat", 0xFFFF);
-      u.amount = spire_get_u(*u_json, "Amount", 0xFFFF);
-      uint32_t c = spire_code_of(code);
-      if ((c >> 8) != 0x0103) {
-        throw std::runtime_error(std::format("Units Items {} is not a unit (0103xx)", code));
-      }
-      ret.units.emplace(c, std::move(u));
-    }
-    for (const auto& [arch, a_json] : units.get_dict("Archetypes")) {
-      std::array<std::vector<uint32_t>, 4> tiers;
-      for (size_t z = 0; z < 4; z++) {
-        for (const auto& code : a_json->get_list(TIER_NAMES[z])) {
-          uint32_t c = spire_code_of(code->as_string());
-          if (!ret.units.count(c)) {
-            throw std::runtime_error(std::format("Units {} {}: {:06X} not in Units Items", arch, TIER_NAMES[z], c));
-          }
-          tiers[z].emplace_back(c);
-        }
-        if (tiers[z].empty()) {
-          throw std::runtime_error(std::format("Units {} {}: no unit", arch, TIER_NAMES[z]));
-        }
-      }
-      ret.unit_tiers.emplace(arch, std::move(tiers));
-    }
-  }
-}
-
-// The offer of kind 5: one unit of the archetype's tier
-std::optional<SpireRewardOffer> spire_reward_unit_offer(const SpireRewardOfferInput& in, SpireRewardOffer ret) {
-  const auto& table = in.table;
-  const auto& cls = in.cls;
-  const auto& tier = in.tier;
-  const auto& tier_label = in.tier_label;
-  const auto& rnd = in.rnd;
-  auto a_it = table.unit_tiers.find(cls.archetype);
-  if (a_it == table.unit_tiers.end()) {
-    throw std::runtime_error(std::format("archetype {} has no units in the reward grid", cls.archetype));
-  }
-  const auto& codes = a_it->second[static_cast<size_t>(tier) & 3];
-  uint32_t code = codes[rnd(codes.size()) % codes.size()];
-  ret.item[0] = (code >> 16) & 0xFF;
-  ret.item[1] = (code >> 8) & 0xFF;
-  ret.item[2] = code & 0xFF;
-  ret.item_name = table.units.at(code).name;
-  ret.label = tier_label + " " + ret.item_name;
-  return ret;
-}
-
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
     const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
     const SpireRewardDiskState* disk, uint8_t rung, SpireRewardLive* live) {
