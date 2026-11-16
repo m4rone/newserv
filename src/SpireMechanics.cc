@@ -84,10 +84,14 @@ KindRegistry& kind_registry() {
   return registry;
 }
 
+std::string conflict_name(SpireRewardKind kind, bool first) {
+  return std::format("kind {}{}", static_cast<uint32_t>(kind), first ? " (first route)" : "");
+}
+
 bool register_kind(const SpireMechKind& reg, bool first) {
   auto& registry = kind_registry();
   if (!registry.by_kind.emplace(std::make_pair(static_cast<uint8_t>(reg.kind), !first), reg).second) {
-    registry.conflicts.emplace_back(std::format("kind {}{}", static_cast<uint32_t>(reg.kind), first ? " (first route)" : ""));
+    registry.conflicts.emplace_back(conflict_name(reg.kind, first));
   }
   return true;
 }
@@ -135,7 +139,9 @@ std::vector<std::string> spire_mech_kind_conflicts() {
 }
 
 void spire_mech_forget_kind(SpireRewardKind kind, bool first) {
-  kind_registry().by_kind.erase(std::make_pair(static_cast<uint8_t>(kind), !first));
+  auto& registry = kind_registry();
+  registry.by_kind.erase(std::make_pair(static_cast<uint8_t>(kind), !first));
+  std::erase(registry.conflicts, conflict_name(kind, first));
 }
 
 bool spire_mech_register_tests(const char* name, SpireMechTestFunction fn) {

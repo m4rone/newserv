@@ -102,5 +102,5 @@ const SpireMechKind* spire_mech_kind(SpireRewardKind kind, bool first = false);
 std::vector<const SpireMechKind*> spire_mech_kinds();
 // "kind 4" or "kind 4 (first route)" for every registration that came second; empty when all is well
 std::vector<std::string> spire_mech_kind_conflicts();
-// Tests only: takes a registration out again
+// Tests only: takes a registration out again, with the conflicts named for it
 void spire_mech_forget_kind(SpireRewardKind kind, bool first = false);
