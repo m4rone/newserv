@@ -89,17 +89,17 @@ struct SpireRewardUnit {
   uint16_t stat = 0;
   uint16_t amount = 0;
 };
-// A technique of the grid (part B, the disk): the MST the GC client asks before it lets a disk be used is
-// Base + Step * (level - 1), held against the total MST with the mag and the units (pso-roguelike
-// new-features/roguelike/research/schijf-mst-eis.md; read from the client image, every technique)
+// A technique of the grid (part B, the disk): the MST the client asks before it lets a disk of each level be used,
+// held against the total MST with the mag and the units (pso-roguelike new-features/roguelike/research/schijf-mst-eis.md).
+// Per level the stricter of the GC client image and Blue Burst (make_spire_rewards.py), so a disk is in reach under either.
 constexpr size_t SPIRE_TECH_COUNT = 19;
+constexpr size_t SPIRE_TECH_LEVELS = 30;
 struct SpireRewardTech {
   std::string name;
-  uint16_t base = 0;
-  uint16_t step = 0;
+  std::array<uint16_t, SPIRE_TECH_LEVELS> req{}; // by level - 1, never falling
 };
 constexpr uint32_t spire_reward_disk_mst(const SpireRewardTech& tech, uint8_t level) { // level 1-30
-  return tech.base + (static_cast<uint32_t>(tech.step) * (level ? (level - 1) : 0));
+  return tech.req[std::clamp<size_t>(level, 1, SPIRE_TECH_LEVELS) - 1];
 }
 // The MIND levels a mag must have for a requirement on a copy with this MST (+2 MST per MIND level, rounded up)
 constexpr uint16_t spire_reward_disk_mind(uint32_t mst_required, uint32_t mst) {
@@ -142,6 +142,11 @@ struct SpireRewardTable {
   // SpireMeta spire_meta_ladder_quest_rung): the places up Sega's series a rung's rooms are solved with (pso-roguelike
   // sim/ladder.json weapon_steps), so a rung never offers a weapon below its own kit
   std::array<uint8_t, 4> rung_weapon_steps{};
+  // part B, the disk's level (pso-roguelike design/mechanics/force-spells.md par. 2): the MIND levels a tier lets the run
+  // mag rise above its plan for a disk (Normal, Rare, Epic, Legendary), and per rung the columns the grid's presence test
+  // moves up (Hard reads Sega's Hard disks from the Rare column, and so on, at most the last)
+  std::array<uint16_t, 4> tier_disk_mind{};
+  std::array<uint8_t, 4> rung_disk_columns{};
   std::map<uint8_t, std::string> line_groups; // data1[1] of a plain weapon -> line
   std::map<uint32_t, std::string> line_of; // a weapon code -> line
   std::map<uint32_t, SpireRewardItemInfo> items;
@@ -151,8 +156,8 @@ struct SpireRewardTable {
   std::map<uint32_t, SpireRewardUnit> units;
   std::map<std::string, std::array<std::vector<uint32_t>, 4>> unit_tiers;
   // part B, the disk: the techniques by id (0 Foie - 18 Megid) and per room index (1 = the first room of the episode)
-  // the level of Sega's disk per technique and tier (0: Sega drops none there). Empty when the file has no Disks: a
-  // DISK entry then gives its own item.
+  // the level of Sega's disk per technique and tier (0: Sega drops none there; the level itself only says that the
+  // technique may come). Empty when the file has no Disks: a DISK entry then gives its own item.
   std::array<SpireRewardTech, SPIRE_TECH_COUNT> techs;
   std::map<uint32_t, std::array<std::array<uint8_t, 4>, SPIRE_TECH_COUNT>> disk_levels;
 };
@@ -206,11 +211,14 @@ struct SpireRewardOffer {
 //   mst        the copy's MST with the worn units, without the mag (as a weapon's MST requirement reads it)
 //   mst_cap    the class's highest MST (the client caps the total there); 0 = not known, no cap
 //   mind_room  the MIND levels rule B's mag can carry: 200 less the POW and DEX the reward weapon asks
+//   mind_now   the MIND levels of the run mag the copy wears (0 without one)
+//   mind_plan  the MIND levels the run mag is planned to have at this point of the run: its step row, or the floor of
+//              the bought start levels when that is higher (0 without a ledger)
 // and of its draw entry:
-//   line_tech, line_level  the disk the entry names itself (a line that was a fixed disk, "Foie Lv3": its own item
-//              03 02 level-1 00 tech), 0xFF and 0 for a line without one ("Disk"). The offer keeps that technique while
-//              the copy can still grow in it, at the line's own level or higher when the copy can reach that (Marck,
-//              16 Nov 2026: "the reward must simply be a spell a force can use"); else any technique, as "Disk"
+//   line_tech  the technique of the disk the entry names itself (a line that was a fixed disk, "Foie": its own item
+//              03 02 level-1 00 tech), 0xFF for a line without one ("Disk"). The offer keeps that technique while the
+//              copy can still grow in it (Marck, 16 Nov 2026: "the reward must simply be a spell a force can use"),
+//              whether or not Sega drops it in the room; else any technique Sega drops there, as "Disk"
 //   extra_levels  what a drawn curse on the pick adds to the disk (spire_reward_curse_disk_levels), as far as the
 //              class's highest level and the copy's MST go
 struct SpireRewardDiskState {
@@ -219,8 +227,9 @@ struct SpireRewardDiskState {
   uint32_t mst = 0;
   uint32_t mst_cap = 0;
   uint16_t mind_room = 200;
+  uint16_t mind_now = 0;
+  uint16_t mind_plan = 0;
   uint8_t line_tech = 0xFF;
-  uint8_t line_level = 0;
   uint8_t extra_levels = 0;
   SpireRewardDiskState() {
     this->known.fill(0xFF);
@@ -233,18 +242,27 @@ struct SpireRewardDiskState {
 constexpr uint8_t spire_reward_curse_disk_levels(uint32_t curse) {
   return ((curse == 1) || (curse == 3)) ? 2 : 0;
 }
-// The level of a DISK offer for one technique, 0 for none. Sega's level for the room and tier (the grid), at most the
-// class's highest; for a technique the copy knows at least two levels above what it knows (pso-roguelike
-// design/kracht-voorbij-normaal.md par. 4: "disk +2 levels"; one level when that is the class's highest), so a disk
-// always teaches something; state.extra_levels on top, within the class's highest. Then down, never to what the copy
-// knows, until the copy can meet the MST the client asks: the requirement at most mst_cap, and the MIND it takes
-// within mind_room.
-uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level, uint8_t known, uint8_t class_max,
+// The MST a DISK offer of a tier may count on (design/mechanics/force-spells.md par. 2): the copy's MST and two per MIND
+// level of the mag it wears, or of the mag's plan with the tier's tilt (tier_mind) when that is more, within mind_room.
+// So a spell follows the strength of the copy (a difficulty rung and bought start levels raise it by themselves), and
+// a higher tier reaches further above it without the mag going all MIND for one disk.
+constexpr uint32_t spire_reward_disk_budget(const SpireRewardDiskState& state, uint16_t tier_mind) {
+  uint32_t mind = std::max<uint32_t>(state.mind_now, static_cast<uint32_t>(state.mind_plan) + tier_mind);
+  return state.mst + (2 * std::min<uint32_t>(mind, state.mind_room));
+}
+// The level of a DISK offer for one technique, 0 for none. The highest level whose MST the budget meets (at most
+// mst_cap), at most the class's highest; for a technique the copy knows at least two levels above what it knows
+// (pso-roguelike design/kracht-voorbij-normaal.md par. 4: "disk +2 levels"; one level when that is the class's
+// highest) and for any other at least level 1, so a disk always teaches something; state.extra_levels on top, within
+// the class's highest. Then down, never to what the copy knows, until the copy can meet the MST the client asks: the
+// requirement at most mst_cap, and the MIND it takes within mind_room.
+uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, uint8_t known, uint8_t class_max,
     const SpireRewardDiskState& state);
 // rnd(n): uniform 0..n-1. held: data1 of the weapon the player holds (nullptr: none, the class's first line). The tier is
 // given (spire_reward_tier_for_roll). Throws when the class has no line for it (not in the grid). disk: the run copy
 // for a DISK offer (required for that kind; it throws without, and when no technique has a level to give). rung: the
-// difficulty rung of the run's quest (0 Normal - 3 Ultimate), which lifts a weapon's W (spire_reward_w).
+// difficulty rung of the run's quest (0 Normal - 3 Ultimate), which lifts a weapon's W (spire_reward_w) and moves the
+// column of the grid that says which techniques a disk may be (rung_disk_columns).
 SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKind kind, uint8_t char_class,
     const uint8_t* held, uint32_t room_index, SpireRewardTier tier, const std::function<uint32_t(uint32_t)>& rnd,
     const SpireRewardDiskState* disk = nullptr, uint8_t rung = 0);

@@ -160,18 +160,23 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
   for (const auto& [k, w] : json.get_dict("RoomW")) {
     ret.room_w.emplace(std::stoul(k), spire_get_u(json.at("RoomW"), k, 6));
   }
-  const auto& rung_steps = json.get_list("RungWeaponSteps");
-  if (rung_steps.size() != ret.rung_weapon_steps.size()) {
-    throw std::runtime_error(std::format("RungWeaponSteps has {} rungs, not {}", rung_steps.size(),
-        ret.rung_weapon_steps.size()));
-  }
-  for (size_t r = 0; r < ret.rung_weapon_steps.size(); r++) {
-    int64_t v = rung_steps[r]->as_int();
-    if ((v < 0) || (v > 4)) {
-      throw std::runtime_error(std::format("RungWeaponSteps {}: {} outside 0-4", r, v));
+  // four values of one key, each 0-max: one per difficulty rung, or one per tier
+  auto four = [&json](const char* key, int64_t max, auto& to) {
+    const auto& list = json.get_list(key);
+    if (list.size() != to.size()) {
+      throw std::runtime_error(std::format("{} has {} values, not {}", key, list.size(), to.size()));
     }
-    ret.rung_weapon_steps[r] = v;
-  }
+    for (size_t z = 0; z < to.size(); z++) {
+      int64_t v = list[z]->as_int();
+      if ((v < 0) || (v > max)) {
+        throw std::runtime_error(std::format("{} {}: {} outside 0-{}", key, z, v, max));
+      }
+      to[z] = v;
+    }
+  };
+  four("RungWeaponSteps", 4, ret.rung_weapon_steps);
+  four("TierDiskMind", 200, ret.tier_disk_mind);
+  four("RungDiskColumns", 3, ret.rung_disk_columns);
   for (const auto& [g, line] : json.get_dict("LineGroups")) {
     ret.line_groups.emplace(std::stoul(g, nullptr, 16), line->as_string());
   }
@@ -285,10 +290,17 @@ SpireRewardTable spire_rewards_parse(const std::string& json_text) {
     }
     for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
       ret.techs[t].name = techs[t]->get_string("Name");
-      ret.techs[t].base = spire_get_u(*techs[t], "Base", 2000);
-      ret.techs[t].step = spire_get_u(*techs[t], "Step", 200);
-      if (ret.techs[t].name.empty() || !ret.techs[t].base) {
-        throw std::runtime_error(std::format("Disks Techs {}: no name or no Base", t));
+      const auto& req = techs[t]->get_list("Req");
+      if (ret.techs[t].name.empty() || (req.size() != SPIRE_TECH_LEVELS)) {
+        throw std::runtime_error(std::format("Disks Techs {}: no name, or Req has {} levels, not {}", t, req.size(),
+            SPIRE_TECH_LEVELS));
+      }
+      for (size_t z = 0; z < SPIRE_TECH_LEVELS; z++) {
+        int64_t v = req[z]->as_int();
+        if ((v < 1) || (v > 5000) || (z && (v < ret.techs[t].req[z - 1]))) {
+          throw std::runtime_error(std::format("Disks Techs {} Req level {}: {} is not 1-5000 or falls", t, z + 1, v));
+        }
+        ret.techs[t].req[z] = v;
       }
     }
     for (const auto& [room, r_json] : disks.get_dict("Rooms")) {
@@ -425,16 +437,22 @@ static std::string spire_reward_weapon_name(const SpireRewardCell& cell, const S
   return ret;
 }
 
-uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint8_t sega_level, uint8_t known, uint8_t class_max,
+uint8_t spire_reward_disk_level(const SpireRewardTech& tech, uint32_t budget, uint8_t known, uint8_t class_max,
     const SpireRewardDiskState& state) {
-  if (!sega_level || (class_max == 0xFF)) {
-    return 0; // Sega drops none here, or the class cannot learn it
+  if (class_max == 0xFF) {
+    return 0; // the class cannot learn it
   }
   uint8_t max_level = std::min<uint8_t>(class_max, 29) + 1;
   uint8_t known_level = (known == 0xFF) ? 0 : (std::min<uint8_t>(known, 29) + 1);
+  if (state.mst_cap) {
+    budget = std::min(budget, state.mst_cap);
+  }
+  uint8_t fit = max_level; // the highest level the budget meets, 0 for none
+  for (; fit && (spire_reward_disk_mst(tech, fit) > budget); fit--) {
+  }
   // a technique the copy knows comes at least two levels higher (KV par. 4: "disk +2 levels"), one at the class's top
   uint8_t floor = known_level ? std::min<uint8_t>(known_level + 2, max_level) : 1;
-  uint8_t level = std::max(std::min(sega_level, max_level), floor);
+  uint8_t level = std::max(fit, floor);
   if (level <= known_level) {
     return 0; // the copy knows the class's highest already
   }
@@ -519,22 +537,25 @@ SpireRewardOffer spire_reward_offer(const SpireRewardTable& table, SpireRewardKi
     if (r_it != table.disk_levels.begin()) {
       r_it--;
     }
-    auto level_of = [&](size_t t, uint8_t at_least) -> uint8_t {
-      return spire_reward_disk_level(table.techs[t], std::max(r_it->second[t][static_cast<size_t>(tier) & 3], at_least),
-          disk->known[t], disk->class_max[t], *disk);
+    size_t z = static_cast<size_t>(tier) & 3;
+    // the techniques Sega drops here: on a rung its disks of that difficulty, which the grid holds in a later column
+    size_t column = std::min<size_t>(z + table.rung_disk_columns[rung & 3], 3);
+    uint32_t budget = spire_reward_disk_budget(*disk, table.tier_disk_mind[z]);
+    auto level_of = [&](size_t t) -> uint8_t {
+      return spire_reward_disk_level(table.techs[t], budget, disk->known[t], disk->class_max[t], *disk);
     };
     std::vector<std::pair<uint8_t, uint8_t>> can; // technique, level
-    // a line that names a disk of its own keeps that technique, at the line's level or higher, while the copy can
-    // still grow in it and reach it; only then any technique of the tier
+    // a line that names a disk of its own keeps that technique while the copy can still grow in it and reach it,
+    // also where Sega drops none of it; only then any technique Sega drops here
     if (disk->line_tech < SPIRE_TECH_COUNT) {
-      uint8_t level = level_of(disk->line_tech, std::min<uint8_t>(disk->line_level, 30));
+      uint8_t level = level_of(disk->line_tech);
       if (level) {
         can.emplace_back(disk->line_tech, level);
       }
     }
     if (can.empty()) {
       for (size_t t = 0; t < SPIRE_TECH_COUNT; t++) {
-        uint8_t level = level_of(t, 0);
+        uint8_t level = r_it->second[t][column] ? level_of(t) : 0;
         if (level) {
           can.emplace_back(static_cast<uint8_t>(t), level);
         }

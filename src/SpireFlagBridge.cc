@@ -4431,6 +4431,29 @@ void spire_static_test_run_boss(std::shared_ptr<Client> c, std::shared_ptr<const
   spire_run_rooms_for(c, l->lobby_id).boss_rooms.emplace(k);
 }
 
+// The MIND levels the run mag is planned to have at this point of the run (SpireRewardDiskState mind_plan): the row of
+// the step the ledger expects, in the column of its lean, merged with the floor of the run's bought start levels; 0
+// without a ledger or a usable mag table
+static uint16_t spire_reward_mind_plan(std::shared_ptr<Client> c, std::shared_ptr<const Lobby> l,
+    const SpireRunMagLedger* led, uint8_t char_class) {
+  if (!led) {
+    return 0;
+  }
+  try {
+    auto table = spire_mag_parse(phosg::load_file(SPIRE_RUN_MAG_FILE));
+    auto it = table.classes.find(spire_mag_archetype(char_class));
+    if (!table.enabled || (it == table.classes.end())) {
+      return 0;
+    }
+    auto column = spire_mag_column(it->second, led->lean);
+    uint32_t step = spire_mag_expected_step(column.line.steps.size(), led->start_step, led->boss_rooms.size(), false);
+    uint32_t bonus = l->quest ? spire_start_level_run_bonus(c.get(), l->lobby_id, l->quest->meta.quest_number).value_or(0) : 0;
+    return spire_mag_stat_word(spire_mag_step_bytes(column.line, step, bonus, std::nullopt), 3) / 100;
+  } catch (const std::exception&) {
+    return 0;
+  }
+}
+
 // One server offer for a drawn slot (kind of its entry), with the tier rolled by KV par. 4; a rare line of the pool is
 // never below Rare. curse: the drawn curse code of the slot (1 Cursed Chest, 2 Jellen Mark, 3 Glass; 0 none), which
 // rides only on a rare line and pays a disk in levels (spire_reward_curse_disk_levels).
@@ -4469,10 +4492,12 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
       auto* led = run ? spire_run_mag_ledger_for(c, run->run_id, false) : nullptr;
       uint32_t asked = led ? (led->need.pow + led->need.dex) : 0; // the reward weapon's POW and DEX stay (rule B)
       disk->mind_room = (asked < 200) ? (200 - asked) : 0;
-      // a line that was a fixed disk ("Foie Lv3"): its own item names the technique and the level it starts from
+      auto mag = spire_reward_run_mag(overlay->inventory);
+      disk->mind_now = mag ? (spire_mag_stat_word(*mag, 3) / 100) : 0;
+      disk->mind_plan = spire_reward_mind_plan(c, l, led, char_class);
+      // a line that was a fixed disk ("Foie"): its own item names the technique
       if (entry.has_own_bytes && (entry.own_bytes[0] == 0x03) && (entry.own_bytes[1] == 0x02)) {
         disk->line_tech = entry.own_bytes[4];
-        disk->line_level = entry.own_bytes[2] + 1;
       }
       disk->extra_levels = entry.rare ? spire_reward_curse_disk_levels(curse) : 0;
     }
@@ -4483,10 +4508,10 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
         offer.w, trede, odds.legendary, odds.epic, odds.rare, elite ? ", elite" : "", entry.rare ? ", a rare line" : "",
         offer.label,
         !disk ? std::string()
-        : std::format(" (the line's own disk: {}; a curse adds {} level(s))",
-              (disk->line_tech < SPIRE_TECH_COUNT) ? std::format("{} Lv{}", table.techs[disk->line_tech].name, disk->line_level)
-                                                   : std::string("none"),
-              disk->extra_levels));
+        : std::format(" (the line's own technique: {}; MST {}, mag MIND {} worn and {} planned, room for {}; a curse "
+                      "adds {} level(s))",
+              (disk->line_tech < SPIRE_TECH_COUNT) ? table.techs[disk->line_tech].name : std::string("none"), disk->mst,
+              disk->mind_now, disk->mind_plan, disk->mind_room, disk->extra_levels));
     return offer;
   } catch (const std::exception& e) {
     *why = e.what();
