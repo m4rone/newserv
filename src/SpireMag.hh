@@ -328,7 +328,29 @@ struct SpireRunMagLedger {
   // leave room in the mag's 200 levels (SpireRewards.hh spire_reward_need_with_disk), so need.mind can be below it.
   uint16_t disk_mind = 0;
   bool offered_boost = false; // the offered mag is a boost (its kind follows Sega's evolution; in memory only)
+  // Mags, the first piece (persisted "FeedStats", "Form"; mags.md par. 6). feed_stats: the mag food owed per stat, of
+  // a food that names its stat (feed_levels stays the food on the main stat: the food of before, and with Feed off);
+  // both are owed and settled together. form: the rare form the run mag took (its kind, data1[1]; 0: none). From then
+  // on every answer carries that kind, also a boss step: the form is never renamed again (as Sega's evolution number 4).
+  SpireMagLevels feed_stats{};
+  uint8_t form = 0;
 };
+
+// The mag food the next answer owes per stat: feed_stats, with feed_levels on the main stat; at most 200 each
+SpireMagLevels spire_run_mag_owed_food(const SpireRunMagLedger& ledger, size_t main_stat);
+// A mag food is taken ('Z' sub 6 of reward kind 3): the ledger owes it, and the next ASK answers the mag (boost_due),
+// along the run mag's one swap path. Levels of a directed food go to feed_stats, of the food of before to feed_levels;
+// a form becomes the ledger's form (the stats stay). Owed food is at most 200 levels per stat.
+void spire_run_mag_take_food(SpireRunMagLedger& ledger, const SpireMagFoodOffer& offer);
+// A mag food offer as 12 bytes, so a reward offer can carry it from the draw to its pick in its item field (which mag
+// food uses for nothing else: its pick answers no item). 02, the form's kind, the levels, 00, the stat, directed, the
+// form's source, then zeros. from_bytes: nullopt for bytes that are no such record (an offer made before this piece).
+SpireMagBytes spire_mag_food_offer_bytes(const SpireMagFoodOffer& offer);
+std::optional<SpireMagFoodOffer> spire_mag_food_offer_from_bytes(const SpireMagBytes& bytes);
+// The ledger's new keys read from a savestate file, as spire_run_mag_saved_lean: an edited file never wraps. The form:
+// 1-255 as written, anything else 0 (none). The food per stat: four values, each 0-200; any other count is no food.
+uint8_t spire_run_mag_saved_form(int64_t value);
+SpireMagLevels spire_run_mag_saved_feed(const std::vector<int64_t>& values);
 
 // F10: the lean bits of an ASK or EXAM word (bits 8-15)
 uint8_t spire_run_mag_lean_bits(uint32_t value);
@@ -391,8 +413,9 @@ struct SpireRunMagDecision {
   uint32_t expected_step = 0;
   SpireMagBytes bytes{};
 };
-// Rule B: every answer is spire_mag_rule_b of the ledger's need and feed (both 0 without a reward); a boost_due answers
-// even without a new step, and its kind follows evolve_at (spire_mag_evolve_id) when one is given. main_stat:
+// Rule B: every answer is spire_mag_rule_b_fed of the ledger's need and food (spire_run_mag_owed_food; both 0 without a
+// reward); a boost_due answers even without a new step, and its kind follows evolve_at (spire_mag_evolve_id) when one
+// is given. A ledger with a form answers that kind, whatever the step row or the evolution says. main_stat:
 // spire_mag_main_stat of the class and the ledger's lean.
 SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireMagLine& line, uint8_t sub, uint8_t k,
     const std::set<uint8_t>& server_boss_rooms, uint32_t used_start_bonus, size_t main_stat = 1,
@@ -481,6 +504,9 @@ std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_m
 // F10: shell names the choice ("Your mag evolves: Varuna (Shell). ..."); Fang/Mind is the text as before. Bundle 9:
 // server_equips (its RESULT's 'C' 14 came, so the server equips the new mag; spire_run_mag_evolve_text_take) drops
 // " Equip it: Item Pack, Mag."
+// Mags, the first piece: a line longer than SPIRE_RUN_MAG_TICKER_MAX (the rare forms and the directions bring longer
+// names: "KAPU KAPU (Shell)" would be 62) first drops " (Shell)", then shortens the hint to " Equip it."; the names of
+// the step rows fit as they are, so their lines are the ones of before.
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell = false, bool server_equips = false);
 // The text at a run's first mag (RESULT 1 with nothing issued before: the kit, or a practice run's first ASK). Fix
 // round (F10S critic N4): a Shell mag names the choice as the evolve text does; otherwise SPIRE_RUN_MAG_REMINDER_TEXT.

@@ -714,6 +714,67 @@ std::string spire_mag_food_name(const SpireMagFoodOffer& offer, const std::strin
   return std::format("Mag {} +{}", spire_mag_stat_name(offer.stat), offer.levels);
 }
 
+SpireMagLevels spire_run_mag_owed_food(const SpireRunMagLedger& ledger, size_t main_stat) {
+  SpireMagLevels ret{};
+  for (size_t z = 0; z < 4; z++) {
+    uint32_t owed = ledger.feed_stats[z] + ((z == main_stat) ? ledger.feed_levels : 0);
+    ret[z] = std::min<uint32_t>(owed, 200);
+  }
+  return ret;
+}
+
+void spire_run_mag_take_food(SpireRunMagLedger& ledger, const SpireMagFoodOffer& offer) {
+  if (offer.form != SpireMagFormSource::NONE) {
+    ledger.form = offer.form_id;
+  } else if (offer.directed && (offer.stat < 4)) {
+    ledger.feed_stats[offer.stat] = std::min<uint32_t>(ledger.feed_stats[offer.stat] + offer.levels, 200);
+  } else {
+    ledger.feed_levels = std::min<uint32_t>(ledger.feed_levels + offer.levels, 200);
+  }
+  ledger.boost_due = true;
+}
+
+SpireMagBytes spire_mag_food_offer_bytes(const SpireMagFoodOffer& offer) {
+  SpireMagBytes ret{};
+  ret[0] = 0x02;
+  ret[1] = offer.form_id;
+  ret[2] = std::min<uint16_t>(offer.levels, 200);
+  ret[4] = offer.stat & 3;
+  ret[5] = offer.directed ? 1 : 0;
+  ret[6] = static_cast<uint8_t>(offer.form);
+  return ret;
+}
+
+std::optional<SpireMagFoodOffer> spire_mag_food_offer_from_bytes(const SpireMagBytes& bytes) {
+  bool is_form = bytes[6] != static_cast<uint8_t>(SpireMagFormSource::NONE);
+  if ((bytes[0] != 0x02) || (bytes[2] > 200) || (bytes[3] != 0) || (bytes[4] > 3) || (bytes[5] > 1) ||
+      (bytes[6] > static_cast<uint8_t>(SpireMagFormSource::HEART)) || (is_form != (bytes[1] != 0)) ||
+      (is_form != (bytes[2] == 0)) || std::any_of(bytes.begin() + 7, bytes.end(), [](uint8_t b) { return b != 0; })) {
+    return std::nullopt;
+  }
+  SpireMagFoodOffer ret;
+  ret.form_id = bytes[1];
+  ret.levels = bytes[2];
+  ret.stat = bytes[4];
+  ret.directed = bytes[5];
+  ret.form = static_cast<SpireMagFormSource>(bytes[6]);
+  return ret;
+}
+
+uint8_t spire_run_mag_saved_form(int64_t value) {
+  return ((value >= 1) && (value <= 0xFF)) ? value : 0;
+}
+
+SpireMagLevels spire_run_mag_saved_feed(const std::vector<int64_t>& values) {
+  SpireMagLevels ret{};
+  if (values.size() == ret.size()) {
+    for (size_t z = 0; z < ret.size(); z++) {
+      ret[z] = std::clamp<int64_t>(values[z], 0, 200);
+    }
+  }
+  return ret;
+}
+
 SpireMagBytes spire_mag_food_apply(const SpireMagBytes& mag, const SpireMagFoodOffer& offer, const SpireMagSega& sega) {
   if (offer.form != SpireMagFormSource::NONE) {
     auto ret = mag;
@@ -815,9 +876,12 @@ SpireRunMagDecision spire_run_mag_decide(SpireRunMagLedger& ledger, const SpireM
   bool new_step = ledger.issued_step < static_cast<int32_t>(ret.expected_step);
   if (new_step || ledger.boost_due) {
     ret.result = true;
-    ret.bytes = spire_mag_rule_b(line, std::max<int64_t>(ret.expected_step, ledger.issued_step), used_start_bonus,
-        ledger.last_mirrored, ledger.need, ledger.feed_levels, main_stat);
-    if (ledger.boost_due && evolve_at) {
+    ret.bytes = spire_mag_rule_b_fed(line, std::max<int64_t>(ret.expected_step, ledger.issued_step), used_start_bonus,
+        ledger.last_mirrored, ledger.need, spire_run_mag_owed_food(ledger, main_stat), main_stat);
+    if (ledger.form) {
+      // a rare form stays: no step row and no evolution renames it (mags.md par. 3c)
+      ret.bytes[1] = ledger.form;
+    } else if (ledger.boost_due && evolve_at) {
       uint8_t from = ledger.last_mirrored ? (*ledger.last_mirrored)[1] : ret.bytes[1];
       ret.bytes[1] = spire_mag_evolve_id(ret.bytes, from, evolve_at);
     }
@@ -906,6 +970,7 @@ bool spire_run_mag_result(SpireRunMagLedger& ledger, bool created) {
     if (ledger.offered_boost) { // rule B: the boost is on the client now
       ledger.boost_due = false;
       ledger.feed_levels = 0;
+      ledger.feed_stats = {};
     }
   } else {
     ledger.issued_step = ledger.step_before_offer;
@@ -963,6 +1028,7 @@ bool spire_run_mag_follow_mirror(SpireRunMagLedger& ledger, const std::vector<Sp
     if (ledger.offered_boost) {
       ledger.boost_due = false;
       ledger.feed_levels = 0;
+      ledger.feed_stats = {};
     }
     ledger.offered_boost = false;
     ledger.offered.reset();
@@ -1002,8 +1068,17 @@ SpireMagBytes spire_run_mag_bytes_from_hex(const std::string& hex) {
 }
 
 std::string spire_run_mag_evolve_text(const std::string& sega_name, bool shell, bool server_equips) {
-  return std::format("Your mag evolves: {}{}.{}", sega_name, shell ? " (Shell)" : "",
-      server_equips ? "" : " Equip it: Item Pack, Mag.");
+  auto text = [&](bool with_shell, const char* hint) {
+    return std::format("Your mag evolves: {}{}.{}", sega_name, with_shell ? " (Shell)" : "", server_equips ? "" : hint);
+  };
+  std::string ret = text(shell, " Equip it: Item Pack, Mag.");
+  if (ret.size() > SPIRE_RUN_MAG_TICKER_MAX) {
+    ret = text(false, " Equip it: Item Pack, Mag.");
+  }
+  if (ret.size() > SPIRE_RUN_MAG_TICKER_MAX) {
+    ret = text(false, " Equip it.");
+  }
+  return ret;
 }
 
 std::string spire_kit_use_text(bool server_equips, uint32_t grind, uint32_t hp_mat_level) {
