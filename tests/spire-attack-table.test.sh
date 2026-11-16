@@ -5,8 +5,9 @@
 # Episode 1 on a difficulty of its rung and tier (rare-table-v3.json), and be reachable: in at least one room of that
 # rung the run copy of the reward grid (system/spire-rewards.json: run level, weapon level, mag ceiling, ATA model) can
 # carry it with rule B's mag. The lists are held against a fresh derivation from those tables, so the table cannot
-# drift from them; Legendary is never weaker than Epic in any room; the attribute per area is Sega's most likely one;
-# the specials are Sega's 40, each once, with Sega's stars.
+# drift from them; with the grind RareFloor gives, an Epic or Legendary weapon is never weaker than the room's Normal
+# weapon and Legendary never weaker than Epic, in any room; the attribute per area is Sega's most likely one; the
+# specials are Sega's 40, each once, with Sega's stars.
 #
 #   sh tests/spire-attack-table.test.sh [newserv]      the test (the executable is not used; python3 is)
 #   sh tests/spire-attack-table.test.sh --write        derive Items and Rares again and rewrite the table in place
@@ -158,6 +159,35 @@ def pick(codes, cls, line, rung, k):
     return None
 
 
+def grid_cell(cls, line, rung, k, tier):
+    return GRID['Classes'][cls]['Lines'][line]['W']['W%d' % min(6, ROOM_W[k] + STEPS[rung])]['Tiers'][tier]
+
+
+def choose(table, tier, cls, line, rung, k):
+    """The weapon of an offer as SpireAttack.cc spire_attack_choose gives it: (code, grind, whether it is a rare of the
+    table). Normal and Rare: the grid's cell. Epic and Legendary: the first rare weapon of the list the copy can carry,
+    else the grid's cell. RareFloor: a rare weapon gets the grind it needs, at most its MaxGrind, to be no weaker than
+    the Normal weapon of the cell with its grind. Legendary is held against Epic's choice as well, and is that choice
+    when its own weapon cannot reach it."""
+    cell = grid_cell(cls, line, rung, k, tier)
+    own = (cell['Code'], min(cell.get('Grind') or 0, ITEMS[cell['Code']]['MaxGrind']), False)
+    if tier not in TIERS:
+        return own
+    got = pick(table['Rares'][RUNGS[rung]][cls][line][tier], cls, line, rung, k)
+    epic = choose(table, 'Epic', cls, line, rung, k) if tier == 'Legendary' else None
+    if got is None:
+        ret = own
+    else:
+        normal = grid_cell(cls, line, rung, k, 'Normal')
+        target = strength(normal['Code'], normal.get('Grind') or 0) if table['RareFloor'] else 0
+        if epic is not None and table['RareFloor']:
+            target = max(target, strength(epic[0], epic[1]))
+        ret = (got, min(ITEMS[got]['MaxGrind'], ceil_div(target - strength(got), 4)), True)
+    if (epic is not None) and (strength(ret[0], ret[1]) < strength(epic[0], epic[1])):
+        return epic
+    return ret
+
+
 def candidates(cls, line, difficulties, kind_lines):
     out = []
     for code, dropped in DROPS.items():
@@ -256,11 +286,14 @@ def check(ok, text):
 
 # --- the switch and the keys
 KEYS = ['_what', 'Enabled', 'AttributeIds', 'AreaOfRoom', 'AreaAttribute', 'AttrPct', 'AttrPerRung',
-        'AttrPerStepAboveW6', 'AttrCap', 'SecondAttr', 'HitPerRung', 'HitCap', 'MagCapKey', 'Columns', 'KindLines',
-        'RareSpecials', 'ExcludedSpecials', 'Items', 'Rares']
+        'AttrPerStepAboveW6', 'AttrCap', 'SecondAttr', 'HitPerRung', 'HitCap', 'MagCapKey', 'MagCap', 'RareFloor',
+        'Columns', 'KindLines', 'RareSpecials', 'ExcludedSpecials', 'Items', 'Rares']
 check(list(table) == KEYS, 'keys are %s, expected %s' % (list(table), KEYS))
 check(list(table)[1] == 'Enabled' and isinstance(table['Enabled'], bool), 'Enabled must be the first key after _what, a bool')
 check(MAG_CAP_KEY in ('MagCap', 'MagCapLegendary'), 'MagCapKey %s is no key of the grid\'s WeaponLevels' % MAG_CAP_KEY)
+check(table.get('MagCap') == {str(w): WEAPON_LEVELS[w][MAG_CAP_KEY] for w in sorted(WEAPON_LEVELS)},
+      'MagCap is not the reward grid\'s %s per weapon level' % MAG_CAP_KEY)
+check(isinstance(table.get('RareFloor'), bool), 'RareFloor must be a bool')
 check(open(TABLE).read() == render(table), 'the file is not in its own layout: run this script with --write')
 
 # --- lines: Sega's weapon kind gives the line of every weapon the reward grid knows
@@ -296,6 +329,7 @@ check(list(rares) == RUNGS, 'Rares has the rungs %s, expected %s' % (list(rares)
 check(list(table['Columns']) == RUNGS, 'Columns has the rungs %s, expected %s' % (list(table['Columns']), RUNGS))
 rows = 0
 used = set()
+floors = {'rooms': 0, 'ground': 0, 'max': 0, 'lost': 0, 'weaker': 0}  # rare weapons given over all rooms, and those with grind
 for ri, rung in enumerate(RUNGS):
     check(list(rares.get(rung, {})) == list(GRID['Classes']), '%s: the classes are not the reward grid\'s' % rung)
     for cls, c in GRID['Classes'].items():
@@ -327,11 +361,27 @@ for ri, rung in enumerate(RUNGS):
                     check(any(fits(code, cls, line, ri, k) for k in ROOM_W),
                           '%s: %s %s cannot be carried in any room of this rung' % (where, code, NAMES[code]))
             check(set(epic) <= set(legendary), '%s %s %s: an Epic weapon is missing from Legendary' % (rung, cls, line))
-            # Legendary never weaker than Epic, in every room
+            # In every room: the list's Legendary is never weaker than its Epic, and what the server gives
+            # (choose: the floor's grind, Epic's choice for a Legendary that cannot reach it) never weaker than the
+            # room's Normal weapon, Legendary never weaker than Epic
             for k in ROOM_W:
                 e, l = pick(epic, cls, line, ri, k), pick(legendary, cls, line, ri, k)
                 check((e is None) or ((l is not None) and (strength(l) >= strength(e))),
                       '%s %s %s room %d: Legendary %s is weaker than Epic %s' % (rung, cls, line, k, l, e))
+                given = {t: choose(table, t, cls, line, ri, k) for t in ALL_TIERS}
+                power = {t: strength(given[t][0], given[t][1]) for t in ALL_TIERS}
+                check(power['Legendary'] >= power['Epic'], '%s %s %s room %d: the server gives Legendary %s +%d, weaker than '
+                      'Epic %s +%d' % ((rung, cls, line, k) + given['Legendary'][:2] + given['Epic'][:2]))
+                for t in TIERS:
+                    floors['rooms'] += 1 if given[t][2] else 0
+                    floors['ground'] += 1 if (given[t][2] and given[t][1]) else 0
+                    floors['max'] = max(floors['max'], given[t][1] if given[t][2] else 0)
+                    floors['lost'] += 1 if ((pick(tiers[t], cls, line, ri, k) is not None) and not given[t][2]) else 0
+                    weaker = given[t][2] and (power[t] < power['Normal'])
+                    floors['weaker'] += 1 if weaker else 0
+                    check((not weaker) or (not table['RareFloor']), '%s %s %s room %d: %s %s +%d is weaker than the '
+                          'Normal weapon %s +%d' % ((rung, cls, line, k, t) + given[t][:2] + given['Normal'][:2]))
+check((floors['lost'] == 0) or (not table['RareFloor']), '%d times a Legendary rare weapon gives way to Epic\'s choice: it cannot reach it' % floors['lost'])
 check(used == set(table['Items']), 'Items and the lists differ: %s' % sorted(used ^ set(table['Items'])))
 derived_items, derived_rares = derive(table)
 check(derived_rares == rares, 'Rares is not what Sega\'s tables and the reward grid give: run this script with --write')
@@ -450,6 +500,10 @@ for rung in RUNGS:
     print('ok: %-8s cells with a real rare weapon: Epic %d of %d (reward grid alone %d), Legendary %d of %d (%d)' % (
         rung, n['Epic']['rare'], n['Epic']['cells'], n['Epic']['grid'], n['Legendary']['rare'], n['Legendary']['cells'],
         n['Legendary']['grid']))
+print('ok: floor %s: %d rare weapons given over all rooms, classes, lines and rungs, %d of them with grind (at most '
+      '+%d), %d weaker than the room\'s Normal weapon, %d times Legendary gives Epic\'s weapon instead' % (
+          'on' if table['RareFloor'] else 'OFF', floors['rooms'], floors['ground'], floors['max'], floors['weaker'],
+          floors['lost']))
 print('ok: Legendary never weaker than Epic in any room; attributes %s%% on %d of Sega\'s tables; %d specials in %d '
       'styles, %d left out for all, %d for androids' % (
           '/'.join(str(p) for p in sorted(pcts)), sega_tables, len(seen), len(table['RareSpecials']), len(exp), len(mana)))
