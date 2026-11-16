@@ -399,11 +399,12 @@ std::vector<SeamSection> seam_offer_sections(const SpireRewardTable& table,
   }
 
   // The shared part, which stays in SpireRewards.cc: the room index, W, the trede, the odds and the tier of a roll, the
-  // names. spire_reward_kind_known is left out on purpose: the seam widens it to the kinds 6-8.
+  // names. spire_reward_kind_known is left out on purpose: the seam widens it to the kinds 6-8. The table's Source text
+  // is left out too: it names where the grid was generated from, the seam splits those sources (it was the one line of
+  // the dump that differed between the old grid and the split one), and no offer is computed from it.
   {
     auto& out = sections.emplace_back(SeamSection{"shared", ""}).text;
-    out += std::format("table enabled={} ata_model={} source=\"{}\"\n", table.enabled, spire_ata_model_name(table.ata_model),
-        table.source);
+    out += std::format("table enabled={} ata_model={}\n", table.enabled, spire_ata_model_name(table.ata_model));
     for (uint32_t k = 0; k <= 31; k++) {
       out += std::format("room_index k{} = {}\n", k, spire_reward_room_index(k));
     }
