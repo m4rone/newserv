@@ -1073,11 +1073,14 @@ void spire_tests_hooks() {
       return std::count(names.begin(), names.end(), std::string(name)) == 1;
     };
 
-    // (a) the hooks. Outside the silence, as on the server, the registrant with a switch key is reached ...
+    // (a) the hooks. Outside the silence, as on the server, the registrant with a switch key is reached ... Every real
+    // mechanic is reached there too, so only this test's own calls are compared: a real weight on H3 moves the draw
+    // and its sum (review naad-testregel r1 B1: "LLLL 2 4 4" went red with a mechanic on H3 whose weights are not 1)
     {
       OutsideSilence outside;
       expect_eq(std::string("EL"), died());
-      expect_eq(std::string("LLLL 2 4 4"), weighed());
+      weighed();
+      expect_eq(std::string("LLLL"), hook_calls);
       expect_eq(std::string("LrLw sections=1 carried=1 out=7"), run_state_read());
     }
     // ... in the silence it is not: only the registrant without a switch key is called, H3 makes the plain draw
