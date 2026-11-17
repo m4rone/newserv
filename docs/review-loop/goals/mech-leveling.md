@@ -26,7 +26,8 @@ Wat de wijziging doet (haak H2: bij elk aanbod de kamer en de trede waarop het a
 - De kans op Normal, Rare, Epic en Legendary blijft rekenen op de kamer k van de quest en op de trede; leveling
   verandert de trede niet.
 - k_eff is nooit kleiner dan k. Haalt L_sleutel N(k + 1) niet, dan is k_eff gelijk aan k en is het aanbod gelijk aan
-  dat van vóór dit stuk. Vanaf L_sleutel 22 is de ladder op: kamer 15 en W6.
+  dat van vóór dit stuk. Vanaf het eindlevel van kamer 15 (L_sleutel 24) is de ladder op: het aanbod rekent dan met
+  kamer 15 en het hoogste wapenlevel (W6).
 - Met z'n tweeën rekent elk aanbod op de kopie van de speler die het krijgt.
 
 Uitzetten (integratie kop 7): met `leveling` uit, of de uitknop in `spire-leveling.json` uit, is H2 niet aangemeld en
