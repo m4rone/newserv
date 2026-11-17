@@ -1,0 +1,56 @@
+{
+  "_what": "PSO Spire, the four rangers (pso-roguelike new-features/roguelike/design/mechanics/ranger-types.md). Read by src/SpireRangerTypes.cc, which weighs what a ranger is offered on the seam's H3. Enabled false, a missing file or a missing type: every weight is 1, the draw of before this table; the switch ranger-types in system/spire-schakelaars.json does the same. MeleeLines: lines the reward New line gives a ranger only when it holds one of them already. Per type: NewLineWeights (the weight of a line for New line; a line not named weighs 1), TechWeights (the weight of a technique for a disk; one not named weighs 1; the androids learn none), WildcardOneIn (one unit offer in this many is a unit outside the type's own), Units (the type's own units per tier, name and code; names and codes are system/tables/names-v3.json; a unit counts as the type's own in whatever tier the reward grid offers it; the attack speed units are no type's own), NeverUnits (the two androids: units the type is never offered, for techniques and against poison and paralysis), Traps (the two androids: the levels per extra trap of a kind). TrapRule: Sega's rule for an android's traps, Base + level / (the type's levels per trap), at most Max per kind; the code that hands traps out is the defence mechanic's and is off until a run on the Wii.",
+  "Enabled": true,
+  "MeleeLines": ["Saber", "Partisan"],
+  "TrapRule": {"Base": 2, "Max": 20},
+  "Types": {
+    "RAmar": {
+      "NewLineWeights": {"Rifle": 3, "Handgun": 3},
+      "TechWeights": {"Shifta": 10, "Deband": 10, "Resta": 10},
+      "WildcardOneIn": 4,
+      "Units": {
+        "Normal": {"Marksman/Arm": "010308", "Knight/Power": "010300"},
+        "Rare": {"General/Arm": "010309", "General/Power": "010301"},
+        "Epic": {"Elf/Arm": "01030A", "Ogre/Power": "010302"},
+        "Legendary": {"God/Arm": "01030B", "God/Power": "010303"}
+      }
+    },
+    "RAmarl": {
+      "NewLineWeights": {"Rifle": 3, "Handgun": 2, "Mechgun": 2},
+      "TechWeights": {"Jellen": 6, "Zalure": 6, "Shifta": 6, "Deband": 6, "Resta": 6},
+      "WildcardOneIn": 4,
+      "Units": {
+        "Normal": {"Thief/Legs": "01030C", "Priest/Mind": "010304"},
+        "Rare": {"General/Legs": "01030D", "General/Mind": "010305", "General/TP": "010315"},
+        "Epic": {"Elf/Legs": "01030E", "Angel/Mind": "010306"},
+        "Legendary": {"God/Legs": "01030F", "God/Mind": "010307"}
+      }
+    },
+    "RAcast": {
+      "NewLineWeights": {"Shot": 3, "Slicer": 2, "Mechgun": 2},
+      "TechWeights": {},
+      "WildcardOneIn": 4,
+      "Units": {
+        "Normal": {"Knight/Power": "010300", "Digger/HP": "010310"},
+        "Rare": {"General/Power": "010301", "General/HP": "010311", "HP/Restorate": "010333"},
+        "Epic": {"Ogre/Power": "010302", "Dragon/HP": "010312", "HP/Generate": "010334"},
+        "Legendary": {"God/Power": "010303", "God/HP": "010313", "HP/Revival": "010335"}
+      },
+      "NeverUnits": {"Priest/Mind": "010304", "General/Mind": "010305", "Angel/Mind": "010306", "God/Mind": "010307", "Magician/TP": "010314", "General/TP": "010315", "Angel/TP": "010316", "God/TP": "010317", "TP/Restorate": "010336", "TP/Generate": "010337", "TP/Revival": "010338", "Wizard/Technique": "01033C", "Devil/Technique": "01033D", "God/Technique": "01033E", "Cure/Poison": "010342", "Cure/Paralysis": "010343"},
+      "Traps": {"Damage": 7, "Freeze": 9, "Confuse": 11}
+    },
+    "RAcaseal": {
+      "NewLineWeights": {"Mechgun": 3, "Handgun": 2, "Rifle": 2},
+      "TechWeights": {},
+      "WildcardOneIn": 4,
+      "Units": {
+        "Normal": {"Warrior/Body": "010318", "Digger/HP": "010310"},
+        "Rare": {"General/Body": "010319", "General/HP": "010311", "All/Resist": "010330", "HP/Restorate": "010333"},
+        "Epic": {"Metal/Body": "01031A", "Super/Resist": "010331", "HP/Generate": "010334"},
+        "Legendary": {"God/Body": "01031B", "Perfect/Resist": "010332", "HP/Revival": "010335"}
+      },
+      "NeverUnits": {"Priest/Mind": "010304", "General/Mind": "010305", "Angel/Mind": "010306", "God/Mind": "010307", "Magician/TP": "010314", "General/TP": "010315", "Angel/TP": "010316", "God/TP": "010317", "TP/Restorate": "010336", "TP/Generate": "010337", "TP/Revival": "010338", "Wizard/Technique": "01033C", "Devil/Technique": "01033D", "God/Technique": "01033E", "Cure/Poison": "010342", "Cure/Paralysis": "010343"},
+      "Traps": {"Damage": 7, "Freeze": 11, "Confuse": 9}
+    }
+  }
+}
