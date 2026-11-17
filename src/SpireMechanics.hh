@@ -234,6 +234,10 @@ std::shared_ptr<const std::string> spire_mech_quest_bin(std::shared_ptr<Client> 
 // a room index they changed is brought back to the nearest of the rooms the grid knows (1 to the last room of its
 // RoomW or its disks), a rung they changed to the nearest of the grid's rungs (0 to the rung with every boss of
 // TredeRooms beaten), with one line in the journal. Values no registrant changed stay the core's own.
+//
+// The room index H2 gives is what the offer holds: its W, its weapon, its disk. The chance of a higher tier is not
+// reckoned on it: spire_reward_odds gets the quest's own room (spire_reward_room_index(k)) and the rung as H2 gave it
+// (pso-roguelike design/mechanics/leveling.md: the odds stay on k). Without a registrant the two rooms are the same.
 struct SpireMechRewardRoom {
   std::shared_ptr<Client> c;
   std::shared_ptr<const Lobby> l;

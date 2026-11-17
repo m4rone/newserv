@@ -27,6 +27,7 @@
 #include "SpireFlagBridge.hh"
 #include "SpireMechanics.hh"
 #include "SpireMeta.hh"
+#include "SpireRewardKinds.hh"
 #include "SpireRewards.hh"
 
 // The tests of the seam's own rules (SpireMechanics.hh; docs/review-loop/goals/naad.md point 2): the table of reward
@@ -496,6 +497,113 @@ void spire_tests_hooks() {
     // a value the registrant left as it came is the core's own, and stays
     expect_eq(std::format("f {} {}", last_room + 10, top_trede + 5), far(last_room + 10, top_trede + 5, last_room + 10, top_trede + 5));
     expect_eq(std::format("f {} {}", last_room + 10, top_trede), far(last_room + 10, top_trede + 6, last_room + 10, top_trede + 5));
+  }
+
+  // H2 through the bridge (docs/review-loop/goals/naad-testregel.md point 3): the room H2 gives is what the offer
+  // holds (its room index, its W); the odds stay on the quest's room, with the rung H2 gave. Played as the quest plays
+  // it: a 'Q' in room k, in a game whose draw table holds mag food entries only (kind 3 asks nothing of the run copy).
+  // The grid is the real one with odds that leave no roll open: at rung 1 a room from 5 on is Legendary on every roll
+  // and a room before it on none, and below rung 1 no room is.
+  {
+    const std::string real_grid = phosg::load_file(SPIRE_REWARDS_FILE);
+    struct InDirectory { // the bridge reads its files relative to the working directory
+      std::filesystem::path old_cwd = std::filesystem::current_path();
+      explicit InDirectory(const std::filesystem::path& to) {
+        std::filesystem::current_path(to);
+      }
+      ~InDirectory() {
+        std::filesystem::current_path(this->old_cwd);
+      }
+    } in_directory(dir);
+    size_t odds_at = real_grid.find("\"TierOdds\"");
+    size_t odds_open = (odds_at == std::string::npos) ? odds_at : real_grid.find('{', odds_at);
+    size_t odds_close = (odds_open == std::string::npos) ? odds_open : real_grid.find('}', odds_open);
+    expect(odds_close != std::string::npos);
+    std::filesystem::create_directories(SPIRE_BRIDGE_DRAW_DIRECTORY);
+    std::filesystem::create_directories(SPIRE_BRIDGE_DIRECTORY);
+    phosg::save_file(SPIRE_REWARDS_FILE,
+        real_grid.substr(0, odds_open) +
+            "{\"RareWidth\": 0, \"EpicBase\": 0, \"EpicPerRoom\": 0, \"EpicElite\": 0, \"LegendaryFromTrede\": 1, "
+            "\"LegendaryRoom\": 5, \"LegendaryRoomBonus\": 100, \"LegendaryElite\": 0, \"Cap\": 100}" +
+            real_grid.substr(odds_close + 1));
+    // a time of its own: the bridge keeps the grid by its file's time, and reads the real one again after this test
+    std::filesystem::last_write_time(SPIRE_REWARDS_FILE,
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds(54321));
+    std::string entries;
+    for (size_t z = 0; z < 4; z++) {
+      entries += std::format("{}{{\"cap\":2,\"vanaf_k\":1,\"android_ok\":true,\"rare\":false,\"own_curse\":false,"
+                             "\"glass_ok\":false,\"name\":\"Entry {}\",\"srv\":3,"
+                             "\"bytes\":\"01 01 00 00 00 00 06 00 00 00 00 00\"}}",
+          z ? "," : "", z + 1);
+    }
+    const std::string row = "[0,1,2,3]";
+    std::string arch = std::format("{{\"entries\":[{}],\"kbands\":[1],\"rows\":{{\"1\":[{},{},{},{},{},{},{}]}},"
+                                   "\"slot_c_zero_tags\":[]}}",
+        entries, row, row, row, row, row, row, row);
+    phosg::save_file(std::format("{}/q{}.json", SPIRE_BRIDGE_DRAW_DIRECTORY, SPIRE_QUEST),
+        std::format("{{\"num_tags\":2,\"rare_base\":5,\"rare_per_k\":3,\"uncommon_below\":40,\"curse_pct\":10,"
+                    "\"max_attempts\":8,\"blood_pact_bonus\":15,\"relic_bit_r3\":4,\"relic_bit_r13\":8,"
+                    "\"relic_bit_r14\":16,\"archetypes\":[{},{},{}]}}",
+            arch, arch, arch));
+
+    // a client with a character and a run copy, in the Spire game
+    auto offer_c = std::make_shared<Client>(server, std::make_shared<HookTestChannel>(), ServerBehavior::GAME_SERVER);
+    auto login = std::make_shared<Login>();
+    login->account = std::make_shared<Account>();
+    login->account->is_temporary = true; // never saved to system/licenses
+    login->gc_license = std::make_shared<GCLicense>();
+    login->gc_license->serial_number = 987700001;
+    offer_c->login = login;
+    offer_c->character_file(true, false); // a GC client: its character is in memory only
+    auto rules = std::make_shared<BattleRules>();
+    rules->replace_char = false; // the run copy is the character as it is: no level table is asked
+    offer_c->create_battle_overlay(rules, nullptr);
+    expect(offer_c->has_overlay());
+    spire_static_test_run_boss(offer_c, run_l, grid.trede1_room); // rung 1: the run beat the first rung's boss
+    expect_eq(1u, spire_static_test_reward_trede(offer_c, run_l, 987700001, grid));
+
+    // the offers of a 'Q' in room k, as "legendary or lower, the offer's room index, its W": all of one 'Q' are the same
+    auto offers_at = [&](uint32_t k) {
+      for (size_t z = 0; z < SPIRE_DRAW_NUM_INPUTS; z++) {
+        expect(spire_bridge_handle_register(offer_c, run_l, SPIRE_BRIDGE_DRAW_DATA_REGISTER, (z == 2) ? k : 0));
+      }
+      expect(spire_bridge_handle_register(offer_c, run_l, SPIRE_BRIDGE_REQUEST_REGISTER,
+          (static_cast<uint32_t>(SPIRE_BRIDGE_DRAW_REQUEST) << 24) | SPIRE_DRAW_NUM_INPUTS));
+      const auto& by_slot = spire_reward_offers_for(offer_c, run_l->lobby_id).by_slot;
+      expect(!by_slot.empty());
+      std::set<std::string> texts;
+      for (const auto& [slot, o] : by_slot) {
+        expect(o.kind == SpireRewardKind::MAG_FOOD);
+        texts.emplace(std::format("{} room {} W{}", (o.tier == SpireRewardTier::LEGENDARY) ? "legendary" : "lower",
+            o.room_index, o.w));
+      }
+      expect_eq(1u, texts.size());
+      return *texts.begin();
+    };
+    auto offer_of = [&](bool legendary, uint32_t room) {
+      return std::format("{} room {} W{}", legendary ? "legendary" : "lower", room, spire_reward_w(grid, room));
+    };
+    expect((spire_reward_w(grid, 2) != spire_reward_w(grid, 6)) && (spire_reward_w(grid, 3) != spire_reward_w(grid, 9)));
+
+    // without a registrant on H2 the offer's room and the odds' room are both the quest's, as before
+    expect_eq(offer_of(true, 6), offers_at(6));
+    expect_eq(offer_of(false, 3), offers_at(3));
+    {
+      HookGuard g{H::REWARD_ROOM, "ver"};
+      spire_mech_register_reward_room({"ver", "", 1, t_reward_room_far});
+      // a registrant moves the room: the offer is the moved room's, the odds are those of the quest's room
+      reward_room_far_trede = 1;
+      reward_room_far_room = 2;
+      expect_eq(offer_of(true, 2), offers_at(6)); // room 6's odds (Legendary), room 2's offer
+      reward_room_far_room = 9;
+      expect_eq(offer_of(false, 9), offers_at(3)); // room 3's odds (never Legendary), room 9's offer
+      // the rung H2 gives does go to the odds: rung 0 opens no Legendary, in the same room
+      reward_room_far_trede = 0;
+      reward_room_far_room = 6;
+      expect_eq(offer_of(false, 6), offers_at(6));
+    }
+    expect_eq(offer_of(true, 6), offers_at(6));
+    spire_static_test_forget(offer_c, run_l);
   }
 
   // H3 type_weight, the hook alone: without a registrant one draw rnd(n) and no candidate is asked; with registrants

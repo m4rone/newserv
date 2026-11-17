@@ -4362,7 +4362,9 @@ static std::optional<SpireRewardOffer> spire_reward_make_offer(std::shared_ptr<C
   uint32_t room_index = spire_reward_room_index(k);
   spire_mech_reward_room({c, l, serial_number, table, entry, k, elite}, room_index, trede); // the seam's H2
   uint8_t rung = l->quest ? spire_meta_ladder_quest_rung(l->quest->meta.quest_number) : 0; // the quest's difficulty
-  auto odds = spire_reward_odds(table, room_index, trede, elite, rare_bonus);
+  // The room H2 gave (room_index) is what the offer holds; the chance of a higher tier stays on the quest's own room,
+  // with the rung H2 gave (SpireMechanics.hh H2). Without a registrant on H2 the two rooms are the same.
+  auto odds = spire_reward_odds(table, spire_reward_room_index(k), trede, elite, rare_bonus);
   auto tier = spire_reward_tier_for_roll(odds, rnd(100));
   if (entry.rare && (tier < SpireRewardTier::RARE)) {
     tier = SpireRewardTier::RARE;
