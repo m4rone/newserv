@@ -1,0 +1,12 @@
+{
+  "_comment": "Spire leveling (SpireLevel.hh; pso-roguelike new-features/roguelike/design/mechanics/leveling.md). Read at every reward offer; a missing or broken file leaves every offer as it was before the mechanic (one journal line per new reason). Enabled false is the data-only kill switch of the mechanic, next to its switch \"leveling\" in system/spire-schakelaars.json: both must be on. Piece 1, the reward at the level the run copy really stands on: an offer reckons with the last room of the episode whose end level the copy has reached on the Normal scale (its level less the RungLevels of the quest's difficulty), never with a room before the quest's own; the odds of the tiers stay on the quest's room.",
+  "Enabled": true,
+  "RungLevels": [0, 19, 39, 79],
+  "_RungLevels": "The levels a difficulty's run starts above Normal's (Normal, Hard, Very Hard, Ultimate): pso-roguelike sim/ladder.json rungs.*.char_level, which build.sh adds to every room's level. Sega's online gates (Hard Lv20, Very Hard Lv40, Ultimate Lv80).",
+  "Episodes": {
+    "1": {
+      "_what": "RoomEndLevels[k - 1]: the level a run copy without bought start levels has on Normal when room k is cleared and its reward is drawn, the entry level of room k + 1 (pso-roguelike sim/plan-spire.json rooms[].level_x4, the x4 curve the run plays). Rooms 1-15: Forest 1 A, Forest 1 B, Forest 2, Dragon, Caves 1-3, De Rol Le, Mines 1-2, Vol Opt, Ruins 1-3, Dark Falz. The reward grid's weapon levels are computed on the same column: W2-W6 start at rooms 1, 3, 5, 8, 11 with run level 4, 8, 11, 15, 19 (system/spire-rewards.json).",
+      "RoomEndLevels": [4, 6, 8, 10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 24]
+    }
+  }
+}
